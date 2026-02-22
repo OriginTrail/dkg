@@ -496,7 +496,19 @@ Phase 1 uses full replication (every paranet node stores everything). Part 2 int
 | `selective` | Nodes declare which rootEntities they serve | Large paranets with topic specialization |
 | `sharded` | Triples distributed by consistent hash of rootEntity | Very large paranets, even load |
 
-Nodes advertise their replication scope via DHT provider records. Query routing uses this metadata to target the right nodes.
+Nodes advertise their replication scope via DHT provider records.
+
+#### Cross-Node Data Retrieval (Constrained)
+
+When sharding is active, a node may not have all triples locally. Cross-node data retrieval is introduced as an **explicit opt-in** — not as raw SPARQL passthrough. This respects Part 1's Store Isolation principle (§1.6):
+
+1. **Protocol-mediated only** — Cross-node retrieval uses `/dkg/query/1.0.0` with a constrained request schema (entity lookup by rootEntity or predicate filter), not arbitrary SPARQL strings.
+2. **Responding node controls scope** — The responding node decides what triples to return. The request specifies a rootEntity or a set of predicates; the responder returns matching triples from its local store (or nothing).
+3. **Allowlist-gated** — Nodes must explicitly opt in to serving cross-node requests. By default, `/dkg/query/1.0.0` is disabled. Operators configure an allowlist of trusted peer IDs or paranet memberships.
+4. **Rate-limited** — Per-peer rate limits prevent abuse even for allowlisted peers.
+5. **No query pattern leakage** — The constrained schema ensures that requesters cannot infer the full contents or structure of the responding node's store.
+
+> **Important**: Even with sharding enabled, the default behavior is "deny all remote queries." This is the opposite of traditional federated databases. Nodes are sovereign over their data.
 
 ### 10.9 Private Triple Redundancy
 

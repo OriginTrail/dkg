@@ -1,0 +1,61 @@
+@prefix sh:       <http://www.w3.org/ns/shacl#> .
+@prefix dkgskill: <https://dkg.origintrail.io/skill#> .
+@prefix dkg:      <http://dkg.io/ontology/> .
+@prefix schema:   <http://schema.org/> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# ─────────────────────────────────────────
+#  SHACL Shapes for DKG Agent Profiles
+# ─────────────────────────────────────────
+
+dkgskill:AgentShape a sh:NodeShape ;
+    sh:targetClass dkgskill:Agent ;
+    sh:property [
+        sh:path schema:name ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "Agent must have exactly one name."
+    ] ;
+    sh:property [
+        sh:path dkg:peerId ;
+        sh:datatype xsd:string ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "Agent must have exactly one peerId."
+    ] ;
+    sh:property [
+        sh:path dkgskill:framework ;
+        sh:datatype xsd:string ;
+        sh:minCount 0 ;
+        sh:maxCount 1 ;
+        sh:message "Agent may have at most one framework."
+    ] ;
+    sh:property [
+        sh:path dkgskill:offersSkill ;
+        sh:class dkgskill:SkillOffering ;
+        sh:message "offersSkill must point to a SkillOffering."
+    ] .
+
+dkgskill:SkillOfferingShape a sh:NodeShape ;
+    sh:targetClass dkgskill:SkillOffering ;
+    sh:property [
+        sh:path dkgskill:skill ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:message "SkillOffering must reference exactly one skill type."
+    ] ;
+    sh:property [
+        sh:path dkgskill:pricePerCall ;
+        sh:datatype xsd:decimal ;
+        sh:minInclusive 0 ;
+        sh:message "pricePerCall must be a non-negative decimal."
+    ] ;
+    sh:property [
+        sh:path dkgskill:successRate ;
+        sh:datatype xsd:float ;
+        sh:minInclusive 0.0 ;
+        sh:maxInclusive 1.0 ;
+        sh:message "successRate must be between 0.0 and 1.0."
+    ] .

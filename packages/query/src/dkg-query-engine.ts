@@ -4,8 +4,10 @@ import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import { paranetDataGraphUri, paranetMetaGraphUri } from '@dkg/core';
 
 /**
- * Local query engine that executes SPARQL against the local triple store.
- * Supports paranet-scoped queries and KA resolution.
+ * Local-only query engine that executes SPARQL against this node's own
+ * triple store. No remote query capability — by design (Spec §1.6 Store
+ * Isolation). All data must arrive via protocol messages (publish, access,
+ * sync) before it can be queried here.
  */
 export class DKGQueryEngine implements QueryEngine {
   private readonly store: TripleStore;
@@ -97,7 +99,7 @@ export class DKGQueryEngine implements QueryEngine {
   }
 
   /**
-   * Execute a federated query across all paranets.
+   * Execute a query across all locally-stored paranets.
    */
   async queryAllParanets(sparql: string): Promise<QueryResult> {
     const paranets = await this.graphManager.listParanets();
@@ -119,12 +121,24 @@ export class DKGQueryEngine implements QueryEngine {
 function wrapWithGraph(sparql: string, graphUri: string): string {
   if (sparql.toLowerCase().includes('graph ')) return sparql;
 
-  const whereMatch = sparql.match(/(WHERE\s*\{)([\s\S]*?)(\})\s*$/i);
-  if (!whereMatch) return sparql;
+  const whereIdx = sparql.search(/WHERE\s*\{/i);
+  if (whereIdx === -1) return sparql;
 
-  const before = sparql.slice(0, whereMatch.index! + whereMatch[1].length);
-  const inner = whereMatch[2];
-  const after = whereMatch[3];
+  const braceStart = sparql.indexOf('{', whereIdx);
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < sparql.length; i++) {
+    if (sparql[i] === '{') depth++;
+    else if (sparql[i] === '}') {
+      depth--;
+      if (depth === 0) { braceEnd = i; break; }
+    }
+  }
+  if (braceEnd === -1) return sparql;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const after = sparql.slice(braceEnd);
 
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }

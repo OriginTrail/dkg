@@ -8,6 +8,8 @@
   "include": ["src"],
   "references": [
     { "path": "../core" },
+    { "path": "../chain" },
+    { "path": "../storage" },
     { "path": "../publisher" },
     { "path": "../query" }
   ]

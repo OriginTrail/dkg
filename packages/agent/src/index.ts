@@ -1,1 +1,7 @@
-export * from './agent-wallet.js';
+export { DKGAgentWallet, type AgentWallet, type EvmWallet, type SolanaWallet } from './agent-wallet.js';
+export { buildAgentProfile, AGENT_REGISTRY_PARANET, AGENT_REGISTRY_GRAPH, type AgentProfileConfig, type SkillOfferingConfig } from './profile.js';
+export { ProfileManager } from './profile-manager.js';
+export { DiscoveryClient, type DiscoveredAgent, type DiscoveredOffering, type SkillSearchOptions } from './discovery.js';
+export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
+export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler } from './messaging.js';
+export { DKGAgent, type DKGAgentConfig } from './dkg-agent.js';

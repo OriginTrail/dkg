@@ -1,0 +1,179 @@
+@prefix dkgskill: <https://dkg.origintrail.io/skill#> .
+@prefix dkg:      <http://dkg.io/ontology/> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix schema:   <http://schema.org/> .
+
+# ─────────────────────────────────────────
+#  DKG Skill Ontology v1.0
+#  Marketplace concepts for agent discovery
+# ─────────────────────────────────────────
+
+dkgskill: a owl:Ontology ;
+    rdfs:label "DKG Skill Ontology" ;
+    rdfs:comment "Defines marketplace concepts for AI agent discovery, skill offerings, and pricing." .
+
+# ═══════════════════════════════════════════
+#  Core Classes
+# ═══════════════════════════════════════════
+
+dkgskill:Agent a owl:Class ;
+    rdfs:subClassOf dkg:Agent ;
+    rdfs:label "Agent" ;
+    rdfs:comment "An AI agent participating in the DKG marketplace." .
+
+dkgskill:Skill a owl:Class ;
+    rdfs:label "Skill" ;
+    rdfs:comment "A capability or service type an agent can perform. Subclass to create domain-specific skills." .
+
+dkgskill:SkillOffering a owl:Class ;
+    rdfs:label "Skill Offering" ;
+    rdfs:comment "A specific skill offered by an agent, with pricing and quality metadata." .
+
+dkgskill:HostingProfile a owl:Class ;
+    rdfs:label "Hosting Profile" ;
+    rdfs:comment "Description of an agent's DKG node hosting capabilities." .
+
+dkgskill:PricingModel a owl:Class ;
+    rdfs:label "Pricing Model" ;
+    rdfs:comment "How a skill offering is priced." .
+
+# ═══════════════════════════════════════════
+#  Pricing Model Instances
+# ═══════════════════════════════════════════
+
+dkgskill:PerInvocation a dkgskill:PricingModel ;
+    rdfs:label "Per Invocation" ;
+    rdfs:comment "Pay per skill call." .
+
+dkgskill:Subscription a dkgskill:PricingModel ;
+    rdfs:label "Subscription" ;
+    rdfs:comment "Recurring payment for unlimited access." .
+
+dkgskill:Free a dkgskill:PricingModel ;
+    rdfs:label "Free" ;
+    rdfs:comment "No payment required." .
+
+# ═══════════════════════════════════════════
+#  Domain Skill Hierarchy (extensible)
+# ═══════════════════════════════════════════
+
+dkgskill:DataAnalysis a owl:Class ;
+    rdfs:subClassOf dkgskill:Skill ;
+    rdfs:label "Data Analysis" .
+
+dkgskill:ImageAnalysis a owl:Class ;
+    rdfs:subClassOf dkgskill:DataAnalysis ;
+    rdfs:label "Image Analysis" .
+
+dkgskill:TextAnalysis a owl:Class ;
+    rdfs:subClassOf dkgskill:DataAnalysis ;
+    rdfs:label "Text Analysis" .
+
+dkgskill:ClimateRiskAssessment a owl:Class ;
+    rdfs:subClassOf dkgskill:DataAnalysis ;
+    rdfs:label "Climate Risk Assessment" .
+
+dkgskill:CodeGeneration a owl:Class ;
+    rdfs:subClassOf dkgskill:Skill ;
+    rdfs:label "Code Generation" .
+
+dkgskill:Translation a owl:Class ;
+    rdfs:subClassOf dkgskill:Skill ;
+    rdfs:label "Translation" .
+
+dkgskill:KnowledgeExtraction a owl:Class ;
+    rdfs:subClassOf dkgskill:Skill ;
+    rdfs:label "Knowledge Extraction" .
+
+# ═══════════════════════════════════════════
+#  Agent Properties
+# ═══════════════════════════════════════════
+
+dkgskill:framework a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:Agent ;
+    rdfs:range xsd:string ;
+    rdfs:label "framework" ;
+    rdfs:comment "The AI framework this agent uses (OpenClaw, ElizaOS, LangChain, custom)." .
+
+dkgskill:offersSkill a owl:ObjectProperty ;
+    rdfs:domain dkgskill:Agent ;
+    rdfs:range dkgskill:SkillOffering ;
+    rdfs:label "offers skill" ;
+    rdfs:comment "Links an agent to a skill offering." .
+
+dkgskill:hostingProfile a owl:ObjectProperty ;
+    rdfs:domain dkgskill:Agent ;
+    rdfs:range dkgskill:HostingProfile ;
+    rdfs:label "hosting profile" .
+
+dkgskill:status a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:Agent ;
+    rdfs:range xsd:string ;
+    rdfs:label "status" ;
+    rdfs:comment "Agent status: online, offline, busy." .
+
+# ═══════════════════════════════════════════
+#  Skill Offering Properties
+# ═══════════════════════════════════════════
+
+dkgskill:skill a owl:ObjectProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:range dkgskill:Skill ;
+    rdfs:label "skill" ;
+    rdfs:comment "The skill type this offering provides." .
+
+dkgskill:pricing a owl:ObjectProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:range dkgskill:PricingModel ;
+    rdfs:label "pricing" .
+
+dkgskill:pricePerCall a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:range xsd:decimal ;
+    rdfs:label "price per call" ;
+    rdfs:comment "Cost in TRAC per invocation." .
+
+dkgskill:currency a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:range xsd:string ;
+    rdfs:label "currency" .
+
+dkgskill:successRate a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:range xsd:float ;
+    rdfs:label "success rate" ;
+    rdfs:comment "Historical success rate (0.0 to 1.0)." .
+
+dkgskill:inputSchema a owl:ObjectProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:label "input schema" ;
+    rdfs:comment "Reference to the input schema KA for this skill." .
+
+dkgskill:outputSchema a owl:ObjectProperty ;
+    rdfs:domain dkgskill:SkillOffering ;
+    rdfs:label "output schema" ;
+    rdfs:comment "Reference to the output schema KA for this skill." .
+
+# ═══════════════════════════════════════════
+#  Hosting Profile Properties
+# ═══════════════════════════════════════════
+
+dkgskill:storageCapacity a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:HostingProfile ;
+    rdfs:range xsd:integer ;
+    rdfs:label "storage capacity (MB)" .
+
+dkgskill:uptime a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:HostingProfile ;
+    rdfs:range xsd:float ;
+    rdfs:label "uptime" ;
+    rdfs:comment "Historical uptime (0.0 to 1.0)." .
+
+dkgskill:paranetsServed a owl:DatatypeProperty ;
+    rdfs:domain dkgskill:HostingProfile ;
+    rdfs:range xsd:string ;
+    rdfs:label "paranets served" ;
+    rdfs:comment "Comma-separated paranet IDs this node serves." .

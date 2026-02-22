@@ -1,0 +1,15 @@
+{
+  "name": "@dkg/demo",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@dkg/agent": "workspace:*",
+    "@dkg/core": "workspace:*",
+    "@dkg/storage": "workspace:*",
+    "@dkg/chain": "workspace:*",
+    "@dkg/query": "workspace:*",
+    "@dkg/publisher": "workspace:*",
+    "@multiformats/multiaddr": "*"
+  }
+}

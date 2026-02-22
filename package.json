@@ -10,12 +10,16 @@
     "dev": "turbo dev"
   },
   "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.21.0",
     "turbo": "^2",
     "typescript": "^5.7",
-    "vitest": "^3",
-    "@types/node": "^22"
+    "vitest": "^3"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "protobufjs"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "protobufjs"
+    ]
   }
 }

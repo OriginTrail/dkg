@@ -28,6 +28,8 @@ DKG V9 is a **decentralized knowledge marketplace run by AI agents**. Any agent 
 3. **Graph-Native** — RDF triples, SPARQL, named graphs used correctly.
 4. **Language-Agnostic** — Spec defines protocols and formats, not implementations.
 5. **Ship Incrementally** — Each package builds, tests, and ships independently.
+6. **Store Isolation** — The triple store is a private, internal component. No node may execute SPARQL or any other query directly against another node's store. All inter-node data exchange goes through defined protocol messages (see §5). This is foundational for an adversarial decentralized environment where operators may act differently or maliciously.
+7. **Protocol-Mediated Mutations** — All state changes to the knowledge graph (create, update, transfer) are mediated by blockchain-anchored protocol commands. There is no external insert or delete API. The triple store accepts writes only from the local node's protocol handlers.
 
 ---
 
@@ -38,7 +40,7 @@ DKG V9 is a **decentralized knowledge marketplace run by AI agents**. Any agent 
 @dkg/storage       Triple store adapters (GraphDB, Oxigraph, in-memory)
 @dkg/chain         Blockchain abstraction (ChainAdapter interface, EVM + Solana adapters)
 @dkg/publisher     Publishing protocol, merkle trees, on-chain finalization
-@dkg/query         SPARQL engine, paranet-scoped queries, federation
+@dkg/query         SPARQL engine, paranet-scoped local queries (no remote query exposure)
 @dkg/agent         Agent identity, skill profiles, messaging, framework adapters
 ```
 
@@ -382,13 +384,26 @@ DHT and GossipSub are complementary: DHT for point lookups against the full netw
 | Protocol ID | Messages | Purpose |
 |---|---|---|
 | `/dkg/publish/1.0.0` | PublishRequest, PublishAck | Knowledge publishing |
-| `/dkg/query/1.0.0` | QueryRequest, QueryResponse | SPARQL queries |
+| `/dkg/query/1.0.0` | QueryRequest, QueryResponse | **Reserved for Part 2** — constrained data retrieval (not raw SPARQL passthrough) |
 | `/dkg/discover/1.0.0` | DiscoverRequest, DiscoverResponse | Find KAs, paranets, agents |
 | `/dkg/sync/1.0.0` | SyncRequest, SyncResponse | Sync missing triples |
 | `/dkg/message/1.0.0` | AgentMessage | Encrypted agent-to-agent messaging |
 | `/dkg/access/1.0.0` | AccessRequest, AccessResponse | Private KA triple transfer |
 
 All messages: **Protocol Buffers** over libp2p streams.
+
+### Network Interface Boundary
+
+The protocol messages above are the **only** way nodes interact. Critical invariants:
+
+1. **No remote SPARQL** — A node's triple store has no external-facing query endpoint. SPARQL runs locally against the node's own store only. Remote nodes cannot execute, proxy, or federate queries against another node's store.
+2. **No raw data access** — All data exchange (public triples, private triples, metadata) flows through the defined protocol messages with explicit validation and access control at each step.
+3. **Receiver controls response** — The responding node decides what data to include in a protocol response. The requester cannot dictate query scope, graph selection, or filter criteria beyond what the protocol message schema allows.
+4. **Mutations only via protocol** — The triple store accepts writes only from the local node's own protocol handlers (PublishHandler, SyncHandler, etc.), which enforce validation rules and blockchain verification. There is no external insert, update, or delete interface.
+
+This design is non-negotiable for an adversarial decentralized network where different operators may act differently or maliciously. Exposing SPARQL endpoints would be equivalent to giving external parties direct database access.
+
+> **Future (Part 2+)**: Trusted-party SPARQL federation may be added as an explicit opt-in feature with allowlists, rate limiting, and constrained graph scope. It will never be a default behavior.
 
 ### Private KA Access Protocol
 
@@ -682,7 +697,9 @@ DKG tools exposed via MCP for any MCP-compatible AI system:
 
 ## 11. Querying
 
-### Local Queries
+### Local Queries Only (Part 1)
+
+All SPARQL queries execute **locally** against the node's own triple store. There is no remote query interface. This is a direct consequence of Design Principles 6 (Store Isolation) and 7 (Protocol-Mediated Mutations).
 
 Standard SPARQL via the storage adapter:
 
@@ -690,12 +707,17 @@ Standard SPARQL via the storage adapter:
 SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:paranet:agent-registry> { ?s ?p ?o } }
 ```
 
-### Federated Queries
+Since Phase 1 uses full replication (every paranet node stores all public triples), local queries are sufficient — the node always has the complete public dataset for its subscribed paranets.
 
-When a node doesn't hold all graphs for a paranet (Phase 1: full replication, so this is rare — but needed for cross-paranet queries):
-1. Check local graphs.
-2. Route sub-queries to peer nodes that serve the target paranet.
-3. Merge and deduplicate results.
+### No Federated Queries (Part 1)
+
+Federated SPARQL (routing sub-queries to peer nodes) is **not supported** in Part 1. Reasons:
+
+1. **Security** — Exposing query endpoints to untrusted peers leaks query patterns and creates a direct attack surface on the store.
+2. **Unnecessary** — Full replication means every node has all public triples for its paranets. There is nothing to federate.
+3. **Complexity** — Federation introduces query routing, result merging, and trust/cost models that are premature for the initial release.
+
+> **Part 2**: If selective replication or sharding is introduced, constrained cross-node data retrieval may be added as an opt-in capability with explicit allowlists, protocol-level access control, and rate limiting. This would operate through a defined protocol message (not raw SPARQL passthrough), where the responding node controls what data is returned. See Part 2 §10.8.
 
 ### KA Resolution
 
@@ -766,7 +788,7 @@ The meta graph is public — anyone can discover which KAs have private portions
 | # | Question | Impact | Status |
 |---|---|---|---|
 | OQ1 | Light node storage limits and eviction policy | Browser/mobile viability | Open |
-| OQ2 | Federated query cost — who pays for peer compute? | Economy | Deferred to Part 2 |
+| OQ2 | ~~Federated query cost~~ | ~~Economy~~ | **Resolved: No federated queries in Part 1. Store isolation is a core design principle (§1.6, §1.7). Constrained cross-node retrieval may be opt-in in Part 2 (§10.8).** |
 | OQ3 | Agent profile update frequency and stale profile handling | Discovery accuracy | Open |
 | OQ4 | Skill verification — how to verify an agent performs advertised skills? | Marketplace trust | Open |
 | OQ5 | ~~Multi-publisher same entity~~ | ~~Data integrity~~ | **Resolved: entity exclusivity per paranet** |
@@ -804,7 +826,7 @@ Both developers work in parallel. No blockchain dependency. The full agent marke
 | 1 | `@dkg/core`: libp2p node (TCP+Noise+yamux+WebSocket+WebTransport), peer discovery (DHT+mDNS), GossipSub (paranet topics), protocol router, event bus, crypto (Ed25519, ECDSA, merkle trees, URDNA2015) |
 | 2 | `@dkg/storage`: In-memory + Oxigraph adapters, TripleStore interface, named graph manager (data graph + meta graph per paranet), private KA content store (publisher-only triples, flagged in meta graph) |
 | 3 | `@dkg/publisher` (mock-chain mode): entity-based auto-partitioning, triple canonicalization, merkle tree computation (public + private KA roots), PublishRequest/Ack P2P flow, private KA manifest with pre-computed roots, metadata triple generation. UAL reservation = local counter. Finalization = auto-confirm. |
-| 4 | `@dkg/query`: Local SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), federated routing, result formats |
+| 4 | `@dkg/query`: Local-only SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), result formats. No remote query exposure — all queries run against the node's own store (see §11). |
 | 5 | `/dkg/access/1.0.0`: Private KA access protocol — AccessRequest/Response handler, payment proof verification (mock), merkle verification on recipient side, triple transfer |
 
 #### WP-1B: Agent Layer — Developer B

@@ -7,7 +7,6 @@ export interface QueryResult {
 
 export interface QueryOptions {
   paranetId?: string;
-  federated?: boolean;
   timeout?: number;
 }
 

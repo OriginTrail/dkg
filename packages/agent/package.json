@@ -10,11 +10,18 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@dkg/chain": "workspace:*",
     "@dkg/core": "workspace:*",
     "@dkg/publisher": "workspace:*",
     "@dkg/query": "workspace:*",
+    "@dkg/storage": "workspace:*",
+    "@noble/ciphers": "^2.1.1",
+    "@multiformats/multiaddr": "*",
+    "@noble/curves": "^2",
     "@noble/ed25519": "^3",
-    "@noble/hashes": "^2",
-    "@noble/curves": "^2"
+    "@noble/hashes": "^2"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }

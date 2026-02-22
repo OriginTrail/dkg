@@ -12,6 +12,8 @@ export const DKGEvent = {
   PUBLISH_ACK: 'publish:ack',
   ACCESS_REQUEST: 'access:request',
   ACCESS_RESPONSE: 'access:response',
+  MESSAGE_RECEIVED: 'message:received',
+  MESSAGE_SENT: 'message:sent',
 } as const;
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];

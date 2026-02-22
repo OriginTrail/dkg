@@ -1,3 +1,12 @@
+/**
+ * RESERVED FOR PART 2 — NOT ACTIVE IN PART 1.
+ *
+ * Store Isolation (Spec §1.6): No node may execute SPARQL against another
+ * node's store. This schema is kept as a placeholder for Part 2's constrained
+ * cross-node data retrieval (which will NOT pass raw SPARQL — it will be
+ * replaced with a constrained entity-lookup schema). Do not register a handler
+ * for /dkg/query/1.0.0 in Part 1.
+ */
 import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
