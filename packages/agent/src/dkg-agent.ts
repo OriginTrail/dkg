@@ -11,7 +11,7 @@ import { DKGQueryEngine } from '@dkg/query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
-import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse } from './messaging.js';
+import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -129,6 +129,12 @@ export class DKGAgent {
       this.eventBus,
     );
 
+    // Wire up pending chat handler
+    if (this._pendingChatHandler) {
+      this.messageHandler.onChat(this._pendingChatHandler);
+      this._pendingChatHandler = null;
+    }
+
     // Register skill handlers
     if (this.config.skills) {
       for (const skill of this.config.skills) {
@@ -201,6 +207,21 @@ export class DKGAgent {
   async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
     return this.discovery.findAgentByPeerId(peerId);
   }
+
+  async sendChat(recipientPeerId: string, text: string): Promise<{ delivered: boolean; error?: string }> {
+    if (!this.messageHandler) throw new Error('Agent not started');
+    return this.messageHandler.sendChat(recipientPeerId, text);
+  }
+
+  onChat(handler: ChatHandler): void {
+    if (!this.messageHandler) {
+      this._pendingChatHandler = handler;
+      return;
+    }
+    this.messageHandler.onChat(handler);
+  }
+
+  private _pendingChatHandler: ChatHandler | null = null;
 
   async invokeSkill(
     recipientPeerId: string,

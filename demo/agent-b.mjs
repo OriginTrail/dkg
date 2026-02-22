@@ -1,19 +1,21 @@
 /**
- * DKG V9 Agent Demo — Agent B (Discoverer & Skill Consumer)
+ * DKG V9 Agent Demo — Agent B (TextBot + Interactive Chat)
  *
  * Run from repo root:
  *   node demo/agent-b.mjs <agent-a-multiaddr>
  *
- * This agent:
- *  1. Starts a DKG node
- *  2. Publishes its own profile (TextBot)
- *  3. Connects to Agent A
- *  4. Waits for Agent A's profile to arrive via GossipSub
- *  5. Discovers agents and skill offerings
- *  6. Invokes Agent A's ImageAnalysis skill
+ * After connecting to Agent A, type messages to send them.
+ * Commands:
+ *   /peers           — list connected peers
+ *   /agents          — list discovered agents
+ *   /skills          — list discovered skill offerings
+ *   /invoke <text>   — invoke Agent A's ImageAnalysis skill with <text>
+ *   /quit            — stop the agent
+ *   anything else    — send as a chat message to Agent A
  */
 
 import { DKGAgent } from '@dkg/agent';
+import { createInterface } from 'node:readline';
 
 const AGENT_A_ADDR = process.argv[2];
 if (!AGENT_A_ADDR) {
@@ -24,7 +26,7 @@ if (!AGENT_A_ADDR) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function main() {
-  console.log('=== DKG Agent B — TextBot (Discoverer & Consumer) ===\n');
+  console.log('=== DKG Agent B — TextBot ===\n');
 
   const agent = await DKGAgent.create({
     name: 'TextBot',
@@ -41,8 +43,7 @@ async function main() {
           return {
             success: true,
             outputData: new TextEncoder().encode(JSON.stringify({
-              sentiment: 'positive',
-              wordCount: text.split(' ').length,
+              sentiment: 'positive', wordCount: text.split(' ').length,
             })),
           };
         },
@@ -50,66 +51,141 @@ async function main() {
     ],
   });
 
+  const connectedPeers = new Set();
+
+  agent.onChat((text, senderPeerId) => {
+    console.log(`\n  [${short(senderPeerId)}]: ${text}`);
+    prompt();
+  });
+
   await agent.start();
-  console.log(`Node started. PeerId: ${agent.peerId.slice(0, 16)}...`);
+  console.log(`PeerId: ${short(agent.peerId)}`);
 
-  // Publish our own profile
-  console.log('\nPublishing TextBot profile...');
-  const myProfile = await agent.publishProfile();
-  console.log(`Profile published: KC #${myProfile.kcId}`);
+  // Publish profile
+  console.log('Publishing profile...');
+  await agent.publishProfile();
 
-  // Subscribe to agent-skills paranet
+  // Subscribe to paranets
   agent.subscribeToParanet('agent-skills');
 
   // Connect to Agent A
-  console.log(`\nConnecting to Agent A at ${AGENT_A_ADDR}...`);
+  console.log(`Connecting to ${AGENT_A_ADDR.slice(0, 40)}...`);
   await agent.connectTo(AGENT_A_ADDR);
-  console.log('Connected!');
+  const agentAPeerId = AGENT_A_ADDR.split('/p2p/')[1];
+  if (agentAPeerId) connectedPeers.add(agentAPeerId);
+  console.log('Connected!\n');
 
-  // Wait for GossipSub to propagate Agent A's profile
-  console.log('\nWaiting for Agent A profile to arrive via GossipSub...');
-  let attempts = 0;
-  let agents = [];
-  while (attempts < 20) {
+  // Track peers
+  agent.node.libp2p.addEventListener('peer:connect', (evt) => {
+    const pid = evt.detail.toString();
+    connectedPeers.add(pid);
+  });
+  agent.node.libp2p.addEventListener('peer:disconnect', (evt) => {
+    const pid = evt.detail.toString();
+    connectedPeers.delete(pid);
+    console.log(`\n  [-] Peer disconnected: ${short(pid)}`);
+    prompt();
+  });
+
+  // Wait for Agent A's profile to arrive
+  console.log('Waiting for Agent A profile via GossipSub...');
+  for (let i = 0; i < 15; i++) {
     await sleep(1000);
-    agents = await agent.findAgents();
-    if (agents.length > 1) break;
-    attempts++;
+    const agents = await agent.findAgents();
+    if (agents.length > 1) {
+      console.log(`Discovered ${agents.length} agent(s):`);
+      for (const a of agents) console.log(`  ${a.name} [${a.framework ?? '?'}] — ${short(a.peerId)}`);
+      break;
+    }
     process.stdout.write('.');
   }
   console.log('');
 
-  console.log(`\n=== DISCOVERED AGENTS ===`);
-  for (const a of agents) {
-    console.log(`  ${a.name} (${a.agentUri}) [${a.framework ?? 'unknown'}]`);
-  }
-
-  // Search for image analysis skills
-  console.log('\n=== SEARCHING: ImageAnalysis skills ===');
   const offerings = await agent.findSkills({ skillType: 'ImageAnalysis' });
-  if (offerings.length === 0) {
-    console.log('No ImageAnalysis offerings found.');
-    console.log('(Agent A profile may not have arrived via GossipSub yet.)');
-  } else {
-    for (const o of offerings) {
-      console.log(`  ${o.agentName} offers ${o.skillType} @ ${o.pricePerCall ?? 'free'} ${o.currency ?? 'TRAC'}/call`);
+  if (offerings.length > 0) {
+    console.log(`Found: ${offerings[0].agentName} offers ${offerings[0].skillType} @ ${offerings[0].pricePerCall} TRAC/call`);
+  }
+
+  console.log('\nReady. Type a message to chat, or /help for commands.\n');
+
+  // Interactive REPL
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const prompt = () => rl.prompt();
+  rl.setPrompt('TextBot> ');
+  rl.prompt();
+
+  rl.on('line', async (line) => {
+    const input = line.trim();
+    if (!input) { prompt(); return; }
+
+    if (input === '/help') {
+      console.log('Commands:');
+      console.log('  /peers           — list connected peers');
+      console.log('  /agents          — list discovered agents');
+      console.log('  /skills          — list discovered skill offerings');
+      console.log('  /invoke <text>   — invoke Agent A ImageAnalysis skill');
+      console.log('  /quit            — stop');
+      console.log('  <anything else>  — send as chat to all peers');
+    } else if (input === '/peers') {
+      console.log(`Connected peers (${connectedPeers.size}):`);
+      for (const p of connectedPeers) console.log(`  ${p}`);
+    } else if (input === '/agents') {
+      const agents = await agent.findAgents();
+      console.log(`Discovered agents (${agents.length}):`);
+      for (const a of agents) console.log(`  ${a.name} [${a.framework ?? '?'}] — ${short(a.peerId)}`);
+    } else if (input === '/skills') {
+      const offerings = await agent.findSkills();
+      if (offerings.length === 0) console.log('No skill offerings found.');
+      else for (const o of offerings) console.log(`  ${o.agentName}: ${o.skillType} @ ${o.pricePerCall ?? 'free'} ${o.currency ?? 'TRAC'}`);
+    } else if (input.startsWith('/invoke ')) {
+      const text = input.slice(8).trim();
+      if (!text) { console.log('Usage: /invoke <text>'); prompt(); return; }
+      if (!agentAPeerId) { console.log('Agent A peerId unknown'); prompt(); return; }
+      console.log(`Invoking ImageAnalysis on Agent A with: "${text}"...`);
+      try {
+        const resp = await agent.invokeSkill(
+          agentAPeerId,
+          'https://dkg.origintrail.io/skill#ImageAnalysis',
+          new TextEncoder().encode(text),
+        );
+        if (resp.success && resp.outputData) {
+          console.log(`  Result: ${new TextDecoder().decode(resp.outputData)}`);
+        } else {
+          console.log(`  Error: ${resp.error ?? 'unknown'}`);
+        }
+      } catch (err) {
+        console.log(`  Failed: ${err.message}`);
+      }
+    } else if (input === '/quit') {
+      console.log('Stopping...');
+      await agent.stop();
+      process.exit(0);
+    } else {
+      // Send chat to all connected peers
+      if (connectedPeers.size === 0) {
+        console.log('  (no peers connected)');
+      } else {
+        for (const pid of connectedPeers) {
+          const result = await agent.sendChat(pid, input);
+          if (!result.delivered) {
+            console.log(`  [!] Failed to send to ${short(pid)}: ${result.error}`);
+          }
+        }
+      }
     }
-  }
+    prompt();
+  });
 
-  // Query local knowledge
-  console.log('\n=== LOCAL SPARQL QUERY ===');
-  const qr = await agent.query(
-    'SELECT ?agent ?name WHERE { ?agent a <https://dkg.origintrail.io/skill#Agent> ; <http://schema.org/name> ?name }',
-    'agent-registry',
-  );
-  console.log(`Found ${qr.bindings.length} agent(s) in local store:`);
-  for (const row of qr.bindings) {
-    const name = row['name']?.replace(/^"|"$/g, '') ?? '?';
-    console.log(`  - ${name} (${row['agent']})`);
-  }
+  rl.on('close', async () => {
+    console.log('\nStopping...');
+    await agent.stop();
+    process.exit(0);
+  });
+}
 
-  console.log('\n=== DEMO COMPLETE ===');
-  console.log('Both agents are running. Press Ctrl+C to stop.\n');
+function short(peerId) {
+  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
+  return peerId;
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

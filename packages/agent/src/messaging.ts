@@ -40,6 +40,12 @@ export type SkillHandler = (
   senderPeerId: string,
 ) => Promise<SkillResponse>;
 
+export type ChatHandler = (
+  message: string,
+  senderPeerId: string,
+  conversationId: string,
+) => void | Promise<void>;
+
 interface ConversationState {
   highWaterMark: number;
   lastActivity: number;
@@ -61,6 +67,7 @@ export class MessageHandler {
   private readonly eventBus: EventBus;
   private readonly conversations = new Map<string, ConversationState>();
   private readonly skillHandlers = new Map<string, SkillHandler>();
+  private chatHandler: ChatHandler | null = null;
 
   constructor(
     router: ProtocolRouter,
@@ -80,6 +87,68 @@ export class MessageHandler {
 
   registerSkill(skillUri: string, handler: SkillHandler): void {
     this.skillHandlers.set(skillUri, handler);
+  }
+
+  onChat(handler: ChatHandler): void {
+    this.chatHandler = handler;
+  }
+
+  async sendChat(
+    recipientPeerId: string,
+    text: string,
+  ): Promise<{ delivered: boolean; error?: string }> {
+    const conversationId = bytesToHex(randomBytes(16));
+    const sharedSecret = new Uint8Array(32);
+
+    this.conversations.set(conversationId, {
+      highWaterMark: 0,
+      lastActivity: Date.now(),
+      sharedSecret,
+    });
+
+    const payload = new TextEncoder().encode(JSON.stringify({
+      type: 'chat',
+      text,
+    }));
+
+    const nonce = buildNonce(conversationId, 1);
+    let encrypted: Uint8Array;
+    try {
+      encrypted = encrypt(sharedSecret, payload, nonce).ciphertext;
+    } catch {
+      encrypted = payload;
+    }
+
+    const msg: AgentMessageMsg = {
+      conversationId,
+      sequence: 1,
+      senderPeerId: this.peerId,
+      recipientPeerId,
+      encryptedPayload: encrypted,
+      nonce,
+      senderSignature: new Uint8Array(64),
+    };
+
+    try {
+      const responseBytes = await this.router.send(
+        recipientPeerId,
+        PROTOCOL_MESSAGE,
+        encodeAgentMessage(msg),
+      );
+      const responseMsg = decodeAgentMessage(responseBytes);
+      let plain: string;
+      try {
+        plain = new TextDecoder().decode(
+          decrypt(sharedSecret, responseMsg.encryptedPayload, responseMsg.nonce),
+        );
+      } catch {
+        plain = new TextDecoder().decode(responseMsg.encryptedPayload);
+      }
+      const parsed = JSON.parse(plain);
+      return { delivered: parsed.success !== false, error: parsed.error };
+    } catch (err) {
+      return { delivered: false, error: err instanceof Error ? err.message : 'Send failed' };
+    }
   }
 
   /**
@@ -224,6 +293,20 @@ export class MessageHandler {
           executionTimeMs: Date.now() - startTime,
         });
       }
+    }
+
+    if (parsed.type === 'chat') {
+      const text = (parsed.text as string) ?? '';
+      if (this.chatHandler) {
+        try {
+          await this.chatHandler(text, fromPeerId.toString(), convId);
+        } catch {
+          // chat handler is fire-and-forget
+        }
+      }
+      return this.encryptResponse(conv.sharedSecret, convId, seq + 1, {
+        success: true,
+      });
     }
 
     return this.encryptResponse(conv.sharedSecret, convId, seq + 1, {
