@@ -97,16 +97,36 @@ export class DKGNode {
       services,
     } as any);
 
-    // Connect to relay peers after start
+    // Connect to relay peers and maintain the connection
     if (this.config.relayPeers?.length) {
       const { multiaddr } = await import('@multiformats/multiaddr');
-      for (const addr of this.config.relayPeers) {
-        try {
-          await this.node.dial(multiaddr(addr));
-        } catch {
-          // Relay may be unreachable — will retry via DHT
+      const relayAddrs = this.config.relayPeers.map(a => multiaddr(a));
+
+      const dialRelay = async (ma: ReturnType<typeof multiaddr>) => {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            await this.node!.dial(ma);
+            return true;
+          } catch {
+            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          }
         }
+        return false;
+      };
+
+      for (const ma of relayAddrs) {
+        await dialRelay(ma);
       }
+
+      // Auto-reconnect to relay peers on disconnect
+      this.node.addEventListener('peer:disconnect', (evt) => {
+        const disconnectedId = evt.detail.toString();
+        for (const ma of relayAddrs) {
+          if (ma.toString().includes(disconnectedId)) {
+            setTimeout(() => { dialRelay(ma); }, 2000);
+          }
+        }
+      });
     }
   }
 
