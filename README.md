@@ -103,20 +103,61 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 - **Mock everything at the boundary.** Dev B mocks the Publisher and QueryEngine interfaces. Dev A mocks the AgentWallet. Both can work independently.
 - **Full replication in Phase 1.** Every node in a paranet stores all public triples. Sharding comes later (Part 2).
 
+## Current Status
+
+**Phase 1 is complete.** Both work packages are implemented and tested:
+
+| Work Package | Status | Tests |
+|---|---|---|
+| WP-1A-i: Protocol Core | Done | 67 tests (core, storage, publisher, query) |
+| WP-1B: Agent Layer | Done | 32+ tests (wallet, profiles, discovery, encryption, messaging, E2E) |
+
+### What works today
+
+- **P2P networking** — libp2p nodes form a private DKG network (no public IPFS bootstrap)
+- **Knowledge publishing** — entities → KAs → KCs with merkle trees, skolemization, mock chain finalization
+- **Private triples** — mixed public/private KAs; private triples stay on the publisher, verified via merkle roots
+- **GossipSub** — paranet-scoped pub/sub for broadcasting published knowledge
+- **Agent identity** — Ed25519 master key with BIP-32/SLIP-10 derivation for EVM and Solana
+- **Skill ontology** — `dkgskill:` RDF vocabulary with SHACL validation shapes
+- **Profile publishing** — agents publish RDF profiles as Knowledge Assets in the Agent Registry paranet
+- **Agent discovery** — SPARQL-based skill search (local-only, per Store Isolation principle)
+- **Encrypted messaging** — X25519 key exchange, XChaCha20-Poly1305 encryption, replay protection
+- **Interactive chat** — agents exchange arbitrary messages via `/dkg/message/1.0.0`
+- **Store isolation** — no node exposes its SPARQL endpoint; all inter-node exchange via protocol messages
+
+## Demo
+
+Run two agents locally and send messages between them:
+
+**Terminal 1:**
+```bash
+node demo/agent-a.mjs 9100
+```
+
+**Terminal 2** (use the multiaddr printed by Agent A):
+```bash
+node demo/agent-b.mjs /ip4/127.0.0.1/tcp/9100/p2p/<PEER_ID>
+```
+
+Both terminals get an interactive prompt. Type a message and press enter to send it. Commands:
+
+| Command | Description |
+|---|---|
+| `<text>` | Send chat message to all connected peers |
+| `/peers` | List connected peer IDs |
+| `/agents` | Query local store for discovered agents |
+| `/skills` | List discovered skill offerings |
+| `/invoke <text>` | (Agent B) Invoke Agent A's ImageAnalysis skill |
+| `/quit` | Stop the agent |
+
 ## Development
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build all packages (respects dependency order)
-pnpm build
-
-# Run tests
-pnpm test
-
-# Build a specific package
-pnpm --filter @dkg/core build
+pnpm install            # Install dependencies
+pnpm build              # Build all packages (respects dependency order)
+pnpm test               # Run all tests
+pnpm --filter @dkg/agent test   # Run tests for a specific package
 ```
 
 ## Tech Stack
@@ -128,7 +169,9 @@ pnpm --filter @dkg/core build
 | Networking | libp2p (TCP, WebSocket, WebTransport, Noise, yamux) |
 | Discovery | Kademlia DHT + GossipSub + mDNS |
 | Data | RDF/SPARQL, N-Quads, URDNA2015 canonicalization |
-| Triple Store | Oxigraph (embedded), in-memory adapter |
-| Crypto | Ed25519 (noble/ed25519), SHA-256 merkle trees |
-| Blockchain | EVM (ethers.js), Solana (web3.js + Anchor) |
+| Triple Store | Oxigraph (embedded), pluggable via TripleStore interface |
+| Agent Identity | Ed25519 master, BIP-32/SLIP-10 derivation (EVM + Solana) |
+| Encryption | X25519 key exchange, XChaCha20-Poly1305 |
+| Crypto | @noble/curves, @noble/hashes, @noble/ciphers |
+| Blockchain | EVM (ethers.js), Solana (web3.js + Anchor) — via ChainAdapter |
 | Testing | Vitest |
