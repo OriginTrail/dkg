@@ -70,6 +70,7 @@ async function main() {
   });
 
   const connectedPeers = new Set();
+  let prompt = () => {};
 
   agent.onChat((text, senderPeerId) => {
     console.log(`\n  [${short(senderPeerId)}]: ${text}`);
@@ -154,7 +155,7 @@ async function main() {
 
   // Interactive REPL
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const prompt = () => rl.prompt();
+  prompt = () => rl.prompt();
   rl.setPrompt('TextBot> ');
   rl.prompt();
 

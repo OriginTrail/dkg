@@ -57,6 +57,7 @@ async function main() {
 
   // Register chat handler before start
   const connectedPeers = new Set();
+  let prompt = () => {};
 
   agent.onChat((text, senderPeerId) => {
     console.log(`\n  [${short(senderPeerId)}]: ${text}`);
@@ -95,11 +96,17 @@ async function main() {
 
   if (relayPeers.length) {
     console.log(`Relay: ${relayPeers[0]}`);
-    await new Promise(r => setTimeout(r, 2000));
-    const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
-    if (circuitAddrs.length) {
-      console.log('Circuit addresses:');
-      for (const a of circuitAddrs) console.log(`  ${a}`);
+    // Wait for relay reservation — may take longer on real networks
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+      if (circuitAddrs.length) {
+        console.log('Circuit addresses:');
+        for (const a of circuitAddrs) console.log(`  ${a}`);
+        break;
+      }
+      if (i < 9) process.stdout.write('.');
+      else console.log('\n  (no circuit addresses — relay may not have granted a reservation)');
     }
   }
 
@@ -114,7 +121,7 @@ async function main() {
 
   // Interactive REPL
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const prompt = () => rl.prompt();
+  prompt = () => rl.prompt();
   rl.setPrompt('ImageBot> ');
   rl.prompt();
 
