@@ -14,6 +14,7 @@ import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
 import { autoNAT } from '@libp2p/autonat';
 import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
+import { peerIdFromString } from '@libp2p/peer-id';
 import type { DKGNodeConfig } from './types.js';
 import { DHT_PROTOCOL } from './constants.js';
 
@@ -95,38 +96,35 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
+      connectionManager: {
+        minConnections: 0,
+      },
     } as any);
 
-    // Connect to relay peers and maintain the connection
+    // Connect to relay peers and tag them as keep-alive so libp2p's
+    // connection manager maintains the connection and auto-redials.
     if (this.config.relayPeers?.length) {
       const { multiaddr } = await import('@multiformats/multiaddr');
-      const relayAddrs = this.config.relayPeers.map(a => multiaddr(a));
 
-      const dialRelay = async (ma: ReturnType<typeof multiaddr>) => {
-        for (let attempt = 0; attempt < 5; attempt++) {
-          try {
-            await this.node!.dial(ma);
-            return true;
-          } catch {
-            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-          }
+      for (const addr of this.config.relayPeers) {
+        const ma = multiaddr(addr);
+        const p2pComponent = ma.getComponents().find(c => c.name === 'p2p');
+        if (!p2pComponent?.value) continue;
+
+        const peerId = peerIdFromString(p2pComponent.value);
+        await this.node.peerStore.merge(peerId, {
+          multiaddrs: [ma],
+          tags: {
+            'keep-alive-dkg-relay': { value: 100 },
+          },
+        });
+
+        try {
+          await this.node.dial(ma);
+        } catch {
+          // libp2p will auto-reconnect via the keep-alive tag
         }
-        return false;
-      };
-
-      for (const ma of relayAddrs) {
-        await dialRelay(ma);
       }
-
-      // Auto-reconnect to relay peers on disconnect
-      this.node.addEventListener('peer:disconnect', (evt) => {
-        const disconnectedId = evt.detail.toString();
-        for (const ma of relayAddrs) {
-          if (ma.toString().includes(disconnectedId)) {
-            setTimeout(() => { dialRelay(ma); }, 2000);
-          }
-        }
-      });
     }
   }
 

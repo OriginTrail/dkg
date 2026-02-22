@@ -2,7 +2,8 @@
  * DKG V9 — Relay Server
  *
  * A lightweight relay node that helps agents behind NATs connect to each other.
- * Does NOT store knowledge or run agent logic — just networking.
+ * Runs as a full DKG node (DHT, GossipSub, etc.) so it can participate in
+ * the network — not just forward bytes.
  *
  * The relay forwards encrypted bytes between peers. It cannot read message
  * content (double-encrypted: libp2p Noise + XChaCha20-Poly1305).
