@@ -40,11 +40,28 @@ if (!AGENT_A_ADDR && !relayPeers.length) {
   process.exit(1);
 }
 
+function ts() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function short(peerId) {
+  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
+  return peerId;
+}
+
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function main() {
   console.log('=== DKG Agent B — TextBot ===\n');
 
+  console.log(`[${ts()}] Node version: ${process.version}`);
+  if (relayPeers.length) console.log(`[${ts()}] Relay: ${relayPeers[0]}`);
+  if (targetPeerId)      console.log(`[${ts()}] Target peer: ${targetPeerId}`);
+  console.log('');
+
+  console.log(`[${ts()}] Creating agent...`);
   const agent = await DKGAgent.create({
     name: 'TextBot',
     framework: 'ElizaOS',
@@ -73,48 +90,75 @@ async function main() {
   let prompt = () => {};
 
   agent.onChat((text, senderPeerId) => {
-    console.log(`\n  [${short(senderPeerId)}]: ${text}`);
+    console.log(`\n  [${ts()}] [${short(senderPeerId)}]: ${text}`);
     prompt();
   });
 
+  console.log(`[${ts()}] Starting node...`);
   await agent.start();
-  console.log(`PeerId: ${short(agent.peerId)}`);
+  console.log(`[${ts()}] PeerId: ${agent.peerId}`);
+  console.log(`[${ts()}] Listening on:`);
+  for (const a of agent.multiaddrs) console.log(`  ${a}`);
 
-  // Publish profile
-  console.log('Publishing profile...');
+  console.log(`[${ts()}] Publishing profile...`);
   await agent.publishProfile();
 
-  // Subscribe to paranets
   agent.subscribeToParanet('agent-skills');
 
   let agentAPeerId = null;
 
   if (AGENT_A_ADDR) {
-    // Direct connection to Agent A
-    console.log(`Connecting to ${AGENT_A_ADDR.slice(0, 50)}...`);
+    console.log(`[${ts()}] Connecting directly to ${AGENT_A_ADDR.slice(0, 60)}...`);
     await agent.connectTo(AGENT_A_ADDR);
     agentAPeerId = AGENT_A_ADDR.split('/p2p/').pop();
     if (agentAPeerId) connectedPeers.add(agentAPeerId);
-    console.log('Connected!\n');
+    console.log(`[${ts()}] Connected!\n`);
   } else if (relayPeers.length) {
-    console.log('Connected to relay.');
-    await sleep(1000);
+    // Check if relay connection succeeded
+    const relayPeerId = relayPeers[0].split('/p2p/').pop();
+    const conns = agent.node.libp2p.getConnections();
+    const relayConn = conns.find(c => c.remotePeer.toString() === relayPeerId);
+    if (relayConn) {
+      console.log(`[${ts()}] Relay connected (${relayConn.direction}, ${relayConn.remoteAddr})`);
+    } else {
+      console.log(`[${ts()}] WARNING: Not connected to relay! Connections: ${conns.length}`);
+      for (const c of conns) {
+        console.log(`  ${short(c.remotePeer.toString())} ${c.direction} ${c.remoteAddr}`);
+      }
+    }
+
+    // Wait for circuit reservation
+    console.log(`[${ts()}] Waiting for circuit reservation...`);
+    let gotCircuit = false;
+    for (let i = 0; i < 8; i++) {
+      await sleep(1000);
+      const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+      if (circuitAddrs.length) {
+        gotCircuit = true;
+        console.log(`[${ts()}] Circuit reservation granted (${circuitAddrs.length} addresses)`);
+        break;
+      }
+      process.stdout.write('.');
+    }
+    if (!gotCircuit) {
+      console.log(`\n[${ts()}] WARNING: No circuit reservation — relay may reject inbound circuit dials`);
+    }
 
     if (targetPeerId) {
-      // Dial Agent A through the relay circuit
       const circuitAddr = `${relayPeers[0]}/p2p-circuit/p2p/${targetPeerId}`;
-      console.log(`Dialing ${short(targetPeerId)} via relay circuit...`);
+      console.log(`[${ts()}] Dialing ${short(targetPeerId)} via circuit: ${circuitAddr}`);
       try {
         await agent.connectTo(circuitAddr);
         agentAPeerId = targetPeerId;
         connectedPeers.add(targetPeerId);
-        console.log('Connected through relay!\n');
+        console.log(`[${ts()}] Connected through relay!\n`);
       } catch (err) {
-        console.log(`Failed to reach peer via relay: ${err.message}`);
-        console.log('Will wait for DHT discovery...\n');
+        console.log(`[${ts()}] ERROR dialing via relay: ${err.message}`);
+        if (err.cause) console.log(`  cause: ${err.cause.message ?? err.cause}`);
+        console.log(`[${ts()}] Will wait for DHT/GossipSub discovery...\n`);
       }
     } else {
-      console.log('No --peer specified. Waiting for peers to connect...');
+      console.log(`[${ts()}] No --peer specified. Waiting for peers to connect...`);
       console.log('Tip: use --peer <AGENT_A_PEER_ID> to dial through the relay.\n');
       await sleep(2000);
     }
@@ -124,21 +168,23 @@ async function main() {
   agent.node.libp2p.addEventListener('peer:connect', (evt) => {
     const pid = evt.detail.toString();
     connectedPeers.add(pid);
+    console.log(`\n  [${ts()}] [+] Peer connected: ${short(pid)} (${pid})`);
+    prompt();
   });
   agent.node.libp2p.addEventListener('peer:disconnect', (evt) => {
     const pid = evt.detail.toString();
     connectedPeers.delete(pid);
-    console.log(`\n  [-] Peer disconnected: ${short(pid)}`);
+    console.log(`\n  [${ts()}] [-] Peer disconnected: ${short(pid)} (${pid})`);
     prompt();
   });
 
-  // Wait for Agent A's profile to arrive
-  console.log('Waiting for Agent A profile via GossipSub...');
+  // Wait for Agent A's profile
+  console.log(`[${ts()}] Waiting for Agent A profile via GossipSub...`);
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
     const agents = await agent.findAgents();
     if (agents.length > 1) {
-      console.log(`Discovered ${agents.length} agent(s):`);
+      console.log(`[${ts()}] Discovered ${agents.length} agent(s):`);
       for (const a of agents) console.log(`  ${a.name} [${a.framework ?? '?'}] — ${short(a.peerId)}`);
       break;
     }
@@ -148,10 +194,10 @@ async function main() {
 
   const offerings = await agent.findSkills({ skillType: 'ImageAnalysis' });
   if (offerings.length > 0) {
-    console.log(`Found: ${offerings[0].agentName} offers ${offerings[0].skillType} @ ${offerings[0].pricePerCall} TRAC/call`);
+    console.log(`[${ts()}] Found: ${offerings[0].agentName} offers ${offerings[0].skillType} @ ${offerings[0].pricePerCall} TRAC/call`);
   }
 
-  console.log('\nReady. Type a message to chat, or /help for commands.\n');
+  console.log(`\n[${ts()}] Ready. Type a message to chat, or /help for commands.\n`);
 
   // Interactive REPL
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -169,11 +215,23 @@ async function main() {
       console.log('  /agents          — list discovered agents');
       console.log('  /skills          — list discovered skill offerings');
       console.log('  /invoke <text>   — invoke Agent A ImageAnalysis skill');
+      console.log('  /status          — show connection diagnostics');
       console.log('  /quit            — stop');
       console.log('  <anything else>  — send as chat to all peers');
     } else if (input === '/peers') {
       console.log(`Connected peers (${connectedPeers.size}):`);
       for (const p of connectedPeers) console.log(`  ${p}`);
+    } else if (input === '/status') {
+      const conns = agent.node.libp2p.getConnections();
+      console.log(`Connections (${conns.length}):`);
+      for (const c of conns) {
+        console.log(`  ${short(c.remotePeer.toString())} dir=${c.direction} ` +
+          `addr=${c.remoteAddr} streams=${c.streams.length} ` +
+          `limited=${c.limits != null}`);
+      }
+      const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+      console.log(`Circuit addresses: ${circuitAddrs.length}`);
+      for (const a of circuitAddrs) console.log(`  ${a}`);
     } else if (input === '/agents') {
       const agents = await agent.findAgents();
       console.log(`Discovered agents (${agents.length}):`);
@@ -206,7 +264,6 @@ async function main() {
       await agent.stop();
       process.exit(0);
     } else {
-      // Send chat to all connected peers
       if (connectedPeers.size === 0) {
         console.log('  (no peers connected)');
       } else {
@@ -226,11 +283,6 @@ async function main() {
     await agent.stop();
     process.exit(0);
   });
-}
-
-function short(peerId) {
-  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
-  return peerId;
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

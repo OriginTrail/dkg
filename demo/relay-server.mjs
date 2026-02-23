@@ -1,9 +1,8 @@
 /**
  * DKG V9 — Relay Server
  *
- * A lightweight relay node that helps agents behind NATs connect to each other.
- * Runs as a full DKG node (DHT, GossipSub, etc.) so it can participate in
- * the network — not just forward bytes.
+ * A full DKG node that also acts as a circuit relay for NAT-traversal.
+ * Participates in DHT, GossipSub, etc. like any other DKG node.
  *
  * The relay forwards encrypted bytes between peers. It cannot read message
  * content (double-encrypted: libp2p Noise + XChaCha20-Poly1305).
@@ -20,8 +19,24 @@ import { DKGNode } from '@dkg/core';
 
 const PORT = parseInt(process.argv[2] || '9090', 10);
 
+function ts() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function log(...args) {
+  console.log(`[${ts()}]`, ...args);
+}
+
+function short(peerId) {
+  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
+  return peerId;
+}
+
 async function main() {
-  console.log('=== DKG Relay Server ===\n');
+  log('=== DKG Relay Server ===');
 
   const node = new DKGNode({
     listenAddresses: [
@@ -34,33 +49,68 @@ async function main() {
 
   await node.start();
 
-  console.log(`Relay PeerId: ${node.peerId}`);
-  console.log('Listening on:');
+  log(`Relay PeerId: ${node.peerId}`);
+  log('Listening on:');
   for (const addr of node.multiaddrs) {
-    console.log(`  ${addr}`);
+    log(`  ${addr}`);
   }
 
-  console.log('\n--- Relay is running ---');
-  console.log('Agents can connect using:');
+  log('--- Relay is running ---');
+  log('Agents can connect using:');
   const tcpAddr = node.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'));
   if (tcpAddr) {
-    console.log(`  --relay ${tcpAddr}`);
+    log(`  --relay ${tcpAddr}`);
   }
-  console.log('\nThe relay cannot read any message content (encrypted transport).');
-  console.log('Press Ctrl+C to stop.\n');
+  log('The relay cannot read any message content (encrypted transport).');
+  log('Press Ctrl+C to stop.');
 
-  let connections = 0;
-  node.libp2p.addEventListener('peer:connect', () => {
-    connections++;
-    console.log(`[relay] Peer connected (${connections} active)`);
+  const libp2p = node.libp2p;
+  const connectedPeers = new Map(); // peerId -> { connectedAt, addr, direction }
+
+  libp2p.addEventListener('connection:open', (evt) => {
+    const conn = evt.detail;
+    const pid = conn.remotePeer.toString();
+    connectedPeers.set(pid, {
+      connectedAt: new Date(),
+      addr: conn.remoteAddr?.toString() ?? 'unknown',
+      direction: conn.direction,
+    });
+    log(`CONNECT   ${short(pid)} (${pid}) dir=${conn.direction} addr=${conn.remoteAddr} — ${connectedPeers.size} peers`);
   });
-  node.libp2p.addEventListener('peer:disconnect', () => {
-    connections = Math.max(0, connections - 1);
-    console.log(`[relay] Peer disconnected (${connections} active)`);
+
+  libp2p.addEventListener('connection:close', (evt) => {
+    const conn = evt.detail;
+    const pid = conn.remotePeer.toString();
+    const info = connectedPeers.get(pid);
+    const durationMs = conn.timeline.close
+      ? conn.timeline.close - conn.timeline.open
+      : '?';
+    connectedPeers.delete(pid);
+    log(`DISCONN   ${short(pid)} (${pid}) duration=${durationMs}ms — ${connectedPeers.size} peers`);
   });
+
+  libp2p.addEventListener('connection:prune', (evt) => {
+    const pruned = evt.detail;
+    log(`PRUNE     ${pruned.length} connection(s) pruned`);
+    for (const conn of pruned) {
+      log(`  pruned: ${short(conn.remotePeer.toString())} dir=${conn.direction}`);
+    }
+  });
+
+  // Periodic status report every 60 seconds
+  setInterval(() => {
+    const count = connectedPeers.size;
+    log(`STATUS    ${count} peer(s) connected`);
+    if (count > 0) {
+      for (const [pid, info] of connectedPeers) {
+        const uptime = Math.round((Date.now() - info.connectedAt.getTime()) / 1000);
+        log(`  ${short(pid)} (${pid}) dir=${info.direction} uptime=${uptime}s`);
+      }
+    }
+  }, 60_000);
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down relay...');
+    log('Shutting down relay...');
     await node.stop();
     process.exit(0);
   });

@@ -31,6 +31,12 @@ export interface DKGNodeConfig {
   relayPeers?: string[];
   /** Enable circuit relay server on this node (for nodes with public IPs). */
   enableRelayServer?: boolean;
+  /**
+   * Enable autoNAT service for automatic NAT status detection.
+   * Default: true, but auto-disabled when relayPeers or enableRelayServer is
+   * set (nodes that already know their NAT status don't need probing).
+   */
+  enableAutoNAT?: boolean;
 }
 
 export interface StreamHandler {

@@ -30,6 +30,17 @@ if (relayIdx !== -1 && args[relayIdx + 1]) {
 }
 const PORT = parseInt(args[0] || '9100', 10);
 
+function ts() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function short(peerId) {
+  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
+  return peerId;
+}
+
 async function main() {
   console.log('=== DKG Agent A — ImageBot ===\n');
 
@@ -46,7 +57,7 @@ async function main() {
         currency: 'TRAC',
         handler: async (request, senderPeerId) => {
           const inputText = new TextDecoder().decode(request.inputData);
-          console.log(`\n  [SKILL] ImageAnalysis from ${short(senderPeerId)}: "${inputText}"`);
+          console.log(`\n  [${ts()}] [SKILL] ImageAnalysis from ${short(senderPeerId)}: "${inputText}"`);
           const result = JSON.stringify({ label: 'cat', confidence: 0.97 });
           prompt();
           return { success: true, outputData: new TextEncoder().encode(result) };
@@ -55,12 +66,11 @@ async function main() {
     ],
   });
 
-  // Register chat handler before start
   const connectedPeers = new Set();
   let prompt = () => {};
 
   agent.onChat((text, senderPeerId) => {
-    console.log(`\n  [${short(senderPeerId)}]: ${text}`);
+    console.log(`\n  [${ts()}] [${short(senderPeerId)}]: ${text}`);
     prompt();
   });
 
@@ -75,13 +85,12 @@ async function main() {
   await agent.publishProfile();
   console.log('Profile published.\n');
 
-  // Track peers
+  // Track peers with detailed logging
   agent.node.libp2p.addEventListener('peer:connect', async (evt) => {
     const pid = evt.detail.toString();
     connectedPeers.add(pid);
-    console.log(`\n  [+] Peer connected: ${short(pid)}`);
+    console.log(`\n  [${ts()}] [+] Peer connected: ${short(pid)} (${pid})`);
 
-    // Re-broadcast profile after a delay so the new peer's GossipSub is ready
     await new Promise(r => setTimeout(r, 2000));
     try { await agent.publishProfile(); } catch {}
     prompt();
@@ -90,23 +99,27 @@ async function main() {
   agent.node.libp2p.addEventListener('peer:disconnect', (evt) => {
     const pid = evt.detail.toString();
     connectedPeers.delete(pid);
-    console.log(`\n  [-] Peer disconnected: ${short(pid)}`);
+    console.log(`\n  [${ts()}] [-] Peer disconnected: ${short(pid)} (${pid})`);
     prompt();
   });
 
   if (relayPeers.length) {
     console.log(`Relay: ${relayPeers[0]}`);
-    // Wait for relay reservation — may take longer on real networks
+    let gotCircuit = false;
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
       if (circuitAddrs.length) {
-        console.log('Circuit addresses:');
-        for (const a of circuitAddrs) console.log(`  ${a}`);
+        gotCircuit = true;
+        const publicCircuit = circuitAddrs.find(a => !a.includes('/127.0.0.1/') && !a.includes('/10.') && !a.includes('/192.168.'));
+        console.log(`\n  [${ts()}] Circuit reservation granted (${circuitAddrs.length} addresses)`);
+        if (publicCircuit) {
+          console.log(`  Public circuit: ${publicCircuit}`);
+        }
         break;
       }
       if (i < 9) process.stdout.write('.');
-      else console.log('\n  (no circuit addresses — relay may not have granted a reservation)');
+      else console.log(`\n  [${ts()}] WARNING: no circuit addresses — relay may not have granted a reservation`);
     }
   }
 
@@ -145,7 +158,6 @@ async function main() {
       await agent.stop();
       process.exit(0);
     } else {
-      // Send chat to all connected peers
       if (connectedPeers.size === 0) {
         console.log('  (no peers connected)');
       } else {
@@ -165,11 +177,6 @@ async function main() {
     await agent.stop();
     process.exit(0);
   });
-}
-
-function short(peerId) {
-  if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
-  return peerId;
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

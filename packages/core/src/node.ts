@@ -24,7 +24,7 @@ export interface DKGServices extends Record<string, unknown> {
   identify: unknown;
   ping: Ping;
   dcutr: unknown;
-  autoNAT: unknown;
+  autoNAT?: unknown;
   relay?: unknown;
 }
 
@@ -53,6 +53,12 @@ export class DKGNode {
 
     const transports: any[] = [tcp(), webSockets(), circuitRelayTransport()];
 
+    // Nodes that already know their NAT status skip autoNAT probing:
+    // - relayPeers set → agent behind NAT (knows it needs relay)
+    // - enableRelayServer → public node acting as relay
+    const useAutoNAT = this.config.enableAutoNAT ??
+      !(this.config.relayPeers?.length || this.config.enableRelayServer);
+
     const services: Record<string, any> = {
       identify: identify(),
       ping: ping(),
@@ -62,8 +68,11 @@ export class DKGNode {
         allowPublishToZeroTopicPeers: true,
       }),
       dcutr: dcutr(),
-      autoNAT: autoNAT(),
     };
+
+    if (useAutoNAT) {
+      services.autoNAT = autoNAT();
+    }
 
     if (this.config.enableRelayServer) {
       services.relay = circuitRelayServer({
