@@ -62,13 +62,21 @@ program
     );
     const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port?', String(existing.apiPort)), 10);
-    const enableAutoUpdate = (await ask('Enable auto-update from GitHub? (y/n)', 'n')).toLowerCase() === 'y';
+
+    const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
+    const enableAutoUpdate = (await ask(
+      'Enable auto-update from GitHub? (y/n)',
+      autoUpdateDefault ? 'y' : 'n',
+    )).toLowerCase() === 'y';
 
     let autoUpdate = existing.autoUpdate;
     if (enableAutoUpdate) {
-      const repo = await ask('GitHub repo (owner/name)?', existing.autoUpdate?.repo);
-      const branch = await ask('Branch?', existing.autoUpdate?.branch ?? 'main');
-      const interval = parseInt(await ask('Check interval (minutes)?', String(existing.autoUpdate?.checkIntervalMinutes ?? 5)), 10);
+      const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
+      const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
+      const repo = await ask('GitHub repo (owner/name)?', defaultRepo);
+      const branch = await ask('Branch?', defaultBranch);
+      const interval = parseInt(await ask('Check interval (minutes)?', String(defaultInterval)), 10);
       autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
     }
 

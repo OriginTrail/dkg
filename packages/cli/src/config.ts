@@ -18,6 +18,12 @@ export interface NetworkConfig {
   relays: string[];
   defaultParanets: string[];
   defaultNodeRole: 'core' | 'edge';
+  autoUpdate?: {
+    enabled: boolean;
+    repo: string;
+    branch: string;
+    checkIntervalMinutes: number;
+  };
 }
 
 export interface DkgConfig {
