@@ -1,13 +1,21 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 export interface AutoUpdateConfig {
   enabled: boolean;
   repo: string;
   branch: string;
   checkIntervalMinutes: number;
+}
+
+export interface NetworkConfig {
+  networkName: string;
+  relays: string[];
+  defaultParanets: string[];
+  defaultNodeRole: 'core' | 'edge';
 }
 
 export interface DkgConfig {
@@ -27,6 +35,34 @@ const DEFAULT_CONFIG: DkgConfig = {
   nodeRole: 'edge',
   paranets: [],
 };
+
+let _networkConfig: NetworkConfig | null = null;
+
+/**
+ * Load the network config from network/testnet.json in the repo root.
+ * Walks up from this file's location to find it.
+ */
+export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
+  if (_networkConfig) return _networkConfig;
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    // Walk up from packages/cli/dist (or src) to repo root
+    const candidates = [
+      join(thisDir, '..', '..', '..', 'network', 'testnet.json'),   // from dist/
+      join(thisDir, '..', '..', '..', '..', 'network', 'testnet.json'), // from src/ during dev
+    ];
+    for (const path of candidates) {
+      try {
+        const raw = await readFile(path, 'utf-8');
+        _networkConfig = JSON.parse(raw) as NetworkConfig;
+        return _networkConfig;
+      } catch { /* try next */ }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function dkgDir(): string {
   return join(homedir(), '.dkg');

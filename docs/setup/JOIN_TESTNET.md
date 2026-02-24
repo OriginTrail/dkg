@@ -33,30 +33,33 @@ pnpm build
 npx dkg init
 ```
 
-You'll be prompted for:
+The CLI reads the testnet relay address from `network/testnet.json` in the repo, so it's pre-filled for you. Just give your node a name and hit enter through the rest:
+
+```
+DKG Node Setup — DKG V9 Testnet
+
+Node name?: alice-mini
+Node role? (edge / core) (edge):
+Relay multiaddr? (/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5m...):
+Paranets to subscribe? (comma-separated):
+API port? (9200):
+Enable auto-update from GitHub? (y/n) (n):
+
+Config saved to /Users/you/.dkg/config.json
+  name:       alice-mini
+  role:       edge
+  relay:      /ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5m...
+  network:    DKG V9 Testnet
+```
 
 | Prompt | What to enter |
 |--------|---------------|
 | **Node name?** | A memorable name for your node (e.g. `alice-mini`, `lab-node-3`) |
-| **Node role?** | `edge` (unless you're running a relay — then `core`) |
-| **Relay multiaddr?** | The testnet relay address (see below) |
-| **Paranets to subscribe?** | Leave blank for now, or enter `memes` if the paranet already exists |
-| **API port?** | `9200` (default, or pick another if that's taken) |
+| **Node role?** | `edge` (just press Enter) |
+| **Relay multiaddr?** | Pre-filled from testnet config — just press Enter |
+| **Paranets to subscribe?** | Leave blank, or enter paranet names if you know them |
+| **API port?** | `9200` (default — press Enter) |
 | **Enable auto-update?** | `y` if you want the node to pull new code automatically |
-
-### Testnet Relay Address
-
-Ask the person who set up the relay for the full multiaddr. It looks like:
-
-```
-/ip4/<RELAY_IP>/tcp/9090/p2p/<RELAY_PEER_ID>
-```
-
-For example:
-
-```
-/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK
-```
 
 Your config is saved to `~/.dkg/config.json`. You can edit it directly or re-run `dkg init`.
 

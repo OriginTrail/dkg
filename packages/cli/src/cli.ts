@@ -7,6 +7,7 @@ import { createReadStream } from 'node:fs';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
+  loadNetworkConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { runDaemon } from './daemon.js';
@@ -25,6 +26,7 @@ program
   .action(async () => {
     await ensureDkgDir();
     const existing = await loadConfig();
+    const network = await loadNetworkConfig();
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     const ask = (q: string, def?: string): Promise<string> =>
       new Promise(resolve => {
@@ -32,17 +34,31 @@ program
         rl.question(`${q}${suffix}: `, answer => resolve(answer.trim() || def || ''));
       });
 
-    console.log('DKG Node Setup\n');
+    if (network) {
+      console.log(`DKG Node Setup — ${network.networkName}\n`);
+    } else {
+      console.log('DKG Node Setup\n');
+    }
 
     const name = await ask('Node name?', existing.name !== 'dkg-node' ? existing.name : undefined);
-    const roleAnswer = await ask('Node role? (edge / core)', existing.nodeRole ?? 'edge');
+    const defaultRole = existing.nodeRole ?? network?.defaultNodeRole ?? 'edge';
+    const roleAnswer = await ask('Node role? (edge / core)', defaultRole);
     const nodeRole = roleAnswer === 'core' ? 'core' as const : 'edge' as const;
+
+    // Pre-fill relay from network config if user hasn't set one
+    const defaultRelay = existing.relay ?? network?.relays?.[0];
     const relay = nodeRole === 'edge'
-      ? await ask('Relay multiaddr?', existing.relay)
-      : await ask('Relay multiaddr? (optional for core)', existing.relay);
+      ? await ask('Relay multiaddr?', defaultRelay)
+      : await ask('Relay multiaddr? (optional for core)', defaultRelay);
+
+    const defaultParanets = existing.paranets?.length
+      ? existing.paranets.join(',')
+      : network?.defaultParanets?.length
+        ? network.defaultParanets.join(',')
+        : undefined;
     const paranetsStr = await ask(
-      'Paranets to subscribe? (comma-separated, e.g. agent-skills,climate)',
-      existing.paranets?.join(','),
+      'Paranets to subscribe? (comma-separated)',
+      defaultParanets,
     );
     const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port?', String(existing.apiPort)), 10);
@@ -76,6 +92,9 @@ program
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
+    if (network) {
+      console.log(`  network:    ${network.networkName}`);
+    }
     console.log(`\nRun "dkg start" to start the node.`);
   });
 

@@ -1,0 +1,8 @@
+{
+  "networkName": "DKG V9 Testnet",
+  "relays": [
+    "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK"
+  ],
+  "defaultParanets": [],
+  "defaultNodeRole": "edge"
+}
