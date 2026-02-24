@@ -164,24 +164,10 @@ export class DKGAgent {
       }
     }
 
-    // Subscribe to agent-registry GossipSub
-    this.gossip.subscribe(paranetPublishTopic(AGENT_REGISTRY_PARANET));
-
-    // Handle incoming GossipSub publish broadcasts
-    this.gossip.onMessage(paranetPublishTopic(AGENT_REGISTRY_PARANET), async (_topic, data) => {
-      try {
-        const request = decodePublishRequest(data);
-        const nquadsStr = new TextDecoder().decode(request.nquads);
-        const quads = parseSimpleNQuads(nquadsStr);
-        const graphManager = new GraphManager(this.store);
-        await graphManager.ensureParanet(request.paranetId);
-        const dataGraph = graphManager.dataGraphUri(request.paranetId);
-        const normalized = quads.map(q => ({ ...q, graph: dataGraph }));
-        await this.store.insert(normalized);
-      } catch {
-        // Silently handle malformed broadcasts
-      }
-    });
+    // Subscribe to both system paranet GossipSub topics
+    for (const systemParanet of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
+      this.subscribeToParanet(systemParanet);
+    }
 
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
@@ -393,12 +379,12 @@ export class DKGAgent {
    */
   async paranetExists(paranetId: string): Promise<boolean> {
     const paranetUri = paranetDataGraphUri(paranetId);
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const result = await this.store.query(
-      `ASK { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> } }`,
+      `SELECT ?p WHERE {
+        GRAPH ?g { <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
+      } LIMIT 1`,
     );
-    if (result.type === 'boolean') return result.value;
-    return false;
+    return result.type === 'bindings' && result.bindings.length > 0;
   }
 
   /**

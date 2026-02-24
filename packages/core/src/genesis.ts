@@ -68,7 +68,15 @@ function buildGenesisQuads(): GenesisQuad[] {
   quads.push(q(AG, 'did:dkg:paranet:agents', `${DKG}gossipTopic`, '"dkg/paranet/agents/publish"'));
   quads.push(q(AG, 'did:dkg:paranet:agents', `${DKG}replicationPolicy`, '"full"'));
 
-  // --- Ontology definitions ---
+  // --- Ontology paranet definition ---
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${RDF}type`, `${DKG}Paranet`));
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${RDF}type`, `${DKG}SystemParanet`));
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${SCHEMA}name`, '"Ontology Registry"'));
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${SCHEMA}description`, '"System paranet for shared ontology and paranet definitions"'));
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${DKG}gossipTopic`, '"dkg/paranet/ontology/publish"'));
+  quads.push(q(OG, 'did:dkg:paranet:ontology', `${DKG}replicationPolicy`, '"full"'));
+
+  // --- Ontology class definitions ---
   quads.push(q(OG, `${DKG}Network`,              `${RDF}type`, `${RDFS}Class`));
   quads.push(q(OG, `${DKG}Paranet`,              `${RDF}type`, `${RDFS}Class`));
   quads.push(q(OG, `${DKG}SystemParanet`,        `${RDF}type`, `${RDFS}Class`));
