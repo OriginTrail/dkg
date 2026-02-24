@@ -1,0 +1,17 @@
+{
+  "name": "@dkg/cli",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "dkg": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/agent": "workspace:*",
+    "commander": "^13"
+  }
+}
