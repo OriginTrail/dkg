@@ -35,18 +35,23 @@ program
     console.log('DKG Node Setup\n');
 
     const name = await ask('Node name?', existing.name !== 'dkg-node' ? existing.name : undefined);
-    const relay = await ask('Relay multiaddr?', existing.relay);
+    const roleAnswer = await ask('Node role? (edge / core)', existing.nodeRole ?? 'edge');
+    const nodeRole = roleAnswer === 'core' ? 'core' as const : 'edge' as const;
+    const relay = nodeRole === 'edge'
+      ? await ask('Relay multiaddr?', existing.relay)
+      : await ask('Relay multiaddr? (optional for core)', existing.relay);
     const apiPort = parseInt(await ask('API port?', String(existing.apiPort)), 10);
 
     rl.close();
 
-    const config = { ...existing, name: name || 'dkg-node', relay: relay || undefined, apiPort };
+    const config = { ...existing, name: name || 'dkg-node', relay: relay || undefined, apiPort, nodeRole };
     await saveConfig(config);
 
     console.log(`\nConfig saved to ${configPath()}`);
-    console.log(`  name:    ${config.name}`);
-    console.log(`  relay:   ${config.relay ?? '(none)'}`);
-    console.log(`  apiPort: ${config.apiPort}`);
+    console.log(`  name:     ${config.name}`);
+    console.log(`  role:     ${config.nodeRole}`);
+    console.log(`  relay:    ${config.relay ?? '(none)'}`);
+    console.log(`  apiPort:  ${config.apiPort}`);
     console.log(`\nRun "dkg start" to start the node.`);
   });
 
@@ -136,11 +141,13 @@ program
       const client = await ApiClient.connect();
       const s = await client.status();
       const uptime = formatUptime(s.uptimeMs);
-      console.log(`  Node:    ${s.name}`);
-      console.log(`  PeerId:  ${s.peerId}`);
-      console.log(`  Uptime:  ${uptime}`);
-      console.log(`  Peers:   ${s.connectedPeers}`);
-      console.log(`  Relay:   ${s.relayConnected ? 'connected' : 'not connected'}`);
+      console.log(`  Node:      ${s.name}`);
+      console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);
+      console.log(`  Network:   ${s.networkId ?? '—'}`);
+      console.log(`  PeerId:    ${s.peerId}`);
+      console.log(`  Uptime:    ${uptime}`);
+      console.log(`  Peers:     ${s.connectedPeers}`);
+      console.log(`  Relay:     ${s.relayConnected ? 'connected' : 'not connected'}`);
     } catch (err: any) {
       console.error(err.message);
       process.exit(1);
@@ -165,7 +172,7 @@ program
       console.log(`Network agents (seen by ${status.name}):\n`);
 
       const nameW = Math.max(6, ...agents.map(a => a.name.length));
-      const header = `  ${'Name'.padEnd(nameW)}   ${'PeerId'.padEnd(16)}   Framework`;
+      const header = `  ${'Name'.padEnd(nameW)}   ${'PeerId'.padEnd(16)}   ${'Role'.padEnd(5)}   Framework`;
       console.log(header);
       console.log('  ' + '─'.repeat(header.length - 2));
 
@@ -174,7 +181,8 @@ program
           ? a.peerId.slice(0, 8) + '...' + a.peerId.slice(-4)
           : a.peerId;
         const self = a.peerId === status.peerId ? ' (you)' : '';
-        console.log(`  ${a.name.padEnd(nameW)}   ${short.padEnd(16)}   ${a.framework ?? '—'}${self}`);
+        const role = a.nodeRole ?? 'edge';
+        console.log(`  ${a.name.padEnd(nameW)}   ${short.padEnd(16)}   ${role.padEnd(5)}   ${a.framework ?? '—'}${self}`);
       }
       console.log(`\n  ${agents.length} agent(s) total`);
     } catch (err: any) {

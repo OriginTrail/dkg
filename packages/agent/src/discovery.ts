@@ -1,13 +1,17 @@
 import type { QueryEngine, QueryResult } from '@dkg/query';
+import { DKG_ONTOLOGY } from '@dkg/core';
 import { AGENT_REGISTRY_PARANET } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
+const DKG = 'https://dkg.network/ontology#';
+const SCHEMA = 'https://schema.org/';
 
 export interface DiscoveredAgent {
   agentUri: string;
   name: string;
   peerId: string;
   framework?: string;
+  nodeRole?: string;
 }
 
 export interface DiscoveredOffering {
@@ -48,11 +52,12 @@ export class DiscoveryClient {
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework WHERE {
-        ?agent a <${SKILL}Agent> ;
-               <http://schema.org/name> ?name ;
-               <http://dkg.io/ontology/peerId> ?peerId .${filter}
+      SELECT ?agent ?name ?peerId ?framework ?nodeRole WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${SCHEMA}name> ?name ;
+               <${DKG}peerId> ?peerId .${filter}
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
+        OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
       }
       ${limitClause}
     `;
@@ -64,6 +69,7 @@ export class DiscoveryClient {
       name: stripQuotes(row['name']),
       peerId: stripQuotes(row['peerId']),
       framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
+      nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
     }));
   }
 
@@ -92,8 +98,8 @@ export class DiscoveryClient {
     const sparql = `
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT ?agent ?agentName ?offering ?skillType ?price ?successRate ?currency WHERE {
-        ?agent a <${SKILL}Agent> ;
-               <http://schema.org/name> ?agentName ;
+        ?agent a <${DKG}Agent> ;
+               <${SCHEMA}name> ?agentName ;
                <${SKILL}offersSkill> ?offering .
         ${skillMatch}
         OPTIONAL { ?offering <${SKILL}pricePerCall> ?price }
@@ -119,27 +125,27 @@ export class DiscoveryClient {
 
   async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
     const sparql = `
-      SELECT ?agent ?name ?framework WHERE {
-        ?agent a <${SKILL}Agent> ;
-               <http://schema.org/name> ?name .
+      SELECT ?agent ?name ?framework ?nodeRole WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${SCHEMA}name> ?name ;
+               <${DKG}peerId> "${peerId}" .
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
+        OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
       }
-      LIMIT 10
+      LIMIT 1
     `;
 
     const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_PARANET });
-    for (const row of result.bindings) {
-      const uri = row['agent'];
-      if (uri.endsWith(`:${peerId}`) || uri.includes(`agent:${peerId}`)) {
-        return {
-          agentUri: uri,
-          name: stripQuotes(row['name']),
-          peerId,
-          framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
-        };
-      }
-    }
-    return null;
+    if (result.bindings.length === 0) return null;
+
+    const row = result.bindings[0];
+    return {
+      agentUri: row['agent'],
+      name: stripQuotes(row['name']),
+      peerId,
+      framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
+      nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
+    };
   }
 }
 

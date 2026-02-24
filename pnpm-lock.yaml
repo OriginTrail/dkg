@@ -137,6 +137,9 @@ importers:
       '@dkg/agent':
         specifier: workspace:*
         version: link:../agent
+      '@dkg/core':
+        specifier: workspace:*
+        version: link:../core
       commander:
         specifier: ^13
         version: 13.1.0

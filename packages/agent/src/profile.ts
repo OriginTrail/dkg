@@ -1,11 +1,14 @@
 import type { Quad } from '@dkg/storage';
+import { DKG_ONTOLOGY, SYSTEM_PARANETS } from '@dkg/core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const SCHEMA = 'http://schema.org/';
-const DKG = 'http://dkg.io/ontology/';
+const SCHEMA = 'https://schema.org/';
+const DKG = 'https://dkg.network/ontology#';
+const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
+const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
-export const AGENT_REGISTRY_PARANET = 'agent-registry';
+export const AGENT_REGISTRY_PARANET = SYSTEM_PARANETS.AGENTS;
 export const AGENT_REGISTRY_GRAPH = `did:dkg:paranet:${AGENT_REGISTRY_PARANET}`;
 
 export interface SkillOfferingConfig {
@@ -23,12 +26,15 @@ export interface AgentProfileConfig {
   framework?: string;
   skills: SkillOfferingConfig[];
   paranetsServed?: string[];
+  nodeRole?: 'core' | 'edge';
+  publicKey?: string;
+  relayAddress?: string;
 }
 
 /**
- * Builds RDF quads for an agent profile KA.
+ * Builds RDF quads for an agent profile KA using the ERC-8004 aligned ontology.
  * The agent's rootEntity is `did:dkg:agent:{peerId}`.
- * Skill offerings are skolemized under the agent's rootEntity.
+ * Uses three vocabulary layers: erc8004: (identity), prov: (provenance), dkg: (P2P).
  */
 export function buildAgentProfile(config: AgentProfileConfig): {
   quads: Quad[];
@@ -36,25 +42,46 @@ export function buildAgentProfile(config: AgentProfileConfig): {
 } {
   const entity = `did:dkg:agent:${config.peerId}`;
   const quads: Quad[] = [];
+  const role = config.nodeRole ?? 'edge';
 
   const q = (s: string, p: string, o: string) =>
     quads.push({ subject: s, predicate: p, object: o, graph: AGENT_REGISTRY_GRAPH });
 
-  q(entity, RDF_TYPE, `${SKILL}Agent`);
-  q(entity, `${SCHEMA}name`, `"${config.name}"`);
-  q(entity, `${DKG}peerId`, `"${config.peerId}"`);
+  // Type: dkg:Agent + role-specific subclass
+  q(entity, RDF_TYPE, `${DKG}Agent`);
+  q(entity, RDF_TYPE, role === 'core' ? `${DKG}CoreNode` : `${DKG}EdgeNode`);
 
+  // schema.org metadata
+  q(entity, `${SCHEMA}name`, `"${config.name}"`);
   if (config.description) {
     q(entity, `${SCHEMA}description`, `"${config.description}"`);
+  }
+
+  // DKG P2P properties
+  q(entity, `${DKG}peerId`, `"${config.peerId}"`);
+  q(entity, `${DKG}nodeRole`, `"${role}"`);
+
+  if (config.publicKey) {
+    q(entity, `${DKG}publicKey`, `"${config.publicKey}"`);
+  }
+  if (config.relayAddress) {
+    q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
   }
   if (config.framework) {
     q(entity, `${SKILL}framework`, `"${config.framework}"`);
   }
 
+  // ERC-8004 capabilities (skills as capabilities)
   for (let i = 0; i < config.skills.length; i++) {
     const skill = config.skills[i];
-    const offeringUri = `${entity}/.well-known/genid/offering${i + 1}`;
+    const capUri = `${entity}/.well-known/genid/cap${i + 1}`;
 
+    q(entity, `${ERC8004}capabilities`, capUri);
+    q(capUri, RDF_TYPE, `${ERC8004}Capability`);
+    q(capUri, `${SCHEMA}name`, `"${skill.skillType}"`);
+
+    // Keep backward-compatible skill offering triples
+    const offeringUri = `${entity}/.well-known/genid/offering${i + 1}`;
     q(entity, `${SKILL}offersSkill`, offeringUri);
     q(offeringUri, RDF_TYPE, `${SKILL}SkillOffering`);
     q(offeringUri, `${SKILL}skill`, `${SKILL}${skill.skillType}`);
@@ -72,6 +99,12 @@ export function buildAgentProfile(config: AgentProfileConfig): {
       q(offeringUri, `${SKILL}pricing`, `${SKILL}${skill.pricingModel}`);
     }
   }
+
+  // PROV provenance
+  const activityUri = `${entity}/.well-known/genid/registration`;
+  q(entity, `${PROV}wasGeneratedBy`, activityUri);
+  q(activityUri, RDF_TYPE, `${PROV}Activity`);
+  q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
   if (config.paranetsServed?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;

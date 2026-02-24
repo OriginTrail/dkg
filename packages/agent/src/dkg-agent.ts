@@ -2,6 +2,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH,
   paranetPublishTopic, encodePublishRequest, decodePublishRequest,
+  getGenesisQuads, computeNetworkId, SYSTEM_PARANETS,
   type DKGNodeConfig,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
@@ -32,6 +33,8 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
+  /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
+  nodeRole?: 'core' | 'edge';
 }
 
 /**
@@ -98,13 +101,18 @@ export class DKGAgent {
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
+    // Load genesis knowledge into the store (idempotent)
+    await DKGAgent.loadGenesis(store);
+
     const port = config.listenPort ?? 0;
+    const nodeRole = config.nodeRole ?? 'edge';
     const nodeConfig: DKGNodeConfig = {
       listenAddresses: [`/ip4/0.0.0.0/tcp/${port}`],
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,
       privateKey: keypair.secretKey,
+      nodeRole,
     };
 
     const node = new DKGNode(nodeConfig);
@@ -188,11 +196,17 @@ export class DKGAgent {
   }
 
   async publishProfile(): Promise<PublishResult> {
+    const pubKeyBase64 = Buffer.from(this.wallet.keypair.publicKey).toString('base64');
+    const relayAddrs = this.config.relayPeers;
+
     const profileConfig: AgentProfileConfig = {
       peerId: this.node.peerId,
       name: this.config.name,
       description: this.config.description,
       framework: this.config.framework,
+      nodeRole: this.config.nodeRole ?? 'edge',
+      publicKey: pubKeyBase64,
+      relayAddress: relayAddrs?.[0],
       skills: (this.config.skills ?? []).map(s => ({
         skillType: s.skillType,
         pricePerCall: s.pricePerCall,
@@ -284,6 +298,10 @@ export class DKGAgent {
     });
   }
 
+  async networkId(): Promise<string> {
+    return computeNetworkId();
+  }
+
   get peerId(): string {
     return this.node.peerId;
   }
@@ -296,6 +314,34 @@ export class DKGAgent {
     if (!this.started) return;
     await this.node.stop();
     this.started = false;
+  }
+
+  /**
+   * Loads genesis knowledge into the triple store if not already present.
+   * Creates the system paranet graphs and inserts the genesis quads.
+   */
+  private static async loadGenesis(store: TripleStore): Promise<void> {
+    const gm = new GraphManager(store);
+
+    // Ensure system paranets exist
+    await gm.ensureParanet(SYSTEM_PARANETS.AGENTS);
+    await gm.ensureParanet(SYSTEM_PARANETS.ONTOLOGY);
+
+    // Check if genesis is already loaded by looking for the network definition
+    const result = await store.query(
+      `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v } LIMIT 1`,
+    );
+    if (result.type === 'bindings' && result.bindings.length > 0) return;
+
+    // Insert genesis quads
+    const genesisQuads = getGenesisQuads();
+    const quads: Quad[] = genesisQuads.map(gq => ({
+      subject: gq.subject,
+      predicate: gq.predicate,
+      object: gq.object.startsWith('"') ? gq.object : gq.object,
+      graph: gq.graph,
+    }));
+    await store.insert(quads);
   }
 
   private async broadcastPublish(paranetId: string, result: PublishResult): Promise<void> {

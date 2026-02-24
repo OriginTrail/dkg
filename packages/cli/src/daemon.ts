@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile } from 'node:fs/promises';
 import { DKGAgent } from '@dkg/agent';
+import { computeNetworkId } from '@dkg/core';
 import {
   loadConfig,
   dkgDir,
@@ -35,7 +36,8 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     appendFile(logPath(), line + '\n').catch(() => {});
   }
 
-  log(`Starting DKG node "${config.name}"...`);
+  const role = config.nodeRole ?? 'edge';
+  log(`Starting DKG ${role} node "${config.name}"...`);
 
   const agent = await DKGAgent.create({
     name: config.name,
@@ -43,7 +45,11 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     listenPort: config.listenPort,
     dataDir: dkgDir(),
     relayPeers: config.relay ? [config.relay] : undefined,
+    nodeRole: role,
   });
+
+  const networkId = await computeNetworkId();
+  log(`Network: ${networkId.slice(0, 16)}...`);
 
   agent.onChat((text, senderPeerId, _convId) => {
     pushMessage(messages, { ts: Date.now(), direction: 'in', peer: senderPeerId, text });
@@ -126,9 +132,12 @@ async function handleRequest(
   if (req.method === 'GET' && path === '/api/status') {
     const peers = agent.node.libp2p.getPeers();
     const circuitAddrs = agent.multiaddrs.filter(a => a.includes('/p2p-circuit/'));
+    const networkId = await computeNetworkId();
     return jsonResponse(res, 200, {
       name: config.name,
       peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      networkId: networkId.slice(0, 16),
       uptimeMs: Date.now() - startedAt,
       connectedPeers: peers.length,
       relayConnected: circuitAddrs.length > 0,

@@ -22,6 +22,8 @@ export class ApiClient {
   async status(): Promise<{
     name: string;
     peerId: string;
+    nodeRole?: string;
+    networkId?: string;
     uptimeMs: number;
     connectedPeers: number;
     relayConnected: boolean;
@@ -31,7 +33,7 @@ export class ApiClient {
   }
 
   async agents(): Promise<{
-    agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string }>;
+    agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
   }> {
     return this.get('/api/agents');
   }

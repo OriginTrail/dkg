@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@dkg/agent": "workspace:*",
+    "@dkg/core": "workspace:*",
     "commander": "^13"
   }
 }

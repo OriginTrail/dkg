@@ -13,6 +13,7 @@ import {
   AGENT_REGISTRY_PARANET,
 } from '../src/index.js';
 import { OxigraphStore } from '@dkg/storage';
+import { getGenesisQuads, computeNetworkId, SYSTEM_PARANETS } from '@dkg/core';
 import { DKGQueryEngine } from '@dkg/query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { tmpdir } from 'node:os';
@@ -158,7 +159,7 @@ describe('Profile Builder', () => {
     expect(subjects).toContain('did:dkg:agent:QmTest123/.well-known/genid/offering1');
 
     const predicates = quads.map(q => q.predicate);
-    expect(predicates).toContain('http://schema.org/name');
+    expect(predicates).toContain('https://schema.org/name');
     expect(predicates).toContain('https://dkg.origintrail.io/skill#offersSkill');
     expect(predicates).toContain('https://dkg.origintrail.io/skill#skill');
   });
@@ -187,7 +188,7 @@ describe('Profile Builder', () => {
     });
 
     for (const q of quads) {
-      expect(q.graph).toBe('did:dkg:paranet:agent-registry');
+      expect(q.graph).toBe('did:dkg:paranet:agents');
     }
   });
 
@@ -490,4 +491,140 @@ describe('DKGAgent (integration)', () => {
 
     await agent.stop();
   }, 10000);
+});
+
+describe('Genesis Knowledge', () => {
+  it('produces deterministic genesis quads', () => {
+    const quads = getGenesisQuads();
+    expect(quads.length).toBeGreaterThan(20);
+
+    const networkDef = quads.filter(q => q.subject === 'did:dkg:network:v9-testnet');
+    expect(networkDef.length).toBeGreaterThan(0);
+
+    const agentsParanet = quads.filter(q => q.graph === 'did:dkg:paranet:agents');
+    expect(agentsParanet.length).toBeGreaterThan(0);
+
+    const ontology = quads.filter(q => q.graph === 'did:dkg:paranet:ontology');
+    expect(ontology.length).toBeGreaterThan(0);
+  });
+
+  it('computes a stable networkId', async () => {
+    const id1 = await computeNetworkId();
+    const id2 = await computeNetworkId();
+    expect(id1).toBe(id2);
+    expect(id1.length).toBe(64);
+  });
+
+  it('loads genesis into store on DKGAgent.create()', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'GenesisTest',
+      store,
+    });
+
+    const result = await store.query(
+      `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+    }
+
+    const paranets = await store.query(
+      `SELECT ?p WHERE { <did:dkg:paranet:agents> a <https://dkg.network/ontology#SystemParanet> }`,
+    );
+    expect(paranets.type).toBe('bindings');
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('genesis loading is idempotent', async () => {
+    const store = new OxigraphStore();
+    const agent1 = await DKGAgent.create({ name: 'Idempotent1', store });
+    const agent2 = await DKGAgent.create({ name: 'Idempotent2', store });
+
+    const result = await store.query(
+      `SELECT ?v WHERE { <did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> ?v }`,
+    );
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+    }
+
+    await agent1.stop().catch(() => {});
+    await agent2.stop().catch(() => {});
+  });
+});
+
+describe('Node Roles', () => {
+  it('profile includes node role and ontology types', () => {
+    const { quads } = buildAgentProfile({
+      peerId: 'QmEdge',
+      name: 'EdgeBot',
+      nodeRole: 'edge',
+      skills: [],
+    });
+
+    const types = quads
+      .filter(q => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type')
+      .map(q => q.object);
+    expect(types).toContain('https://dkg.network/ontology#Agent');
+    expect(types).toContain('https://dkg.network/ontology#EdgeNode');
+
+    const roles = quads.filter(q => q.predicate === 'https://dkg.network/ontology#nodeRole');
+    expect(roles.length).toBe(1);
+    expect(roles[0].object).toBe('"edge"');
+  });
+
+  it('core node profile uses CoreNode type', () => {
+    const { quads } = buildAgentProfile({
+      peerId: 'QmCore',
+      name: 'CoreBot',
+      nodeRole: 'core',
+      skills: [],
+    });
+
+    const types = quads
+      .filter(q => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type')
+      .map(q => q.object);
+    expect(types).toContain('https://dkg.network/ontology#CoreNode');
+  });
+
+  it('profile includes PROV provenance activity', () => {
+    const { quads } = buildAgentProfile({
+      peerId: 'QmProv',
+      name: 'ProvBot',
+      skills: [],
+    });
+
+    const provTriples = quads.filter(q =>
+      q.predicate === 'http://www.w3.org/ns/prov#wasGeneratedBy',
+    );
+    expect(provTriples.length).toBe(1);
+
+    const activityUri = provTriples[0].object;
+    const activityType = quads.find(
+      q => q.subject === activityUri &&
+        q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    );
+    expect(activityType?.object).toBe('http://www.w3.org/ns/prov#Activity');
+  });
+
+  it('profile includes ERC-8004 capabilities for skills', () => {
+    const { quads } = buildAgentProfile({
+      peerId: 'QmSkills',
+      name: 'SkillBot',
+      skills: [{ skillType: 'ImageAnalysis' }],
+    });
+
+    const caps = quads.filter(q =>
+      q.predicate === 'https://eips.ethereum.org/erc-8004#capabilities',
+    );
+    expect(caps.length).toBe(1);
+
+    const capType = quads.find(
+      q => q.subject === caps[0].object &&
+        q.object === 'https://eips.ethereum.org/erc-8004#Capability',
+    );
+    expect(capType).toBeDefined();
+  });
 });

@@ -37,6 +37,12 @@ export interface DKGNodeConfig {
    * set (nodes that already know their NAT status don't need probing).
    */
   enableAutoNAT?: boolean;
+  /**
+   * Node deployment tier. Core nodes act as relays and GossipSub backbone.
+   * Edge nodes are the typical deployment for personal agents behind NATs.
+   * Default: 'edge'.
+   */
+  nodeRole?: 'core' | 'edge';
 }
 
 export interface StreamHandler {

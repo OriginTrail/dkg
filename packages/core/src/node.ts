@@ -63,11 +63,14 @@ export class DKGNode {
 
     const transports: any[] = [tcp(), webSockets(), circuitRelayTransport()];
 
+    const isCore = this.config.nodeRole === 'core';
+    const enableRelay = this.config.enableRelayServer ?? isCore;
+
     // Nodes that already know their NAT status skip autoNAT probing:
     // - relayPeers set → agent behind NAT (knows it needs relay)
-    // - enableRelayServer → public node acting as relay
+    // - enableRelayServer/core → public node acting as relay
     const useAutoNAT = this.config.enableAutoNAT ??
-      !(this.config.relayPeers?.length || this.config.enableRelayServer);
+      !(this.config.relayPeers?.length || enableRelay);
 
     const services: Record<string, any> = {
       identify: identify(),
@@ -84,7 +87,7 @@ export class DKGNode {
       services.autoNAT = autoNAT();
     }
 
-    if (this.config.enableRelayServer) {
+    if (enableRelay) {
       services.relay = circuitRelayServer({
         reservations: {
           maxReservations: 256,

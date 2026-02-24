@@ -8,12 +8,14 @@ export interface DkgConfig {
   relay?: string;
   apiPort: number;
   listenPort: number;
+  nodeRole: 'core' | 'edge';
 }
 
 const DEFAULT_CONFIG: DkgConfig = {
   name: 'dkg-node',
   apiPort: 9200,
   listenPort: 0,
+  nodeRole: 'edge',
 };
 
 export function dkgDir(): string {

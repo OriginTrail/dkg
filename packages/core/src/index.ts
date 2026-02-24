@@ -7,3 +7,11 @@ export { DKGNode } from './node.js';
 export { ProtocolRouter } from './protocol-router.js';
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
+export {
+  getGenesisQuads,
+  computeNetworkId,
+  getGenesisRaw,
+  SYSTEM_PARANETS,
+  DKG_ONTOLOGY,
+  type GenesisQuad,
+} from './genesis.js';

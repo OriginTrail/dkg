@@ -716,7 +716,9 @@ DKG tools exposed via MCP for any MCP-compatible AI system:
 
 ---
 
-## 10. Node Roles
+## 10. Node Roles & Network Topology
+
+### Functional Roles
 
 | Role | Packages | Publish | Store | Query | Example |
 |---|---|---|---|---|---|
@@ -724,6 +726,206 @@ DKG tools exposed via MCP for any MCP-compatible AI system:
 | **Query Node** | core+storage+query | No | Yes | Yes | API gateway |
 | **Light Node** | core+publisher+query | Orchestrate only | No | Routes to peers | Browser, mobile |
 | **Agent Node** | core+agent+(any above) | Via agent | Depends | Via agent | AI agent |
+
+### Deployment Tiers: Core & Edge
+
+All nodes run the same codebase. The **deployment tier** determines operational responsibilities:
+
+| Tier | Deployment | Always On | Relay | Full Replication | Typical Role |
+|---|---|---|---|---|---|
+| **Core** | Cloud VPS / bare metal (public IP) | Yes | Yes (circuit relay server) | Yes (all subscribed paranets) | Full Node, relay, GossipSub backbone |
+| **Edge** | Laptop, Mac Mini, home server (behind NAT) | Best effort | No (relay client) | Yes (all subscribed paranets) | Agent Node, personal DKG instance |
+
+**Core nodes** provide network infrastructure:
+- Act as **circuit relay servers** for Edge nodes behind NATs
+- Serve as **GossipSub mesh backbone** — always-on peers that maintain topic connectivity
+- Perform **full replication** of all subscribed paranets (same as Edge — Phase 1 has no sharding)
+- Assist with **paranet sync** — new/returning nodes catch up by requesting missed data from Core nodes
+- Discoverable via **bootstrap lists** in the genesis knowledge
+
+**Edge nodes** are the majority of the network:
+- Run on personal hardware, typically behind NATs
+- Connect through Core nodes via circuit relay
+- Participate fully in publishing, querying, and agent messaging
+- May go offline and catch up on missed paranet updates when reconnecting
+
+> **Part 2**: Core nodes may be incentivized (relay rewards, storage commitments). Edge nodes with sufficient uptime and public IPs can self-promote to Core. Sharding may differentiate replication responsibilities between tiers.
+
+### Configuration
+
+```typescript
+interface DKGNodeConfig {
+  // ... existing fields ...
+  nodeRole?: 'core' | 'edge';  // Default: 'edge'
+}
+```
+
+When `nodeRole: 'core'`:
+- `enableRelayServer` defaults to `true`
+- Node registers itself as a bootstrap peer in the agents paranet
+- Higher connection limits and reservation slots
+
+---
+
+## 10b. Genesis Knowledge & Network Bootstrapping
+
+### Concept
+
+Every DKG network begins with a **genesis knowledge** — a deterministic set of RDF triples loaded into every node on first boot. It is the DKG equivalent of a blockchain genesis block: it defines the network, its system paranets, and the shared ontology.
+
+### Genesis File
+
+Shipped with every `@dkg/core` package as `genesis.trig` (TriG format — RDF with named graph support):
+
+```turtle
+@prefix dkg:     <https://dkg.network/ontology#> .
+@prefix erc8004: <https://eips.ethereum.org/erc-8004#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix schema:  <https://schema.org/> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+# --- Network definition (default graph) ---
+<did:dkg:network:v9-testnet>
+    a dkg:Network ;
+    schema:name "DKG V9 Testnet" ;
+    dkg:genesisVersion 1 ;
+    dkg:createdAt "2026-02-24T00:00:00Z"^^xsd:dateTime ;
+    dkg:systemParanets <did:dkg:paranet:agents>, <did:dkg:paranet:ontology> .
+
+# --- System Paranet: Agent Registry ---
+GRAPH <did:dkg:paranet:agents> {
+    <did:dkg:paranet:agents>
+        a dkg:Paranet, dkg:SystemParanet ;
+        schema:name "Agent Registry" ;
+        schema:description "System paranet for agent discovery and profiles" ;
+        dkg:gossipTopic "dkg/paranet/agents/publish" ;
+        dkg:replicationPolicy "full" .
+}
+
+# --- System Paranet: Ontology ---
+GRAPH <did:dkg:paranet:ontology> {
+    dkg:Network           a rdfs:Class .
+    dkg:Paranet           a rdfs:Class .
+    dkg:SystemParanet     a rdfs:Class ; rdfs:subClassOf dkg:Paranet .
+    dkg:Agent             a rdfs:Class ; rdfs:subClassOf erc8004:Agent, prov:Agent .
+    dkg:CoreNode          a rdfs:Class ; rdfs:subClassOf dkg:Agent .
+    dkg:EdgeNode          a rdfs:Class ; rdfs:subClassOf dkg:Agent .
+    dkg:KnowledgeAsset    a rdfs:Class ; rdfs:subClassOf prov:Entity .
+    dkg:KnowledgeCollection a rdfs:Class .
+    dkg:peerId            a rdf:Property ; rdfs:domain dkg:Agent ; rdfs:range xsd:string .
+    dkg:publicKey         a rdf:Property ; rdfs:domain dkg:Agent ; rdfs:range xsd:base64Binary .
+    dkg:nodeRole          a rdf:Property ; rdfs:domain dkg:Agent ; rdfs:range xsd:string .
+    dkg:paranet           a rdf:Property ; rdfs:range dkg:Paranet .
+    dkg:gossipTopic       a rdf:Property ; rdfs:domain dkg:Paranet ; rdfs:range xsd:string .
+    dkg:relayAddress      a rdf:Property ; rdfs:domain dkg:Agent ; rdfs:range xsd:string .
+    dkg:genesisVersion    a rdf:Property ; rdfs:domain dkg:Network ; rdfs:range xsd:integer .
+    dkg:networkId         a rdf:Property ; rdfs:domain dkg:Network ; rdfs:range xsd:string .
+}
+```
+
+### Network Identity
+
+```
+networkId = SHA-256(canonical(genesis.trig))
+```
+
+- Every node computes `networkId` on startup from the genesis content
+- Nodes reject peers with a different `networkId` (different genesis = different network)
+- Changing any triple in genesis creates a new, isolated network
+- The `networkId` is exchanged during the libp2p Identify protocol handshake
+
+### Agent Profile Ontology (ERC-8004 Aligned)
+
+Agent profiles in `did:dkg:paranet:agents` use three vocabularies:
+
+| Layer | Prefix | Purpose |
+|---|---|---|
+| Identity & Trust | `erc8004:` | Agent identity, capabilities, reputation — bridges to on-chain registries |
+| Provenance | `prov:` | Who published what, when — tracks KA creation and agent lifecycle |
+| DKG-specific | `dkg:` | PeerId, node role, relay addresses, paranet membership — P2P networking |
+
+Example agent profile (as stored in the agents paranet):
+
+```turtle
+<did:dkg:agent:{peerId}>
+    a dkg:Agent, dkg:EdgeNode ;
+    schema:name "Zivojin" ;
+    schema:description "General-purpose DKG agent" ;
+    dkg:peerId "{peerId}" ;
+    dkg:publicKey "{base64-ed25519-pubkey}" ;
+    dkg:nodeRole "edge" ;
+    dkg:relayAddress "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooW..." ;
+    erc8004:capabilities [
+        a erc8004:Capability ;
+        schema:name "image-analysis" ;
+        schema:description "Analyzes images using vision models"
+    ] ;
+    prov:wasGeneratedBy [
+        a prov:Activity ;
+        prov:atTime "2026-02-24T17:21:50Z"^^xsd:dateTime
+    ] .
+```
+
+When on-chain identity is available (Phase 2), the profile includes:
+
+```turtle
+<did:dkg:agent:{peerId}>
+    erc8004:identityRegistry [
+        erc8004:chainId 8453 ;
+        erc8004:contractAddress "0x..." ;
+        erc8004:tokenId 42
+    ] .
+```
+
+### Node Startup Flow
+
+```
+1. First boot (empty store):
+   ├─ Load genesis.trig into triple store
+   ├─ Compute networkId = SHA-256(genesis.trig)
+   └─ Store networkId in local config
+
+2. Every boot:
+   ├─ Verify genesis triples present in store (integrity check)
+   ├─ Publish own agent profile as KA into did:dkg:paranet:agents
+   ├─ Subscribe to GossipSub topics from genesis system paranets
+   ├─ Connect to relays / bootstrap peers
+   └─ Request paranet sync from connected peers (catch up)
+
+3. On peer connect:
+   ├─ Exchange networkId in handshake metadata
+   └─ Reject peers with mismatched networkId
+```
+
+### Paranet Sync Protocol
+
+When a node connects (or reconnects), it syncs missed updates:
+
+1. Node sends `SyncRequest` with its latest known timestamp per subscribed paranet
+2. Peer responds with all `PublishRequest` payloads newer than that timestamp
+3. Node validates and inserts the triples into its local store
+4. This ensures nodes that were offline catch up without relying on GossipSub history
+
+> **Note**: Full sync protocol specification is in Part 2. Phase 1 implementation uses a simplified version where reconnecting nodes re-receive agent profiles through periodic GossipSub re-publishing (every 30s).
+
+### User-Created Paranets
+
+The genesis pattern extends to user-created paranets:
+
+1. Creator publishes a paranet definition as a KA (with metadata: name, description, GossipSub topic, replication policy)
+2. The paranet definition can live in the agents paranet (making it globally discoverable)
+3. Other nodes join by subscribing to the paranet's GossipSub topic and syncing existing data
+4. All paranets follow the same 2-graph structure: `<did:dkg:paranet:{id}>` (data) + `<did:dkg:paranet:{id}/_meta>` (metadata)
+
+### Network Upgrades
+
+If the genesis needs to change (new system paranet, ontology update):
+
+1. New version ships with genesis v1 + migration to v2
+2. On startup, detect current genesis version, apply migrations incrementally
+3. Similar to database migrations or blockchain hard forks
+4. `dkg:genesisVersion` in the network definition tracks the current version
 
 ---
 
@@ -832,7 +1034,9 @@ These are known gaps in Part 1 that are intentionally deferred:
 | Topic | What Part 2 adds |
 |---|---|
 | **Paranet lifecycle** | On-chain paranet creation, parameters, governance |
-| **Sync protocol** | `/dkg/sync/1.0.0` for new node bootstrapping and catch-up |
+| **Sync protocol** | `/dkg/sync/1.0.0` for efficient new node bootstrapping and incremental catch-up beyond periodic re-publish |
+| **Core node incentives** | Relay rewards, storage commitments, on-chain registration for Core nodes |
+| **Edge-to-Core promotion** | Edge nodes with sufficient uptime and public IPs can self-promote to Core |
 | **Paranet membership** | How nodes join/leave paranets, on-chain registration |
 | **Access policy in protobuf** | Publisher-declared pricing in PublishRequest manifest |
 | **GossipSub authentication** | Signed messages, validation rules, spam prevention |
