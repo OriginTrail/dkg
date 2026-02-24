@@ -13,6 +13,8 @@ export interface AutoUpdateConfig {
 
 export interface NetworkConfig {
   networkName: string;
+  networkId: string;
+  genesisVersion: number;
   relays: string[];
   defaultParanets: string[];
   defaultNodeRole: 'core' | 'edge';

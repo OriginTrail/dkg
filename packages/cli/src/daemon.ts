@@ -6,6 +6,7 @@ import { DKGAgent } from '@dkg/agent';
 import { computeNetworkId } from '@dkg/core';
 import {
   loadConfig,
+  loadNetworkConfig,
   dkgDir,
   writePid,
   removePid,
@@ -53,6 +54,17 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   const networkId = await computeNetworkId();
   log(`Network: ${networkId.slice(0, 16)}...`);
+
+  // Verify genesis matches network config
+  const network = await loadNetworkConfig();
+  if (network?.networkId && network.networkId !== networkId) {
+    log(`FATAL: genesis mismatch! Expected networkId ${network.networkId.slice(0, 16)}... but computed ${networkId.slice(0, 16)}...`);
+    log(`This node's genesis does not match network/testnet.json. Rebuild or update the repo.`);
+    process.exit(1);
+  }
+  if (network) {
+    log(`Network config: ${network.networkName} (genesis v${network.genesisVersion})`);
+  }
 
   agent.onChat((text, senderPeerId, _convId) => {
     pushMessage(messages, { ts: Date.now(), direction: 'in', peer: senderPeerId, text });

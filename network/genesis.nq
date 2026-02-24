@@ -1,0 +1,67 @@
+# DKG V9 Testnet — Genesis Knowledge
+#
+# This is the deterministic set of RDF quads loaded into every node on first boot.
+# The SHA-256 hash of the canonical (sorted) form of these quads is the networkId:
+#
+#   networkId: 6f63f485c6cce67e677f7844ec835024c6d97f13fe8cacaf0ceedfd3ad658510
+#
+# Nodes with different genesis cannot peer. Changing anything here changes the
+# networkId and forks the network.
+#
+# Source of truth: packages/core/src/genesis.ts (buildGenesisQuads)
+# This file is generated for reference — the code is authoritative.
+
+# ── Network definition (default graph) ───────────────────────────────
+
+<did:dkg:network:v9-testnet> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#Network> .
+<did:dkg:network:v9-testnet> <https://schema.org/name> "DKG V9 Testnet" .
+<did:dkg:network:v9-testnet> <https://dkg.network/ontology#genesisVersion> "1" .
+<did:dkg:network:v9-testnet> <https://dkg.network/ontology#createdAt> "2026-02-24T00:00:00Z" .
+<did:dkg:network:v9-testnet> <https://dkg.network/ontology#systemParanets> <did:dkg:paranet:agents> .
+<did:dkg:network:v9-testnet> <https://dkg.network/ontology#systemParanets> <did:dkg:paranet:ontology> .
+
+# ── Agents system paranet (did:dkg:paranet:agents graph) ─────────────
+
+<did:dkg:paranet:agents> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#Paranet> <did:dkg:paranet:agents> .
+<did:dkg:paranet:agents> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#SystemParanet> <did:dkg:paranet:agents> .
+<did:dkg:paranet:agents> <https://schema.org/name> "Agent Registry" <did:dkg:paranet:agents> .
+<did:dkg:paranet:agents> <https://schema.org/description> "System paranet for agent discovery and profiles" <did:dkg:paranet:agents> .
+<did:dkg:paranet:agents> <https://dkg.network/ontology#gossipTopic> "dkg/paranet/agents/publish" <did:dkg:paranet:agents> .
+<did:dkg:paranet:agents> <https://dkg.network/ontology#replicationPolicy> "full" <did:dkg:paranet:agents> .
+
+# ── Ontology system paranet (did:dkg:paranet:ontology graph) ─────────
+
+<did:dkg:paranet:ontology> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#Paranet> <did:dkg:paranet:ontology> .
+<did:dkg:paranet:ontology> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#SystemParanet> <did:dkg:paranet:ontology> .
+<did:dkg:paranet:ontology> <https://schema.org/name> "Ontology Registry" <did:dkg:paranet:ontology> .
+<did:dkg:paranet:ontology> <https://schema.org/description> "System paranet for shared ontology and paranet definitions" <did:dkg:paranet:ontology> .
+<did:dkg:paranet:ontology> <https://dkg.network/ontology#gossipTopic> "dkg/paranet/ontology/publish" <did:dkg:paranet:ontology> .
+<did:dkg:paranet:ontology> <https://dkg.network/ontology#replicationPolicy> "full" <did:dkg:paranet:ontology> .
+
+# ── Ontology: class definitions ──────────────────────────────────────
+
+<https://dkg.network/ontology#Network> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#Paranet> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#SystemParanet> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#SystemParanet> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://dkg.network/ontology#Paranet> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#Agent> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#Agent> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://eips.ethereum.org/erc-8004#Agent> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#Agent> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/ns/prov#Agent> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#CoreNode> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#CoreNode> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://dkg.network/ontology#Agent> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#EdgeNode> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#EdgeNode> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://dkg.network/ontology#Agent> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#KnowledgeAsset> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#KnowledgeAsset> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/ns/prov#Entity> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#KnowledgeCollection> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> <did:dkg:paranet:ontology> .
+
+# ── Ontology: property definitions ───────────────────────────────────
+
+<https://dkg.network/ontology#peerId> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#publicKey> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#nodeRole> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#paranet> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#gossipTopic> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#relayAddress> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#genesisVersion> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
+<https://dkg.network/ontology#networkId> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> <did:dkg:paranet:ontology> .
