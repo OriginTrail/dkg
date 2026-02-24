@@ -207,7 +207,19 @@ agent.subscribeToParanet('research-data');
 await agent.connectTo('/ip4/192.168.1.50/tcp/9100/p2p/12D3KooW...');
 ```
 
-## Running a Relay
+## Joining the Testnet
+
+To join the DKG V9 Testnet, the relay address is pre-configured in `network/testnet.json`. Use the CLI for the easiest setup — see [JOIN_TESTNET.md](./JOIN_TESTNET.md). Or configure programmatically:
+
+```typescript
+const agent = await DKGAgent.create({
+  name: 'MyNode',
+  dataDir: '.dkg/my-node',
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+});
+```
+
+## Running a Relay (Custom Network)
 
 If your nodes are behind NATs (home networks, office LANs), you need at least one relay on a public IP:
 

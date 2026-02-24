@@ -130,9 +130,21 @@ const agents = await agent.findAgents({ framework: 'ElizaOS' });
 await agent.sendChat(agents[0].peerId, 'Hello from OpenClaw!');
 ```
 
-## Cross-Network Setup
+## Joining the Testnet
 
-For agents running on different networks (behind NATs), you need a relay:
+To join the DKG V9 Testnet, the relay address is pre-configured in the repo. You can also use the CLI alongside the plugin — see [JOIN_TESTNET.md](./JOIN_TESTNET.md) for the full walkthrough.
+
+```typescript
+const dkg = new DkgNodePlugin({
+  name: 'MyAgent',
+  dataDir: '.dkg/my-agent',
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK'],
+});
+```
+
+## Cross-Network Setup (Custom Relay)
+
+For a private network or your own relay:
 
 ```bash
 # On a VPS with public IP

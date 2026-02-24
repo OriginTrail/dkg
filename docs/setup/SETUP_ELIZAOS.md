@@ -138,9 +138,19 @@ if (agent) {
 }
 ```
 
-## Cross-Network Setup
+## Joining the Testnet
 
-For agents on different networks, set up a relay:
+To join the DKG V9 Testnet, the relay address is pre-configured in the repo. See [JOIN_TESTNET.md](./JOIN_TESTNET.md) for the full walkthrough.
+
+```typescript
+settings: {
+  DKG_RELAY_PEERS: '/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK',
+}
+```
+
+## Cross-Network Setup (Custom Relay)
+
+For a private network or your own relay:
 
 ```bash
 # On a VPS with public IP
