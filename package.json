@@ -7,7 +7,8 @@
     "test": "turbo test",
     "lint": "turbo lint",
     "clean": "turbo clean",
-    "dev": "turbo dev"
+    "dev": "turbo dev",
+    "dkg": "node packages/cli/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^22",

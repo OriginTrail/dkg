@@ -13,6 +13,7 @@ Eight packages in a pnpm monorepo, built with Turborepo:
 @dkg/publisher         Publishing protocol, merkle trees, skolemization, on-chain finalization
 @dkg/query             SPARQL engine, paranet-scoped queries, KA resolution
 @dkg/agent             Agent identity, skill profiles, messaging, persistent keys
+@dkg/cli               CLI daemon — node management, publishing, querying, chat
 @dkg/adapter-openclaw  OpenClaw plugin — registers DKG tools + lifecycle hooks
 @dkg/adapter-elizaos   ElizaOS plugin — DKG actions, providers, and node service
 ```
@@ -190,6 +191,37 @@ Both terminals get an interactive prompt. Type a message and press enter to send
 | `/skills` | List discovered skill offerings |
 | `/invoke <text>` | (Agent B) Invoke Agent A's ImageAnalysis skill |
 | `/quit` | Stop the agent |
+
+## CLI
+
+The `dkg` CLI runs a background daemon and exposes all node operations. All commands run from the repo root via `pnpm dkg`:
+
+```bash
+pnpm dkg init                    # Interactive node setup (pre-fills testnet defaults)
+pnpm dkg start [-f]              # Start daemon (or foreground with -f)
+pnpm dkg stop                    # Stop the daemon
+pnpm dkg status                  # Node info, role, network
+pnpm dkg peers                   # List discovered agents
+pnpm dkg send <name> <msg>       # Send encrypted message
+pnpm dkg chat <name>             # Interactive chat session
+pnpm dkg publish <paranet> -f x  # Publish RDF data (supports .nt, .nq, .ttl, .trig, .jsonld)
+pnpm dkg query [paranet] -q ...  # SPARQL query
+pnpm dkg paranet create <id>     # Create a new paranet
+pnpm dkg paranet list            # List all paranets
+pnpm dkg subscribe <paranet>     # Subscribe to a paranet topic
+pnpm dkg logs                    # View daemon logs
+```
+
+> **Note**: The CLI is not yet published to npm. Until then, use `pnpm dkg` from the repo root (which calls `node packages/cli/dist/cli.js`). `npx dkg` will not work in the monorepo.
+
+### Setup Guides
+
+| Guide | For |
+|---|---|
+| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | CLI-based setup on Mac Minis or any machine |
+| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw agents with the DKG plugin |
+| [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS agents with the DKG plugin |
+| [Custom Project](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |
 
 ## Development
 
