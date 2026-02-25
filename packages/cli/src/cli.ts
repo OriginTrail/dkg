@@ -396,7 +396,14 @@ program
 
       const result = await client.publish(paranet, quads);
       console.log(`Published to "${paranet}":`);
-      console.log(`  KC ID: ${result.kcId}`);
+      console.log(`  Status:    ${result.status}`);
+      console.log(`  KC ID:     ${result.kcId}`);
+      if (result.txHash) {
+        console.log(`  TX hash:   ${result.txHash}`);
+        console.log(`  Block:     ${result.blockNumber}`);
+        console.log(`  Batch ID:  ${result.batchId}`);
+        console.log(`  Publisher: ${result.publisherAddress}`);
+      }
       for (const ka of result.kas) {
         console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
       }
@@ -661,6 +668,101 @@ program
       console.log('The primary wallet is used for identity registration. All wallets are used for publishing.\n');
     } catch (err: any) {
       console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg set-ask <amount> ────────────────────────────────────────────
+
+program
+  .command('set-ask <amount>')
+  .description('Set the node\'s on-chain ask (TRAC per KB·epoch)')
+  .option('--identity <id>', 'Override identity ID (auto-detected from primary wallet by default)')
+  .action(async (amount: string, opts) => {
+    try {
+      const config = await loadConfig();
+      const network = await loadNetworkConfig();
+      const { loadOpWallets } = await import('@dkg/agent');
+      const opWallets = await loadOpWallets(dkgDir());
+
+      if (!opWallets.wallets.length) {
+        console.error('No operational wallets found. Run "dkg start" to auto-generate them.');
+        process.exit(1);
+      }
+
+      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
+      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+      if (!rpcUrl || !hubAddress) {
+        console.error('Chain not configured. Run "dkg init" and set RPC URL + Hub address.');
+        process.exit(1);
+      }
+
+      const askWei = ethers.parseEther(amount);
+      if (askWei === 0n) {
+        console.error('Ask must be > 0.');
+        process.exit(1);
+      }
+
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      const wallet = new ethers.Wallet(opWallets.wallets[0].privateKey, provider);
+
+      const hub = new ethers.Contract(hubAddress, [
+        'function getContractAddress(string) view returns (address)',
+      ], provider);
+
+      const identityStorageAddr = await hub.getContractAddress('IdentityStorage');
+      const identityStorage = new ethers.Contract(identityStorageAddr, [
+        'function getIdentityId(address) view returns (uint72)',
+      ], provider);
+
+      let identityId: bigint;
+      if (opts.identity) {
+        identityId = BigInt(opts.identity);
+      } else {
+        identityId = await identityStorage.getIdentityId(wallet.address);
+        if (identityId === 0n) {
+          console.error(
+            `No on-chain identity found for primary wallet ${wallet.address}.\n` +
+            'Start the node first ("dkg start") so it creates an on-chain profile, or use --identity <id>.',
+          );
+          process.exit(1);
+        }
+      }
+
+      const profileStorageAddr = await hub.getContractAddress('ProfileStorage');
+      const profileStorage = new ethers.Contract(profileStorageAddr, [
+        'function getAsk(uint72) view returns (uint96)',
+      ], provider);
+      const currentAsk = await profileStorage.getAsk(identityId);
+
+      console.log(`  Identity:    ${identityId}`);
+      console.log(`  Wallet:      ${wallet.address}`);
+      console.log(`  Current ask: ${ethers.formatEther(currentAsk)} TRAC`);
+
+      if (currentAsk === askWei) {
+        console.log(`  Already set to ${amount} TRAC. Nothing to do.`);
+        return;
+      }
+
+      const profileAddr = await hub.getContractAddress('Profile');
+      const profile = new ethers.Contract(profileAddr, [
+        'function updateAsk(uint72 identityId, uint96 ask)',
+      ], wallet);
+
+      console.log(`  Setting ask to ${amount} TRAC...`);
+      const tx = await profile.updateAsk(identityId, askWei);
+      console.log(`  TX: ${tx.hash}`);
+      const receipt = await tx.wait();
+      console.log(`  Confirmed in block ${receipt!.blockNumber}`);
+      console.log(`  New ask: ${amount} TRAC`);
+    } catch (err: any) {
+      if (err.code === 'CALL_EXCEPTION') {
+        console.error(
+          `Transaction reverted. The primary wallet may not be the admin/operational key for this identity.\n` +
+          `Use --identity <id> if auto-detection picked the wrong identity.`,
+        );
+      }
+      console.error(err.message ?? err);
       process.exit(1);
     }
   });

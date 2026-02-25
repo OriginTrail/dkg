@@ -298,12 +298,20 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
     }
     const result = await agent.publish(paranetId, quads, privateQuads);
+    const chain = result.onChainResult;
     return jsonResponse(res, 200, {
       kcId: String(result.kcId),
+      status: result.status,
       kas: result.kaManifest.map(ka => ({
         tokenId: String(ka.tokenId),
         rootEntity: ka.rootEntity,
       })),
+      ...(chain && {
+        txHash: chain.txHash,
+        blockNumber: chain.blockNumber,
+        batchId: String(chain.batchId),
+        publisherAddress: chain.publisherAddress,
+      }),
     });
   }
 

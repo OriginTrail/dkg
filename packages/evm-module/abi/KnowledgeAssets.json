@@ -266,6 +266,11 @@
   },
   {
     "inputs": [],
+    "name": "ZeroTokenAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "askStorage",
     "outputs": [
       {

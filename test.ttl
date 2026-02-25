@@ -1,6 +1,6 @@
 @prefix schema: <https://schema.org/> .
 
-<did:dkg:entity:my-first-ka>
+<did:dkg:entity:idemo-bre>
     a schema:Thing ;
     schema:name "My First Knowledge Asset" ;
     schema:description "Published from the testnet" .

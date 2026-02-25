@@ -231,19 +231,16 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const publicByteSize = 1000n;
     const epochs = 2;
 
-    // Required TRAC: get from adapter and fund publisher
+    // Required TRAC: get from adapter and fund publisher (no manual approve — adapter handles it)
     const requiredTokenAmount = await pubAdapter.getRequiredPublishTokenAmount(publicByteSize, epochs);
     expect(requiredTokenAmount).toBeGreaterThan(0n);
     const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
     const tokenAddr = await hub.getContractAddress('Token');
-    const kaAddr = await hub.getContractAddress('KnowledgeAssets');
     const token = new Contract(tokenAddr, [
       'function mint(address, uint256)',
-      'function approve(address, uint256) returns (bool)',
     ], new Wallet(DEPLOYER_KEY, provider));
     const publisher2 = new Wallet(PUBLISHER2_KEY, provider);
     await token.mint(publisher2.address, requiredTokenAmount * 2n);
-    await token.connect(publisher2).approve(kaAddr, requiredTokenAmount * 2n);
 
     // Signing: publisher node signs (pubId, merkleRoot); receivers sign (merkleRoot, publicByteSize)
     const coreOp = new Wallet(CORE_OP_KEY, provider);
@@ -331,7 +328,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('extends storage duration', async () => {
+  it('extends storage duration (adapter auto-approves TRAC)', async () => {
     if (skipSuite) return;
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
     // Extension cost: (ask * publicByteSize * additionalEpochs) / 1024 (batch was updated to 2048 bytes)
@@ -340,14 +337,11 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
 
     const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
     const tokenAddr = await hub.getContractAddress('Token');
-    const kaAddr = await hub.getContractAddress('KnowledgeAssets');
     const token = new Contract(tokenAddr, [
       'function mint(address, uint256)',
-      'function approve(address, uint256) returns (bool)',
     ], new Wallet(DEPLOYER_KEY, provider));
     const publisher2 = new Wallet(PUBLISHER2_KEY, provider);
     await token.mint(publisher2.address, extensionCost);
-    await token.connect(publisher2).approve(kaAddr, extensionCost);
 
     const result = await pubAdapter.extendStorage({
       batchId: 1n,

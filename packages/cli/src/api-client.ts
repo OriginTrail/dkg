@@ -71,7 +71,12 @@ export class ApiClient {
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
     kcId: string;
+    status: 'tentative' | 'confirmed';
     kas: Array<{ tokenId: string; rootEntity: string }>;
+    txHash?: string;
+    blockNumber?: number;
+    batchId?: string;
+    publisherAddress?: string;
   }> {
     return this.post('/api/publish', { paranetId, quads, privateQuads });
   }

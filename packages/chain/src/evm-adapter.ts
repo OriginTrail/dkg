@@ -134,7 +134,11 @@ export class EVMChainAdapter implements ChainAdapter {
     if (tokenAddress !== ethers.ZeroAddress) {
       this.contracts.token = new Contract(
         tokenAddress,
-        ['function approve(address,uint256) returns (bool)', 'function balanceOf(address) view returns (uint256)'],
+        [
+          'function approve(address,uint256) returns (bool)',
+          'function balanceOf(address) view returns (uint256)',
+          'function allowance(address,address) view returns (uint256)',
+        ],
         this.signer,
       );
     }
@@ -308,8 +312,11 @@ export class EVMChainAdapter implements ChainAdapter {
     const kaAddress = await ka.getAddress();
 
     if (this.contracts.token && params.tokenAmount > 0n) {
-      const approveTx = await this.contracts.token.approve(kaAddress, params.tokenAmount);
-      await approveTx.wait();
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await this.contracts.token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
     }
 
     const identityIds = params.receiverSignatures.map((s) => s.identityId);
@@ -370,8 +377,11 @@ export class EVMChainAdapter implements ChainAdapter {
 
     if (this.contracts.token && params.tokenAmount > 0n) {
       const token = this.contracts.token.connect(txSigner) as Contract;
-      const approveTx = await token.approve(kaAddress, params.tokenAmount);
-      await approveTx.wait();
+      const currentAllowance: bigint = await token.allowance(txSigner.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
     }
 
     const identityIds = params.receiverSignatures.map((s) => s.identityId);
@@ -467,8 +477,11 @@ export class EVMChainAdapter implements ChainAdapter {
 
     if (this.contracts.token && params.tokenAmount > 0n) {
       const kaAddress = await ka.getAddress();
-      const approveTx = await this.contracts.token.approve(kaAddress, params.tokenAmount);
-      await approveTx.wait();
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await this.contracts.token.approve(kaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
     }
 
     const tx = await ka.extendStorage(
