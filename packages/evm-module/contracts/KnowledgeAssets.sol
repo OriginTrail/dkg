@@ -137,21 +137,22 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
         (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
 
-        batchId = _mintBatch(
-            publisherNodeIdentityId,
-            merkleRoot,
-            startKAId,
-            endKAId,
-            publicByteSize,
-            epochs,
-            tokenAmount,
-            paymaster,
-            publisherNodeR,
-            publisherNodeVS,
-            identityIds,
-            r,
-            vs
-        );
+        KnowledgeAssetsLib.PublishParams memory params;
+        params.publisherNodeIdentityId = publisherNodeIdentityId;
+        params.merkleRoot = merkleRoot;
+        params.startKAId = startKAId;
+        params.endKAId = endKAId;
+        params.publicByteSize = publicByteSize;
+        params.epochs = epochs;
+        params.tokenAmount = tokenAmount;
+        params.paymaster = paymaster;
+        params.publisherNodeR = publisherNodeR;
+        params.publisherNodeVS = publisherNodeVS;
+        params.identityIds = identityIds;
+        params.r = r;
+        params.vs = vs;
+
+        batchId = _mintBatch(params);
     }
 
     // ========================================================================
@@ -195,21 +196,22 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             revert KnowledgeAssetsLib.InvalidKARange(startKAId, endKAId);
         }
 
-        return _mintBatch(
-            publisherNodeIdentityId,
-            merkleRoot,
-            startKAId,
-            endKAId,
-            publicByteSize,
-            epochs,
-            tokenAmount,
-            paymaster,
-            publisherNodeR,
-            publisherNodeVS,
-            identityIds,
-            r,
-            vs
-        );
+        KnowledgeAssetsLib.PublishParams memory params;
+        params.publisherNodeIdentityId = publisherNodeIdentityId;
+        params.merkleRoot = merkleRoot;
+        params.startKAId = startKAId;
+        params.endKAId = endKAId;
+        params.publicByteSize = publicByteSize;
+        params.epochs = epochs;
+        params.tokenAmount = tokenAmount;
+        params.paymaster = paymaster;
+        params.publisherNodeR = publisherNodeR;
+        params.publisherNodeVS = publisherNodeVS;
+        params.identityIds = identityIds;
+        params.r = r;
+        params.vs = vs;
+
+        return _mintBatch(params);
     }
 
     // ========================================================================
@@ -332,80 +334,83 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
 
     function _mintBatch(
-        uint72 publisherNodeIdentityId,
-        bytes32 merkleRoot,
-        uint64 startKAId,
-        uint64 endKAId,
-        uint64 publicByteSize,
-        uint40 epochs,
-        uint96 tokenAmount,
-        address paymaster,
-        bytes32 publisherNodeR,
-        bytes32 publisherNodeVS,
-        uint72[] calldata identityIds,
-        bytes32[] calldata r,
-        bytes32[] calldata vs
+        KnowledgeAssetsLib.PublishParams memory params
     ) internal returns (uint256 batchId) {
-        // Verify core node signatures
         _verifySignature(
-            publisherNodeIdentityId,
+            params.publisherNodeIdentityId,
             ECDSA.toEthSignedMessageHash(
-                keccak256(abi.encodePacked(publisherNodeIdentityId, merkleRoot))
+                keccak256(abi.encodePacked(params.publisherNodeIdentityId, params.merkleRoot))
             ),
-            publisherNodeR,
-            publisherNodeVS
+            params.publisherNodeR,
+            params.publisherNodeVS
         );
 
-        _verifySignatures(
-            identityIds,
-            ECDSA.toEthSignedMessageHash(merkleRoot),
-            r,
-            vs
+        _verifyReceiverSignatures(
+            params.identityIds,
+            params.merkleRoot,
+            params.publicByteSize,
+            params.r,
+            params.vs
         );
 
         KnowledgeAssetsStorage kas = knowledgeAssetsStorage;
 
-        // Validate KA IDs are not already used (keyed by msg.sender address)
-        for (uint64 id = startKAId; id <= endKAId; id++) {
+        for (uint64 id = params.startKAId; id <= params.endKAId; id++) {
             if (kas.isKAIdUsed(msg.sender, id)) {
                 revert KnowledgeAssetsLib.KAIdAlreadyUsed(msg.sender, id);
             }
         }
 
-        uint32 kaCount = uint32(endKAId - startKAId + 1);
+        uint32 kaCount = uint32(params.endKAId - params.startKAId + 1);
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
 
-        _validateTokenAmount(publicByteSize, epochs, tokenAmount);
+        if (params.tokenAmount == 0) {
+            revert KnowledgeAssetsLib.ZeroTokenAmount();
+        }
+        _validateTokenAmount(params.publicByteSize, params.epochs, params.tokenAmount);
 
         batchId = kas.createKnowledgeBatch(
             msg.sender,
-            merkleRoot,
-            publicByteSize,
+            params.merkleRoot,
+            params.publicByteSize,
             kaCount,
-            startKAId,
-            endKAId,
+            params.startKAId,
+            params.endKAId,
             currentEpoch,
-            currentEpoch + epochs,
-            tokenAmount,
+            currentEpoch + params.epochs,
+            params.tokenAmount,
             false
         );
 
-        _distributeTokens(tokenAmount, epochs, currentEpoch);
+        _distributeTokens(params.tokenAmount, params.epochs, currentEpoch);
 
         epochStorage.addEpochProducedKnowledgeValue(
-            publisherNodeIdentityId,
+            params.publisherNodeIdentityId,
             currentEpoch,
-            tokenAmount
+            params.tokenAmount
         );
 
-        _addTokens(tokenAmount, paymaster);
+        _addTokens(params.tokenAmount, params.paymaster);
+    }
+
+    function _verifyReceiverSignatures(
+        uint72[] memory identityIds,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        bytes32[] memory r,
+        bytes32[] memory vs
+    ) internal view {
+        bytes32 messageHash = ECDSA.toEthSignedMessageHash(
+            keccak256(abi.encodePacked(merkleRoot, publicByteSize))
+        );
+        _verifySignatures(identityIds, messageHash, r, vs);
     }
 
     function _verifySignatures(
-        uint72[] calldata identityIds,
+        uint72[] memory identityIds,
         bytes32 messageHash,
-        bytes32[] calldata r,
-        bytes32[] calldata vs
+        bytes32[] memory r,
+        bytes32[] memory vs
     ) internal view {
         if (r.length != identityIds.length || r.length != vs.length) {
             revert KnowledgeAssetsLib.SignaturesSignersMismatch(r.length, vs.length, identityIds.length);

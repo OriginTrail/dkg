@@ -135,7 +135,29 @@ describe('E2E: DKGAgent with real blockchain', () => {
     hubAddress = await deployContracts();
 
     // Create profile for the core node (operational != admin to satisfy contract)
-    await createProfileForKeys(DEPLOYER_OP_KEY, DEPLOYER_ADMIN_KEY);
+    const coreProfileId = await createProfileForKeys(DEPLOYER_OP_KEY, DEPLOYER_ADMIN_KEY);
+
+    // Set ask so V9 publish requires TRAC: stake the core node and set ask (Profile.updateAsk triggers recalculateActiveSet)
+    const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+    const tokenAddr = await hub.getContractAddress('Token');
+    const stakingAddr = await hub.getContractAddress('Staking');
+    const profileAddr = await hub.getContractAddress('Profile');
+    const token = new Contract(tokenAddr, [
+      'function mint(address, uint256)',
+      'function approve(address, uint256) returns (bool)',
+    ], new Wallet(DEPLOYER_OP_KEY, provider));
+    const staking = new Contract(stakingAddr, ['function stake(uint72 identityId, uint96 amount)'], new Wallet(DEPLOYER_OP_KEY, provider));
+    const profile = new Contract(profileAddr, ['function updateAsk(uint72 identityId, uint96 ask)'], new Wallet(DEPLOYER_OP_KEY, provider));
+    const stakeAmount = ethers.parseEther('10000');
+    const coreOp = new Wallet(DEPLOYER_OP_KEY, provider);
+    await token.mint(coreOp.address, stakeAmount);
+    await token.connect(coreOp).approve(stakingAddr, stakeAmount);
+    await staking.stake(coreProfileId, stakeAmount);
+    await profile.updateAsk(coreProfileId, ethers.parseEther('1'));
+
+    // Fund the publishing agent (Node A) with TRAC so V9 publish can pay tokenAmount
+    const nodeA = new Wallet(NODE_A_KEY, provider);
+    await token.mint(nodeA.address, ethers.parseEther('100000'));
   }, 90_000);
 
   afterAll(async () => {

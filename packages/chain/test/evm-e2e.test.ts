@@ -116,8 +116,17 @@ async function signMerkleRoot(signer: Wallet, identityId: number, merkleRoot: st
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
 
-async function signReceiverMerkleRoot(signer: Wallet, merkleRoot: string) {
-  const rawSig = await signer.signMessage(ethers.getBytes(merkleRoot));
+/** Receiver signs (merkleRoot, publicByteSize) — same hash as V9 contract. */
+async function signReceiverMerkleRootAndByteSize(
+  signer: Wallet,
+  merkleRoot: string,
+  publicByteSize: number | bigint,
+) {
+  const msgHash = ethers.solidityPackedKeccak256(
+    ['bytes32', 'uint64'],
+    [merkleRoot, BigInt(publicByteSize)],
+  );
+  const rawSig = await signer.signMessage(ethers.getBytes(msgHash));
   const sig = ethers.Signature.from(rawSig);
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -154,6 +163,29 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     await createNodeProfile(REC1_OP_KEY, REC1_ADMIN_KEY, 'Receiver1');
     await createNodeProfile(REC2_OP_KEY, REC2_ADMIN_KEY, 'Receiver2');
     await createNodeProfile(REC3_OP_KEY, REC3_ADMIN_KEY, 'Receiver3');
+
+    // Set ask so V9 publish requires TRAC: stake one node and set ask (triggers recalculateActiveSet)
+    const hub = new Contract(hubAddress, [
+      'function getContractAddress(string) view returns (address)',
+    ], provider);
+    const tokenAddr = await hub.getContractAddress('Token');
+    const stakingAddr = await hub.getContractAddress('Staking');
+    const profileAddr = await hub.getContractAddress('Profile');
+    const token = new Contract(tokenAddr, [
+      'function mint(address, uint256)',
+      'function approve(address, uint256) returns (bool)',
+    ], new Wallet(DEPLOYER_KEY, provider));
+    const staking = new Contract(stakingAddr, [
+      'function stake(uint72 identityId, uint96 amount)',
+    ], new Wallet(CORE_OP_KEY, provider));
+    const profile = new Contract(profileAddr, [
+      'function updateAsk(uint72 identityId, uint96 ask)',
+    ], new Wallet(CORE_OP_KEY, provider));
+    const stakeAmount = ethers.parseEther('10000');
+    await token.mint(new Wallet(CORE_OP_KEY, provider).address, stakeAmount);
+    await token.connect(new Wallet(CORE_OP_KEY, provider)).approve(stakingAddr, stakeAmount);
+    await staking.stake(deployerProfileId, stakeAmount);
+    await profile.updateAsk(deployerProfileId, ethers.parseEther('1'));
   }, 90_000);
 
   afterAll(() => {
@@ -196,14 +228,29 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
   it('publishes KAs in a single transaction (publishKnowledgeAssets)', async () => {
     if (skipSuite) return;
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
-    // Signing: the publisher node's operational key signs the publisher signature
+    const publicByteSize = 1000n;
+    const epochs = 2;
+
+    // Required TRAC: get from adapter and fund publisher
+    const requiredTokenAmount = await pubAdapter.getRequiredPublishTokenAmount(publicByteSize, epochs);
+    expect(requiredTokenAmount).toBeGreaterThan(0n);
+    const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+    const tokenAddr = await hub.getContractAddress('Token');
+    const kaAddr = await hub.getContractAddress('KnowledgeAssets');
+    const token = new Contract(tokenAddr, [
+      'function mint(address, uint256)',
+      'function approve(address, uint256) returns (bool)',
+    ], new Wallet(DEPLOYER_KEY, provider));
+    const publisher2 = new Wallet(PUBLISHER2_KEY, provider);
+    await token.mint(publisher2.address, requiredTokenAmount * 2n);
+    await token.connect(publisher2).approve(kaAddr, requiredTokenAmount * 2n);
+
+    // Signing: publisher node signs (pubId, merkleRoot); receivers sign (merkleRoot, publicByteSize)
     const coreOp = new Wallet(CORE_OP_KEY, provider);
     const rec1Op = new Wallet(REC1_OP_KEY, provider);
     const rec2Op = new Wallet(REC2_OP_KEY, provider);
     const rec3Op = new Wallet(REC3_OP_KEY, provider);
 
-    // Look up receiver identity IDs via operational key
-    const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
     const idStorageAddr = await hub.getContractAddress('IdentityStorage');
     const idStorage = new Contract(idStorageAddr, ['function getIdentityId(address) view returns (uint72)'], provider);
     const rec1Id = Number(await idStorage.getIdentityId(rec1Op.address));
@@ -214,18 +261,18 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const pubSig = await signMerkleRoot(coreOp, deployerProfileId, merkleRoot);
 
     const receiverSignatures = [
-      { identityId: BigInt(rec1Id), ...(await signReceiverMerkleRoot(rec1Op, merkleRoot)) },
-      { identityId: BigInt(rec2Id), ...(await signReceiverMerkleRoot(rec2Op, merkleRoot)) },
-      { identityId: BigInt(rec3Id), ...(await signReceiverMerkleRoot(rec3Op, merkleRoot)) },
+      { identityId: BigInt(rec1Id), ...(await signReceiverMerkleRootAndByteSize(rec1Op, merkleRoot, publicByteSize)) },
+      { identityId: BigInt(rec2Id), ...(await signReceiverMerkleRootAndByteSize(rec2Op, merkleRoot, publicByteSize)) },
+      { identityId: BigInt(rec3Id), ...(await signReceiverMerkleRootAndByteSize(rec3Op, merkleRoot, publicByteSize)) },
     ];
 
     const result = await pubAdapter.publishKnowledgeAssets({
       kaCount: 5,
       publisherNodeIdentityId: BigInt(deployerProfileId),
       merkleRoot: ethers.getBytes(merkleRoot),
-      publicByteSize: 1000n,
-      epochs: 2,
-      tokenAmount: 0n,
+      publicByteSize,
+      epochs,
+      tokenAmount: requiredTokenAmount,
       publisherSignature: pubSig,
       receiverSignatures,
     });
@@ -240,6 +287,35 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
       new Wallet(PUBLISHER2_KEY).address.toLowerCase(),
     );
   }, 60_000);
+
+  it('minted ERC1155 NFTs for each KA (publisher owns one per token id in batch)', async () => {
+    if (skipSuite) return;
+    const hub = new Contract(hubAddress, [
+      'function getContractAddress(string) view returns (address)',
+      'function getAssetStorageAddress(string) view returns (address)',
+    ], provider);
+    const kasAddr = await hub.getAssetStorageAddress('KnowledgeAssetsStorage');
+    const publisher2 = new Wallet(PUBLISHER2_KEY, provider).address;
+
+    const kas = new Contract(kasAddr, [
+      'function getKnowledgeAssetsRange(uint256 batchId) view returns (uint256 startTokenId, uint256 endTokenId)',
+      'function balanceOf(address owner, uint256 id) view returns (uint256)',
+      'function balanceOf(address owner) view returns (uint256)',
+    ], provider);
+
+    const batchId = 1n;
+    const [startTokenId, endTokenId] = await kas.getKnowledgeAssetsRange(batchId);
+    expect(startTokenId).toBeGreaterThan(0n);
+    expect(endTokenId).toBeGreaterThanOrEqual(startTokenId);
+
+    const totalBalance = await kas.balanceOf(publisher2);
+    expect(totalBalance).toBe(5n);
+
+    for (let tokenId = startTokenId; tokenId <= endTokenId; tokenId++) {
+      const balance = await kas.balanceOf(publisher2, tokenId);
+      expect(balance).toBe(1n);
+    }
+  }, 30_000);
 
   it('updates knowledge assets (new merkle root)', async () => {
     if (skipSuite) return;
@@ -258,10 +334,25 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
   it('extends storage duration', async () => {
     if (skipSuite) return;
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
+    // Extension cost: (ask * publicByteSize * additionalEpochs) / 1024 (batch was updated to 2048 bytes)
+    const extensionCost = await pubAdapter.getRequiredPublishTokenAmount(2048n, 5);
+    expect(extensionCost).toBeGreaterThan(0n);
+
+    const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+    const tokenAddr = await hub.getContractAddress('Token');
+    const kaAddr = await hub.getContractAddress('KnowledgeAssets');
+    const token = new Contract(tokenAddr, [
+      'function mint(address, uint256)',
+      'function approve(address, uint256) returns (bool)',
+    ], new Wallet(DEPLOYER_KEY, provider));
+    const publisher2 = new Wallet(PUBLISHER2_KEY, provider);
+    await token.mint(publisher2.address, extensionCost);
+    await token.connect(publisher2).approve(kaAddr, extensionCost);
+
     const result = await pubAdapter.extendStorage({
       batchId: 1n,
       additionalEpochs: 5,
-      tokenAmount: 0n,
+      tokenAmount: extensionCost,
     });
     expect(result.success).toBe(true);
   }, 30_000);

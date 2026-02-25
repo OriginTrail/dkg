@@ -200,6 +200,20 @@ export class DKGPublisher implements Publisher {
     } else {
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
 
+      // Public byte size = length of serialized public N-Quads (must match what receivers sign)
+      const nquadsStr = allSkolemizedQuads
+        .map(
+          (q) =>
+            `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
+        )
+        .join('\n');
+      const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
+
+      const tokenAmount =
+        typeof this.chain.getRequiredPublishTokenAmount === 'function'
+          ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, 1)
+          : 1n;
+
       // Publisher signature: sign keccak256(abi.encodePacked(uint72 identityId, bytes32 merkleRoot))
       const pubMsgHash = ethers.solidityPackedKeccak256(
         ['uint72', 'bytes32'],
@@ -209,20 +223,24 @@ export class DKGPublisher implements Publisher {
         await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
       );
 
-      // Receiver signature: sign raw merkleRoot
+      // Receiver signature: sign (merkleRoot, publicByteSize) so attested size is binding on-chain
+      const rcvMsgHash = ethers.solidityPackedKeccak256(
+        ['bytes32', 'uint64'],
+        [merkleRootHex, publicByteSize],
+      );
       const rcvSig = ethers.Signature.from(
-        await this.publisherWallet.signMessage(ethers.getBytes(kcMerkleRoot)),
+        await this.publisherWallet.signMessage(ethers.getBytes(rcvMsgHash)),
       );
 
-      this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, identityId=${identityId})`);
+      this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         onChainResult = await this.chain.publishKnowledgeAssets({
           kaCount,
           publisherNodeIdentityId: identityId,
           merkleRoot: kcMerkleRoot,
-          publicByteSize: BigInt(allSkolemizedQuads.length * 100),
+          publicByteSize,
           epochs: 1,
-          tokenAmount: 0n,
+          tokenAmount,
           publisherSignature: {
             r: ethers.getBytes(pubSig.r),
             vs: ethers.getBytes(pubSig.yParityAndS),

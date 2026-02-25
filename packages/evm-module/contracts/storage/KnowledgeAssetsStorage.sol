@@ -376,7 +376,8 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
             uint256 tokenIdsLength = start < stop ? balanceOf(owner, start, stop) : 0;
             uint256[] memory tokenIds = new uint256[](tokenIdsLength);
             LibBitmap.Bitmap storage bmap = _owned[owner];
-            for (uint256 i = start, tokenIdsIdx = 0; tokenIdsIdx != tokenIdsLength; ++i) {
+            uint256 tokenIdsIdx;
+            for (uint256 i = start; tokenIdsIdx != tokenIdsLength; ++i) {
                 if (bmap.get(i)) tokenIds[tokenIdsIdx++] = i;
             }
             return tokenIds;

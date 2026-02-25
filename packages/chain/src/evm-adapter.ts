@@ -44,6 +44,7 @@ interface ContractCache {
   paranet?: Contract;
   token?: Contract;
   parametersStorage?: Contract;
+  askStorage?: Contract;
 }
 
 /**
@@ -124,6 +125,7 @@ export class EVMChainAdapter implements ChainAdapter {
     try {
       this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
       this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
+      this.contracts.askStorage = await this.resolveContract('AskStorage');
     } catch {
       // V9 contracts not deployed — adapter works in V8-only mode
     }
@@ -501,6 +503,15 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       success: receipt.status === 1,
     };
+  }
+
+  async getRequiredPublishTokenAmount(publicByteSize: bigint, epochs: number): Promise<bigint> {
+    await this.init();
+    if (!this.contracts.askStorage) {
+      throw new Error('AskStorage not available');
+    }
+    const ask = await this.contracts.askStorage.getStakeWeightedAverageAsk();
+    return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
   }
 
   // =====================================================================

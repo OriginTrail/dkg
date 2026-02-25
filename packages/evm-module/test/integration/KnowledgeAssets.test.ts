@@ -195,7 +195,7 @@ describe('@integration KnowledgeAssets V9', () => {
   });
 
   // ========================================================================
-  // Helper: build core node signatures for a batch mint
+  // Helper: build core node signatures for a batch mint (receivers sign merkleRoot + publicByteSize)
   // ========================================================================
 
   async function buildSignatures(
@@ -203,6 +203,7 @@ describe('@integration KnowledgeAssets V9', () => {
     pubId: number,
     receivingNodes: { admin: SignerWithAddress; operational: SignerWithAddress }[],
     merkleRoot: string,
+    publicByteSize: number,
   ) {
     const pubMsgHash = ethers.solidityPackedKeccak256(
       ['uint72', 'bytes32'],
@@ -210,10 +211,14 @@ describe('@integration KnowledgeAssets V9', () => {
     );
     const { r: pubR, vs: pubVS } = await signMessage(publishingNode.operational, pubMsgHash);
 
+    const receiverMsgHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'uint64'],
+      [merkleRoot, BigInt(publicByteSize)],
+    );
     const receiverRs: string[] = [];
     const receiverVSs: string[] = [];
     for (const node of receivingNodes) {
-      const { r, vs } = await signMessage(node.operational, merkleRoot);
+      const { r, vs } = await signMessage(node.operational, receiverMsgHash);
       receiverRs.push(r);
       receiverVSs.push(vs);
     }
@@ -256,7 +261,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('batch-' + Date.now()));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, byteSize,
     );
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
@@ -273,10 +278,10 @@ describe('@integration KnowledgeAssets V9', () => {
   }
 
   // ========================================================================
-  // Batch Minting (zero ask — proves the flow without TRAC)
+  // Batch Minting (with TRAC; contract requires tokenAmount > 0)
   // ========================================================================
 
-  it('Should batch-mint KAs with zero ask (no TRAC needed)', async () => {
+  it('Should batch-mint KAs with TRAC payment (tokenAmount required)', async () => {
     const publishingNode = getDefaultPublishingNode(accounts);
     const receivingNodes = getDefaultReceivingNodes(accounts);
     const kcCreator = getDefaultKCCreator(accounts);
@@ -285,12 +290,22 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
-    // kcCreator reserves — no identity needed
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-v9-merkleroot'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
     const tx = await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
@@ -298,9 +313,9 @@ describe('@integration KnowledgeAssets V9', () => {
       merkleRoot,
       1,    // startKAId
       5,    // endKAId (5 KAs)
-      1000, // publicByteSize
-      2,    // epochs
-      0,    // tokenAmount (0 because ask is 0)
+      publicByteSize,
+      epochs,
+      tokenAmount,
       ethers.ZeroAddress,
       pubR,
       pubVS,
@@ -316,7 +331,7 @@ describe('@integration KnowledgeAssets V9', () => {
     const batch = await KnowledgeAssetsStorage.getBatch(1);
     expect(batch.publisherAddress).to.equal(kcCreator.address);
     expect(batch.merkleRoot).to.equal(merkleRoot);
-    expect(batch.publicByteSize).to.equal(1000);
+    expect(batch.publicByteSize).to.equal(publicByteSize);
     expect(batch.knowledgeAssetsCount).to.equal(5);
     expect(batch.startKAId).to.equal(1);
     expect(batch.endKAId).to.equal(5);
@@ -328,6 +343,31 @@ describe('@integration KnowledgeAssets V9', () => {
     expect(await KnowledgeAssetsStorage.isKAIdUsed(kcCreator.address, 6)).to.be.false;
 
     expect(await KnowledgeAssetsStorage.getTotalKnowledgeAssets()).to.equal(5);
+  });
+
+  it('Should revert when tokenAmount is 0 (ZeroTokenAmount)', async () => {
+    const publishingNode = getDefaultPublishingNode(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const kcCreator = getDefaultKCCreator(accounts);
+
+    const { identityId: pubId } = await createProfile(Profile, publishingNode);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+    const receiverIds = receiverProfiles.map((p) => p.identityId);
+
+    await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
+
+    const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('zero-token-test'));
+    const publicByteSize = 1000;
+    const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
+    );
+
+    await expect(
+      KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
+        pubId, merkleRoot, 1, 3, publicByteSize, 2, 0, ethers.ZeroAddress,
+        pubR, pubVS, receiverIds, receiverRs, receiverVSs,
+      ),
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'ZeroTokenAmount');
   });
 
   // ========================================================================
@@ -360,7 +400,7 @@ describe('@integration KnowledgeAssets V9', () => {
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-trac-payment'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, byteSize,
     );
 
     const balanceBefore = await Token.balanceOf(kcCreator.address);
@@ -400,25 +440,36 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('first-batch'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-      pubId, merkleRoot, 1, 3, 1000, 2, 0, ethers.ZeroAddress,
+      pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
       pubR, pubVS, receiverIds, receiverRs, receiverVSs,
     );
 
     // Second mint with overlapping IDs should fail
     const merkleRoot2 = ethers.keccak256(ethers.toUtf8Bytes('second-batch'));
-    const sigs2 = await buildSignatures(publishingNode, pubId, receivingNodes, merkleRoot2);
+    const sigs2 = await buildSignatures(publishingNode, pubId, receivingNodes, merkleRoot2, publicByteSize);
+    const tokenAmount2 = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
 
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-        pubId, merkleRoot2, 1, 5, 1000, 2, 0, ethers.ZeroAddress,
+        pubId, merkleRoot2, 1, 5, publicByteSize, epochs, tokenAmount2, ethers.ZeroAddress,
         sigs2.pubR, sigs2.pubVS, receiverIds, sigs2.receiverRs, sigs2.receiverVSs,
       )
     ).to.be.reverted;
@@ -437,19 +488,36 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const v9ByteSize = 1000;
+    const v9Epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const v9TokenAmount = (ask * BigInt(v9ByteSize) * BigInt(v9Epochs)) / 1024n;
+    await Token.mint(kcCreator.address, v9TokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, v9TokenAmount * 2n);
+
     // --- V9 publish ---
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const v9MerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('v9-data'));
-    const v9Sigs = await buildSignatures(publishingNode, pubId, receivingNodes, v9MerkleRoot);
+    const v9Sigs = await buildSignatures(publishingNode, pubId, receivingNodes, v9MerkleRoot, v9ByteSize);
 
     await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-      pubId, v9MerkleRoot, 1, 3, 1000, 2, 0, ethers.ZeroAddress,
+      pubId, v9MerkleRoot, 1, 3, v9ByteSize, v9Epochs, v9TokenAmount, ethers.ZeroAddress,
       v9Sigs.pubR, v9Sigs.pubVS, receiverIds, v9Sigs.receiverRs, v9Sigs.receiverVSs,
     );
 
     // --- V8 publish (legacy flow) ---
     const v8MerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('v8-legacy'));
+    const v8ByteSize = 1000;
+    const v8Epochs = 2;
+    const v8TokenAmount = (ask * BigInt(v8ByteSize) * BigInt(v8Epochs)) / 1024n;
+    await Token.mint(kcCreator.address, v8TokenAmount * 2n);
+    const kcAddr = (await hre.ethers.getContract<KnowledgeCollection>('KnowledgeCollection')).getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kcAddr, v8TokenAmount * 2n);
+
     const v8PubHash = ethers.solidityPackedKeccak256(['uint72', 'bytes32'], [pubId, v8MerkleRoot]);
     const { r: v8PubR, vs: v8PubVS } = await signMessage(publishingNode.operational, v8PubHash);
     const v8RecRs: string[] = [];
@@ -465,9 +533,9 @@ describe('@integration KnowledgeAssets V9', () => {
       'v8-legacy-op',
       v8MerkleRoot,
       5,
-      1000,
-      2,
-      0,
+      v8ByteSize,
+      v8Epochs,
+      v8TokenAmount,
       false,
       ethers.ZeroAddress,
       pubId,
@@ -531,7 +599,7 @@ describe('@integration KnowledgeAssets V9', () => {
   });
 
   it('Should reject update from non-publisher', async () => {
-    const ctx = await mintTestBatch();
+    const ctx = await mintTestBatch({ withAsk: true });
     const stranger = accounts[15];
 
     await expect(
@@ -612,6 +680,16 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('bad-sig-test'));
@@ -621,17 +699,21 @@ describe('@integration KnowledgeAssets V9', () => {
     const pubMsgHash = ethers.solidityPackedKeccak256(['uint72', 'bytes32'], [pubId, merkleRoot]);
     const { r: badR, vs: badVS } = await signMessage(wrongSigner, pubMsgHash);
 
+    const receiverMsgHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'uint64'],
+      [merkleRoot, BigInt(publicByteSize)],
+    );
     const receiverRs: string[] = [];
     const receiverVSs: string[] = [];
     for (const node of receivingNodes) {
-      const { r, vs } = await signMessage(node.operational, merkleRoot);
+      const { r, vs } = await signMessage(node.operational, receiverMsgHash);
       receiverRs.push(r);
       receiverVSs.push(vs);
     }
 
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-        pubId, merkleRoot, 1, 3, 1000, 2, 0, ethers.ZeroAddress,
+        pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
         badR, badVS, receiverIds, receiverRs, receiverVSs,
       )
     ).to.be.reverted;
@@ -646,6 +728,16 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('bad-receiver-sig'));
@@ -653,17 +745,21 @@ describe('@integration KnowledgeAssets V9', () => {
     const { r: pubR, vs: pubVS } = await signMessage(publishingNode.operational, pubMsgHash);
 
     const wrongSigner = accounts[18];
+    const receiverMsgHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'uint64'],
+      [merkleRoot, BigInt(publicByteSize)],
+    );
     const receiverRs: string[] = [];
     const receiverVSs: string[] = [];
     for (const _ of receivingNodes) {
-      const { r, vs } = await signMessage(wrongSigner, merkleRoot);
+      const { r, vs } = await signMessage(wrongSigner, receiverMsgHash);
       receiverRs.push(r);
       receiverVSs.push(vs);
     }
 
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-        pubId, merkleRoot, 1, 3, 1000, 2, 0, ethers.ZeroAddress,
+        pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
         pubR, pubVS, receiverIds, receiverRs, receiverVSs,
       )
     ).to.be.reverted;
@@ -681,16 +777,26 @@ describe('@integration KnowledgeAssets V9', () => {
     await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
     await AskStorage.setTotalActiveStake(1);
 
+    const byteSize = 2048;
+    const epochs = 3;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const requiredAmount = (ask * BigInt(byteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, requiredAmount);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, requiredAmount);
+
     await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('low-token'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, byteSize,
     );
+
+    const lowTokenAmount = requiredAmount > 1n ? requiredAmount - 1n : 0n;
 
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
-        pubId, merkleRoot, 1, 3, 2048, 3, 0, ethers.ZeroAddress,
+        pubId, merkleRoot, 1, 3, byteSize, epochs, lowTokenAmount, ethers.ZeroAddress,
         pubR, pubVS, receiverIds, receiverRs, receiverVSs,
       )
     ).to.be.reverted;
@@ -735,7 +841,7 @@ describe('@integration KnowledgeAssets V9', () => {
     // Mint second batch from the same reserved range
     const root2 = ethers.keccak256(ethers.toUtf8Bytes('batch-2'));
     const sigs2 = await buildSignatures(
-      ctx.publishingNode, ctx.pubId, ctx.receivingNodes, root2,
+      ctx.publishingNode, ctx.pubId, ctx.receivingNodes, root2, 2048,
     );
 
     const ask2 = await AskStorage.getStakeWeightedAverageAsk();
@@ -762,19 +868,30 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+
     const kaCount = 5;
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('single-tx-publish'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
     const tx = await KnowledgeAssets.connect(kcCreator).publishKnowledgeAssets(
       kaCount,
       pubId,
       merkleRoot,
-      1000, // publicByteSize
-      2,    // epochs
-      0,    // tokenAmount (zero ask)
+      publicByteSize,
+      epochs,
+      tokenAmount,
       ethers.ZeroAddress,
       pubR,
       pubVS,
@@ -845,7 +962,7 @@ describe('@integration KnowledgeAssets V9', () => {
     await KnowledgeAssets.connect(accountA).reserveUALRange(20);
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('pre-transfer'));
-    const sigs = await buildSignatures(publishingNode, pubId, receivingNodes, merkleRoot);
+    const sigs = await buildSignatures(publishingNode, pubId, receivingNodes, merkleRoot, byteSize);
 
     await KnowledgeAssets.connect(accountA).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, byteSize, epochs, tokenAmount,
@@ -901,6 +1018,16 @@ describe('@integration KnowledgeAssets V9', () => {
     const receiverProfiles = await createProfiles(Profile, receivingNodes);
     const receiverIds = receiverProfiles.map((p) => p.identityId);
 
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(noProfileWallet.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(noProfileWallet).increaseAllowance(kaAddr, tokenAmount * 2n);
+
     // noProfileWallet reserves UAL range — no identity required
     await KnowledgeAssets.connect(noProfileWallet).reserveUALRange(10);
 
@@ -909,12 +1036,11 @@ describe('@integration KnowledgeAssets V9', () => {
 
     const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('no-profile-publish'));
     const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
-      publishingNode, pubId, receivingNodes, merkleRoot,
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
-    // noProfileWallet mints — zero ask, no TRAC needed
     await KnowledgeAssets.connect(noProfileWallet).batchMintKnowledgeAssets(
-      pubId, merkleRoot, 1, 5, 1000, 2, 0, ethers.ZeroAddress,
+      pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
       pubR, pubVS, receiverIds, receiverRs, receiverVSs,
     );
 

@@ -311,8 +311,9 @@ export class PublishHandler {
         from: fromPeerId,
       });
 
-      const { signatureR, signatureVs } = await this.signMerkleRoot(computedMerkleRoot);
-      this.log.info(ctx, `Sending signed ack for ${request.ual}`);
+      const publicByteSize = request.nquads.length;
+      const { signatureR, signatureVs } = await this.signMerkleRootAndByteSize(computedMerkleRoot, publicByteSize);
+      this.log.info(ctx, `Sending signed ack for ${request.ual} (publicByteSize=${publicByteSize})`);
 
       return encodePublishAck({
         merkleRoot: computedMerkleRoot,
@@ -321,6 +322,7 @@ export class PublishHandler {
         signatureVs,
         accepted: true,
         rejectionReason: '',
+        publicByteSize,
       });
     } catch (err) {
       this.log.error(ctx, `Publish handling failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -328,15 +330,25 @@ export class PublishHandler {
     }
   }
 
-  private async signMerkleRoot(
+  /**
+   * Sign (merkleRoot, publicByteSize) so the attested byte size is binding on-chain; token amount is enforced from it.
+   * Must match contract: ECDSA.toEthSignedMessageHash(keccak256(abi.encodePacked(merkleRoot, publicByteSize))).
+   */
+  private async signMerkleRootAndByteSize(
     merkleRoot: Uint8Array,
+    publicByteSize: number,
   ): Promise<{ signatureR: Uint8Array; signatureVs: Uint8Array }> {
     if (!this.signingKey) {
       return { signatureR: new Uint8Array(0), signatureVs: new Uint8Array(0) };
     }
 
+    const merkleRootHex = ethers.hexlify(merkleRoot);
+    const messageHash = ethers.solidityPackedKeccak256(
+      ['bytes32', 'uint64'],
+      [merkleRootHex, BigInt(publicByteSize)],
+    );
     const wallet = new ethers.Wallet(ethers.hexlify(this.signingKey));
-    const rawSig = await wallet.signMessage(merkleRoot);
+    const rawSig = await wallet.signMessage(ethers.getBytes(messageHash));
     const { r, yParityAndS } = ethers.Signature.from(rawSig);
 
     return {

@@ -117,6 +117,12 @@ export interface ChainAdapter {
   // V9 single-tx publish (reserve + mint in one call)
   publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult>;
 
+  /**
+   * Required TRAC amount for publishing (from stake-weighted ask and byte size).
+   * Used so the publisher can approve and send the correct token amount.
+   */
+  getRequiredPublishTokenAmount?(publicByteSize: bigint, epochs: number): Promise<bigint>;
+
   // V9 knowledge updates
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;
 

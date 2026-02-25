@@ -98,6 +98,9 @@
             "knowledgeCollectionSize": "1000000",
             "uriBase": "did:dkg"
         },
+        "KnowledgeAssetsStorage": {
+            "uriBase": "did:dkg:v9"
+        },
         "RandomSamplingStorage": {
             "neuroweb_testnet": {
                 "proofingPeriodDurationInBlocks": "257",

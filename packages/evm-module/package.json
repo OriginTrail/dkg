@@ -15,6 +15,7 @@
     "test:unit": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@unit'",
     "test:integration": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@integration'",
     "deploy:localhost": "hardhat deploy --network hardhat --config hardhat.node.config.ts",
+    "deploy:testnet": "hardhat deploy --network base_sepolia_test --config hardhat.node.config.ts",
     "typechain": "hardhat typechain"
   },
   "dependencies": {

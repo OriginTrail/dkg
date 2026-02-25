@@ -157,6 +157,10 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async getRequiredPublishTokenAmount(_publicByteSize: bigint, _epochs: number): Promise<bigint> {
+    return 1n;
+  }
+
   async verifyPublisherOwnsRange(
     publisherAddress: string,
     startKAId: bigint,

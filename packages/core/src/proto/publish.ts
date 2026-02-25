@@ -28,7 +28,8 @@ export const PublishAckSchema = new Type('PublishAck')
   .add(new Field('signatureR', 3, 'bytes'))
   .add(new Field('signatureVs', 4, 'bytes'))
   .add(new Field('accepted', 5, 'bool'))
-  .add(new Field('rejectionReason', 6, 'string'));
+  .add(new Field('rejectionReason', 6, 'string'))
+  .add(new Field('publicByteSize', 7, 'uint64'));
 
 export interface KAManifestEntryMsg {
   tokenId: number | Long;
@@ -58,6 +59,8 @@ export interface PublishAckMsg {
   signatureVs: Uint8Array;
   accepted: boolean;
   rejectionReason: string;
+  /** Attested public byte size (receivers sign merkleRoot + this so token amount is verifiable) */
+  publicByteSize?: number | Long;
 }
 
 type Long = { low: number; high: number; unsigned: boolean };
