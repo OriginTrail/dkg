@@ -1,14 +1,19 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC,
-  paranetPublishTopic, paranetDataGraphUri, encodePublishRequest, decodePublishRequest,
+  paranetPublishTopic, paranetDataGraphUri, paranetMetaGraphUri,
+  encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
-import { DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient, type PublishResult } from '@dkg/publisher';
+import {
+  DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient,
+  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  type PublishResult,
+} from '@dkg/publisher';
 import { DKGQueryEngine } from '@dkg/query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
@@ -270,8 +275,10 @@ export class DKGAgent {
       }
     }
 
-    // Register sync handler: responds with a page of triples from a paranet.
+    // Register sync handler: responds with a page of data + meta triples.
     // Request format: "paranetId|offset|limit"  (offset/limit default to 0/500)
+    // Response includes both the data graph and the meta graph so the
+    // receiver can verify merkle roots before inserting.
     this.router.register(PROTOCOL_SYNC, async (data) => {
       const text = new TextDecoder().decode(data).trim();
       const [paranetPart, offsetStr, limitStr] = text.split('|');
@@ -279,17 +286,36 @@ export class DKGAgent {
       const offset = parseInt(offsetStr, 10) || 0;
       const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
 
-      const graphUri = paranetDataGraphUri(paranetId);
-      const result = await this.store.query(
-        `SELECT ?s ?p ?o WHERE { GRAPH <${graphUri}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+      const dataGraph = paranetDataGraphUri(paranetId);
+      const metaGraph = paranetMetaGraphUri(paranetId);
+      const nquads: string[] = [];
+
+      const dataResult = await this.store.query(
+        `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
       );
-      if (result.type !== 'bindings' || result.bindings.length === 0) {
+      if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
         return new TextEncoder().encode('');
       }
-      const nquads = result.bindings.map((b) => {
+      for (const b of dataResult.bindings) {
         const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-        return `<${b['s']}> <${b['p']}> ${obj} <${graphUri}> .`;
-      });
+        nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
+      }
+
+      // Include the full meta graph on the first page so the receiver
+      // can verify merkle roots. On subsequent pages it's redundant but
+      // small enough to re-send.
+      if (offset === 0) {
+        const metaResult = await this.store.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+        );
+        if (metaResult.type === 'bindings') {
+          for (const b of metaResult.bindings) {
+            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
+          }
+        }
+      }
+
       return new TextEncoder().encode(nquads.join('\n'));
     });
 
@@ -332,8 +358,9 @@ export class DKGAgent {
    * them into our local store. Used on peer:connect for initial catch-up.
    */
   /**
-   * Pull all triples for the given paranets from a remote peer in pages
-   * and merge them into our local store. Used on peer:connect for catch-up.
+   * Pull triples for the given paranets from a remote peer in pages,
+   * verify merkle roots against the KC metadata, and only insert
+   * triples that pass verification.
    */
   async syncFromPeer(
     remotePeerId: string,
@@ -343,6 +370,11 @@ export class DKGAgent {
     let totalSynced = 0;
     try {
       for (const pid of paranetIds) {
+        const dataGraph = paranetDataGraphUri(pid);
+        const metaGraph = paranetMetaGraphUri(pid);
+
+        // Phase 1: Download all pages into a staging buffer
+        const allQuads: Quad[] = [];
         let offset = 0;
         this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
         // eslint-disable-next-line no-constant-condition
@@ -354,17 +386,38 @@ export class DKGAgent {
 
           const quads = parseNQuads(nquadsText);
           if (quads.length === 0) break;
+          allQuads.push(...quads);
 
-          await this.store.insert(quads);
-          totalSynced += quads.length;
-          offset += quads.length;
-          this.log.info(ctx, `  page ${Math.ceil(offset / SYNC_PAGE_SIZE)}: ${quads.length} triples (total ${totalSynced})`);
+          const dataCount = quads.filter(q => q.graph === dataGraph).length;
+          offset += dataCount;
+          this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
+          if (dataCount < SYNC_PAGE_SIZE) break;
+        }
 
-          if (quads.length < SYNC_PAGE_SIZE) break;
+        if (allQuads.length === 0) continue;
+
+        // Separate data vs meta triples
+        const dataQuads = allQuads.filter(q => q.graph === dataGraph);
+        const metaQuads = allQuads.filter(q => q.graph === metaGraph);
+
+        // Phase 2: Verify merkle roots
+        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log);
+
+        if (verified.data.length > 0) {
+          await this.store.insert(verified.data);
+          totalSynced += verified.data.length;
+        }
+        if (verified.meta.length > 0) {
+          await this.store.insert(verified.meta);
+          totalSynced += verified.meta.length;
+        }
+
+        if (verified.rejected > 0) {
+          this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
         }
       }
       if (totalSynced > 0) {
-        this.log.info(ctx, `Sync complete: ${totalSynced} triples from ${remotePeerId}`);
+        this.log.info(ctx, `Sync complete: ${totalSynced} verified triples from ${remotePeerId}`);
       }
     } catch (err) {
       this.log.info(ctx, `Sync from ${remotePeerId} failed (peer may not support sync): ${err instanceof Error ? err.message : String(err)}`);
@@ -842,4 +895,141 @@ function parseNQuads(text: string): Quad[] {
     }
   }
   return quads;
+}
+
+const DKG_NS = 'http://dkg.io/ontology/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+/**
+ * Verify synced data by recomputing merkle roots from the received
+ * triples and comparing them to the claimed roots in the meta graph.
+ *
+ * Returns only the verified data and meta triples; unverifiable KCs
+ * (those without a merkle root in the meta) are passed through
+ * since they may be system/genesis data.
+ */
+function verifySyncedData(
+  dataQuads: Quad[],
+  metaQuads: Quad[],
+  ctx: OperationContext,
+  log: Logger,
+): { data: Quad[]; meta: Quad[]; rejected: number } {
+  if (metaQuads.length === 0) {
+    // No meta graph → no verification possible. Accept data as-is
+    // (covers system paranets that don't have KC metadata).
+    return { data: dataQuads, meta: metaQuads, rejected: 0 };
+  }
+
+  // Extract KC UALs and their claimed merkle roots from meta triples
+  const kcMerkleRoots = new Map<string, string>();
+  const kcRootEntities = new Map<string, string[]>();
+
+  for (const q of metaQuads) {
+    if (q.predicate === `${DKG_NS}merkleRoot`) {
+      kcMerkleRoots.set(q.subject, stripLiteral(q.object));
+    }
+  }
+
+  // Find KA → KC relationships and root entities
+  const kaToKc = new Map<string, string>();
+  const kaRootEntity = new Map<string, string>();
+
+  for (const q of metaQuads) {
+    if (q.predicate === `${DKG_NS}partOf`) {
+      kaToKc.set(q.subject, stripLiteral(q.object));
+    }
+    if (q.predicate === `${DKG_NS}rootEntity`) {
+      kaRootEntity.set(q.subject, stripLiteral(q.object));
+    }
+  }
+
+  // Build KC → rootEntities[] map
+  for (const [kaUri, kcUri] of kaToKc) {
+    const rootEntity = kaRootEntity.get(kaUri);
+    if (rootEntity && kcMerkleRoots.has(kcUri)) {
+      if (!kcRootEntities.has(kcUri)) kcRootEntities.set(kcUri, []);
+      kcRootEntities.get(kcUri)!.push(rootEntity);
+    }
+  }
+
+  if (kcMerkleRoots.size === 0) {
+    return { data: dataQuads, meta: metaQuads, rejected: 0 };
+  }
+
+  // Partition data triples by root entity
+  const partitioned = autoPartition(dataQuads);
+
+  // Verify each KC
+  const verifiedKcUals = new Set<string>();
+  let rejected = 0;
+
+  for (const [kcUal, claimedHex] of kcMerkleRoots) {
+    const rootEntities = kcRootEntities.get(kcUal) ?? [];
+    if (rootEntities.length === 0) {
+      // No KA info — can't verify, accept on trust
+      verifiedKcUals.add(kcUal);
+      continue;
+    }
+
+    try {
+      const kaRoots: Uint8Array[] = [];
+      for (const re of rootEntities) {
+        const quads = partitioned.get(re) ?? [];
+        const publicRoot = computePublicRoot(quads);
+        kaRoots.push(computeKARoot(publicRoot, undefined));
+      }
+      const recomputedRoot = computeKCRoot(kaRoots);
+      const recomputedHex = Array.from(recomputedRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+
+      if (recomputedHex === claimedHex) {
+        verifiedKcUals.add(kcUal);
+      } else {
+        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, recomputed ${recomputedHex.slice(0, 16)}…`);
+        rejected++;
+      }
+    } catch {
+      log.warn(ctx, `Merkle verification error for ${kcUal}, rejecting`);
+      rejected++;
+    }
+  }
+
+  // Collect triples belonging to verified KCs only
+  const verifiedRootEntities = new Set<string>();
+  for (const kcUal of verifiedKcUals) {
+    for (const re of (kcRootEntities.get(kcUal) ?? [])) {
+      verifiedRootEntities.add(re);
+    }
+  }
+
+  // Keep data triples whose root entity belongs to a verified KC,
+  // plus any triples not associated with any KC (genesis/system data)
+  const allKnownRootEntities = new Set<string>();
+  for (const entities of kcRootEntities.values()) {
+    for (const re of entities) allKnownRootEntities.add(re);
+  }
+
+  const verifiedData = dataQuads.filter(q => {
+    // If this triple's subject is a known root entity, only keep if verified
+    if (allKnownRootEntities.has(q.subject)) {
+      return verifiedRootEntities.has(q.subject);
+    }
+    // For triples under skolemized/blank node subjects, check if their
+    // root entity prefix matches a verified entity
+    for (const re of verifiedRootEntities) {
+      if (q.subject.startsWith(re)) return true;
+    }
+    // Not associated with any KC — keep (system/genesis data)
+    return true;
+  });
+
+  // Keep meta triples for verified KCs + unrelated meta triples
+  const verifiedMeta = metaQuads.filter(q => {
+    if (kcMerkleRoots.has(q.subject)) return verifiedKcUals.has(q.subject);
+    // KA meta triple — check if its KC is verified
+    const kcUri = kaToKc.get(q.subject);
+    if (kcUri) return verifiedKcUals.has(kcUri);
+    return true;
+  });
+
+  return { data: verifiedData, meta: verifiedMeta, rejected };
 }
