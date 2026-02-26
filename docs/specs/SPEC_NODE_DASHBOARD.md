@@ -1,4 +1,4 @@
-# Node Dashboard & Observability
+# DKG Node UI
 
 **Status**: Draft
 **Priority**: P1
@@ -7,10 +7,14 @@
 
 ## Overview
 
-A self-contained admin dashboard served directly from the DKG node's
-existing HTTP API port. Node runners get a full monitoring, management,
-and analytics UI without installing any external infrastructure
-(Prometheus, Grafana, etc.).
+A unified web interface for operating a DKG node — monitoring,
+querying, exploring, and managing — served directly from the node's
+existing HTTP API port. One URL, everything a node runner needs.
+
+Not just a monitoring dashboard: this is the **complete node
+management interface** that combines observability, knowledge
+exploration, graph visualization, wallet management, integration
+configuration, and an AI assistant.
 
 For operators who want to integrate with existing monitoring stacks,
 the node optionally exports metrics via OpenTelemetry.
@@ -18,38 +22,59 @@ the node optionally exports metrics via OpenTelemetry.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                              DKG Node                                │
-│                                                                      │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────────────────────┐ │
-│  │ @dkg/core │  │ @dkg/agent   │  │ @dkg/cli (daemon.ts)          │ │
-│  │           │  │              │  │                                │ │
-│  │ libp2p    │  │ store        │  │ HTTP API (existing + new)     │ │
-│  │ gossipsub │  │ publisher    │  │  /api/status                  │ │
-│  │ Logger ───┼──┼──────────────┼──┼─► /api/metrics         ← NEW │ │
-│  │           │  │ query engine │  │  /api/operations        ← NEW │ │
-│  └─────┬─────┘  └──────┬───────┘  │  /api/logs             ← NEW │ │
-│        │               │          │  /api/wallets                 │ │
-│        │               │          │  /dashboard             ← NEW │ │
-│        ▼               ▼          └──────────┬─────────────────── │ │
-│  ┌─────────────────────────────┐             │                    │ │
-│  │    MetricsCollector (NEW)   │◄────────────┘                    │ │
-│  │                             │                                  │ │
-│  │  • System: CPU, RAM, disk   │                                  │ │
-│  │  • Network: peers, bandwidth│  ┌────────────────────────────┐  │ │
-│  │  • DKG: KAs, KCs, triples  │  │ ~/.dkg/dashboard.db        │  │ │
-│  │  • Chain: stake, earnings   │  │ (SQLite)                   │  │ │
-│  │  • Uptime: heartbeats       │  │                            │  │ │
-│  │  • Operations: per request  │  │ Tables:                    │  │ │
-│  │  • Logs: structured entries │  │  • metric_snapshots        │  │ │
-│  └──────────┬──────────────────┘  │  • operations              │  │ │
-│             │                     │  • logs                     │  │ │
-│             │                     └────────────────────────────┘  │ │
-│             ▼ (optional)                                          │ │
-│  ┌──────────────────────┐                                         │ │
-│  │  OTel Exporter (opt) │──► Prometheus / Grafana / Datadog       │ │
-│  └──────────────────────┘                                         │ │
-└──────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                              DKG Node                                     │
+│                                                                           │
+│  ┌──────────┐  ┌──────────────┐  ┌─────────────────────────────────────┐ │
+│  │ @dkg/core │  │ @dkg/agent   │  │ @dkg/cli (daemon.ts)               │ │
+│  │           │  │              │  │                                     │ │
+│  │ libp2p    │  │ store ───────┼──┼─► /api/query  /api/publish         │ │
+│  │ gossipsub │  │ publisher    │  │  /api/status                       │ │
+│  │ Logger ───┼──┼──────────────┼──┼─► /api/metrics              ← NEW │ │
+│  │           │  │ query engine │  │  /api/operations             ← NEW │ │
+│  └─────┬─────┘  └──────┬───────┘  │  /api/logs                  ← NEW │ │
+│        │               │          │  /api/wallets                      │ │
+│        │               │          │  /api/integrations           ← NEW │ │
+│        │               │          │  /ui                         ← NEW │ │
+│        ▼               ▼          └──────────┬──────────────────────── │ │
+│  ┌─────────────────────────────┐             │                        │ │
+│  │    MetricsCollector (NEW)   │◄────────────┘                        │ │
+│  │                             │                                      │ │
+│  │  • System: CPU, RAM, disk   │                                      │ │
+│  │  • Network: peers, bandwidth│  ┌────────────────────────────┐      │ │
+│  │  • DKG: KAs, KCs, triples  │  │ ~/.dkg/node-ui.db          │      │ │
+│  │  • Chain: stake, earnings   │  │ (SQLite)                   │      │ │
+│  │  • Uptime: heartbeats       │  │                            │      │ │
+│  │  • Operations: per request  │  │ Tables:                    │      │ │
+│  │  • Logs: structured entries │  │  • metric_snapshots        │      │ │
+│  └──────────┬──────────────────┘  │  • operations              │      │ │
+│             │                     │  • logs                     │      │ │
+│             │                     │  • query_history     ← NEW │      │ │
+│             │                     │  • saved_queries     ← NEW │      │ │
+│             │                     └────────────────────────────┘      │ │
+│             ▼ (optional)                                              │ │
+│  ┌──────────────────────┐                                             │ │
+│  │  OTel Exporter (opt) │──► Prometheus / Grafana / Datadog           │ │
+│  └──────────────────────┘                                             │ │
+└───────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                     Node UI (React SPA @ /ui)                             │
+│                                                                           │
+│  ┌─────────┐ ┌─────────┐ ┌──────────┐ ┌────────┐ ┌──────────────────┐   │
+│  │  Home   │ │ Network │ │ Explorer │ │  Ops   │ │     Wallet       │   │
+│  │Dashboard│ │  Peers  │ │  SPARQL  │ │ & Logs │ │   & Economics    │   │
+│  └────┬────┘ └────┬────┘ └────┬─────┘ └───┬────┘ └────────┬─────────┘   │
+│       │           │           │            │               │             │
+│       │      ┌────┴────┐  ┌──┴──────────┐ │  ┌────────────┴───────────┐ │
+│       │      │ Integra-│  │ @dkg/       │ │  │      AI Assistant      │ │
+│       │      │  tions  │  │  graph-viz  │ │  │ NL → SQL + SPARQL      │ │
+│       │      └─────────┘  └─────────────┘ │  └────────────────────────┘ │
+│       ▼                                   ▼                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │                    /api/* endpoints (fetch)                         │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -144,7 +169,63 @@ number cards for totals.
 Visual: TRAC balance line chart, earnings bar chart per epoch,
 RPC latency sparkline with red threshold line.
 
-### Panel 5: Operations & Logs
+### Panel 5: Knowledge Explorer
+
+The **core knowledge interface** — browse, query, and visualize everything
+in your node's knowledge graph. Built on the existing `/api/query` and
+`/api/publish` endpoints, with `@dkg/graph-viz` for interactive visualization.
+
+#### SPARQL Editor
+
+Full-featured query editor with:
+- Syntax highlighting and autocompletion (prefix suggestions, predicate hints)
+- Query history (stored in SQLite alongside operations)
+- Saved queries (user-defined bookmarks)
+- Pre-built query templates: "All agents", "KCs in paranet X",
+  "Triples about entity Y", "Confirmed vs tentative KCs"
+
+Results render in three modes:
+
+| Mode | When to use |
+|------|-------------|
+| **Table** | SELECT queries — standard tabular results |
+| **Graph** | CONSTRUCT/DESCRIBE queries — interactive force-directed graph via `@dkg/graph-viz` |
+| **JSON** | Raw bindings — for debugging or copy-paste |
+
+#### Graph Visualization
+
+Powered by `@dkg/graph-viz` (already in the monorepo):
+- Interactive force-directed 2D layout (with optional 3D via `renderer-3d`)
+- Click a node → expand its triples (fetch neighbors on demand)
+- Color-coded by `rdf:type` or paranet
+- Provenance overlay: show which KC/KA a triple belongs to
+- Timeline overlay: filter by `dkg:publishedAt` date range
+- Export as SVG/PNG
+
+The graph-viz package already has:
+- `RemoteSparqlSource` — connects to the node's `/api/query` endpoint
+- `RdfGraph` React component with `useRdfGraph` hook
+- Turtle, N-Triples, JSON-LD parsers
+- Hexagon painter, label resolver, prefix manager, style engine
+
+#### Paranet Browser
+
+- List all paranets → click to see KCs in that paranet
+- KC detail view: UAL, merkle root, status, publisher, timestamp, KA list
+- KA detail view: root entity, triple count, private/public flag
+- Click root entity → opens in Graph Visualization
+
+#### Publish UI
+
+Simple form for publishing triples to a paranet:
+- Paranet selector (dropdown of subscribed paranets)
+- Turtle/N-Triples text input with syntax highlighting
+- Preview (parsed triples displayed as table)
+- Publish button → calls `/api/publish` → shows result with UAL
+
+---
+
+### Panel 6: Operations & Logs
 
 **This is the operational intelligence panel.** Every request the node
 processes (publish, query, sync, message, access) is tracked as an
@@ -207,7 +288,7 @@ Full-text search across structured log entries, filterable by:
 Clicking an `operationId` jumps to the Operations panel with that
 operation's full detail view.
 
-### Panel 6: Wallet Management
+### Panel 7: Wallet Management
 
 Interactive (not just metrics):
 
@@ -217,7 +298,34 @@ Interactive (not just metrics):
 - **Fund operational wallets**: transfer ETH/TRAC between wallets
 - **RPC management**: show configured RPCs, latency, switch primary
 
-### Panel 7: AI Assistant
+### Panel 8: Integrations
+
+Manage external adapters and extensions from the UI:
+
+#### Adapter Management
+- **List installed adapters**: ElizaOS, OpenClaw, custom adapters
+- **Enable / disable**: toggle adapters on/off without restarting
+- **Configure**: per-adapter settings (API keys, endpoints, models)
+- **Status**: connection health, last heartbeat, error count
+
+#### Skill Registry
+- **Browse registered skills**: name, description, input/output schemas
+- **Test skills**: invoke a skill manually with sample input, inspect output
+- **Register new skill**: upload or point to a skill definition
+
+#### Paranet Subscriptions
+- **List subscribed paranets**: name, UAL, KC count, last sync time
+- **Subscribe / unsubscribe**: join or leave a paranet from the UI
+- **Paranet health**: sync lag, peer count, data freshness
+
+#### Webhooks & Events
+- **Configure outbound webhooks**: notify external systems on events
+  (new KC published, sync completed, query threshold exceeded)
+- **Event log**: recent webhook deliveries with status codes
+
+---
+
+### Panel 9: AI Assistant
 
 Embedded chatbot powered by the node's own DKG agent capabilities:
 
@@ -237,16 +345,26 @@ extension (see [SPEC_PART3_EXTENSIONS.md §1](../SPEC_PART3_EXTENSIONS.md)).
 
 ## Implementation approach
 
-### Package: `@dkg/dashboard`
+### Package: `@dkg/node-ui`
 
 New package containing:
+
+**Backend (instrumentation + API)**:
 - `MetricsCollector` — gathers system, network, DKG, and chain metrics
   on a timer and stores snapshots
 - `OperationTracker` — records every operation with duration and outcome
 - `StructuredLogger` — drop-in replacement for `Logger` that also writes
   to SQLite with operationId correlation
-- `DashboardServer` — serves the web UI as static files on the existing
-  HTTP server
+- `NodeUIServer` — serves the web UI as static files on the existing
+  HTTP server, mounts all API routes
+
+**Frontend (React SPA)**:
+- Built with React + Vite, pre-built at publish time to static files
+- Consumes the `/api/*` endpoints for all data
+- Embeds `@dkg/graph-viz` for the Knowledge Explorer's graph view
+- CodeMirror or Monaco for the SPARQL editor
+- Recharts or similar for time-series charts
+- The AI Assistant panel shares the same chat UI components
 - `DashboardDB` — SQLite database manager (schema, migrations, retention)
 
 ### SQLite schema
@@ -312,6 +430,27 @@ CREATE INDEX idx_logs_ts ON logs(ts);
 CREATE INDEX idx_logs_operation_id ON logs(operation_id);
 CREATE INDEX idx_logs_level ON logs(level);
 CREATE INDEX idx_logs_message ON logs(message);  -- for FTS fallback
+
+-- SPARQL query history (auto-saved on each query execution)
+CREATE TABLE query_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,                    -- unix timestamp (ms)
+  sparql TEXT NOT NULL,                   -- the SPARQL query text
+  duration_ms INTEGER,                    -- execution time
+  result_count INTEGER,                   -- number of result rows/triples
+  error TEXT                              -- NULL if successful
+);
+CREATE INDEX idx_qhist_ts ON query_history(ts);
+
+-- User-saved query bookmarks
+CREATE TABLE saved_queries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                     -- user-chosen name
+  description TEXT,                       -- optional description
+  sparql TEXT NOT NULL,                   -- the SPARQL query text
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ```
 
 Note: for full-text search on log messages, SQLite's FTS5 extension
@@ -477,13 +616,16 @@ The dashboard is built at package build time and served as static HTML/JS
 from the node's HTTP server. No runtime bundler needed on the node.
 
 ```
-GET /dashboard              → serves index.html (SPA)
-GET /dashboard/*            → serves static assets
+GET /ui                     → serves index.html (SPA)
+GET /ui/*                   → serves static assets (JS, CSS, fonts)
 GET /api/metrics            → current snapshot (JSON)
 GET /api/metrics/history    → time-series (params: from, to, resolution)
 GET /api/operations         → operation list (params: name, status, from, to, limit)
 GET /api/operations/:id     → single operation detail + associated logs
 GET /api/logs               → log search (params: q, operationId, level, module, from, to)
+GET /api/paranets           → subscribed paranets with counts
+GET /api/query-history      → recent SPARQL queries with timing
+GET /api/integrations       → adapter list with status
 ```
 
 The SPA polls `/api/metrics` every 10 seconds and renders charts using
@@ -493,17 +635,34 @@ a lightweight charting library (e.g., Chart.js or uPlot).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| **Observability** | | |
 | `/api/metrics` | GET | Current metric snapshot |
 | `/api/metrics/history` | GET | Time-series data (params: `from`, `to`, `resolution`) |
 | `/api/operations` | GET | List operations (filterable by name, status, time range) |
 | `/api/operations/:id` | GET | Single operation with all associated log entries |
 | `/api/logs` | GET | Search logs (full-text, by operationId, level, module, time range) |
+| **Knowledge Explorer** | | |
+| `/api/query` | POST | Execute SPARQL query (existing) |
+| `/api/publish` | POST | Publish triples to a paranet (existing) |
+| `/api/paranets` | GET | List subscribed paranets with KC/KA counts |
+| `/api/paranets/:id/kcs` | GET | List KCs in a paranet |
+| `/api/query-history` | GET | SPARQL query history (paginated) |
+| `/api/saved-queries` | GET/POST/PUT/DELETE | Manage saved query bookmarks |
+| **Wallet & Economics** | | |
 | `/api/wallets/balances` | GET | All wallet balances (ETH + TRAC) |
 | `/api/wallets/add-key` | POST | Generate and register new operational key |
 | `/api/wallets/collect-fees` | POST | Trigger operator fee withdrawal |
 | `/api/chain/rpc-health` | GET | RPC endpoint latency and block height |
 | `/api/chain/stake` | GET | Node stake, delegation info, rewards |
-| `/api/dashboard` | GET | Serve dashboard SPA |
+| **Integrations** | | |
+| `/api/integrations` | GET | List installed adapters with status |
+| `/api/integrations/:id/toggle` | POST | Enable/disable an adapter |
+| `/api/integrations/:id/config` | GET/PUT | Read/update adapter config |
+| `/api/skills` | GET | List registered skills |
+| `/api/skills/:id/test` | POST | Test-invoke a skill with sample input |
+| **UI** | | |
+| `/ui` | GET | Serve Node UI SPA |
+| `/ui/*` | GET | Serve static assets |
 
 ---
 
@@ -550,27 +709,44 @@ Power users enable the OTel exporter to pipe into their existing stack.
 
 ## Implementation phases
 
-### Phase 1: Instrumentation + Storage
+### Phase 1: Instrumentation + Storage + Core API
 - `DashboardDB` — SQLite schema, migrations, retention policy
 - `StructuredLogger` — extends `Logger` to write to SQLite
 - `OperationTracker` — start/complete/fail for each operation
 - `MetricsCollector` — system, network, knowledge, chain snapshots
 - Wire into daemon.ts (create DB, substitute loggers)
+- API endpoints: `/api/metrics`, `/api/operations`, `/api/logs`
 
-### Phase 2: API + Dashboard UI
-- New API endpoints: metrics, operations, logs
-- React SPA with 7 panels (system, network, knowledge, economics,
-  operations & logs, wallets, AI assistant)
-- Charts, tables, log explorer with full-text search
-- Served as pre-built static files from the node's HTTP server
+### Phase 2: Dashboard Home + Observability UI
+- React SPA scaffold (Vite + React + routing)
+- Home/dashboard panel: system health, uptime, key metrics
+- Network panel: peers, connections, relay
+- Operations & Logs panel: filterable table, log explorer, FTS
+- Charts (Recharts) for time-series metrics
 
-### Phase 3: Wallet management
+### Phase 3: Knowledge Explorer
+- SPARQL editor (CodeMirror with SPARQL mode)
+- Table view for SELECT results
+- Graph visualization via `@dkg/graph-viz` for CONSTRUCT/DESCRIBE
+- Paranet browser: list paranets → KCs → KAs → root entities
+- Publish UI: simple form → `/api/publish`
+- Query history and saved queries (SQLite)
+
+### Phase 4: Wallet Management + Economics
 - Wallet balances panel (auto-refresh)
 - Add/remove operational keys
 - Fee collection UI
 - RPC health monitoring
+- Earnings charts, stake info
 
-### Phase 4: OTel export + AI assistant
+### Phase 5: Integrations Panel
+- Adapter list with enable/disable toggles
+- Per-adapter configuration forms
+- Skill browser and test harness
+- Paranet subscription management from UI
+- Webhook configuration
+
+### Phase 6: OTel Export + AI Assistant
 - Optional OTLP exporter for metrics + traces
 - `operationId` ↔ OTel trace ID correlation
 - Embedded chatbot querying SQLite + triple store
@@ -586,4 +762,7 @@ Power users enable the OTel exporter to pipe into their existing stack.
 | `@opentelemetry/api` | Metrics/traces API (optional) | ~50KB |
 | `@opentelemetry/sdk-node` | Auto-instrumentation (optional) | ~200KB |
 | `@opentelemetry/exporter-metrics-otlp-http` | OTLP export (optional) | ~100KB |
-| `react` + `chart.js` | Dashboard UI (build-time only) | — |
+| `react` + `vite` | SPA framework (build-time only) | — |
+| `recharts` | Time-series charts | ~200KB |
+| `@codemirror/lang-sparql` | SPARQL editor | ~50KB |
+| `@dkg/graph-viz` | Graph visualization (in-monorepo) | — |

@@ -193,13 +193,14 @@ UAL resolution and payment settlement.
 
 ---
 
-## 5. Observability & Dashboard
+## 5. Node UI & Observability
 
-### 5.0 Node admin dashboard — **NEEDS SPEC** (created)
-Self-contained admin dashboard served from the node's existing HTTP API.
-Four phases: metrics collection + API, dashboard UI (React SPA),
-wallet management, AI assistant. OpenTelemetry for optional export to
-Prometheus/Grafana/Datadog.
+### 5.0 DKG Node UI — **READY**
+Unified web interface for operating a DKG node — monitoring, querying,
+exploring, and managing. Six phases: instrumentation + storage + API,
+dashboard home + observability UI, Knowledge Explorer (SPARQL editor +
+`@dkg/graph-viz`), wallet management + economics, integrations panel
+(adapters, skills, paranet subscriptions), OTel export + AI assistant.
 
 - **Spec**: [SPEC_NODE_DASHBOARD.md](../specs/SPEC_NODE_DASHBOARD.md)
 
@@ -252,7 +253,7 @@ be gitignored or test setup made deterministic.
 | **P1** | 2.1 Private KA access | Completes the core publish/access loop |
 | **P1** | 2.3 Paranet on-chain | Required for multi-paranet testnet |
 | **P1** | 1.5 Cross-agent query | Enables agents to query each other |
-| **P1** | 5.0 Node dashboard | Node runner UX — critical for testnet operators |
+| **P1** | 5.0 DKG Node UI | Node runner UX — critical for testnet operators |
 | **P2** | 3.1 Publishing conviction | First trust layer economic feature |
 | **P2** | 3.2 Staking conviction | Node operator incentives |
 | **P2** | 3.3 Paranet sharding | Per-paranet economics |
