@@ -193,39 +193,51 @@ UAL resolution and payment settlement.
 
 ---
 
-## 5. Extensions
+## 5. Observability & Dashboard
 
-### 5.1 Neural queries — **READY**
+### 5.0 Node admin dashboard — **NEEDS SPEC** (created)
+Self-contained admin dashboard served from the node's existing HTTP API.
+Four phases: metrics collection + API, dashboard UI (React SPA),
+wallet management, AI assistant. OpenTelemetry for optional export to
+Prometheus/Grafana/Datadog.
+
+- **Spec**: [SPEC_NODE_DASHBOARD.md](../specs/SPEC_NODE_DASHBOARD.md)
+
+---
+
+## 6. Extensions
+
+### 6.1 Neural queries — **READY**
 LLM-powered SPARQL generation and natural language query interface.
 Transforms "What does Alice know about climate?" into SPARQL.
 
 - **Spec**: [SPEC_PART3_EXTENSIONS.md §1](../SPEC_PART3_EXTENSIONS.md)
 
-### 5.2 Knowledge pipelines — **READY**
+### 6.2 Knowledge pipelines — **READY**
 DAG-based processing pipelines: ingest → transform → derive → publish.
 Declarative pipeline definitions with provenance tracking.
 
 - **Spec**: [SPEC_PART3_EXTENSIONS.md §2](../SPEC_PART3_EXTENSIONS.md)
 
-### 5.3 Graph visualization — **READY**
+### 6.3 Graph visualization — **READY**
 Interactive RDF graph visualization component for web UIs.
 
 - **Spec**: [SPEC_PART3_EXTENSIONS.md §3](../SPEC_PART3_EXTENSIONS.md)
 
 ---
 
-## 6. Bugs & Technical Debt
+## 7. Bugs & Technical Debt
 
-### 6.1 Relay circuit test flaky — **IN PROGRESS**
+### 7.1 Relay circuit test flaky — **IN PROGRESS**
 `e2e-agents.test.ts` "agents exchange encrypted chat through a circuit
 relay" fails intermittently. The relay connection drops before the chat
 message is sent. Likely a timing/reservation issue.
 
-### 6.2 Codebase TODOs — **READY**
+### 7.2 Codebase TODOs — **READY**
 See [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §4](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 for the full list of inline TODOs across the codebase.
 
-### 6.3 EVM test hardhat_contracts.json instability
+### 7.3 EVM test hardhat_contracts.json instability
 The file regenerates with different addresses on each test run. Should
 be gitignored or test setup made deterministic.
 
@@ -236,10 +248,11 @@ be gitignored or test setup made deterministic.
 | Priority | Item | Rationale |
 |----------|------|-----------|
 | **P0** | 2.2 Fix UAL/chainId | Bug — real chain publishes use wrong UAL |
-| **P0** | 6.1 Relay test | Flaky test blocks CI |
+| **P0** | 7.1 Relay test | Flaky test blocks CI |
 | **P1** | 2.1 Private KA access | Completes the core publish/access loop |
 | **P1** | 2.3 Paranet on-chain | Required for multi-paranet testnet |
 | **P1** | 1.5 Cross-agent query | Enables agents to query each other |
+| **P1** | 5.0 Node dashboard | Node runner UX — critical for testnet operators |
 | **P2** | 3.1 Publishing conviction | First trust layer economic feature |
 | **P2** | 3.2 Staking conviction | Node operator incentives |
 | **P2** | 3.3 Paranet sharding | Per-paranet economics |
@@ -251,5 +264,5 @@ be gitignored or test setup made deterministic.
 | **P3** | 1.6 Relay auto-discovery | Better node bootstrapping UX |
 | **P4** | 4.1 Payment channels | Agent economy |
 | **P4** | 2.4 Capacity metering | Resource-aware pricing |
-| **P4** | 5.1–5.3 Extensions | Neural queries, pipelines, viz |
+| **P4** | 6.1–6.3 Extensions | Neural queries, pipelines, viz |
 | **P5** | 3.8 Solana adapter | Second chain support |
