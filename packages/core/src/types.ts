@@ -17,6 +17,8 @@ export interface EventBus {
 export interface DKGNodeConfig {
   /** Multiaddr strings to listen on. Defaults to TCP + WS on random ports. */
   listenAddresses?: string[];
+  /** Multiaddr strings to announce to the network (for nodes behind NAT/VPS with a public IP not bound to the interface). */
+  announceAddresses?: string[];
   /** DKG bootstrap peer multiaddrs (NOT public IPFS nodes). */
   bootstrapPeers?: string[];
   /** Enable mDNS for local peer discovery. Default: true. */

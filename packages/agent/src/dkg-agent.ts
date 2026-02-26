@@ -26,6 +26,8 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
+  announceAddresses?: string[];
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;
@@ -144,6 +146,7 @@ export class DKGAgent {
     const nodeRole = config.nodeRole ?? 'edge';
     const nodeConfig: DKGNodeConfig = {
       listenAddresses: [`/ip4/0.0.0.0/tcp/${port}`],
+      announceAddresses: config.announceAddresses,
       bootstrapPeers: config.bootstrapPeers,
       relayPeers: config.relayPeers,
       enableMdns: !config.bootstrapPeers?.length && !config.relayPeers?.length,

@@ -49,6 +49,8 @@ export interface DkgConfig {
   apiPort: number;
   listenPort: number;
   nodeRole: 'core' | 'edge';
+  /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
+  announceAddresses?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
   chain?: ChainConfig;

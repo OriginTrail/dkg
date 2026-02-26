@@ -90,6 +90,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     listenPort: config.listenPort,
     dataDir: dkgDir(),
     relayPeers: config.relay ? [config.relay] : undefined,
+    announceAddresses: config.announceAddresses,
     nodeRole: role,
     chainConfig: chainBase ? {
       rpcUrl: chainBase.rpcUrl,

@@ -112,7 +112,12 @@ export class DKGNode {
 
     this.node = await createLibp2p<DKGServices>({
       privateKey,
-      addresses: { listen: listenAddrs },
+      addresses: {
+        listen: listenAddrs,
+        ...(this.config.announceAddresses?.length
+          ? { announce: this.config.announceAddresses }
+          : {}),
+      },
       transports: transports as any,
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
