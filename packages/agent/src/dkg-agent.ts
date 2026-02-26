@@ -18,6 +18,8 @@ import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
+const SYNC_PAGE_SIZE = 500;
+
 export interface DKGAgentConfig {
   name: string;
   framework?: string;
@@ -118,6 +120,8 @@ export class DKGAgent {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
+    const log = new Logger('DKGAgent');
+    const ctx = createOperationContext('system');
     let store: TripleStore;
     if (config.store) {
       store = config.store;
@@ -125,8 +129,10 @@ export class DKGAgent {
       const { join } = await import('node:path');
       const persistPath = join(config.dataDir, 'store.nq');
       store = new OxigraphStore(persistPath);
+      log.info(ctx, `Persistent triple store: ${persistPath}`);
     } else {
       store = new OxigraphStore();
+      log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
 
     let chain: ChainAdapter;
@@ -264,24 +270,27 @@ export class DKGAgent {
       }
     }
 
-    // Register sync handler: responds with all triples from requested paranets
+    // Register sync handler: responds with a page of triples from a paranet.
+    // Request format: "paranetId|offset|limit"  (offset/limit default to 0/500)
     this.router.register(PROTOCOL_SYNC, async (data) => {
-      const requested = new TextDecoder().decode(data).trim();
-      const paranetIds = requested ? requested.split(',') : [SYSTEM_PARANETS.AGENTS];
-      const allNquads: string[] = [];
-      for (const pid of paranetIds) {
-        const graphUri = paranetDataGraphUri(pid);
-        const result = await this.store.query(
-          `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-        );
-        if (result.type === 'quads') {
-          for (const q of result.quads) {
-            const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-            allNquads.push(`<${q.subject}> <${q.predicate}> ${obj} <${graphUri}> .`);
-          }
-        }
+      const text = new TextDecoder().decode(data).trim();
+      const [paranetPart, offsetStr, limitStr] = text.split('|');
+      const paranetId = paranetPart || SYSTEM_PARANETS.AGENTS;
+      const offset = parseInt(offsetStr, 10) || 0;
+      const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
+
+      const graphUri = paranetDataGraphUri(paranetId);
+      const result = await this.store.query(
+        `SELECT ?s ?p ?o WHERE { GRAPH <${graphUri}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+      );
+      if (result.type !== 'bindings' || result.bindings.length === 0) {
+        return new TextEncoder().encode('');
       }
-      return new TextEncoder().encode(allNquads.join('\n'));
+      const nquads = result.bindings.map((b) => {
+        const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+        return `<${b['s']}> <${b['p']}> ${obj} <${graphUri}> .`;
+      });
+      return new TextEncoder().encode(nquads.join('\n'));
     });
 
     // Subscribe to both system paranet GossipSub topics
@@ -322,30 +331,45 @@ export class DKGAgent {
    * Pull all triples for the given paranets from a remote peer and merge
    * them into our local store. Used on peer:connect for initial catch-up.
    */
+  /**
+   * Pull all triples for the given paranets from a remote peer in pages
+   * and merge them into our local store. Used on peer:connect for catch-up.
+   */
   async syncFromPeer(
     remotePeerId: string,
     paranetIds: string[] = [SYSTEM_PARANETS.AGENTS],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
+    let totalSynced = 0;
     try {
-      this.log.info(ctx, `Requesting paranet sync from ${remotePeerId}`);
-      const payload = new TextEncoder().encode(paranetIds.join(','));
-      const responseBytes = await this.router.send(remotePeerId, PROTOCOL_SYNC, payload);
-      const nquadsText = new TextDecoder().decode(responseBytes);
-      if (!nquadsText.trim()) {
-        this.log.info(ctx, `Peer ${remotePeerId} returned empty sync data`);
-        return 0;
+      for (const pid of paranetIds) {
+        let offset = 0;
+        this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+          const responseBytes = await this.router.send(remotePeerId, PROTOCOL_SYNC, payload);
+          const nquadsText = new TextDecoder().decode(responseBytes).trim();
+          if (!nquadsText) break;
+
+          const quads = parseNQuads(nquadsText);
+          if (quads.length === 0) break;
+
+          await this.store.insert(quads);
+          totalSynced += quads.length;
+          offset += quads.length;
+          this.log.info(ctx, `  page ${Math.ceil(offset / SYNC_PAGE_SIZE)}: ${quads.length} triples (total ${totalSynced})`);
+
+          if (quads.length < SYNC_PAGE_SIZE) break;
+        }
       }
-      const quads = parseNQuads(nquadsText);
-      if (quads.length > 0) {
-        await this.store.insert(quads);
-        this.log.info(ctx, `Synced ${quads.length} triples from ${remotePeerId}`);
+      if (totalSynced > 0) {
+        this.log.info(ctx, `Sync complete: ${totalSynced} triples from ${remotePeerId}`);
       }
-      return quads.length;
     } catch (err) {
       this.log.info(ctx, `Sync from ${remotePeerId} failed (peer may not support sync): ${err instanceof Error ? err.message : String(err)}`);
-      return 0;
     }
+    return totalSynced;
   }
 
   async publishProfile(): Promise<PublishResult> {
