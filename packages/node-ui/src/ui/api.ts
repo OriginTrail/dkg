@@ -84,6 +84,21 @@ export const deleteSavedQuery = (id: number) =>
 export const sendChatMessage = (message: string) =>
   post<{ reply: string; data?: unknown; sparql?: string }>('/api/chat-assistant', { message });
 
+// --- Peer-to-peer messaging ---
+export const sendPeerMessage = (to: string, text: string) =>
+  post<{ delivered: boolean; error?: string }>('/api/chat', { to, text });
+
+export const fetchMessages = (opts: { peer?: string; since?: number; limit?: number } = {}) => {
+  const params = new URLSearchParams();
+  if (opts.peer) params.set('peer', opts.peer);
+  if (opts.since) params.set('since', String(opts.since));
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  return get<{ messages: Array<{ ts: number; direction: 'in' | 'out'; peer: string; peerName?: string; text: string }> }>(
+    `/api/messages${qs ? '?' + qs : ''}`,
+  );
+};
+
 // --- Wallet & chain ---
 export const fetchWalletsBalances = () =>
   get<{

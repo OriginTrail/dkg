@@ -6,6 +6,7 @@ import { OperationsPage } from './pages/Operations.js';
 import { ExplorerPage } from './pages/Explorer.js';
 import { WalletPage } from './pages/Wallet.js';
 import { IntegrationsPage } from './pages/Integrations.js';
+import { MessagesPage } from './pages/Messages.js';
 import { ChatPanel } from './components/ChatPanel.js';
 
 export function App() {
@@ -23,6 +24,10 @@ export function App() {
           <NavLink to="/network">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><line x1="4" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/><line x1="12" y1="6" x2="8" y2="10" stroke="currentColor" strokeWidth="1.5"/></svg>
             Network
+          </NavLink>
+          <NavLink to="/messages">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2h14v9H5l-4 3V2zm2 2v5.17l1.59-1.59.41-.58H13V4H3z"/></svg>
+            Messages
           </NavLink>
           <NavLink to="/explorer">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 1a5 5 0 014.32 7.5l3.59 3.59-1.42 1.42-3.59-3.59A5 5 0 116 1zm0 2a3 3 0 100 6 3 3 0 000-6z"/></svg>
@@ -46,6 +51,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/network" element={<NetworkPage />} />
+          <Route path="/messages" element={<MessagesPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
           <Route path="/operations/*" element={<OperationsPage />} />
           <Route path="/wallet" element={<WalletPage />} />
