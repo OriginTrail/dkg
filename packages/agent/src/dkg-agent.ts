@@ -500,6 +500,7 @@ export class DKGAgent {
 
   async sendChat(recipientPeerId: string, text: string): Promise<{ delivered: boolean; error?: string }> {
     if (!this.messageHandler) throw new Error('Agent not started');
+    await this.ensureCircuitRelayAddress(recipientPeerId);
     return this.messageHandler.sendChat(recipientPeerId, text);
   }
 
@@ -519,6 +520,7 @@ export class DKGAgent {
     inputData: Uint8Array,
   ): Promise<SkillResponse> {
     if (!this.messageHandler) throw new Error('Agent not started');
+    await this.ensureCircuitRelayAddress(recipientPeerId);
 
     return this.messageHandler.sendSkillRequest(recipientPeerId, {
       skillUri,
@@ -529,6 +531,30 @@ export class DKGAgent {
 
   async connectTo(multiaddress: string): Promise<void> {
     await this.node.libp2p.dial(multiaddr(multiaddress));
+  }
+
+  /**
+   * Ensure libp2p knows how to reach a peer via circuit relay. If the peer
+   * isn't directly connected and their profile advertises a relay address, we
+   * add a /p2p-circuit multiaddr to the peer store so dialProtocol can route
+   * through the relay.
+   */
+  private async ensureCircuitRelayAddress(peerIdStr: string): Promise<void> {
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    const peerId = peerIdFromString(peerIdStr);
+
+    const conns = this.node.libp2p.getConnections(peerId);
+    if (conns.length > 0) return;
+
+    const agent = await this.discovery.findAgentByPeerId(peerIdStr);
+    if (!agent?.relayAddress) return;
+
+    const circuitAddr = multiaddr(
+      `${agent.relayAddress}/p2p-circuit/p2p/${peerIdStr}`,
+    );
+    await this.node.libp2p.peerStore.merge(peerId, {
+      multiaddrs: [circuitAddr],
+    });
   }
 
   async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {

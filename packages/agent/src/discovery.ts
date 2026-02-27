@@ -12,6 +12,7 @@ export interface DiscoveredAgent {
   peerId: string;
   framework?: string;
   nodeRole?: string;
+  relayAddress?: string;
 }
 
 export interface DiscoveredOffering {
@@ -52,12 +53,13 @@ export class DiscoveryClient {
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole WHERE {
+      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
         OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
+        OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
       }
       ${limitClause}
     `;
@@ -70,6 +72,7 @@ export class DiscoveryClient {
       peerId: stripQuotes(row['peerId']),
       framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
       nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
+      relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
     }));
   }
 
@@ -125,12 +128,13 @@ export class DiscoveryClient {
 
   async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
     const sparql = `
-      SELECT ?agent ?name ?framework ?nodeRole WHERE {
+      SELECT ?agent ?name ?framework ?nodeRole ?relayAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> "${peerId}" .
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
         OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
+        OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
       }
       LIMIT 1
     `;
@@ -145,6 +149,7 @@ export class DiscoveryClient {
       peerId,
       framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
       nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
+      relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
     };
   }
 }
