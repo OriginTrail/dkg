@@ -13,5 +13,5 @@ export { generateKCMetadata, type KCMetadata, type KAMetadata } from './metadata
 export { DKGPublisher, type DKGPublisherConfig } from './dkg-publisher.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig } from './chain-event-poller.js';
-export { AccessHandler } from './access-handler.js';
+export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';

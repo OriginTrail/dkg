@@ -12,11 +12,15 @@ import { computePrivateRoot } from './merkle.js';
 export interface AccessResult {
   granted: boolean;
   quads: Quad[];
+  privateMerkleRoot?: Uint8Array;
+  verified: boolean;
   rejectionReason?: string;
 }
 
 /**
  * Client-side access protocol for requesting private triples from a publisher node.
+ * After receiving triples, verifies them against the privateMerkleRoot to ensure
+ * data integrity.
  */
 export class AccessClient {
   private readonly router: ProtocolRouter;
@@ -58,18 +62,32 @@ export class AccessClient {
       return {
         granted: false,
         quads: [],
+        verified: false,
         rejectionReason: response.rejectionReason,
       };
     }
 
-    // Parse returned N-Quads
     const nquadsStr = new TextDecoder().decode(response.nquads);
     const quads = parseSimpleNQuads(nquadsStr);
 
-    // Optionally verify merkle root against meta graph
-    // (deferred to when we have the private merkle root from meta)
+    // Verify merkle root of received private triples
+    let verified = false;
+    if (response.privateMerkleRoot.length === 32 && !isZeroBytes(response.privateMerkleRoot)) {
+      const computedRoot = computePrivateRoot(quads);
+      if (computedRoot) {
+        verified = bytesEqual(computedRoot, response.privateMerkleRoot);
+      }
+    } else if (quads.length > 0) {
+      // No root provided but we got triples — accept but mark as unverified
+      verified = false;
+    }
 
-    return { granted: true, quads };
+    return {
+      granted: true,
+      quads,
+      privateMerkleRoot: response.privateMerkleRoot,
+      verified,
+    };
   }
 }
 
@@ -98,4 +116,19 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+function isZeroBytes(bytes: Uint8Array): boolean {
+  for (const b of bytes) {
+    if (b !== 0) return false;
+  }
+  return true;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
