@@ -16,6 +16,7 @@ import type {
   OnChainPublishResult,
   ConvictionAccountInfo,
   PermanentPublishParams,
+  FairSwapPurchaseInfo,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -394,6 +395,90 @@ export class MockChainAdapter implements ChainAdapter {
       lockEpochs: acct.lockEpochs,
       conviction: acct.conviction,
       discountBps,
+    };
+  }
+
+  // --- FairSwap Judge ---
+
+  private fairSwapPurchases = new Map<bigint, {
+    buyer: string;
+    seller: string;
+    kcId: bigint;
+    kaId: bigint;
+    price: bigint;
+    state: number;
+    encryptedDataRoot: Uint8Array;
+    keyCommitment: Uint8Array;
+    revealedKey: Uint8Array;
+  }>();
+  private nextFairSwapPurchaseId = 1n;
+
+  async initiatePurchase(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult> {
+    const purchaseId = this.nextFairSwapPurchaseId++;
+    this.fairSwapPurchases.set(purchaseId, {
+      buyer: this.signerAddress,
+      seller,
+      kcId,
+      kaId,
+      price,
+      state: 1, // Initiated
+      encryptedDataRoot: new Uint8Array(32),
+      keyCommitment: new Uint8Array(32),
+      revealedKey: new Uint8Array(32),
+    });
+    this.pushEvent('PurchaseInitiated', { purchaseId: purchaseId.toString(), buyer: this.signerAddress, seller });
+    return { ...this.txResult(true), purchaseId };
+  }
+
+  async fulfillPurchase(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p || p.state !== 1) return this.txResult(false);
+    p.encryptedDataRoot = encryptedDataRoot;
+    p.keyCommitment = keyCommitment;
+    p.state = 2; // Fulfilled
+    return this.txResult(true);
+  }
+
+  async revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p || p.state !== 2) return this.txResult(false);
+    p.revealedKey = key;
+    p.state = 3; // KeyRevealed
+    return this.txResult(true);
+  }
+
+  async disputeDelivery(purchaseId: bigint, _proof: Uint8Array): Promise<TxResult> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p || p.state !== 3) return this.txResult(false);
+    p.state = 5; // Disputed
+    return this.txResult(true);
+  }
+
+  async claimPayment(purchaseId: bigint): Promise<TxResult> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p || p.state !== 3) return this.txResult(false);
+    p.state = 4; // Completed
+    return this.txResult(true);
+  }
+
+  async claimRefund(purchaseId: bigint): Promise<TxResult> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p || (p.state !== 1 && p.state !== 2)) return this.txResult(false);
+    p.state = 7; // Expired
+    return this.txResult(true);
+  }
+
+  async getFairSwapPurchase(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null> {
+    const p = this.fairSwapPurchases.get(purchaseId);
+    if (!p) return null;
+    return {
+      purchaseId,
+      buyer: p.buyer,
+      seller: p.seller,
+      kcId: p.kcId,
+      kaId: p.kaId,
+      price: p.price,
+      state: p.state,
     };
   }
 
