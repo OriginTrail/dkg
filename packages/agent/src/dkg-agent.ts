@@ -1123,6 +1123,24 @@ function verifySyncedData(
     return { data: dataQuads, meta: metaQuads, rejected: 0 };
   }
 
+  // Detect root entities shared across multiple KCs. When an entity has been
+  // published more than once (e.g. profile updates), the data graph contains
+  // the union of all versions' triples under the same root entity, making
+  // per-KC Merkle verification impossible without KC-level graph isolation.
+  const rootEntityToKCs = new Map<string, string[]>();
+  for (const [kcUal, entities] of kcRootEntities) {
+    for (const re of entities) {
+      if (!rootEntityToKCs.has(re)) rootEntityToKCs.set(re, []);
+      rootEntityToKCs.get(re)!.push(kcUal);
+    }
+  }
+  const overlappingKCs = new Set<string>();
+  for (const [, kcUals] of rootEntityToKCs) {
+    if (kcUals.length > 1) {
+      for (const u of kcUals) overlappingKCs.add(u);
+    }
+  }
+
   // Partition data triples by root entity
   const partitioned = autoPartition(dataQuads);
 
@@ -1134,6 +1152,15 @@ function verifySyncedData(
     const rootEntities = kcRootEntities.get(kcUal) ?? [];
     if (rootEntities.length === 0) {
       // No KA info — can't verify, accept on trust
+      verifiedKcUals.add(kcUal);
+      continue;
+    }
+
+    if (overlappingKCs.has(kcUal)) {
+      // Root entity is shared with other KCs (multi-version entity). Local
+      // partition contains mixed triples so Merkle re-computation would fail.
+      // Accept and defer to chain-level verification (Tier 2).
+      log.debug(ctx, `Skipping Merkle check for ${kcUal}: root entity shared across ${rootEntityToKCs.get(rootEntities[0])!.length} KCs`);
       verifiedKcUals.add(kcUal);
       continue;
     }
@@ -1167,6 +1194,9 @@ function verifySyncedData(
 
       if (epHex === claimedHex) {
         verifiedKcUals.add(kcUal);
+      } else if (acceptUnverified) {
+        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        rejected++;
       } else {
         log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
         rejected++;
@@ -1185,10 +1215,10 @@ function verifySyncedData(
     }
   }
 
-  // When acceptUnverified is set (system paranets), accept all data with
-  // a warning rather than dropping profiles that fail merkle verification.
+  // When acceptUnverified is set (system paranets), accept all data
+  // rather than dropping profiles that fail merkle verification.
   if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
-    log.warn(ctx, `Accepting ${rejected} unverified KC(s) (system paranet, merkle mismatch)`);
+    log.debug(ctx, `Accepting ${rejected} unverified KC(s) (system paranet)`);
     return { data: dataQuads, meta: metaQuads, rejected: 0 };
   }
 

@@ -33,6 +33,10 @@ export class Logger {
     this.prefix = moduleName;
   }
 
+  debug(ctx: OperationContext, message: string): void {
+    Logger.sink?.({ level: 'debug', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
+  }
+
   info(ctx: OperationContext, message: string): void {
     process.stdout.write(`${this.format(ctx, message)}\n`);
     Logger.sink?.({ level: 'info', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
