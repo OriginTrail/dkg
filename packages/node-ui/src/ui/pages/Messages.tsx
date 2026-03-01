@@ -16,9 +16,26 @@ interface Agent {
   peerId: string;
   framework?: string;
   nodeRole?: string;
+  connectionStatus?: 'connected' | 'disconnected' | 'self';
+  connectionTransport?: 'direct' | 'relayed';
 }
 
 const POLL_INTERVAL = 3_000;
+
+function OnlineIndicator({ agent }: { agent: Agent }) {
+  const isOnline = agent.connectionStatus === 'connected';
+  const isRelayed = agent.connectionTransport === 'relayed';
+  const title = isOnline 
+    ? `Online (${isRelayed ? 'relayed' : 'direct'})` 
+    : 'Offline';
+  
+  return (
+    <span 
+      className={`online-indicator ${isOnline ? 'online' : 'offline'}`}
+      title={title}
+    />
+  );
+}
 
 export function MessagesPage() {
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
@@ -112,7 +129,10 @@ export function MessagesPage() {
                 className={`chat-peer-item ${selectedPeer === a.peerId ? 'active' : ''}`}
                 onClick={() => { setSelectedPeer(a.peerId); setSendError(null); }}
               >
-                <div className="chat-peer-name">{a.name}</div>
+                <div className="chat-peer-name">
+                  <OnlineIndicator agent={a} />
+                  {a.name}
+                </div>
                 <div className="chat-peer-meta">
                   <span className={`badge ${a.nodeRole === 'core' ? 'badge-info' : 'badge-success'}`}>
                     {a.nodeRole ?? 'edge'}
@@ -129,8 +149,18 @@ export function MessagesPage() {
           {selectedPeer ? (
             <>
               <div className="chat-header">
-                <div className="chat-header-name">{selectedAgent?.name ?? shortId(selectedPeer, 12)}</div>
-                <div className="chat-header-meta mono">{shortId(selectedPeer, 16)}</div>
+                <div className="chat-header-name">
+                  {selectedAgent && <OnlineIndicator agent={selectedAgent} />}
+                  {selectedAgent?.name ?? shortId(selectedPeer, 12)}
+                </div>
+                <div className="chat-header-meta">
+                  <span className="mono">{shortId(selectedPeer, 16)}</span>
+                  {selectedAgent?.connectionStatus === 'connected' && (
+                    <span className="chat-status-text">
+                      {selectedAgent.connectionTransport === 'relayed' ? '· relayed' : '· direct'}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="chat-messages">

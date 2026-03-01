@@ -85,31 +85,121 @@ function GraphZoomToFit() {
   return null;
 }
 
+const TYPE_FILTERS = [
+  { label: 'All Types', value: '' },
+  { label: 'Knowledge Assets', value: 'http://dkg.io/ontology/KnowledgeAsset' },
+  { label: 'Knowledge Collections', value: 'http://dkg.io/ontology/KnowledgeCollection' },
+  { label: 'Agents', value: 'https://dkg.network/ontology#Agent' },
+  { label: 'Software Agents', value: 'http://schema.org/SoftwareAgent' },
+  { label: 'Datasets', value: 'http://schema.org/Dataset' },
+];
+
+const TYPE_COLORS: Record<string, string> = {
+  'http://dkg.io/ontology/KnowledgeAsset': '#10b981',
+  'http://dkg.io/ontology/KnowledgeCollection': '#3b82f6',
+  'https://dkg.network/ontology#Agent': '#8b5cf6',
+  'http://schema.org/SoftwareAgent': '#8b5cf6',
+  'http://schema.org/Dataset': '#f59e0b',
+  'default': '#6b7280',
+};
+
+interface NodeDetails {
+  uri: string;
+  types: string[];
+  outgoing: Array<{ predicate: string; object: string }>;
+  incoming: Array<{ subject: string; predicate: string }>;
+}
+
 function GraphTab() {
+  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
+  const paranets = paranetData?.paranets ?? [];
+  
   const [triples, setTriples] = useState<Array<{ subject: string; predicate: string; object: string }> | null>(null);
+  const [allTriples, setAllTriples] = useState<Array<{ subject: string; predicate: string; object: string }> | null>(null);
+  const [typeMap, setTypeMap] = useState<Map<string, string[]>>(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState<number>(10000);
   const [refreshKey, setRefreshKey] = useState(0);
+  
+  // Filters
+  const [typeFilter, setTypeFilter] = useState('');
+  const [paranetFilter, setParanetFilter] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showLiterals, setShowLiterals] = useState(true);
+  
+  // Selected node
+  const [selectedNode, setSelectedNode] = useState<NodeDetails | null>(null);
 
   const loadGraph = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Query default graph + all named graphs (DKG stores data in paranet named graphs)
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT ${limit}`;
+      // Build SPARQL based on filters
+      let sparql: string;
+      if (paranetFilter) {
+        sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${paranetFilter}> { ?s ?p ?o } } LIMIT ${limit}`;
+      } else {
+        sparql = `CONSTRUCT { ?s ?p ?o } WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT ${limit}`;
+      }
+      
       const res = await executeQuery(sparql);
       const raw = res?.result;
       const quads = raw?.quads;
+      
       if (quads && Array.isArray(quads) && quads.length > 0) {
-        const raw = quads.map((q: { subject: string; predicate: string; object: string }) => ({
+        const rawTriples = quads.map((q: { subject: string; predicate: string; object: string }) => ({
           subject: q.subject,
           predicate: q.predicate,
           object: q.object,
         }));
-        setTriples(triplesWithLiteralsAsNodes(raw));
+        
+        // Build type map
+        const types = new Map<string, string[]>();
+        for (const t of rawTriples) {
+          if (t.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type') {
+            const existing = types.get(t.subject) || [];
+            existing.push(t.object);
+            types.set(t.subject, existing);
+          }
+        }
+        setTypeMap(types);
+        setAllTriples(rawTriples);
+        
+        // Apply filters for display
+        let filtered = rawTriples;
+        
+        // Type filter
+        if (typeFilter) {
+          const matchingSubjects = new Set<string>();
+          for (const [subj, typeList] of types) {
+            if (typeList.includes(typeFilter)) matchingSubjects.add(subj);
+          }
+          filtered = filtered.filter(t => matchingSubjects.has(t.subject) || matchingSubjects.has(t.object));
+        }
+        
+        // Search filter
+        if (searchQuery) {
+          const q = searchQuery.toLowerCase();
+          const matchingNodes = new Set<string>();
+          for (const t of rawTriples) {
+            if (t.subject.toLowerCase().includes(q) || t.object.toLowerCase().includes(q)) {
+              matchingNodes.add(t.subject);
+              matchingNodes.add(t.object);
+            }
+          }
+          filtered = filtered.filter(t => matchingNodes.has(t.subject) || matchingNodes.has(t.object));
+        }
+        
+        // Process literals
+        if (showLiterals) {
+          setTriples(triplesWithLiteralsAsNodes(filtered));
+        } else {
+          setTriples(filtered.filter(t => isResourceObject(t.object)));
+        }
       } else {
         setTriples([]);
+        setAllTriples([]);
       }
     } catch (err: any) {
       setError(err.message);
@@ -117,59 +207,228 @@ function GraphTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, refreshKey]);
+  }, [limit, refreshKey, paranetFilter]);
+
+  // Re-filter when filters change (without re-fetching)
+  useEffect(() => {
+    if (!allTriples) return;
+    
+    let filtered = allTriples;
+    
+    if (typeFilter) {
+      const matchingSubjects = new Set<string>();
+      for (const [subj, typeList] of typeMap) {
+        if (typeList.includes(typeFilter)) matchingSubjects.add(subj);
+      }
+      filtered = filtered.filter(t => matchingSubjects.has(t.subject) || matchingSubjects.has(t.object));
+    }
+    
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const matchingNodes = new Set<string>();
+      for (const t of allTriples) {
+        if (t.subject.toLowerCase().includes(q) || t.object.toLowerCase().includes(q)) {
+          matchingNodes.add(t.subject);
+          matchingNodes.add(t.object);
+        }
+      }
+      filtered = filtered.filter(t => matchingNodes.has(t.subject) || matchingNodes.has(t.object));
+    }
+    
+    if (showLiterals) {
+      setTriples(triplesWithLiteralsAsNodes(filtered));
+    } else {
+      setTriples(filtered.filter(t => isResourceObject(t.object)));
+    }
+  }, [typeFilter, searchQuery, showLiterals, allTriples, typeMap]);
 
   useEffect(() => {
     loadGraph();
   }, [loadGraph]);
 
+  const handleNodeClick = useCallback((node: any) => {
+    if (!allTriples) return;
+    const uri = node.id || node.uri || node;
+    if (typeof uri !== 'string') return;
+    
+    const outgoing: Array<{ predicate: string; object: string }> = [];
+    const incoming: Array<{ subject: string; predicate: string }> = [];
+    
+    for (const t of allTriples) {
+      if (t.subject === uri) outgoing.push({ predicate: t.predicate, object: t.object });
+      if (t.object === uri) incoming.push({ subject: t.subject, predicate: t.predicate });
+    }
+    
+    setSelectedNode({
+      uri,
+      types: typeMap.get(uri) || [],
+      outgoing,
+      incoming,
+    });
+  }, [allTriples, typeMap]);
+
   return (
-    <div className="card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
-        <span className="card-title" style={{ marginBottom: 0 }}>Full knowledge graph</span>
-        <select
-          className="input"
-          style={{ width: 'auto', minWidth: 100 }}
-          value={limit}
-          onChange={(e) => setLimit(Number(e.target.value))}
-        >
-          {GRAPH_LIMITS.map((n) => (
-            <option key={n} value={n}>Limit {n}</option>
-          ))}
-        </select>
-        <button className="btn btn-ghost btn-sm" onClick={() => setRefreshKey((k) => k + 1)} disabled={loading}>
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
-        {triples && !loading && (
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {triples.length} triples (all shown; literals as nodes)
-          </span>
-        )}
+    <div className="graph-explorer-layout">
+      <div className="graph-explorer-main">
+        <div className="card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', height: '100%' }}>
+          {/* Toolbar */}
+          <div className="graph-toolbar">
+            <div className="graph-toolbar-row">
+              <input
+                type="text"
+                className="input"
+                placeholder="Search nodes..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{ width: 180 }}
+              />
+              <select
+                className="input"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                style={{ width: 'auto', minWidth: 140 }}
+              >
+                {TYPE_FILTERS.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+              <select
+                className="input"
+                value={paranetFilter}
+                onChange={(e) => { setParanetFilter(e.target.value); setRefreshKey(k => k + 1); }}
+                style={{ width: 'auto', minWidth: 120 }}
+              >
+                <option value="">All Paranets</option>
+                {paranets.map((p: any) => (
+                  <option key={p.id} value={p.uri}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="graph-toolbar-row">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={showLiterals}
+                  onChange={(e) => setShowLiterals(e.target.checked)}
+                />
+                Show literals
+              </label>
+              <select
+                className="input"
+                style={{ width: 'auto', minWidth: 100 }}
+                value={limit}
+                onChange={(e) => { setLimit(Number(e.target.value)); setRefreshKey(k => k + 1); }}
+              >
+                {GRAPH_LIMITS.map((n) => (
+                  <option key={n} value={n}>Limit {n}</option>
+                ))}
+              </select>
+              <button className="btn btn-ghost btn-sm" onClick={() => setRefreshKey((k) => k + 1)} disabled={loading}>
+                {loading ? 'Loading…' : 'Refresh'}
+              </button>
+              {triples && !loading && (
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {triples.length} triples
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Legend */}
+          <div className="graph-legend">
+            {TYPE_FILTERS.slice(1).map((t) => (
+              <span key={t.value} className="graph-legend-item">
+                <span className="graph-legend-dot" style={{ background: TYPE_COLORS[t.value] || TYPE_COLORS.default }} />
+                {t.label}
+              </span>
+            ))}
+          </div>
+
+          {/* Graph */}
+          {error && <div style={{ padding: 16, color: 'var(--error)' }}>{error}</div>}
+          {loading && !triples && <div className="loading" style={{ minHeight: 400 }}>Loading graph…</div>}
+          {triples && triples.length === 0 && !loading && (
+            <div className="empty-state" style={{ minHeight: 400 }}>No triples match the current filters</div>
+          )}
+          {triples && triples.length > 0 && (
+            <div style={{ flex: 1, minHeight: 400, background: 'var(--bg-input)' }}>
+              <RdfGraph
+                data={triples}
+                format="triples"
+                options={{
+                  labelMode: 'humanized',
+                  renderer: '2d',
+                  hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
+                }}
+                style={{ width: '100%', height: '100%' }}
+                onNodeClick={handleNodeClick}
+              >
+                <GraphZoomToFit />
+              </RdfGraph>
+            </div>
+          )}
+        </div>
       </div>
-      {error && (
-        <div style={{ padding: 16, color: 'var(--error)' }}>{error}</div>
-      )}
-      {loading && !triples && (
-        <div className="loading" style={{ minHeight: 400 }}>Loading graph…</div>
-      )}
-      {triples && triples.length === 0 && !loading && (
-        <div className="empty-state" style={{ minHeight: 400 }}>No triples in the store</div>
-      )}
-      {triples && triples.length > 0 && (
-        <div style={{ height: 600, minHeight: 400, background: 'var(--bg-input)' }}>
-          <RdfGraph
-            data={triples}
-            format="triples"
-            options={{
-              labelMode: 'humanized',
-              renderer: '2d',
-              hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
-            }}
-            style={{ width: '100%', height: '100%' }}
-            onNodeClick={(node) => console.log('Node:', node)}
-          >
-            <GraphZoomToFit />
-          </RdfGraph>
+
+      {/* Details Panel */}
+      {selectedNode && (
+        <div className="graph-details-panel">
+          <div className="graph-details-header">
+            <h3>Node Details</h3>
+            <button className="btn btn-ghost btn-sm" onClick={() => setSelectedNode(null)}>×</button>
+          </div>
+          <div className="graph-details-body">
+            <div className="graph-details-section">
+              <div className="graph-details-label">URI</div>
+              <div className="graph-details-value mono">{selectedNode.uri}</div>
+            </div>
+            
+            {selectedNode.types.length > 0 && (
+              <div className="graph-details-section">
+                <div className="graph-details-label">Types</div>
+                {selectedNode.types.map((t, i) => (
+                  <div key={i} className="graph-details-value">
+                    <span className="graph-legend-dot" style={{ background: TYPE_COLORS[t] || TYPE_COLORS.default }} />
+                    {shortLabel(t)}
+                  </div>
+                ))}
+              </div>
+            )}
+            
+            {selectedNode.outgoing.length > 0 && (
+              <div className="graph-details-section">
+                <div className="graph-details-label">Properties ({selectedNode.outgoing.length})</div>
+                <div className="graph-details-triples">
+                  {selectedNode.outgoing.slice(0, 20).map((t, i) => (
+                    <div key={i} className="graph-details-triple">
+                      <span className="predicate">{shortLabel(t.predicate)}</span>
+                      <span className="object" title={t.object}>{shortLabel(t.object)}</span>
+                    </div>
+                  ))}
+                  {selectedNode.outgoing.length > 20 && (
+                    <div className="graph-details-more">+{selectedNode.outgoing.length - 20} more</div>
+                  )}
+                </div>
+              </div>
+            )}
+            
+            {selectedNode.incoming.length > 0 && (
+              <div className="graph-details-section">
+                <div className="graph-details-label">Referenced by ({selectedNode.incoming.length})</div>
+                <div className="graph-details-triples">
+                  {selectedNode.incoming.slice(0, 10).map((t, i) => (
+                    <div key={i} className="graph-details-triple">
+                      <span className="subject" title={t.subject}>{shortLabel(t.subject)}</span>
+                      <span className="predicate">{shortLabel(t.predicate)}</span>
+                    </div>
+                  ))}
+                  {selectedNode.incoming.length > 10 && (
+                    <div className="graph-details-more">+{selectedNode.incoming.length - 10} more</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

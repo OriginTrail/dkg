@@ -314,15 +314,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   });
 
   const apiPort = config.apiPort || 0;
+  const apiHost = config.apiHost || '127.0.0.1';
   await new Promise<void>((resolve) => {
-    server.listen(apiPort, '127.0.0.1', () => resolve());
+    server.listen(apiPort, apiHost, () => resolve());
   });
   const boundPort = (server.address() as any).port as number;
   await writeApiPort(boundPort);
   await writePid(process.pid);
 
-  log(`API listening on http://127.0.0.1:${boundPort}`);
-  log(`Node UI: http://127.0.0.1:${boundPort}/ui`);
+  log(`API listening on http://${apiHost}:${boundPort}`);
+  log(`Node UI: http://${apiHost}:${boundPort}/ui`);
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
 
   // Graceful shutdown
