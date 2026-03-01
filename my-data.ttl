@@ -1,0 +1,32 @@
+@prefix schema: <http://schema.org/> .
+@prefix dkg:    <http://dkg.io/ontology/> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+
+<did:dkg:testnet:zivojin>
+  a schema:Person, dkg:NodeOperator ;
+  schema:name "Zivojin" ;
+  schema:description "Early DKG V9 testnet explorer, running an edge node connected to the first relay" ;
+  dkg:nodeRole "edge" ;
+  dkg:networkGenesis "2026-02-22"^^xsd:date ;
+  schema:knowsAbout <did:dkg:concept:decentralized-knowledge> ,
+                    <did:dkg:concept:verifiable-ai> .
+
+<did:dkg:concept:decentralized-knowledge>
+  a schema:DefinedTerm ;
+  schema:name "Decentralized Knowledge Graph" ;
+  schema:description "A peer-to-peer network where knowledge is published, verified via merkle proofs, and shared across autonomous agents" ;
+  schema:url "https://origintrail.io" .
+
+<did:dkg:concept:verifiable-ai>
+  a schema:DefinedTerm ;
+  schema:name "Verifiable AI" ;
+  schema:description "AI systems grounded in provenance-tracked, cryptographically verifiable knowledge rather than opaque training data" ;
+  dkg:relatedTo <did:dkg:concept:decentralized-knowledge> .
+
+<did:dkg:testnet:first-publish>
+  a schema:Event ;
+  schema:name "First Knowledge Publish on V9 Testnet" ;
+  schema:description "Zivojin's inaugural knowledge asset, marking the beginning of the V9 testnet era" ;
+  schema:startDate "2026-02-27"^^xsd:date ;
+  schema:participant <did:dkg:testnet:zivojin> ;
+  schema:location "The Decentralized Knowledge Graph" .

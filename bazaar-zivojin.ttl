@@ -1,0 +1,19 @@
+@prefix schema: <https://schema.org/> .
+@prefix dkg: <https://dkg.network/ontology#> .
+@prefix e: <did:dkg:entity:> .
+
+e:expert-zivojin
+    a dkg:ExpertCard ;
+    schema:name "Zivojin" ;
+    dkg:domain "Blockchain History" ;
+    dkg:expertise "Origin of decentralized knowledge graphs" ;
+    schema:description "First node on the DKG V9 testnet. Knows where the bodies are buried." .
+
+e:bitcoin-genesis
+    a schema:Article ;
+    schema:name "The Genesis Block" ;
+    schema:author "Satoshi Nakamoto" ;
+    schema:datePublished "2009-01-03" ;
+    schema:description "Chancellor on brink of second bailout for banks" ;
+    dkg:contributedBy e:expert-zivojin ;
+    dkg:domain "Blockchain History" .

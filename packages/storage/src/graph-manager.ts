@@ -3,6 +3,8 @@ import {
   paranetDataGraphUri,
   paranetMetaGraphUri,
   paranetPrivateGraphUri,
+  paranetWorkspaceGraphUri,
+  paranetWorkspaceMetaGraphUri,
 } from '@dkg/core';
 
 export class GraphManager {
@@ -24,10 +26,20 @@ export class GraphManager {
     return paranetPrivateGraphUri(paranetId);
   }
 
+  workspaceGraphUri(paranetId: string): string {
+    return paranetWorkspaceGraphUri(paranetId);
+  }
+
+  workspaceMetaGraphUri(paranetId: string): string {
+    return paranetWorkspaceMetaGraphUri(paranetId);
+  }
+
   async ensureParanet(paranetId: string): Promise<void> {
     await this.store.createGraph(this.dataGraphUri(paranetId));
     await this.store.createGraph(this.metaGraphUri(paranetId));
     await this.store.createGraph(this.privateGraphUri(paranetId));
+    await this.store.createGraph(this.workspaceGraphUri(paranetId));
+    await this.store.createGraph(this.workspaceMetaGraphUri(paranetId));
   }
 
   async listParanets(): Promise<string[]> {
@@ -41,7 +53,11 @@ export class GraphManager {
           ? rest.slice(0, -6)
           : rest.endsWith('/_private')
             ? rest.slice(0, -9)
-            : rest;
+            : rest.endsWith('/_workspace_meta')
+              ? rest.slice(0, -16)
+              : rest.endsWith('/_workspace')
+                ? rest.slice(0, -11)
+                : rest;
         paranets.add(id);
       }
     }
@@ -56,5 +72,7 @@ export class GraphManager {
     await this.store.dropGraph(this.dataGraphUri(paranetId));
     await this.store.dropGraph(this.metaGraphUri(paranetId));
     await this.store.dropGraph(this.privateGraphUri(paranetId));
+    await this.store.dropGraph(this.workspaceGraphUri(paranetId));
+    await this.store.dropGraph(this.workspaceMetaGraphUri(paranetId));
   }
 }

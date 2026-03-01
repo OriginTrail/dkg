@@ -1,7 +1,7 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
-import { paranetDataGraphUri, paranetMetaGraphUri } from '@dkg/core';
+import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri } from '@dkg/core';
 import { validateReadOnlySparql } from './sparql-guard.js';
 
 /**
@@ -29,7 +29,21 @@ export class DKGQueryEngine implements QueryEngine {
 
     if (options?.paranetId && !sparql.toLowerCase().includes('from ')) {
       const dataGraph = paranetDataGraphUri(options.paranetId);
-      effectiveSparql = wrapWithGraph(sparql, dataGraph);
+      const workspaceGraph = paranetWorkspaceGraphUri(options.paranetId);
+      if (options.includeWorkspace) {
+        const dataSparql = wrapWithGraph(sparql, dataGraph);
+        const workspaceSparql = wrapWithGraph(sparql, workspaceGraph);
+        const dataResult = await this.store.query(dataSparql);
+        const wsResult = await this.store.query(workspaceSparql);
+        const dataBindings = dataResult.type === 'bindings' ? dataResult.bindings : [];
+        const wsBindings = wsResult.type === 'bindings' ? wsResult.bindings : [];
+        return { bindings: [...dataBindings, ...wsBindings] };
+      }
+      if (options.graphSuffix === '_workspace') {
+        effectiveSparql = wrapWithGraph(sparql, workspaceGraph);
+      } else {
+        effectiveSparql = wrapWithGraph(sparql, dataGraph);
+      }
     }
 
     const result = await this.store.query(effectiveSparql);
@@ -146,3 +160,4 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
 
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
+

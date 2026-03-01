@@ -1,0 +1,260 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { OxigraphStore, type Quad } from '@dkg/storage';
+import { GraphManager } from '@dkg/storage';
+import { MockChainAdapter } from '@dkg/chain';
+import { TypedEventBus } from '@dkg/core';
+import { generateEd25519Keypair } from '@dkg/core';
+import {
+  DKGPublisher,
+  WorkspaceHandler,
+  type WriteToWorkspaceOptions,
+} from '../src/index.js';
+import { ethers } from 'ethers';
+
+const PARANET = 'test-workspace';
+const DATA_GRAPH = `did:dkg:paranet:${PARANET}`;
+const WORKSPACE_GRAPH = `did:dkg:paranet:${PARANET}/_workspace`;
+const WORKSPACE_META_GRAPH = `did:dkg:paranet:${PARANET}/_workspace_meta`;
+const ENTITY = 'urn:test:entity:1';
+
+function q(s: string, p: string, o: string, g = ''): Quad {
+  return { subject: s, predicate: p, object: o, graph: g };
+}
+
+describe('Workspace: writeToWorkspace', () => {
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+  const wallet = ethers.Wallet.createRandom();
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  it('stores quads in workspace and workspace_meta, returns encoded message', async () => {
+    const quads: Quad[] = [
+      q(ENTITY, 'http://schema.org/name', '"Test"'),
+      q(ENTITY, 'http://schema.org/description', '"Workspace draft"'),
+    ];
+    const opts: WriteToWorkspaceOptions = {
+      publisherPeerId: '12D3KooWTest',
+    };
+
+    const result = await publisher.writeToWorkspace(PARANET, quads, opts);
+
+    expect(result.workspaceOperationId).toMatch(/^ws-\d+-[a-z0-9]+$/);
+    expect(result.message).toBeInstanceOf(Uint8Array);
+    expect(result.message.length).toBeGreaterThan(0);
+
+    const workspaceResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(workspaceResult.type).toBe('bindings');
+    if (workspaceResult.type === 'bindings') {
+      expect(workspaceResult.bindings.length).toBe(1);
+      expect(workspaceResult.bindings[0]['o']).toContain('Test');
+    }
+
+    const metaResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${WORKSPACE_META_GRAPH}> { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> } }`,
+    );
+    expect(metaResult.type).toBe('bindings');
+    if (metaResult.type === 'bindings') {
+      expect(metaResult.bindings.length).toBe(1);
+    }
+  });
+
+  it('rejects write when rootEntity already in workspace (Rule 4)', async () => {
+    const quads1 = [q(ENTITY, 'http://schema.org/name', '"First"')];
+    await publisher.writeToWorkspace(PARANET, quads1, { publisherPeerId: 'peer1' });
+
+    const quads2 = [q(ENTITY, 'http://schema.org/name', '"Second"')];
+    await expect(
+      publisher.writeToWorkspace(PARANET, quads2, { publisherPeerId: 'peer2' }),
+    ).rejects.toThrow(/Rule 4|Workspace validation failed/);
+  });
+
+  it('rejects write when rootEntity already in data graph (Rule 4)', async () => {
+    await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Published"')],
+    });
+
+    const quads = [q(ENTITY, 'http://schema.org/description', '"In workspace"')];
+    await expect(
+      publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' }),
+    ).rejects.toThrow(/Rule 4|Workspace validation failed/);
+  });
+});
+
+describe('Workspace: enshrineFromWorkspace', () => {
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+  const wallet = ethers.Wallet.createRandom();
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  it('reads workspace and publishes to data graph (selection: all)', async () => {
+    const quads = [
+      q(ENTITY, 'http://schema.org/name', '"Enshrine Me"'),
+      q(ENTITY, 'http://schema.org/description', '"Will be enshrined"'),
+    ];
+    await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
+
+    const result = await publisher.enshrineFromWorkspace(PARANET, 'all');
+
+    expect(result.status).toBe('confirmed');
+    expect(result.kaManifest.length).toBe(1);
+    expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
+
+    const dataResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(dataResult.type).toBe('bindings');
+    if (dataResult.type === 'bindings') {
+      expect(dataResult.bindings.length).toBe(1);
+      expect(dataResult.bindings[0]['o']).toContain('Enshrine Me');
+    }
+  });
+
+  it('enshrine with rootEntities filter only enshrines those entities', async () => {
+    const entity1 = 'urn:test:entity:1';
+    const entity2 = 'urn:test:entity:2';
+    await publisher.writeToWorkspace(PARANET, [
+      q(entity1, 'http://schema.org/name', '"One"'),
+      q(entity2, 'http://schema.org/name', '"Two"'),
+    ], { publisherPeerId: 'peer1' });
+
+    const result = await publisher.enshrineFromWorkspace(PARANET, {
+      rootEntities: [entity1],
+    });
+
+    expect(result.kaManifest.length).toBe(1);
+    expect(result.kaManifest[0].rootEntity).toBe(entity1);
+
+    const oneInData = await store.query(
+      `ASK { GRAPH <${DATA_GRAPH}> { <${entity1}> <http://schema.org/name> ?o } }`,
+    );
+    expect(oneInData.type).toBe('boolean');
+    if (oneInData.type === 'boolean') expect(oneInData.value).toBe(true);
+
+    const twoInWorkspace = await store.query(
+      `ASK { GRAPH <${WORKSPACE_GRAPH}> { <${entity2}> <http://schema.org/name> ?o } }`,
+    );
+    expect(twoInWorkspace.type).toBe('boolean');
+    if (twoInWorkspace.type === 'boolean') expect(twoInWorkspace.value).toBe(true);
+  });
+
+  it('clearWorkspaceAfter removes enshrined rootEntities from workspace', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Clear After"')];
+    await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
+
+    await publisher.enshrineFromWorkspace(PARANET, 'all', {
+      clearWorkspaceAfter: true,
+    });
+
+    const stillInWorkspace = await store.query(
+      `ASK { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> ?p ?o } }`,
+    );
+    expect(stillInWorkspace.type).toBe('boolean');
+    if (stillInWorkspace.type === 'boolean') expect(stillInWorkspace.value).toBe(false);
+  });
+
+  it('throws when workspace is empty for selection', async () => {
+    await expect(
+      publisher.enshrineFromWorkspace(PARANET, 'all'),
+    ).rejects.toThrow(/No quads in workspace/);
+  });
+});
+
+describe('WorkspaceHandler', () => {
+  let store: OxigraphStore;
+  let handler: WorkspaceHandler;
+  let workspaceOwned: Map<string, Set<string>>;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    workspaceOwned = new Map();
+    handler = new WorkspaceHandler(store, new TypedEventBus(), {
+      workspaceOwnedEntities: workspaceOwned,
+    });
+  });
+
+  it('stores valid workspace message to workspace and workspace_meta', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    // Rule 1 expects paranet data graph in payload; handler then assigns workspace graph on insert
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Handler Test" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-handler-1',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureParanet(PARANET);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Handler Test');
+    }
+    expect(workspaceOwned.get(PARANET)?.has(ENTITY)).toBe(true);
+  });
+
+  it('rejects message that violates Rule 4 (rootEntity already in workspace)', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    workspaceOwned.set(PARANET, new Set([ENTITY]));
+
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Duplicate" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-dup',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureParanet(PARANET);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const askResult = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${ENTITY}> ?p ?o } }`,
+    );
+    expect(askResult.type).toBe('boolean');
+    if (askResult.type === 'boolean') {
+      expect(askResult.value).toBe(false);
+    }
+  });
+});

@@ -97,6 +97,36 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.length).toBe(2);
   });
 
+  it('queries workspace graph when graphSuffix is _workspace', async () => {
+    const workspaceGraph = `did:dkg:paranet:${PARANET}/_workspace`;
+    await store.insert([
+      q('urn:ws:entity:1', 'http://schema.org/name', '"Workspace Only"', workspaceGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { paranetId: PARANET, graphSuffix: '_workspace' },
+    );
+    expect(result.bindings.length).toBe(1);
+    expect(result.bindings[0]['name']).toContain('Workspace Only');
+  });
+
+  it('queries union of data and workspace when includeWorkspace is true', async () => {
+    const workspaceGraph = `did:dkg:paranet:${PARANET}/_workspace`;
+    await store.insert([
+      q('urn:ws:entity:union', 'http://schema.org/name', '"In Workspace"', workspaceGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { paranetId: PARANET, includeWorkspace: true },
+    );
+    const names = result.bindings.map((r) => String(r['name']));
+    expect(names.some((n) => n.includes('ImageBot'))).toBe(true);
+    expect(names.some((n) => n.includes('In Workspace'))).toBe(true);
+    expect(result.bindings.length).toBe(2);
+  });
+
   it('rejects INSERT queries', async () => {
     await expect(
       engine.query('INSERT DATA { <s> <p> <o> }'),

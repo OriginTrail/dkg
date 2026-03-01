@@ -31,3 +31,15 @@ export function paranetMetaGraphUri(paranetId: string): string {
 export function paranetPrivateGraphUri(paranetId: string): string {
   return `did:dkg:paranet:${paranetId}/_private`;
 }
+
+export function paranetWorkspaceGraphUri(paranetId: string): string {
+  return `did:dkg:paranet:${paranetId}/_workspace`;
+}
+
+export function paranetWorkspaceMetaGraphUri(paranetId: string): string {
+  return `did:dkg:paranet:${paranetId}/_workspace_meta`;
+}
+
+export function paranetWorkspaceTopic(paranetId: string): string {
+  return `dkg/paranet/${paranetId}/workspace`;
+}

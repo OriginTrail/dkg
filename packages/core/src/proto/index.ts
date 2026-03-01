@@ -40,3 +40,10 @@ export {
   encodeAgentMessage,
   decodeAgentMessage,
 } from './message.js';
+
+export {
+  type WorkspacePublishRequestMsg,
+  type WorkspaceManifestEntryMsg,
+  encodeWorkspacePublishRequest,
+  decodeWorkspacePublishRequest,
+} from './workspace.js';

@@ -1,0 +1,9 @@
+@prefix schema: <https://schema.org/> .
+@prefix dkg: <did:dkg:entity:> .
+
+dkg:zivojin-demo-2
+    a schema:Thing, schema:CreativeWork ;
+    schema:name "DKG V9 Cross-Network Test" ;
+    schema:description "Second entity to test gossip propagation to MassContributor" ;
+    schema:author "Zivojin" ;
+    schema:dateCreated "2026-02-26" .

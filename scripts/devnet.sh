@@ -60,7 +60,12 @@ start_hardhat() {
   mkdir -p "$DEVNET_DIR/hardhat"
 
   cd "$REPO_ROOT/packages/evm-module"
-  npx hardhat node --port "$HARDHAT_PORT" \
+
+  # Remove stale deployment artifacts so the fresh chain starts clean
+  rm -f "$REPO_ROOT/packages/evm-module/deployments/hardhat_contracts.json"
+  rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
+
+  npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
   local hh_pid=$!
   echo "$hh_pid" > "$pidfile"
@@ -96,15 +101,17 @@ deploy_contracts() {
     npx hardhat deploy --network localhost \
     > "$DEVNET_DIR/hardhat/deploy.log" 2>&1
 
-  # Extract Hub address from deployment
+  # Extract Hub address from deployment log
   local hub_addr
-  hub_addr=$(grep -o '"Hub":"0x[a-fA-F0-9]*"' "$REPO_ROOT/packages/evm-module/deployments/hardhat_contracts.json" 2>/dev/null \
-    | head -1 | cut -d'"' -f4 || echo "")
+  hub_addr=$(grep 'deploying "Hub"' "$DEVNET_DIR/hardhat/deploy.log" 2>/dev/null \
+    | grep -o 'deployed at 0x[a-fA-F0-9]*' | grep -o '0x[a-fA-F0-9]*' || echo "")
 
   if [ -z "$hub_addr" ]; then
-    # Try alternate extraction from deploy log
-    hub_addr=$(grep "Hub deployed" "$DEVNET_DIR/hardhat/deploy.log" 2>/dev/null \
-      | grep -o '0x[a-fA-F0-9]*' | head -1 || echo "")
+    # Fallback: try the localhost_contracts.json written by the deploy
+    hub_addr=$(node -e "
+      try{const d=JSON.parse(require('fs').readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+      console.log(d.contracts.Hub?.evmAddress||'')}catch{console.log('')}
+    " 2>/dev/null || echo "")
   fi
 
   if [ -z "$hub_addr" ]; then
@@ -134,6 +141,13 @@ create_node_config() {
     node_role="core"
   fi
 
+  # Node 1 (relay) sets relay="none" to prevent connecting to testnet relays.
+  # Other nodes get their relay set later in start_node() once node1 is running.
+  local relay_value=""
+  if [ "$node_num" -eq 1 ]; then
+    relay_value='"relay": "none",'
+  fi
+
   # Create config
   cat > "$node_dir/config.json" <<EOCONF
 {
@@ -141,6 +155,7 @@ create_node_config() {
   "apiPort": ${api_port},
   "listenPort": ${libp2p_port},
   "nodeRole": "${node_role}",
+  ${relay_value}
   "paranets": ["devnet-test"],
   "chain": {
     "type": "evm",
@@ -151,13 +166,21 @@ create_node_config() {
 }
 EOCONF
 
-  # Create wallets.json with hardhat key
+  # Derive the Ethereum address from the private key
+  local wallet_address
+  wallet_address=$(node -e "
+    const { ethers } = require('ethers');
+    const w = new ethers.Wallet('${HARDHAT_KEYS[$key_idx]}');
+    console.log(w.address);
+  " 2>/dev/null)
+
+  # Create wallets.json with hardhat key and derived address
   cat > "$node_dir/wallets.json" <<EOWAL
 {
   "wallets": [
     {
       "privateKey": "${HARDHAT_KEYS[$key_idx]}",
-      "address": "auto"
+      "address": "${wallet_address}"
     }
   ]
 }
@@ -169,7 +192,7 @@ EOWAL
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
-  local pidfile="$node_dir/daemon.pid"
+  local pidfile="$node_dir/devnet.pid"
 
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     log "Node $node_num already running (PID $(cat "$pidfile"))"
@@ -183,7 +206,6 @@ start_node() {
 
   # Update config with relay address if available
   if [ -n "$relay_arg" ]; then
-    # Use node to patch JSON (portable)
     node -e "
       const fs = require('fs');
       const cfg = JSON.parse(fs.readFileSync('$node_dir/config.json','utf8'));
@@ -191,6 +213,9 @@ start_node() {
       fs.writeFileSync('$node_dir/config.json', JSON.stringify(cfg, null, 2));
     "
   fi
+
+  # Remove any stale daemon.pid so the CLI doesn't think it's already running
+  rm -f "$node_dir/daemon.pid"
 
   log "Starting node $node_num..."
   DKG_HOME="$node_dir" \
@@ -272,7 +297,7 @@ cmd_stop() {
   log "Stopping devnet..."
 
   # Stop nodes
-  for pidfile in "$DEVNET_DIR"/node*/daemon.pid; do
+  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
     [ -f "$pidfile" ] || continue
     local pid
     pid=$(cat "$pidfile")
@@ -311,7 +336,7 @@ cmd_status() {
     local node_num
     node_num=$(basename "$node_dir" | sed 's/node//')
     local api_port=$((API_PORT_BASE + node_num - 1))
-    local pidfile="$node_dir/daemon.pid"
+    local pidfile="$node_dir/devnet.pid"
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
       local status_json

@@ -271,6 +271,45 @@
   },
   {
     "inputs": [],
+    "name": "DECAY_FACTOR_BPS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "ENDOWMENT_EPOCHS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "ENDOWMENT_MULTIPLIER",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "askStorage",
     "outputs": [
       {
@@ -356,6 +395,80 @@
         "internalType": "uint256",
         "name": "batchId",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint32",
+        "name": "kaCount",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "publisherNodeIdentityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "merkleRoot",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint64",
+        "name": "publicByteSize",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "publisherNodeR",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "publisherNodeVS",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "r",
+        "type": "bytes32[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "vs",
+        "type": "bytes32[]"
+      }
+    ],
+    "name": "batchMintKnowledgeAssetsPermanent",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "batchId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "startKAId",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "endKAId",
+        "type": "uint64"
       }
     ],
     "stateMutability": "nonpayable",

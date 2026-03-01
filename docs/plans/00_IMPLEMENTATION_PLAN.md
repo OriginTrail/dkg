@@ -99,7 +99,13 @@ chain types extended with `CreateParanetParams` (name/description/accessPolicy),
 
 - **Spec**: [SPEC_PARANET_LIFECYCLE.md](../specs/SPEC_PARANET_LIFECYCLE.md)
 
-### 2.4 Capacity metering & dynamic pricing — **NEEDS SPEC** (exists as draft)
+### 2.4 Workspace graph (no-finality build area) — **IN PROGRESS**
+Per-paranet workspace graph (`/_workspace` + `/_workspace_meta`) so agents can build and replicate knowledge without chain cost, then **enshrine** (publish with finality) when ready. Replication same as publish (GossipSub on workspace topic). Challenges (message ordering, Rule 4 consistency, sync semantics, enshrine coordination, growth, private quads, **Byzantine node / entity exclusivity**) are documented with mitigations in the plan.
+
+- **Plan**: [PLAN_WORKSPACE_GRAPH.md](./PLAN_WORKSPACE_GRAPH.md)
+- **Implemented**: Constants + GraphManager (workspace/workspace_meta URIs and topic); proto `WorkspacePublishRequest`; `Publisher.writeToWorkspace` + `enshrineFromWorkspace`; `WorkspaceHandler` for workspace topic; agent subscribes to both publish and workspace topics, exposes `writeToWorkspace`/`enshrineFromWorkspace`; query options `graphSuffix: '_workspace'` and `includeWorkspace: true`. **Tests**: unit tests in `@dkg/publisher` (workspace.test.ts: writeToWorkspace, enshrineFromWorkspace, WorkspaceHandler), `@dkg/query` (query-engine.test.ts: graphSuffix and includeWorkspace), proto round-trip in `@dkg/core`; e2e in `@dkg/agent` (e2e-workspace.test.ts: 2-node write → GossipSub replicate → query workspace → includeWorkspace → enshrine → query data). Sync extension (workspace on connect) still to do; **test in a real use case** next.
+
+### 2.5 Capacity metering & dynamic pricing — **NEEDS SPEC** (exists as draft)
 Gas-like metering for DKG resources (storage, CPU, bandwidth) with
 dynamic pricing. Foundation for pay-per-query and resource-aware
 node scoring.
@@ -270,7 +276,8 @@ be gitignored or test setup made deterministic.
 | **P3** | 1.4 Profile exchange | Lightweight alternative to full sync |
 | **P3** | 1.6 Relay auto-discovery | Better node bootstrapping UX |
 | **P4** | 4.1 Payment channels | Agent economy |
-| **P4** | 2.4 Capacity metering | Resource-aware pricing |
+| **P2** | 2.4 Workspace graph | No-finality build area; test in use case, address challenges as they arise |
+| **P4** | 2.5 Capacity metering | Resource-aware pricing |
 | **P4** | 6.1–6.3 Extensions | Neural queries, pipelines, viz |
 | **P5** | 3.8 Solana adapter | Second chain support |
 

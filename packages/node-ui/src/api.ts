@@ -4,6 +4,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
+import type { MetricsCollector } from './metrics-collector.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -28,12 +29,22 @@ export async function handleNodeUIRequest(
   db: DashboardDB,
   staticDir: string,
   chatAssistant?: ChatAssistant,
+  metricsCollector?: MetricsCollector,
 ): Promise<boolean> {
   const path = url.pathname;
 
   // --- Metrics ---
 
   if (req.method === 'GET' && path === '/api/metrics') {
+    if (metricsCollector) {
+      try {
+        const live = await metricsCollector.collect();
+        return json(res, 200, live);
+      } catch {
+        const snap = db.getLatestSnapshot();
+        return json(res, 200, snap ?? {});
+      }
+    }
     const snap = db.getLatestSnapshot();
     return json(res, 200, snap ?? {});
   }

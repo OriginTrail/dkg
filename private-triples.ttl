@@ -1,0 +1,8 @@
+@prefix schema: <http://schema.org/> .
+@prefix dkg:    <http://dkg.io/ontology/> .
+
+<did:dkg:testnet:zivojin-secret-project>
+  schema:abstract "Nightingale uses verifiable knowledge graphs to ground LLM reasoning in cryptographically provable facts" ;
+  dkg:internalNote "Budget: 500k TRAC allocated from testnet treasury" ;
+  dkg:secretIngredient "A custom merkle tree that also encodes temporal provenance" ;
+  dkg:status "active" .

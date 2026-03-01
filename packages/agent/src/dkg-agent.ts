@@ -1,7 +1,7 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetDataGraphUri, paranetMetaGraphUri,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetDataGraphUri, paranetMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
@@ -10,7 +10,7 @@ import {
 import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
 import {
-  DKGPublisher, PublishHandler, ChainEventPoller, AccessHandler, AccessClient,
+  DKGPublisher, PublishHandler, WorkspaceHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
   type PublishResult, type PhaseCallback,
 } from '@dkg/publisher';
@@ -93,6 +93,9 @@ export class DKGAgent {
   router!: ProtocolRouter;
   readonly eventBus: TypedEventBus;
   private readonly chain: ChainAdapter;
+  /** Shared workspace-owned root entities per paranet (Rule 4). Used by publisher and workspace handler. */
+  private readonly workspaceOwnedEntities: Map<string, Set<string>>;
+  private workspaceHandler?: WorkspaceHandler;
   private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
@@ -109,6 +112,7 @@ export class DKGAgent {
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
     chain: ChainAdapter,
+    workspaceOwnedEntities: Map<string, Set<string>>,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -116,6 +120,7 @@ export class DKGAgent {
     this.store = store;
     this.publisher = publisher;
     this.queryEngine = queryEngine;
+    this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.eventBus = eventBus;
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
@@ -185,17 +190,20 @@ export class DKGAgent {
     };
 
     const node = new DKGNode(nodeConfig);
+    const workspaceOwnedEntities = new Map<string, Set<string>>();
     const publisher = new DKGPublisher({
       store,
       chain,
       eventBus,
       keypair,
       publisherPrivateKey: opKeys?.[0],
+      workspaceOwnedEntities,
     });
     const queryEngine = new DKGQueryEngine(store);
 
     return new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
+      workspaceOwnedEntities,
     );
   }
 
@@ -616,10 +624,51 @@ export class DKGAgent {
     return result;
   }
 
-  async query(sparql: string, paranetId?: string) {
+  /**
+   * Write quads to the paranet's workspace graph (no chain, no TRAC). Replicates via GossipSub workspace topic.
+   */
+  async writeToWorkspace(paranetId: string, quads: Quad[]): Promise<{ workspaceOperationId: string }> {
+    const ctx = createOperationContext('workspace');
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
+    const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+    });
+    const topic = paranetWorkspaceTopic(paranetId);
+    try {
+      await this.gossip.publish(topic, message);
+    } catch {
+      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    }
+    return { workspaceOperationId };
+  }
+
+  /**
+   * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
+   */
+  async enshrineFromWorkspace(
+    paranetId: string,
+    selection: 'all' | { rootEntities: string[] },
+    options?: { clearWorkspaceAfter?: boolean },
+  ): Promise<PublishResult> {
+    return this.publisher.enshrineFromWorkspace(paranetId, selection, {
+      operationCtx: createOperationContext('enshrine'),
+      clearWorkspaceAfter: options?.clearWorkspaceAfter,
+    });
+  }
+
+  async query(
+    sparql: string,
+    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean },
+  ) {
+    const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
     const ctx = createOperationContext('query');
-    this.log.info(ctx, `Query on paranet="${paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
-    const result = await this.queryEngine.query(sparql, { paranetId });
+    this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
+    const result = await this.queryEngine.query(sparql, {
+      paranetId: opts.paranetId,
+      graphSuffix: opts.graphSuffix,
+      includeWorkspace: opts.includeWorkspace,
+    });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }
@@ -704,10 +753,13 @@ export class DKGAgent {
   }
 
   subscribeToParanet(paranetId: string): void {
-    const topic = paranetPublishTopic(paranetId);
-    this.gossip.subscribe(topic);
+    const publishTopic = paranetPublishTopic(paranetId);
+    const workspaceTopic = paranetWorkspaceTopic(paranetId);
 
-    this.gossip.onMessage(topic, async (_topic, data) => {
+    this.gossip.subscribe(publishTopic);
+    this.gossip.subscribe(workspaceTopic);
+
+    this.gossip.onMessage(publishTopic, async (_topic, data) => {
       try {
         const request = decodePublishRequest(data);
         const nquadsStr = new TextDecoder().decode(request.nquads);
@@ -721,6 +773,20 @@ export class DKGAgent {
         // Silently handle malformed broadcasts
       }
     });
+
+    this.gossip.onMessage(workspaceTopic, async (_topic, data, from) => {
+      const wh = this.getOrCreateWorkspaceHandler();
+      await wh.handle(data, from);
+    });
+  }
+
+  private getOrCreateWorkspaceHandler(): WorkspaceHandler {
+    if (!this.workspaceHandler) {
+      this.workspaceHandler = new WorkspaceHandler(this.store, this.eventBus, {
+        workspaceOwnedEntities: this.workspaceOwnedEntities,
+      });
+    }
+    return this.workspaceHandler;
   }
 
   /**

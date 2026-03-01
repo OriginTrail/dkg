@@ -201,3 +201,48 @@ function intLit(val: number): string {
 function dateLit(d: Date): string {
   return `"${d.toISOString()}"^^<${XSD}dateTime>`;
 }
+
+/** Workspace metadata: no UAL; stored in _workspace_meta graph. */
+export interface WorkspaceMetadata {
+  workspaceOperationId: string;
+  paranetId: string;
+  rootEntities: string[];
+  publisherPeerId: string;
+  timestamp: Date;
+}
+
+/**
+ * Generate RDF metadata triples for a workspace write.
+ * Stored in paranet's _workspace_meta graph (not _meta).
+ */
+export function generateWorkspaceMetadata(
+  meta: WorkspaceMetadata,
+  workspaceMetaGraph: string,
+): Quad[] {
+  const quads: Quad[] = [];
+  const subject = `urn:dkg:workspace:${meta.paranetId}:${meta.workspaceOperationId}`;
+
+  quads.push(
+    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, workspaceMetaGraph),
+    mq(
+      subject,
+      `${PROV}wasAttributedTo`,
+      lit(meta.publisherPeerId),
+      workspaceMetaGraph,
+    ),
+    mq(
+      subject,
+      `${DKG}publishedAt`,
+      dateLit(meta.timestamp),
+      workspaceMetaGraph,
+    ),
+  );
+
+  for (const rootEntity of meta.rootEntities) {
+    quads.push(
+      mq(subject, `${DKG}rootEntity`, rootEntity, workspaceMetaGraph),
+    );
+  }
+
+  return quads;
+}

@@ -1,0 +1,655 @@
+@prefix dkg: <urn:dkg:> .
+@prefix schema: <http://schema.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo: <http://www.w3.org/2003/01/geo/wgs84_pos#> .
+
+# === AI Research Organizations (50 triples) ===
+
+dkg:org-deepmind a schema:Organization ;
+  schema:name "DeepMind" ;
+  schema:foundingDate "2010-09-23"^^xsd:date ;
+  schema:parentOrganization dkg:org-alphabet ;
+  schema:location dkg:place-london ;
+  schema:knowsAbout dkg:field-reinforcement-learning, dkg:field-protein-folding .
+
+dkg:org-openai a schema:Organization ;
+  schema:name "OpenAI" ;
+  schema:foundingDate "2015-12-11"^^xsd:date ;
+  schema:location dkg:place-san-francisco ;
+  schema:knowsAbout dkg:field-llm, dkg:field-alignment, dkg:field-robotics .
+
+dkg:org-anthropic a schema:Organization ;
+  schema:name "Anthropic" ;
+  schema:foundingDate "2021-01-28"^^xsd:date ;
+  schema:location dkg:place-san-francisco ;
+  schema:knowsAbout dkg:field-alignment, dkg:field-interpretability .
+
+dkg:org-meta-ai a schema:Organization ;
+  schema:name "Meta AI" ;
+  schema:parentOrganization dkg:org-meta ;
+  schema:location dkg:place-menlo-park ;
+  schema:knowsAbout dkg:field-llm, dkg:field-computer-vision .
+
+dkg:org-alphabet a schema:Organization ;
+  schema:name "Alphabet Inc." ;
+  schema:foundingDate "2015-10-02"^^xsd:date ;
+  schema:location dkg:place-mountain-view .
+
+dkg:org-meta a schema:Organization ;
+  schema:name "Meta Platforms" ;
+  schema:foundingDate "2004-02-04"^^xsd:date .
+
+dkg:org-stability-ai a schema:Organization ;
+  schema:name "Stability AI" ;
+  schema:foundingDate "2019-01-01"^^xsd:date ;
+  schema:location dkg:place-london ;
+  schema:knowsAbout dkg:field-diffusion-models, dkg:field-generative-art .
+
+dkg:org-mistral a schema:Organization ;
+  schema:name "Mistral AI" ;
+  schema:foundingDate "2023-04-01"^^xsd:date ;
+  schema:location dkg:place-paris ;
+  schema:knowsAbout dkg:field-llm, dkg:field-mixture-of-experts .
+
+dkg:org-cohere a schema:Organization ;
+  schema:name "Cohere" ;
+  schema:foundingDate "2019-01-01"^^xsd:date ;
+  schema:location dkg:place-toronto ;
+  schema:knowsAbout dkg:field-llm, dkg:field-rag .
+
+dkg:org-huggingface a schema:Organization ;
+  schema:name "Hugging Face" ;
+  schema:foundingDate "2016-01-01"^^xsd:date ;
+  schema:location dkg:place-new-york ;
+  schema:knowsAbout dkg:field-open-source-ml, dkg:field-transformers .
+
+# === AI Research Fields (60 triples) ===
+
+dkg:field-reinforcement-learning a schema:DefinedTerm ;
+  schema:name "Reinforcement Learning" ;
+  schema:description "Learning through interaction with an environment via rewards and penalties" ;
+  schema:isPartOf dkg:field-machine-learning ;
+  owl:sameAs <https://en.wikipedia.org/wiki/Reinforcement_learning> .
+
+dkg:field-protein-folding a schema:DefinedTerm ;
+  schema:name "Protein Structure Prediction" ;
+  schema:description "Predicting the 3D structure of proteins from amino acid sequences" ;
+  schema:isPartOf dkg:field-computational-biology .
+
+dkg:field-llm a schema:DefinedTerm ;
+  schema:name "Large Language Models" ;
+  schema:description "Neural networks trained on vast text corpora for language understanding and generation" ;
+  schema:isPartOf dkg:field-nlp ;
+  owl:sameAs <https://en.wikipedia.org/wiki/Large_language_model> .
+
+dkg:field-alignment a schema:DefinedTerm ;
+  schema:name "AI Alignment" ;
+  schema:description "Ensuring AI systems behave in accordance with human values and intentions" ;
+  schema:isPartOf dkg:field-ai-safety .
+
+dkg:field-interpretability a schema:DefinedTerm ;
+  schema:name "Mechanistic Interpretability" ;
+  schema:description "Understanding the internal mechanisms of neural networks" ;
+  schema:isPartOf dkg:field-ai-safety .
+
+dkg:field-computer-vision a schema:DefinedTerm ;
+  schema:name "Computer Vision" ;
+  schema:description "Enabling machines to interpret and understand visual information" ;
+  schema:isPartOf dkg:field-machine-learning .
+
+dkg:field-diffusion-models a schema:DefinedTerm ;
+  schema:name "Diffusion Models" ;
+  schema:description "Generative models that learn to denoise data through iterative refinement" ;
+  schema:isPartOf dkg:field-generative-ai .
+
+dkg:field-generative-art a schema:DefinedTerm ;
+  schema:name "Generative Art" ;
+  schema:description "Art created with the assistance of AI generative systems" .
+
+dkg:field-mixture-of-experts a schema:DefinedTerm ;
+  schema:name "Mixture of Experts" ;
+  schema:description "Architecture where different subnetworks specialize in different inputs" ;
+  schema:isPartOf dkg:field-llm .
+
+dkg:field-rag a schema:DefinedTerm ;
+  schema:name "Retrieval Augmented Generation" ;
+  schema:description "Combining retrieval systems with generative models for grounded responses" ;
+  schema:isPartOf dkg:field-llm .
+
+dkg:field-transformers a schema:DefinedTerm ;
+  schema:name "Transformer Architecture" ;
+  schema:description "Self-attention based architecture that revolutionized NLP and beyond" ;
+  schema:isPartOf dkg:field-deep-learning .
+
+dkg:field-machine-learning a schema:DefinedTerm ;
+  schema:name "Machine Learning" ;
+  schema:isPartOf dkg:field-artificial-intelligence .
+
+dkg:field-deep-learning a schema:DefinedTerm ;
+  schema:name "Deep Learning" ;
+  schema:isPartOf dkg:field-machine-learning .
+
+dkg:field-nlp a schema:DefinedTerm ;
+  schema:name "Natural Language Processing" ;
+  schema:isPartOf dkg:field-artificial-intelligence .
+
+dkg:field-ai-safety a schema:DefinedTerm ;
+  schema:name "AI Safety" ;
+  schema:isPartOf dkg:field-artificial-intelligence .
+
+dkg:field-generative-ai a schema:DefinedTerm ;
+  schema:name "Generative AI" ;
+  schema:isPartOf dkg:field-deep-learning .
+
+dkg:field-computational-biology a schema:DefinedTerm ;
+  schema:name "Computational Biology" .
+
+dkg:field-artificial-intelligence a schema:DefinedTerm ;
+  schema:name "Artificial Intelligence" .
+
+dkg:field-open-source-ml a schema:DefinedTerm ;
+  schema:name "Open Source Machine Learning" ;
+  schema:isPartOf dkg:field-machine-learning .
+
+dkg:field-robotics a schema:DefinedTerm ;
+  schema:name "Robotics" ;
+  schema:isPartOf dkg:field-artificial-intelligence .
+
+# === Researchers / People (120 triples) ===
+
+dkg:person-demis-hassabis a foaf:Person ;
+  foaf:name "Demis Hassabis" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-deepmind ;
+  schema:knowsAbout dkg:field-reinforcement-learning, dkg:field-protein-folding ;
+  schema:award "Nobel Prize in Chemistry 2024" ;
+  schema:birthPlace dkg:place-london .
+
+dkg:person-sam-altman a foaf:Person ;
+  foaf:name "Sam Altman" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-openai ;
+  schema:knowsAbout dkg:field-llm ;
+  schema:birthPlace dkg:place-chicago .
+
+dkg:person-dario-amodei a foaf:Person ;
+  foaf:name "Dario Amodei" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-anthropic ;
+  schema:knowsAbout dkg:field-alignment, dkg:field-ai-safety ;
+  foaf:knows dkg:person-daniela-amodei .
+
+dkg:person-daniela-amodei a foaf:Person ;
+  foaf:name "Daniela Amodei" ;
+  schema:jobTitle "President" ;
+  schema:worksFor dkg:org-anthropic ;
+  foaf:knows dkg:person-dario-amodei .
+
+dkg:person-yann-lecun a foaf:Person ;
+  foaf:name "Yann LeCun" ;
+  schema:jobTitle "Chief AI Scientist" ;
+  schema:worksFor dkg:org-meta-ai ;
+  schema:knowsAbout dkg:field-deep-learning, dkg:field-computer-vision ;
+  schema:award "Turing Award 2018" ;
+  schema:birthPlace dkg:place-paris .
+
+dkg:person-geoffrey-hinton a foaf:Person ;
+  foaf:name "Geoffrey Hinton" ;
+  schema:knowsAbout dkg:field-deep-learning, dkg:field-ai-safety ;
+  schema:award "Turing Award 2018" , "Nobel Prize in Physics 2024" ;
+  schema:birthPlace dkg:place-london .
+
+dkg:person-yoshua-bengio a foaf:Person ;
+  foaf:name "Yoshua Bengio" ;
+  schema:knowsAbout dkg:field-deep-learning, dkg:field-ai-safety ;
+  schema:award "Turing Award 2018" ;
+  schema:birthPlace dkg:place-paris ;
+  schema:affiliation dkg:org-mila .
+
+dkg:person-ilya-sutskever a foaf:Person ;
+  foaf:name "Ilya Sutskever" ;
+  schema:knowsAbout dkg:field-deep-learning, dkg:field-alignment ;
+  foaf:knows dkg:person-geoffrey-hinton .
+
+dkg:person-andrej-karpathy a foaf:Person ;
+  foaf:name "Andrej Karpathy" ;
+  schema:knowsAbout dkg:field-deep-learning, dkg:field-computer-vision, dkg:field-llm ;
+  foaf:knows dkg:person-ilya-sutskever .
+
+dkg:person-arthur-mensch a foaf:Person ;
+  foaf:name "Arthur Mensch" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-mistral ;
+  schema:knowsAbout dkg:field-llm, dkg:field-mixture-of-experts ;
+  schema:birthPlace dkg:place-paris .
+
+dkg:person-emad-mostaque a foaf:Person ;
+  foaf:name "Emad Mostaque" ;
+  schema:worksFor dkg:org-stability-ai ;
+  schema:knowsAbout dkg:field-diffusion-models .
+
+dkg:person-aidan-gomez a foaf:Person ;
+  foaf:name "Aidan Gomez" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-cohere ;
+  schema:knowsAbout dkg:field-transformers, dkg:field-llm ;
+  schema:birthPlace dkg:place-toronto .
+
+dkg:person-clement-delangue a foaf:Person ;
+  foaf:name "Clement Delangue" ;
+  schema:jobTitle "CEO" ;
+  schema:worksFor dkg:org-huggingface ;
+  schema:knowsAbout dkg:field-open-source-ml .
+
+dkg:person-john-jumper a foaf:Person ;
+  foaf:name "John Jumper" ;
+  schema:worksFor dkg:org-deepmind ;
+  schema:knowsAbout dkg:field-protein-folding ;
+  schema:award "Nobel Prize in Chemistry 2024" .
+
+dkg:person-chris-olah a foaf:Person ;
+  foaf:name "Chris Olah" ;
+  schema:worksFor dkg:org-anthropic ;
+  schema:knowsAbout dkg:field-interpretability ;
+  schema:description "Pioneer of neural network visualization and mechanistic interpretability" .
+
+# === AI Models / Systems (100 triples) ===
+
+dkg:model-gpt-4 a schema:SoftwareApplication ;
+  schema:name "GPT-4" ;
+  schema:creator dkg:org-openai ;
+  schema:datePublished "2023-03-14"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:description "Multimodal large language model" ;
+  dkg:parameterCount "1.8T (estimated)" ;
+  dkg:architecture "Transformer (MoE)" .
+
+dkg:model-gpt-4o a schema:SoftwareApplication ;
+  schema:name "GPT-4o" ;
+  schema:creator dkg:org-openai ;
+  schema:datePublished "2024-05-13"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:description "Omni model with native audio, vision, and text" ;
+  schema:isBasedOn dkg:model-gpt-4 .
+
+dkg:model-claude-3 a schema:SoftwareApplication ;
+  schema:name "Claude 3" ;
+  schema:creator dkg:org-anthropic ;
+  schema:datePublished "2024-03-04"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:description "Family of models focused on safety and helpfulness" ;
+  dkg:variants "Haiku, Sonnet, Opus" .
+
+dkg:model-claude-4 a schema:SoftwareApplication ;
+  schema:name "Claude 4" ;
+  schema:creator dkg:org-anthropic ;
+  schema:datePublished "2025-05-22"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:isBasedOn dkg:model-claude-3 ;
+  dkg:variants "Haiku, Sonnet, Opus" .
+
+dkg:model-gemini a schema:SoftwareApplication ;
+  schema:name "Gemini" ;
+  schema:creator dkg:org-deepmind ;
+  schema:datePublished "2023-12-06"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:description "Natively multimodal model" ;
+  dkg:variants "Nano, Pro, Ultra" .
+
+dkg:model-llama-3 a schema:SoftwareApplication ;
+  schema:name "Llama 3" ;
+  schema:creator dkg:org-meta-ai ;
+  schema:datePublished "2024-04-18"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  schema:description "Open-weight large language model" ;
+  schema:license "Llama 3 Community License" ;
+  dkg:parameterCount "8B, 70B, 405B" .
+
+dkg:model-mistral-large a schema:SoftwareApplication ;
+  schema:name "Mistral Large" ;
+  schema:creator dkg:org-mistral ;
+  schema:datePublished "2024-02-26"^^xsd:date ;
+  schema:applicationCategory dkg:field-llm ;
+  dkg:architecture "Transformer" .
+
+dkg:model-mixtral a schema:SoftwareApplication ;
+  schema:name "Mixtral 8x7B" ;
+  schema:creator dkg:org-mistral ;
+  schema:datePublished "2023-12-11"^^xsd:date ;
+  schema:applicationCategory dkg:field-mixture-of-experts ;
+  schema:license "Apache 2.0" ;
+  dkg:parameterCount "46.7B (12.9B active)" ;
+  dkg:architecture "Sparse Mixture of Experts" .
+
+dkg:model-stable-diffusion-3 a schema:SoftwareApplication ;
+  schema:name "Stable Diffusion 3" ;
+  schema:creator dkg:org-stability-ai ;
+  schema:datePublished "2024-06-12"^^xsd:date ;
+  schema:applicationCategory dkg:field-diffusion-models ;
+  dkg:architecture "Multimodal Diffusion Transformer (MMDiT)" .
+
+dkg:model-alphafold a schema:SoftwareApplication ;
+  schema:name "AlphaFold" ;
+  schema:creator dkg:org-deepmind ;
+  schema:datePublished "2020-11-30"^^xsd:date ;
+  schema:applicationCategory dkg:field-protein-folding ;
+  schema:description "Predicts protein 3D structures with atomic accuracy" ;
+  schema:award "Breakthrough of the Year 2021" .
+
+dkg:model-alphafold-3 a schema:SoftwareApplication ;
+  schema:name "AlphaFold 3" ;
+  schema:creator dkg:org-deepmind ;
+  schema:datePublished "2024-05-08"^^xsd:date ;
+  schema:applicationCategory dkg:field-protein-folding ;
+  schema:isBasedOn dkg:model-alphafold ;
+  schema:description "Predicts structures of all biological molecules" .
+
+dkg:model-command-r-plus a schema:SoftwareApplication ;
+  schema:name "Command R+" ;
+  schema:creator dkg:org-cohere ;
+  schema:datePublished "2024-04-04"^^xsd:date ;
+  schema:applicationCategory dkg:field-rag ;
+  schema:description "Optimized for retrieval augmented generation and tool use" ;
+  dkg:parameterCount "104B" .
+
+# === Places (40 triples) ===
+
+dkg:place-london a schema:Place ;
+  schema:name "London" ;
+  schema:containedInPlace dkg:place-uk ;
+  geo:lat "51.5074"^^xsd:decimal ;
+  geo:long "-0.1278"^^xsd:decimal .
+
+dkg:place-san-francisco a schema:Place ;
+  schema:name "San Francisco" ;
+  schema:containedInPlace dkg:place-usa ;
+  geo:lat "37.7749"^^xsd:decimal ;
+  geo:long "-122.4194"^^xsd:decimal .
+
+dkg:place-menlo-park a schema:Place ;
+  schema:name "Menlo Park" ;
+  schema:containedInPlace dkg:place-usa ;
+  geo:lat "37.4530"^^xsd:decimal ;
+  geo:long "-122.1817"^^xsd:decimal .
+
+dkg:place-mountain-view a schema:Place ;
+  schema:name "Mountain View" ;
+  schema:containedInPlace dkg:place-usa ;
+  geo:lat "37.3861"^^xsd:decimal ;
+  geo:long "-122.0839"^^xsd:decimal .
+
+dkg:place-paris a schema:Place ;
+  schema:name "Paris" ;
+  schema:containedInPlace dkg:place-france ;
+  geo:lat "48.8566"^^xsd:decimal ;
+  geo:long "2.3522"^^xsd:decimal .
+
+dkg:place-toronto a schema:Place ;
+  schema:name "Toronto" ;
+  schema:containedInPlace dkg:place-canada ;
+  geo:lat "43.6532"^^xsd:decimal ;
+  geo:long "-79.3832"^^xsd:decimal .
+
+dkg:place-new-york a schema:Place ;
+  schema:name "New York" ;
+  schema:containedInPlace dkg:place-usa ;
+  geo:lat "40.7128"^^xsd:decimal ;
+  geo:long "-74.0060"^^xsd:decimal .
+
+dkg:place-chicago a schema:Place ;
+  schema:name "Chicago" ;
+  schema:containedInPlace dkg:place-usa ;
+  geo:lat "41.8781"^^xsd:decimal ;
+  geo:long "-87.6298"^^xsd:decimal .
+
+dkg:place-usa a schema:Place ;
+  schema:name "United States" .
+
+dkg:place-uk a schema:Place ;
+  schema:name "United Kingdom" .
+
+dkg:place-france a schema:Place ;
+  schema:name "France" .
+
+dkg:place-canada a schema:Place ;
+  schema:name "Canada" .
+
+# === Benchmarks & Evaluations (50 triples) ===
+
+dkg:benchmark-mmlu a schema:DefinedTerm ;
+  schema:name "MMLU" ;
+  schema:description "Massive Multitask Language Understanding — 57 subjects from STEM to humanities" ;
+  schema:url "https://arxiv.org/abs/2009.03300" .
+
+dkg:benchmark-humaneval a schema:DefinedTerm ;
+  schema:name "HumanEval" ;
+  schema:description "Code generation benchmark with 164 hand-crafted programming problems" .
+
+dkg:benchmark-math a schema:DefinedTerm ;
+  schema:name "MATH" ;
+  schema:description "Competition-level mathematics problems" .
+
+dkg:benchmark-gpqa a schema:DefinedTerm ;
+  schema:name "GPQA" ;
+  schema:description "Graduate-level question answering requiring expert domain knowledge" .
+
+dkg:benchmark-arc-agi a schema:DefinedTerm ;
+  schema:name "ARC-AGI" ;
+  schema:description "Abstraction and Reasoning Corpus measuring fluid intelligence" ;
+  schema:creator dkg:person-francois-chollet .
+
+dkg:person-francois-chollet a foaf:Person ;
+  foaf:name "Francois Chollet" ;
+  schema:knowsAbout dkg:field-deep-learning ;
+  schema:description "Creator of Keras and the ARC benchmark" .
+
+dkg:eval-gpt4-mmlu a schema:Rating ;
+  schema:itemReviewed dkg:model-gpt-4 ;
+  schema:about dkg:benchmark-mmlu ;
+  schema:ratingValue "86.4"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+dkg:eval-claude3-opus-mmlu a schema:Rating ;
+  schema:itemReviewed dkg:model-claude-3 ;
+  schema:about dkg:benchmark-mmlu ;
+  schema:ratingValue "86.8"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+dkg:eval-gemini-ultra-mmlu a schema:Rating ;
+  schema:itemReviewed dkg:model-gemini ;
+  schema:about dkg:benchmark-mmlu ;
+  schema:ratingValue "90.0"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+dkg:eval-llama3-405b-mmlu a schema:Rating ;
+  schema:itemReviewed dkg:model-llama-3 ;
+  schema:about dkg:benchmark-mmlu ;
+  schema:ratingValue "88.6"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+dkg:eval-gpt4-humaneval a schema:Rating ;
+  schema:itemReviewed dkg:model-gpt-4 ;
+  schema:about dkg:benchmark-humaneval ;
+  schema:ratingValue "67.0"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+dkg:eval-claude3-opus-humaneval a schema:Rating ;
+  schema:itemReviewed dkg:model-claude-3 ;
+  schema:about dkg:benchmark-humaneval ;
+  schema:ratingValue "84.9"^^xsd:decimal ;
+  schema:bestRating "100"^^xsd:decimal .
+
+# === Relationships & Connections (80 triples) ===
+
+dkg:person-demis-hassabis foaf:knows dkg:person-geoffrey-hinton .
+dkg:person-demis-hassabis foaf:knows dkg:person-john-jumper .
+dkg:person-sam-altman foaf:knows dkg:person-ilya-sutskever .
+dkg:person-sam-altman foaf:knows dkg:person-dario-amodei .
+dkg:person-dario-amodei foaf:knows dkg:person-ilya-sutskever .
+dkg:person-yann-lecun foaf:knows dkg:person-geoffrey-hinton .
+dkg:person-yann-lecun foaf:knows dkg:person-yoshua-bengio .
+dkg:person-geoffrey-hinton foaf:knows dkg:person-yoshua-bengio .
+dkg:person-geoffrey-hinton foaf:knows dkg:person-ilya-sutskever .
+dkg:person-andrej-karpathy foaf:knows dkg:person-yann-lecun .
+dkg:person-aidan-gomez foaf:knows dkg:person-geoffrey-hinton .
+
+dkg:org-mila a schema:Organization ;
+  schema:name "Mila - Quebec AI Institute" ;
+  schema:location dkg:place-montreal .
+
+dkg:place-montreal a schema:Place ;
+  schema:name "Montreal" ;
+  schema:containedInPlace dkg:place-canada ;
+  geo:lat "45.5017"^^xsd:decimal ;
+  geo:long "-73.5673"^^xsd:decimal .
+
+dkg:model-gpt-4 schema:isBasedOn dkg:field-transformers .
+dkg:model-claude-3 schema:isBasedOn dkg:field-transformers .
+dkg:model-gemini schema:isBasedOn dkg:field-transformers .
+dkg:model-llama-3 schema:isBasedOn dkg:field-transformers .
+dkg:model-mistral-large schema:isBasedOn dkg:field-transformers .
+dkg:model-mixtral schema:isBasedOn dkg:field-transformers .
+
+dkg:field-llm schema:relatedTo dkg:field-transformers .
+dkg:field-diffusion-models schema:relatedTo dkg:field-generative-ai .
+dkg:field-alignment schema:relatedTo dkg:field-interpretability .
+dkg:field-rag schema:relatedTo dkg:field-llm .
+dkg:field-computer-vision schema:relatedTo dkg:field-deep-learning .
+dkg:field-protein-folding schema:relatedTo dkg:field-deep-learning .
+dkg:field-robotics schema:relatedTo dkg:field-reinforcement-learning .
+dkg:field-mixture-of-experts schema:relatedTo dkg:field-transformers .
+
+dkg:model-alphafold schema:contributor dkg:person-demis-hassabis .
+dkg:model-alphafold schema:contributor dkg:person-john-jumper .
+dkg:model-alphafold-3 schema:contributor dkg:person-demis-hassabis .
+dkg:model-alphafold-3 schema:contributor dkg:person-john-jumper .
+dkg:model-gpt-4 schema:contributor dkg:person-ilya-sutskever .
+dkg:model-stable-diffusion-3 schema:contributor dkg:person-emad-mostaque .
+dkg:model-mixtral schema:contributor dkg:person-arthur-mensch .
+dkg:model-command-r-plus schema:contributor dkg:person-aidan-gomez .
+
+dkg:org-deepmind schema:makesOffer dkg:model-alphafold, dkg:model-alphafold-3, dkg:model-gemini .
+dkg:org-openai schema:makesOffer dkg:model-gpt-4, dkg:model-gpt-4o .
+dkg:org-anthropic schema:makesOffer dkg:model-claude-3, dkg:model-claude-4 .
+dkg:org-meta-ai schema:makesOffer dkg:model-llama-3 .
+dkg:org-mistral schema:makesOffer dkg:model-mistral-large, dkg:model-mixtral .
+dkg:org-stability-ai schema:makesOffer dkg:model-stable-diffusion-3 .
+dkg:org-cohere schema:makesOffer dkg:model-command-r-plus .
+
+# === Papers & Publications (70+ triples) ===
+
+dkg:paper-attention-is-all-you-need a schema:ScholarlyArticle ;
+  schema:name "Attention Is All You Need" ;
+  schema:datePublished "2017-06-12"^^xsd:date ;
+  schema:about dkg:field-transformers ;
+  schema:author dkg:person-aidan-gomez ;
+  schema:citation "100,000+" ;
+  schema:description "Introduced the Transformer architecture that became the foundation of modern AI" .
+
+dkg:paper-alphafold-2020 a schema:ScholarlyArticle ;
+  schema:name "Highly accurate protein structure prediction with AlphaFold" ;
+  schema:datePublished "2021-07-15"^^xsd:date ;
+  schema:about dkg:field-protein-folding ;
+  schema:author dkg:person-john-jumper, dkg:person-demis-hassabis ;
+  schema:publisher "Nature" ;
+  schema:description "Achieved protein structure prediction at experimental accuracy" .
+
+dkg:paper-gpt-4-technical-report a schema:ScholarlyArticle ;
+  schema:name "GPT-4 Technical Report" ;
+  schema:datePublished "2023-03-15"^^xsd:date ;
+  schema:about dkg:model-gpt-4 ;
+  schema:creator dkg:org-openai .
+
+dkg:paper-constitutional-ai a schema:ScholarlyArticle ;
+  schema:name "Constitutional AI: Harmlessness from AI Feedback" ;
+  schema:datePublished "2022-12-15"^^xsd:date ;
+  schema:about dkg:field-alignment ;
+  schema:creator dkg:org-anthropic ;
+  schema:author dkg:person-dario-amodei ;
+  schema:description "Training AI systems using a set of principles rather than human labels" .
+
+dkg:paper-scaling-laws a schema:ScholarlyArticle ;
+  schema:name "Scaling Laws for Neural Language Models" ;
+  schema:datePublished "2020-01-23"^^xsd:date ;
+  schema:about dkg:field-llm ;
+  schema:creator dkg:org-openai ;
+  schema:description "Demonstrated predictable scaling relationships for language model performance" .
+
+dkg:paper-diffusion-beats-gans a schema:ScholarlyArticle ;
+  schema:name "Diffusion Models Beat GANs on Image Synthesis" ;
+  schema:datePublished "2021-05-11"^^xsd:date ;
+  schema:about dkg:field-diffusion-models ;
+  schema:description "Showed diffusion models can achieve superior image quality" .
+
+dkg:paper-mixture-of-experts a schema:ScholarlyArticle ;
+  schema:name "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer" ;
+  schema:datePublished "2017-01-23"^^xsd:date ;
+  schema:about dkg:field-mixture-of-experts ;
+  schema:description "Foundational work on sparse expert routing in neural networks" .
+
+dkg:paper-rag-original a schema:ScholarlyArticle ;
+  schema:name "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks" ;
+  schema:datePublished "2020-05-22"^^xsd:date ;
+  schema:about dkg:field-rag ;
+  schema:description "Introduced the RAG paradigm combining retrieval with generation" .
+
+dkg:paper-resnet a schema:ScholarlyArticle ;
+  schema:name "Deep Residual Learning for Image Recognition" ;
+  schema:datePublished "2015-12-10"^^xsd:date ;
+  schema:about dkg:field-computer-vision ;
+  schema:citation "200,000+" ;
+  schema:description "Introduced residual connections enabling training of very deep networks" .
+
+dkg:paper-mechanistic-interpretability a schema:ScholarlyArticle ;
+  schema:name "Zoom In: An Introduction to Circuits" ;
+  schema:datePublished "2020-03-10"^^xsd:date ;
+  schema:about dkg:field-interpretability ;
+  schema:author dkg:person-chris-olah ;
+  schema:description "Foundational work on understanding neural networks through circuits" .
+
+# === Training Datasets (30+ triples) ===
+
+dkg:dataset-common-crawl a schema:Dataset ;
+  schema:name "Common Crawl" ;
+  schema:description "Petabytes of web crawl data used to train many LLMs" ;
+  schema:url "https://commoncrawl.org/" ;
+  schema:size "250+ billion pages" .
+
+dkg:dataset-the-pile a schema:Dataset ;
+  schema:name "The Pile" ;
+  schema:description "800GB diverse open-source language modeling dataset" ;
+  schema:license "MIT" .
+
+dkg:dataset-laion-5b a schema:Dataset ;
+  schema:name "LAION-5B" ;
+  schema:description "5.85 billion CLIP-filtered image-text pairs for generative model training" ;
+  schema:size "5.85 billion pairs" .
+
+dkg:dataset-pdb a schema:Dataset ;
+  schema:name "Protein Data Bank" ;
+  schema:description "Archive of experimentally determined 3D protein structures" ;
+  schema:url "https://www.rcsb.org/" ;
+  schema:size "200,000+ structures" .
+
+dkg:dataset-imagenet a schema:Dataset ;
+  schema:name "ImageNet" ;
+  schema:description "14 million labeled images spanning 20,000 categories" ;
+  schema:size "14 million images" .
+
+dkg:model-gpt-4 schema:trainedOn dkg:dataset-common-crawl .
+dkg:model-llama-3 schema:trainedOn dkg:dataset-common-crawl .
+dkg:model-stable-diffusion-3 schema:trainedOn dkg:dataset-laion-5b .
+dkg:model-alphafold schema:trainedOn dkg:dataset-pdb .
+dkg:model-alphafold-3 schema:trainedOn dkg:dataset-pdb .
+dkg:model-mixtral schema:trainedOn dkg:dataset-common-crawl .
+
+dkg:paper-attention-is-all-you-need schema:relatedTo dkg:model-gpt-4 .
+dkg:paper-attention-is-all-you-need schema:relatedTo dkg:model-claude-3 .
+dkg:paper-attention-is-all-you-need schema:relatedTo dkg:model-gemini .
+dkg:paper-attention-is-all-you-need schema:relatedTo dkg:model-llama-3 .
+dkg:paper-constitutional-ai schema:relatedTo dkg:model-claude-3 .
+dkg:paper-scaling-laws schema:relatedTo dkg:model-gpt-4 .
+dkg:paper-diffusion-beats-gans schema:relatedTo dkg:model-stable-diffusion-3 .
+dkg:paper-rag-original schema:relatedTo dkg:model-command-r-plus .

@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@dkg/storage';
 import type { ChainAdapter, OnChainPublishResult } from '@dkg/chain';
 import type { EventBus, OperationContext } from '@dkg/core';
-import { DKGEvent, Logger, createOperationContext, sha256, MerkleTree, type Ed25519Keypair } from '@dkg/core';
+import { DKGEvent, Logger, createOperationContext, sha256, MerkleTree, encodeWorkspacePublishRequest, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -11,6 +11,7 @@ import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
   generateConfirmedFullMetadata,
+  generateWorkspaceMetadata,
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
@@ -29,6 +30,18 @@ export interface DKGPublisherConfig {
    * If empty, only the primary publisherPrivateKey is used for self-signing.
    */
   additionalSignerKeys?: string[];
+  /** Shared map of workspace-owned rootEntities per paranet (Rule 4). Pass from agent so handler and publisher stay in sync. */
+  workspaceOwnedEntities?: Map<string, Set<string>>;
+}
+
+export interface WriteToWorkspaceOptions {
+  publisherPeerId: string;
+  operationCtx?: OperationContext;
+}
+
+export interface WriteToWorkspaceResult {
+  workspaceOperationId: string;
+  message: Uint8Array;
 }
 
 export class DKGPublisher implements Publisher {
@@ -39,6 +52,7 @@ export class DKGPublisher implements Publisher {
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
+  private readonly workspaceOwnedEntities: Map<string, Set<string>>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -70,6 +84,153 @@ export class DKGPublisher implements Publisher {
 
     this.graphManager = new GraphManager(config.store);
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
+    this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
+  }
+
+  /**
+   * Write quads to the paranet's workspace graph (no chain, no TRAC).
+   * Validates, stores locally in workspace + workspace_meta, returns encoded message for the agent to broadcast on the workspace topic.
+   */
+  async writeToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    options: WriteToWorkspaceOptions,
+  ): Promise<WriteToWorkspaceResult> {
+    const ctx = options.operationCtx ?? createOperationContext('workspace');
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
+
+    await this.graphManager.ensureParanet(paranetId);
+
+    const kaMap = autoPartition(quads);
+    const manifestEntries: { rootEntity: string; privateMerkleRoot?: Uint8Array; privateTripleCount: number }[] = [];
+    for (const [rootEntity, publicQuads] of kaMap) {
+      const privRoot = undefined;
+      manifestEntries.push({
+        rootEntity,
+        privateMerkleRoot: privRoot,
+        privateTripleCount: 0,
+      });
+    }
+
+    const manifestForValidation: KAManifestEntry[] = manifestEntries.map((m) => ({
+      tokenId: 0n,
+      rootEntity: m.rootEntity,
+      privateMerkleRoot: m.privateMerkleRoot,
+      privateTripleCount: m.privateTripleCount,
+    }));
+
+    const dataOwned = this.ownedEntities.get(paranetId) ?? new Set();
+    const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Set();
+    const existing = new Set<string>([...dataOwned, ...wsOwned]);
+    const validation = validatePublishRequest(
+      [...kaMap.values()].flat(),
+      manifestForValidation,
+      paranetId,
+      existing,
+    );
+    if (!validation.valid) {
+      throw new Error(`Workspace validation failed: ${validation.errors.join('; ')}`);
+    }
+
+    const workspaceOperationId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
+    const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+
+    const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
+    await this.store.insert(normalized);
+
+    const rootEntities = manifestEntries.map((m) => m.rootEntity);
+    const metaQuads = generateWorkspaceMetadata(
+      {
+        workspaceOperationId,
+        paranetId,
+        rootEntities,
+        publisherPeerId: options.publisherPeerId,
+        timestamp: new Date(),
+      },
+      workspaceMetaGraph,
+    );
+    await this.store.insert(metaQuads);
+
+    if (!this.workspaceOwnedEntities.has(paranetId)) {
+      this.workspaceOwnedEntities.set(paranetId, new Set());
+    }
+    for (const r of rootEntities) {
+      this.workspaceOwnedEntities.get(paranetId)!.add(r);
+    }
+
+    const paranetGraph = this.graphManager.dataGraphUri(paranetId);
+    const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: paranetGraph }));
+    const nquadsStr = gossipQuads
+      .map(
+        (q) =>
+          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
+      )
+      .join('\n');
+
+    const message = encodeWorkspacePublishRequest({
+      paranetId,
+      nquads: new TextEncoder().encode(nquadsStr),
+      manifest: manifestEntries.map((m) => ({
+        rootEntity: m.rootEntity,
+        privateMerkleRoot: m.privateMerkleRoot,
+        privateTripleCount: m.privateTripleCount,
+      })),
+      publisherPeerId: options.publisherPeerId,
+      workspaceOperationId,
+      timestampMs: Date.now(),
+    });
+
+    this.log.info(ctx, `Workspace write complete: ${workspaceOperationId}`);
+    return { workspaceOperationId, message };
+  }
+
+  /**
+   * Read quads from the paranet's workspace graph and publish them with full finality (data graph + chain).
+   * Selection: 'all' or { rootEntities: string[] } to enshrine only those root entities.
+   */
+  async enshrineFromWorkspace(
+    paranetId: string,
+    selection: 'all' | { rootEntities: string[] },
+    options?: { operationCtx?: OperationContext; clearWorkspaceAfter?: boolean },
+  ): Promise<PublishResult> {
+    const ctx = options?.operationCtx ?? createOperationContext('enshrine');
+    const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
+
+    let sparql: string;
+    if (selection === 'all') {
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o } }`;
+    } else {
+      const filters = selection.rootEntities
+        .map((r) => `STRSTARTS(STR(?s), "${r.replace(/"/g, '\\"')}")`)
+        .join(' || ');
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o . FILTER(${filters}) } }`;
+    }
+
+    const result = await this.store.query(sparql);
+    const quads: Quad[] =
+      result.type === 'quads' ? result.quads : [];
+
+    if (quads.length === 0) {
+      throw new Error(`No quads in workspace for paranet ${paranetId} matching selection`);
+    }
+
+    this.log.info(ctx, `Enshrining ${quads.length} quads from workspace to data graph`);
+    const publishResult = await this.publish({
+      paranetId,
+      quads: quads.map((q) => ({ ...q, graph: '' })),
+      operationCtx: ctx,
+    });
+
+    if (options?.clearWorkspaceAfter) {
+      const kaMap = autoPartition(quads);
+      for (const rootEntity of kaMap.keys()) {
+        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity);
+        this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
+      }
+    }
+
+    return publishResult;
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {

@@ -8,6 +8,8 @@ import {
   decodeAccessRequest,
   encodeAccessResponse,
   decodeAccessResponse,
+  encodeWorkspacePublishRequest,
+  decodeWorkspacePublishRequest,
 } from '../src/index.js';
 
 describe('Protobuf: PublishRequest round-trip', () => {
@@ -66,6 +68,28 @@ describe('Protobuf: AccessRequest round-trip', () => {
     const decoded = decodeAccessRequest(encodeAccessRequest(original));
     expect(decoded.kaUal).toBe(original.kaUal);
     expect(decoded.requesterPeerId).toBe('QmRequester');
+  });
+});
+
+describe('Protobuf: WorkspacePublishRequest round-trip', () => {
+  it('encodes and decodes correctly', () => {
+    const original = {
+      paranetId: 'test-para',
+      nquads: new TextEncoder().encode('<urn:entity> <http://purl.org/dc/terms/title> "Hello" .'),
+      manifest: [{ rootEntity: 'urn:entity', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWTest',
+      workspaceOperationId: 'ws-123',
+      timestampMs: Date.now(),
+    };
+    const encoded = encodeWorkspacePublishRequest(original);
+    expect(encoded).toBeInstanceOf(Uint8Array);
+    expect(encoded.length).toBeGreaterThan(0);
+    const decoded = decodeWorkspacePublishRequest(encoded);
+    expect(decoded.paranetId).toBe(original.paranetId);
+    expect(decoded.publisherPeerId).toBe(original.publisherPeerId);
+    expect(decoded.workspaceOperationId).toBe(original.workspaceOperationId);
+    expect(decoded.manifest).toHaveLength(1);
+    expect(decoded.manifest[0].rootEntity).toBe('urn:entity');
   });
 });
 

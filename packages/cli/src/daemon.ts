@@ -86,14 +86,21 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const chainBase = config.chain ?? network?.chain;
 
   // Relay: prefer config.relay, fall back to network testnet.json relays so
-  // local nodes connect without having run init or set relay manually
-  const relayPeers = config.relay
-    ? [config.relay]
-    : (network?.relays?.length ? network.relays : undefined);
-  if (!relayPeers?.length) {
-    log('No relay configured. Set "relay" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
-  } else if (!config.relay && network?.relays?.length) {
+  // local nodes connect without having run init or set relay manually.
+  // "none" disables relay entirely (used by devnet relay nodes to prevent
+  // cross-network leakage into testnet).
+  let relayPeers: string[] | undefined;
+  if (config.relay === 'none') {
+    relayPeers = undefined;
+    log('Relay disabled (config.relay = "none") — this node will not connect to any relay');
+  } else if (config.relay) {
+    relayPeers = [config.relay];
+  } else if (network?.relays?.length) {
+    relayPeers = network.relays;
     log(`Using relay(s) from network config (${network.networkName})`);
+  }
+  if (!relayPeers?.length && config.relay !== 'none') {
+    log('No relay configured. Set "relay" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
   }
 
   const agent = await DKGAgent.create({
@@ -220,19 +227,19 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKCs: async () => {
-      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <urn:dkg:KC> } }');
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKAs: async () => {
-      const r = await agent.query('SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <urn:dkg:KA> } }');
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontology/KnowledgeAsset> } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getConfirmedKCs: async () => {
-      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "confirmed" } }');
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTentativeKCs: async () => {
-      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <urn:dkg:status> "tentative" } }');
+      const r = await agent.query('SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getStoreBytes: async () => {
@@ -297,7 +304,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector);
       if (handled) return;
 
       await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
@@ -526,10 +533,59 @@ async function handleRequest(
     }
   }
 
-  // POST /api/query  { sparql: "...", paranetId?: "..." }
+  // POST /api/workspace/write  { paranetId: "...", quads: [...] }
+  if (req.method === 'POST' && path === '/api/workspace/write') {
+    const body = await readBody(req);
+    const { paranetId, quads } = JSON.parse(body);
+    if (!paranetId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
+    }
+    const ctx = createOperationContext('workspace');
+    tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    try {
+      const result = await agent.writeToWorkspace(paranetId, quads);
+      tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
+  }
+
+  // POST /api/workspace/enshrine  { paranetId: "...", selection?: "all" | { rootEntities: [...] }, clearAfter?: bool }
+  if (req.method === 'POST' && path === '/api/workspace/enshrine') {
+    const body = await readBody(req);
+    const { paranetId, selection, clearAfter } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const ctx = createOperationContext('enshrine');
+    tracker.start(ctx, { paranetId, details: { source: 'api' } });
+    try {
+      const result = await agent.enshrineFromWorkspace(
+        paranetId,
+        selection || 'all',
+        { clearWorkspaceAfter: clearAfter ?? true },
+      );
+      const chain = result.onChainResult;
+      if (chain) {
+        tracker.setCost(ctx, { gasUsed: chain.gasUsed, gasPrice: chain.effectiveGasPrice });
+      }
+      tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
+      return jsonResponse(res, 200, {
+        kcId: String(result.kcId),
+        status: result.status,
+        kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
+        ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
+      });
+    } catch (err) {
+      tracker.fail(ctx, err);
+      throw err;
+    }
+  }
+
+  // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_workspace", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
     const body = await readBody(req);
-    const { sparql, paranetId } = JSON.parse(body);
+    const { sparql, paranetId, graphSuffix, includeWorkspace } = JSON.parse(body);
     if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     const ctx = createOperationContext('query');
     tracker.start(ctx, { paranetId, details: { sparql: sparql.slice(0, 200) } });
@@ -537,7 +593,7 @@ async function handleRequest(
     try {
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
-      const result = await agent.query(sparql, paranetId);
+      const result = await agent.query(sparql, { paranetId, graphSuffix, includeWorkspace });
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
       return jsonResponse(res, 200, { result });
