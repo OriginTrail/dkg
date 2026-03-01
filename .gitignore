@@ -12,3 +12,4 @@ coverage/
 packages/evm-module/artifacts/
 packages/evm-module/cache/
 packages/evm-module/typechain/
+.devnet/

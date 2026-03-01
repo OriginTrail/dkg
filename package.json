@@ -9,7 +9,12 @@
     "lint": "turbo lint",
     "clean": "turbo clean",
     "dev": "turbo dev",
-    "dkg": "node packages/cli/dist/cli.js"
+    "dkg": "node packages/cli/dist/cli.js",
+    "devnet": "./scripts/devnet.sh",
+    "devnet:start": "./scripts/devnet.sh start",
+    "devnet:stop": "./scripts/devnet.sh stop",
+    "devnet:status": "./scripts/devnet.sh status",
+    "devnet:clean": "./scripts/devnet.sh clean"
   },
   "devDependencies": {
     "@types/node": "^22",

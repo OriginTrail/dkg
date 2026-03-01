@@ -107,7 +107,7 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 }
 
 export function dkgDir(): string {
-  return join(homedir(), '.dkg');
+  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
 }
 
 export function configPath(): string {
