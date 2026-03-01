@@ -757,6 +757,32 @@ a:hover { text-decoration: underline; }
 .chat-peer-name {
   font-weight: 600;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.online-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.online-indicator.online {
+  background: var(--success);
+  box-shadow: 0 0 4px var(--success);
+}
+
+.online-indicator.offline {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+.chat-status-text {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-left: 4px;
 }
 
 .chat-peer-meta {
@@ -785,11 +811,16 @@ a:hover { text-decoration: underline; }
 .chat-header-name {
   font-weight: 600;
   font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .chat-header-meta {
   font-size: 11px;
   color: var(--text-muted);
+  display: flex;
+  align-items: center;
 }
 
 .chat-messages {
@@ -951,4 +982,251 @@ a:hover { text-decoration: underline; }
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 0 6px;
+}
+
+/* Knowledge Assets Tab */
+.ka-graph-container {
+  display: flex;
+  gap: 16px;
+  min-height: 500px;
+}
+
+.ka-graph-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ka-graph-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.ka-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.ka-detail-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ka-detail-body {
+  padding: 16px;
+}
+
+.ka-detail-row {
+  margin-bottom: 12px;
+}
+
+.ka-detail-row:last-child {
+  margin-bottom: 0;
+}
+
+.ka-detail-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.ka-detail-value {
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.ka-detail-value.mono {
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .ka-graph-container {
+    flex-direction: column;
+  }
+  .ka-graph-sidebar {
+    width: 100%;
+  }
+}
+
+/* Enhanced Graph Explorer */
+.graph-explorer-layout {
+  display: flex;
+  gap: 16px;
+  min-height: 600px;
+}
+
+.graph-explorer-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.graph-toolbar {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.graph-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.graph-legend {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+
+.graph-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
+.graph-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.checkbox-label input {
+  cursor: pointer;
+}
+
+/* Graph Details Panel */
+.graph-details-panel {
+  width: 320px;
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 700px;
+}
+
+.graph-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.graph-details-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.graph-details-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.graph-details-section {
+  margin-bottom: 16px;
+}
+
+.graph-details-section:last-child {
+  margin-bottom: 0;
+}
+
+.graph-details-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.graph-details-value {
+  font-size: 13px;
+  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.graph-details-triples {
+  font-size: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.graph-details-triple {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.graph-details-triple:last-child {
+  border-bottom: none;
+}
+
+.graph-details-triple .predicate {
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.graph-details-triple .object,
+.graph-details-triple .subject {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-details-more {
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 1000px) {
+  .graph-explorer-layout {
+    flex-direction: column;
+  }
+  .graph-details-panel {
+    width: 100%;
+    max-height: 300px;
+  }
 }

@@ -57,6 +57,8 @@ export interface DkgConfig {
   name: string;
   relay?: string;
   apiPort: number;
+  /** Host to bind the API server (default '127.0.0.1', use '0.0.0.0' for external access). */
+  apiHost?: string;
   listenPort: number;
   nodeRole: 'core' | 'edge';
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
