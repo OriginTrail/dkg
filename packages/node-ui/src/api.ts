@@ -1,7 +1,7 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant } from './chat-assistant.js';
 import type { MetricsCollector } from './metrics-collector.js';
@@ -30,6 +30,7 @@ export async function handleNodeUIRequest(
   staticDir: string,
   chatAssistant?: ChatAssistant,
   metricsCollector?: MetricsCollector,
+  authToken?: string,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -172,13 +173,13 @@ export async function handleNodeUIRequest(
   // --- Static UI files ---
 
   if (path === '/ui' || path.startsWith('/ui/')) {
-    return serveStatic(res, staticDir, path);
+    return serveStatic(res, staticDir, path, authToken);
   }
 
   return false;
 }
 
-async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string): Promise<true> {
+async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
@@ -193,16 +194,31 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
     filePath = join(staticDir, 'index.html');
   }
 
+  const mimeExt = filePath.slice(filePath.lastIndexOf('.'));
+  const isHtml = mimeExt === '.html';
+
   try {
-    const s = await stat(filePath);
-    const mimeExt = filePath.slice(filePath.lastIndexOf('.'));
-    const contentType = MIME[mimeExt] ?? 'application/octet-stream';
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'Content-Length': s.size,
-      'Cache-Control': mimeExt === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
-    });
-    createReadStream(filePath).pipe(res);
+    if (isHtml && authToken) {
+      const html = await readFile(filePath, 'utf-8');
+      const injection = `<script>window.__DKG_TOKEN__=${JSON.stringify(authToken)}</script>`;
+      const injected = html.replace('</head>', `${injection}</head>`);
+      const buf = Buffer.from(injected, 'utf-8');
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Content-Length': buf.byteLength,
+        'Cache-Control': 'no-cache',
+      });
+      res.end(buf);
+    } else {
+      const s = await stat(filePath);
+      const contentType = MIME[mimeExt] ?? 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': s.size,
+        'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
+      });
+      createReadStream(filePath).pipe(res);
+    }
   } catch {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end('<!DOCTYPE html><html><body><h1>Node UI not built</h1><p>Run <code>pnpm build:ui</code> in @dkg/node-ui</p></body></html>');

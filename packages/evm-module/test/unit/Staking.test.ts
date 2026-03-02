@@ -294,6 +294,9 @@ describe('Staking contract', function () {
       'Node should be added to the sharding table',
     );
 
+    // advance past conviction lock
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
+
     // Request withdrawal of 1 wei to fall below minStake
     await Staking.requestWithdrawal(identityId, 1n);
     const req = await StakingStorage.getDelegatorWithdrawalRequest(
@@ -325,6 +328,9 @@ describe('Staking contract', function () {
       true,
       'Node should be added to the sharding table',
     );
+
+    // advance past conviction lock
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Request withdrawal of 1 wei so node drops below minimum
     await Staking.requestWithdrawal(identityId, 1n);
@@ -558,6 +564,7 @@ describe('Staking contract', function () {
       amount,
     );
     await Staking.stake(identityId, amount);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
     await expect(
       Staking.requestWithdrawal(identityId, amount + 1n),
     ).to.be.revertedWithCustomError(Staking, 'WithdrawalExceedsStake');
@@ -572,6 +579,7 @@ describe('Staking contract', function () {
       amount,
     );
     await Staking.stake(identityId, amount);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
     const delay = await ParametersStorage.stakeWithdrawalDelay();
     const tx = await Staking.requestWithdrawal(identityId, amount / 2n);
     const block = await hre.ethers.provider.getBlock(
@@ -613,6 +621,7 @@ describe('Staking contract', function () {
       amount,
     );
     await Staking.stake(identityId, amount);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
     await Staking.requestWithdrawal(identityId, amount / 2n);
     const req = await StakingStorage.getDelegatorWithdrawalRequest(
       identityId,
@@ -639,6 +648,7 @@ describe('Staking contract', function () {
       amount,
     );
     await Staking.stake(identityId, amount);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
     await Staking.requestWithdrawal(identityId, amount / 2n);
     const req = await StakingStorage.getDelegatorWithdrawalRequest(
       identityId,
@@ -661,6 +671,7 @@ describe('Staking contract', function () {
       amount,
     );
     await Staking.stake(identityId, amount);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
     await Staking.requestWithdrawal(identityId, hre.ethers.parseEther('100'));
     await Staking.cancelWithdrawal(identityId);
     const req = await StakingStorage.getDelegatorWithdrawalRequest(
@@ -1919,6 +1930,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // first request 300
     const req1 = hre.ethers.parseEther('300');
@@ -1956,6 +1968,7 @@ describe('Staking contract', function () {
       smallMax,
     );
     await Staking.stake(identityId, smallMax);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Delegator A requests withdrawal 10 → node stake becomes 10
     const withdrawAmt = hre.ethers.parseEther('10');
@@ -2051,6 +2064,7 @@ describe('Staking contract', function () {
       baseStake,
     );
     await Staking.stake(identityId, baseStake);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Request withdrawal of half that stake
     const withdrawAmt = baseStake / 2n;
@@ -2112,6 +2126,7 @@ describe('Staking contract', function () {
       smallMax,
     );
     await Staking.stake(identityId, smallMax);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Delegator A requests withdrawal of 10
     const withdrawAmt = hre.ethers.parseEther('10');
@@ -2230,6 +2245,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Add some score for the current epoch so delegatorEpochScore18 > 0
     const epoch = await Chronos.getCurrentEpoch();
@@ -2277,6 +2293,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // No score added for current epoch
 
@@ -2307,6 +2324,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Withdraw full stake and finalise so stakeBase becomes 0
     await Staking.requestWithdrawal(identityId, stakeAmt);
@@ -2571,6 +2589,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // Governance lowers the cap below current stake – makes the branch reachable
     const newMax = stakeAmt - hre.ethers.parseEther('10');
@@ -2647,6 +2666,7 @@ describe('Staking contract', function () {
       stakeAmt,
     );
     await Staking.stake(identityId, stakeAmt);
+    await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
 
     // give delegator some score in the current epoch
     const curEp = await Chronos.getCurrentEpoch();

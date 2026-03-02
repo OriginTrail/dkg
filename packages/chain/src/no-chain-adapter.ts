@@ -42,4 +42,5 @@ export class NoChainAdapter implements ChainAdapter {
   async *listenForEvents(_filter: EventFilter): AsyncIterable<ChainEvent> { noChain(); }
   async createParanet(_params: CreateParanetParams): Promise<TxResult> { noChain(); }
   async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> { noChain(); }
+  async revealParanetMetadata(_paranetId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
 }

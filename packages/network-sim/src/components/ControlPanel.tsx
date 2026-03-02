@@ -266,16 +266,17 @@ function rndId(): string {
 let simCounter = 0;
 
 function SimulateTab() {
-  const { state, dispatch, addOperation, addBroadcast, completeOperation } = useStore();
+  const { state, dispatch, addBroadcast, addOperation, completeOperation } = useStore();
   const [simName, setSimName] = useState(() => `Simulation #${++simCounter}`);
-  const [opCount, setOpCount] = useState(50);
-  const [opsPerSec, setOpsPerSec] = useState(3);
-  const [concurrency, setConcurrency] = useState(2);
+  const [opCount, setOpCount] = useState(500);
+  const [opsPerSec, setOpsPerSec] = useState(10);
+  const [concurrency, setConcurrency] = useState(10);
+  const [kasPerPublish, setKasPerPublish] = useState(1);
   const [paranet, setParanet] = useState('devnet-test');
   const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
   const [running, setRunning] = useState(false);
   const [stats, setStats] = useState<SimStats | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const paranets = useParanets();
 
   const toggleOp = useCallback((op: SimOp) => {
@@ -291,146 +292,108 @@ function SimulateTab() {
   }, []);
 
   const runSimulation = useCallback(async () => {
-    const onlineNodes = state.nodes.filter((n) => n.online);
-    if (onlineNodes.length === 0) return;
-
-    const abort = new AbortController();
-    abortRef.current = abort;
-    setRunning(true);
-
-    const simId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const ops = Array.from(enabledOps);
+    const simId = `sim-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
     dispatch({
       type: 'START_SIMULATION',
       id: simId,
       name: simName || `Simulation #${simCounter}`,
-      config: { opCount, opsPerSec, concurrency, paranet, enabledOps: ops },
+      config: { opCount, opsPerSec, concurrency, kasPerPublish, paranet, enabledOps: ops },
     });
 
     const simStats: SimStats = { total: opCount, completed: 0, errors: 0, startedAt: Date.now() };
     setStats({ ...simStats });
+    setRunning(true);
 
-    const delayMs = 1000 / opsPerSec;
-    let scheduled = 0;
-    let inflight = 0;
-
-    const runOne = async () => {
-      if (abort.signal.aborted) return;
-
-      const op = pickRandom(ops);
-      const sourceNode = pickRandom(onlineNodes);
-      const t0 = performance.now();
-      let ok = false;
-
-      try {
-        switch (op) {
-          case 'publish': {
-            const eid = `did:dkg:entity:sim-${rndId()}`;
-            const graph = `did:dkg:paranet:${paranet}`;
-            const quads = [{ subject: eid, predicate: 'http://schema.org/name', object: `"Sim Entity ${rndId()}"`, graph }];
-            const opId = addBroadcast('publish', sourceNode.id, `sim publish ${eid.slice(-6)}`);
-            try {
-              const res = await api.publishKA(sourceNode.id, paranet, quads);
-              completeOperation(opId, 'success', `KC: ${res.kcId}`);
-              simStats.completed++;
-              ok = true;
-            } catch (e: any) {
-              completeOperation(opId, 'error', e.message);
-              simStats.errors++;
-            }
-            break;
-          }
-          case 'workspace': {
-            const eid = `did:dkg:entity:sim-ws-${rndId()}`;
-            const graph = `did:dkg:paranet:${paranet}`;
-            const quads = [{ subject: eid, predicate: 'http://schema.org/name', object: `"Sim Draft ${rndId()}"`, graph }];
-            const opId = addBroadcast('workspace', sourceNode.id, `sim workspace ${eid.slice(-6)}`);
-            try {
-              await api.writeToWorkspace(sourceNode.id, paranet, quads);
-              completeOperation(opId, 'success', 'written');
-              simStats.completed++;
-              ok = true;
-            } catch (e: any) {
-              completeOperation(opId, 'error', e.message);
-              simStats.errors++;
-            }
-            break;
-          }
-          case 'query': {
-            const sparql = `SELECT * WHERE { ?s ?p ?o } LIMIT ${Math.floor(Math.random() * 20) + 5}`;
-            const opId = addOperation('query', sourceNode.id, 'sim query');
-            try {
-              const res = await api.queryNode(sourceNode.id, sparql, paranet);
-              const count = (res.result as any)?.bindings?.length ?? 0;
-              completeOperation(opId, 'success', `${count} results`);
-              simStats.completed++;
-              ok = true;
-            } catch (e: any) {
-              completeOperation(opId, 'error', e.message);
-              simStats.errors++;
-            }
-            break;
-          }
-          case 'chat': {
-            const others = onlineNodes.filter((n) => n.id !== sourceNode.id && n.status?.peerId);
-            if (others.length === 0) {
-              simStats.completed++;
-              ok = true;
-              break;
-            }
-            const target = pickRandom(others);
-            const msg = `Sim message ${rndId()}`;
-            const opId = addOperation('chat', sourceNode.id, `sim chat`, target.id);
-            try {
-              await api.sendChat(sourceNode.id, target.status!.peerId, msg);
-              completeOperation(opId, 'success', 'delivered');
-              simStats.completed++;
-              ok = true;
-            } catch (e: any) {
-              completeOperation(opId, 'error', e.message);
-              simStats.errors++;
-            }
-            break;
-          }
-        }
-      } catch {
-        simStats.errors++;
+    try {
+      const res = await fetch('/sim/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: simName, opCount, opsPerSec, concurrency, kasPerPublish, paranet, enabledOps: ops }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: 'Unknown error' }));
+        simStats.errors = 1;
+        simStats.finishedAt = Date.now();
+        setStats({ ...simStats });
+        setRunning(false);
+        dispatch({ type: 'STOP_SIMULATION' });
+        return;
       }
-      dispatch({ type: 'RECORD_OP', opType: op, success: ok, durationMs: performance.now() - t0 });
-      inflight--;
-      setStats({ ...simStats });
-    };
+    } catch {
+      setRunning(false);
+      dispatch({ type: 'STOP_SIMULATION' });
+      return;
+    }
 
-    await new Promise<void>((resolve) => {
-      const tick = () => {
-        if (abort.signal.aborted) { resolve(); return; }
-        while (inflight < concurrency && scheduled < opCount) {
-          if (abort.signal.aborted) break;
-          scheduled++;
-          inflight++;
-          runOne();
+    const es = new EventSource('/sim/events');
+    eventSourceRef.current = es;
+
+    es.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+
+        if (event.type === 'op') {
+          if (simStats.finishedAt) return; // ignore late op events after done
+          const opType = event.opType as string;
+          const nodeId = event.nodeId as number;
+          const isBroadcast = opType === 'publish' || opType === 'workspace';
+          const opId = isBroadcast
+            ? addBroadcast(opType as any, nodeId, `sim ${opType}`)
+            : addOperation(opType as any, nodeId, `sim ${opType}`);
+          completeOperation(opId, event.success ? 'success' : 'error', event.detail);
+          dispatch({ type: 'RECORD_OP', opType, success: event.success, durationMs: event.durationMs, phases: event.phases });
+          simStats.completed++;
+          if (!event.success) simStats.errors++;
+          setStats({ ...simStats });
         }
-        if (simStats.completed + simStats.errors >= opCount) {
+
+        if (event.type === 'status') {
+          if (simStats.finishedAt) return;
+          simStats.completed = event.completed;
+          simStats.errors = event.errors;
+          setStats({ ...simStats });
+        }
+
+        if (event.type === 'done') {
+          simStats.completed = event.completed;
+          simStats.errors = event.errors;
           simStats.finishedAt = Date.now();
           setStats({ ...simStats });
-          resolve();
-          return;
+          es.close();
+          eventSourceRef.current = null;
+          setRunning(false);
+          dispatch({ type: 'STOP_SIMULATION' });
+          setSimName(`Simulation #${++simCounter}`);
         }
-        setTimeout(tick, delayMs);
-      };
-      tick();
-    });
 
+        if (event.type === 'error') {
+          simStats.errors++;
+          setStats({ ...simStats });
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.onerror = () => {
+      es.close();
+      eventSourceRef.current = null;
+      if (running) {
+        simStats.finishedAt = Date.now();
+        setStats({ ...simStats });
+        setRunning(false);
+        dispatch({ type: 'STOP_SIMULATION' });
+      }
+    };
+  }, [opCount, opsPerSec, concurrency, paranet, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
+
+  const stopSimulation = useCallback(async () => {
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    await fetch('/sim/stop', { method: 'POST' }).catch(() => {});
     dispatch({ type: 'STOP_SIMULATION' });
     setRunning(false);
-    abortRef.current = null;
-    setSimName(`Simulation #${++simCounter}`);
-  }, [state.nodes, opCount, opsPerSec, concurrency, paranet, enabledOps, simName, addOperation, addBroadcast, completeOperation]);
-
-  const stopSimulation = useCallback(() => {
-    abortRef.current?.abort();
-    dispatch({ type: 'STOP_SIMULATION' });
-  }, []);
+  }, [dispatch]);
 
   const [, forceUpdate] = useState(0);
   useEffect(() => {
@@ -442,13 +405,13 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const actualOps = stats ? (stats.completed + stats.errors) : 0;
-  const pct = stats ? Math.round((actualOps / stats.total) * 100) : 0;
+  const actualOps = stats ? (stats.completed + stats.errors) : 0; // total finished (success + fail)
+  const pct = stats ? Math.min(100, Math.round((actualOps / stats.total) * 100)) : 0;
 
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Run automated operations across all online nodes. Use this for load testing and to see the network in action.
+        Run automated operations across all online nodes. Operations execute server-side (no browser bottleneck) and stream results here for visualization.
       </div>
 
       <div className="form-group">
@@ -489,18 +452,23 @@ function SimulateTab() {
       <div className="sim-params">
         <div className="form-group">
           <label>Total Ops</label>
-          <input type="number" min={1} max={10000} value={opCount}
+          <input type="number" min={1} max={100000} value={opCount}
             onChange={(e) => setOpCount(Math.max(1, parseInt(e.target.value) || 1))} disabled={running} />
         </div>
         <div className="form-group">
           <label>Ops/sec</label>
-          <input type="number" min={0.5} max={100} step={0.5} value={opsPerSec}
+          <input type="number" min={0.5} max={1000} step={0.5} value={opsPerSec}
             onChange={(e) => setOpsPerSec(Math.max(0.5, parseFloat(e.target.value) || 1))} disabled={running} />
         </div>
         <div className="form-group">
           <label>Concurrency</label>
-          <input type="number" min={1} max={20} value={concurrency}
+          <input type="number" min={1} max={200} value={concurrency}
             onChange={(e) => setConcurrency(Math.max(1, parseInt(e.target.value) || 1))} disabled={running} />
+        </div>
+        <div className="form-group">
+          <label>KAs per Publish</label>
+          <input type="number" min={1} max={100} value={kasPerPublish}
+            onChange={(e) => setKasPerPublish(Math.max(1, parseInt(e.target.value) || 1))} disabled={running} />
         </div>
       </div>
 
@@ -521,8 +489,8 @@ function SimulateTab() {
           </div>
           <div className="sim-stats-grid">
             <div className="sim-stat">
-              <span className="sim-stat-value">{actualOps}/{stats.total}</span>
-              <span className="sim-stat-label">completed</span>
+              <span className="sim-stat-value">{stats.completed}/{stats.total}</span>
+              <span className="sim-stat-label">succeeded</span>
             </div>
             <div className="sim-stat">
               <span className="sim-stat-value" style={{ color: stats.errors > 0 ? '#ef4444' : undefined }}>

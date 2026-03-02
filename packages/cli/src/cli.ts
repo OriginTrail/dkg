@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -113,6 +114,14 @@ program
       chainId: chainIdStr || undefined,
     } : undefined;
 
+    // API authentication
+    console.log('\nAPI Authentication:');
+    const existingAuthEnabled = existing.auth?.enabled !== false;
+    const enableAuth = (await ask(
+      'Enable API authentication? (y/n)',
+      existingAuthEnabled ? 'y' : 'n',
+    )).toLowerCase() === 'y';
+
     console.log('\nOperational wallets are stored in ~/.dkg/wallets.json');
     console.log('They are auto-generated on first start. You can edit the file to add your own keys.');
 
@@ -127,6 +136,7 @@ program
       paranets,
       autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
       chain: chainSection ?? existing.chain,
+      auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
     };
     await saveConfig(config);
 
@@ -136,12 +146,64 @@ program
     console.log(`  relay:      ${config.relay ?? '(none)'}`);
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
+    console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
     console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
     console.log(`\nRun "dkg start" to start the node.`);
+  });
+
+// ─── dkg auth ─────────────────────────────────────────────────────────
+
+const authCmd = program
+  .command('auth')
+  .description('Manage API authentication tokens');
+
+authCmd
+  .command('show')
+  .description('Display the current auth token')
+  .action(async () => {
+    const { loadTokens } = await import('./auth.js');
+    const config = await loadConfig();
+    const tokens = await loadTokens(config.auth);
+    if (tokens.size === 0) {
+      console.log('No auth tokens configured.');
+      return;
+    }
+    for (const t of tokens) console.log(t);
+  });
+
+authCmd
+  .command('rotate')
+  .description('Generate a new auth token (replaces the file-based token)')
+  .action(async () => {
+    const { randomBytes } = await import('node:crypto');
+    const { writeFile, chmod, mkdir } = await import('node:fs/promises');
+    const { join, dirname } = await import('node:path');
+    const tokenPath = join(dkgDir(), 'auth.token');
+    const token = randomBytes(32).toString('base64url');
+    await mkdir(dirname(tokenPath), { recursive: true });
+    await writeFile(tokenPath, `# DKG node API token — treat this like a password\n${token}\n`, { mode: 0o600 });
+    await chmod(tokenPath, 0o600);
+    console.log('New token generated:');
+    console.log(token);
+    console.log(`\nSaved to ${tokenPath}`);
+    console.log('Restart the daemon for the new token to take effect.');
+  });
+
+authCmd
+  .command('status')
+  .description('Show whether authentication is enabled')
+  .action(async () => {
+    const config = await loadConfig();
+    const enabled = config.auth?.enabled !== false;
+    console.log(`  Authentication: ${enabled ? 'enabled' : 'disabled'}`);
+    console.log(`  Token file:     ${join(dkgDir(), 'auth.token')}`);
+    if (config.auth?.tokens?.length) {
+      console.log(`  Config tokens:  ${config.auth.tokens.length}`);
+    }
   });
 
 // ─── dkg start ───────────────────────────────────────────────────────

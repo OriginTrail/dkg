@@ -4,16 +4,20 @@ A decentralized knowledge marketplace run by AI agents. Any agent — built with
 
 ## Architecture
 
-Eight packages in a pnpm monorepo, built with Turborepo:
+Thirteen packages in a pnpm monorepo, built with Turborepo:
 
 ```
 @dkg/core              P2P networking (libp2p), protocol messages, crypto
-@dkg/storage           Triple store adapters (Oxigraph, in-memory)
+@dkg/storage           Triple store adapters (Oxigraph, Blazegraph, SPARQL HTTP, custom)
 @dkg/chain             Blockchain abstraction (EVM + Solana via ChainAdapter interface)
 @dkg/publisher         Publishing protocol, merkle trees, skolemization, on-chain finalization
 @dkg/query             SPARQL engine, paranet-scoped queries, KA resolution
 @dkg/agent             Agent identity, skill profiles, messaging, persistent keys
 @dkg/cli               CLI daemon — node management, publishing, querying, chat
+@dkg/evm-module        Solidity contracts, Hardhat deploy scripts, Base Sepolia integration
+@dkg/node-ui           Web dashboard — monitoring, Knowledge Explorer, SPARQL editor, chat
+@dkg/graph-viz         Interactive RDF graph visualization (force-directed, used by node-ui)
+@dkg/network-sim       Network simulator — multi-node devnet orchestration and load testing
 @dkg/adapter-openclaw  OpenClaw plugin — registers DKG tools + lifecycle hooks
 @dkg/adapter-elizaos   ElizaOS plugin — DKG actions, providers, and node service
 ```
@@ -77,7 +81,7 @@ Both devs work simultaneously. The full agent marketplace works end-to-end with 
 | Developer A (Protocol Core) | Developer B (Agent Layer) |
 |---|---|
 | `@dkg/core` — libp2p node, GossipSub, DHT, crypto | Agent identity — Ed25519 keygen, wallet derivation |
-| `@dkg/storage` — TripleStore, Oxigraph adapter | Skill ontology — `dkgskill:` RDF, SHACL shapes |
+| `@dkg/storage` — TripleStore interface, Oxigraph + Blazegraph adapters | Skill ontology — `dkgskill:` RDF, SHACL shapes |
 | `@dkg/publisher` — auto-partition, merkle trees, publish flow | Profile publishing, discovery client |
 | `@dkg/query` — local SPARQL, KA resolution | Messaging — encrypted SkillRequest/Response |
 | Private KA access protocol | Framework adapters — OpenClaw + ElizaOS |
@@ -108,23 +112,31 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 
 ## Current Status
 
-**Phase 1 is nearly complete.** Core protocol + agent layer are built and tested. Framework adapters, persistent identity, and relay/hole-punching are done.
+**Phase 1 (off-chain marketplace) is complete.** Phase 2 (blockchain anchoring) is substantially done — on-chain publishing is live on Base Sepolia. The Trust Layer economic contracts (Phase 3) are specified and partially deployed.
 
-| Work Package | Status | Tests |
+| Work Package | Status | Notes |
 |---|---|---|
-| WP-1A-i: Protocol Core | Done | 67 tests (core, storage, publisher, query) |
-| WP-1B: Agent Layer | Done | 33 tests (wallet, profiles, discovery, encryption, messaging, persistence, E2E) |
-| Relay + Hole Punching | Done | 3 tests (circuit relay, relay startup, relay peer connect) |
-| Framework Adapters | Done | OpenClaw plugin (`@dkg/adapter-openclaw`) + ElizaOS plugin (`@dkg/adapter-elizaos`) |
+| Protocol Core | Done | P2P networking, GossipSub, relay, sync, cross-agent query |
+| Agent Layer | Done | Identity, discovery, encrypted messaging, skill invocation |
+| On-Chain Publishing | Done | Base Sepolia (EVM), UAL minting, two-phase metadata |
+| Node UI | Done | Web dashboard, Knowledge Explorer, SPARQL editor, chat |
+| API Authentication | Done | Bearer token auth on all endpoints, auto-generated tokens |
+| Workspace Graph | In Progress | No-finality build area; write, replicate, query, enshrine |
+| Framework Adapters | Done | OpenClaw + ElizaOS plugins |
 | Persistent Identity | Done | Keys saved to disk, same PeerId across restarts |
+| CLI | Done | Full node management: init, start, publish, query, chat, auth |
+
+70 test files including E2E tests covering the full agent lifecycle.
 
 ### What works today
 
 - **P2P networking** — libp2p nodes form a private DKG network (no public IPFS bootstrap)
 - **Cross-network connectivity** — Circuit Relay v2 + DCUtR hole punching for agents behind NATs
-- **Knowledge publishing** — entities → KAs → KCs with merkle trees, skolemization, mock chain finalization
+- **Knowledge publishing** — entities → KAs → KCs with merkle trees, skolemization, on-chain finalization on Base Sepolia
 - **Private triples** — mixed public/private KAs; private triples stay on the publisher, verified via merkle roots
 - **GossipSub** — paranet-scoped pub/sub for broadcasting published knowledge
+- **Paranet sync on connect** — new peers catch up via paginated, merkle-verified sync protocol
+- **Cross-agent query** — remote SPARQL queries via `/dkg/query/2.0.0` with access policies and rate limiting
 - **Agent identity** — Ed25519 master key with BIP-32/SLIP-10 derivation for EVM and Solana
 - **Persistent identity** — keys saved to disk, same PeerId survives node restarts
 - **Skill ontology** — `dkgskill:` RDF vocabulary with SHACL validation shapes
@@ -133,20 +145,30 @@ Payment channels, Macaroon access control, delegation contracts, marketplace flo
 - **Encrypted messaging** — X25519 key exchange, XChaCha20-Poly1305 encryption, replay protection
 - **Interactive chat** — agents exchange arbitrary messages via `/dkg/message/1.0.0`
 - **Store isolation** — no node exposes its SPARQL endpoint; all inter-node exchange via protocol messages
+- **On-chain publishing** — Base Sepolia testnet, UAL minting, TRAC staking, two-phase tentative→confirmed lifecycle
+- **Paranet on-chain lifecycle** — create and discover paranets via `ParanetV9Registry.sol`
+- **Node UI** — web dashboard with monitoring, Knowledge Explorer (SPARQL + graph viz), operations log, wallet, integrations, chat assistant
+- **API authentication** — bearer token auth, auto-generated on first start, CLI management (`dkg auth show/status/rotate`)
+- **Workspace graph** — no-finality build area for collaborative knowledge construction before enshrinement
 - **Framework adapters** — OpenClaw plugin (tools + lifecycle hooks + SKILL.md) and ElizaOS plugin (actions + provider + service)
 
-### Remaining Part 1
+### Remaining
 
 | Item | Package | Description |
 |---|---|---|
-| Private KA access protocol | `@dkg/publisher` | `/dkg/access/1.0.0` — AccessRequest/Response, mock payment verify, merkle verify, triple transfer |
-| Triple sync protocol | `@dkg/core` | `/dkg/sync/1.0.0` — state vector exchange, delta-based replication between peers |
+| Private KA access protocol | `@dkg/publisher` | `/dkg/access/1.0.0` — AccessRequest/Response, payment verify, merkle verify, triple transfer |
 
-### Next: Phase 2 (Blockchain Anchoring)
+### Next Up
 
-| Developer A | Developer B |
+The gap between "agents that can talk" and "agents that can transact with trust." See [Implementation Plan](docs/plans/00_IMPLEMENTATION_PLAN.md) for the full roadmap.
+
+| Priority | Item |
 |---|---|
-| `ChainAdapter` interface + EVM adapter | Solana programs (Anchor) + Solana adapter |
+| P1 | Private KA access — completes the publish/access loop |
+| P1 | FairSwap off-chain flow — trusted skill invocations with payment escrow |
+| P1 | Async skill invocations — task IDs and polling for long-running AI workloads |
+| P2 | Trust Layer contracts — conviction accounts, staking, paranet sharding |
+| P2 | Federated discovery — network-wide skill search beyond local sync |
 
 ## Demo
 
@@ -209,10 +231,105 @@ pnpm dkg query [paranet] -q ...  # SPARQL query
 pnpm dkg paranet create <id>     # Create a new paranet
 pnpm dkg paranet list            # List all paranets
 pnpm dkg subscribe <paranet>     # Subscribe to a paranet topic
+pnpm dkg auth show               # Display API auth token
+pnpm dkg auth status             # Check auth configuration
+pnpm dkg auth rotate             # Generate a new auth token
 pnpm dkg logs                    # View daemon logs
 ```
 
 > **Note**: The CLI is not yet published to npm. Until then, use `pnpm dkg` from the repo root (which calls `node packages/cli/dist/cli.js`). `npx dkg` will not work in the monorepo.
+
+## API Authentication
+
+DKG V9 includes built-in bearer token authentication that protects all node API endpoints. Authentication is **enabled by default** — a token is auto-generated on first start.
+
+### How It Works
+
+1. When a node starts for the first time, a cryptographically random token is generated and saved to `<DKG_HOME>/auth.token` (typically `~/.dkg/auth.token`).
+2. All API requests (except public endpoints) must include the token in the `Authorization` header.
+3. The same token system is designed to work across HTTP API, future MCP servers, WebSocket connections, and any other interface.
+
+### Public Endpoints (No Token Required)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/status` | Health checks and monitoring |
+| `GET /api/chain/rpc-health` | Blockchain RPC health |
+| `/ui/*` | Node UI static files |
+| `OPTIONS *` | CORS preflight |
+
+All other endpoints require a valid bearer token.
+
+### Using the Token
+
+```bash
+# Read your token
+dkg auth show
+
+# Use with curl
+TOKEN=$(dkg auth show)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
+
+# The dkg CLI automatically uses the token for all commands
+dkg status    # works — /api/status is public
+dkg peers     # works — CLI reads ~/.dkg/auth.token automatically
+```
+
+### Token Management
+
+```bash
+dkg auth show      # Display the current token
+dkg auth status    # Check if auth is enabled
+dkg auth rotate    # Generate a new token (requires daemon restart)
+```
+
+### Configuration
+
+Authentication is controlled via the `auth` field in `config.json`:
+
+```jsonc
+{
+  "auth": {
+    "enabled": true,            // default: true — set to false to disable
+    "tokens": ["extra-token"]   // optional additional tokens (merged with auth.token file)
+  }
+}
+```
+
+To disable authentication entirely (not recommended for externally accessible nodes):
+
+```jsonc
+{
+  "auth": { "enabled": false }
+}
+```
+
+### Node UI
+
+The Node UI (`/ui`) receives the auth token automatically — the daemon injects it into the served HTML page. No manual configuration is needed for the browser UI.
+
+### Network Simulator
+
+The devnet script generates a shared auth token for all nodes. The network simulator's Vite proxy automatically injects the token into API requests. No additional configuration is needed.
+
+### Programmatic Access
+
+For any HTTP client, include the token as a bearer token:
+
+```typescript
+const token = 'your-token-here';
+
+const res = await fetch('http://127.0.0.1:9200/api/publish', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({ paranetId: 'my-paranet', quads: [...] }),
+});
+```
+
+For MCP servers and other future interfaces, the same `verifyToken()` function from `@dkg/cli/auth` can be used to validate tokens — one auth system for all interfaces.
 
 ### Setup Guides
 
@@ -241,9 +358,173 @@ pnpm --filter @dkg/agent test   # Run tests for a specific package
 | Networking | libp2p (TCP, WebSocket, Noise, yamux, Circuit Relay v2, DCUtR, AutoNAT) |
 | Discovery | Kademlia DHT + GossipSub + mDNS |
 | Data | RDF/SPARQL, N-Quads, URDNA2015 canonicalization |
-| Triple Store | Oxigraph (embedded), pluggable via TripleStore interface |
+| Triple Store | Pluggable via TripleStore interface — Oxigraph (embedded), Blazegraph (remote SPARQL), custom adapters |
 | Agent Identity | Ed25519 master, BIP-32/SLIP-10 derivation (EVM + Solana) |
 | Encryption | X25519 key exchange, XChaCha20-Poly1305 |
 | Crypto | @noble/curves, @noble/hashes, @noble/ciphers |
 | Blockchain | EVM (ethers.js), Solana (web3.js + Anchor) — via ChainAdapter |
 | Testing | Vitest |
+
+## Triple Store Backends
+
+DKG V9 ships a pluggable RDF storage layer (`@dkg/storage`). Any SPARQL 1.1–capable store can serve as the backend — you pick the right one for each node depending on your data volume, latency, and deployment constraints.
+
+### Built-in Backends
+
+| Backend | Key | How it runs | Best for |
+|---|---|---|---|
+| **Oxigraph** | `oxigraph` | In-process WASM, single-threaded | **Fastest per-operation** — best for low-concurrency or batch workloads |
+| **Oxigraph Worker** | `oxigraph-worker` | Dedicated worker thread, file-backed | **Default for production** — keeps the main event loop free for networking |
+| **Blazegraph** | `blazegraph` | External Docker/JVM process, HTTP SPARQL | Large datasets, parallel writes, multi-node sharing |
+
+### Performance Benchmarks
+
+Benchmarked with the Network Simulator: 10,000 ops, 100 concurrency, 100 KAs per publish, 4 ops types (publish/query/workspace/chat).
+
+| Metric | `oxigraph` (in-process) | `oxigraph-worker` (thread) |
+|---|---|---|
+| **Publish avg** | **125 ms** | 554 ms |
+| **Query avg** | **33 ms** | 399 ms |
+| **Workspace avg** | **34 ms** | 415 ms |
+| Store write phase | 1 ms | 19 ms |
+| Chat failure rate (10s timeout) | 29.5% | **15.1%** |
+| Event loop blocked | Yes | **No** |
+
+**Key trade-off**: `oxigraph` is 4–12x faster per-operation because there is no serialization overhead between threads. However, it runs on the main Node.js event loop, which blocks networking (libp2p, HTTP API) during store operations. This causes ~2x more chat/messaging timeouts under heavy load.
+
+**Recommendation**:
+- Use `oxigraph-worker` (default) for nodes that need to stay responsive to P2P messages, API requests, and real-time chat while handling concurrent load.
+- Use `oxigraph` for batch-processing nodes or dedicated publish/query workers where event loop responsiveness is less important.
+- Use `blazegraph` when you need persistence beyond N-Quads files, large datasets (millions of triples), or want multiple nodes to share a single store.
+
+### Choosing a Backend
+
+In your node's `config.json` (or the config generated by `dkg init`), add a `store` block:
+
+```jsonc
+{
+  "name": "my-node",
+  "apiPort": 9200,
+  // ... other fields ...
+
+  // Option A — Oxigraph worker (default, no config needed)
+  // Omit the "store" key entirely, or:
+  "store": {
+    "backend": "oxigraph-worker"
+  }
+
+  // Option B — Blazegraph
+  // "store": {
+  //   "backend": "blazegraph",
+  //   "options": {
+  //     "url": "http://127.0.0.1:9999/bigdata/namespace/mynode/sparql"
+  //   }
+  // }
+}
+```
+
+If no `store` key is present, the node defaults to `oxigraph-worker` with file persistence in `<DKG_HOME>/store.nq`.
+
+### Running Blazegraph
+
+Blazegraph runs as a Docker container. A single Blazegraph instance can host many nodes — each gets its own namespace.
+
+```bash
+# Start Blazegraph
+docker run -d --name blazegraph -p 9999:9999 lyrasis/blazegraph:2.1.5
+
+# Create a namespace for your node
+curl -s -X POST 'http://127.0.0.1:9999/bigdata/namespace' \
+  -H 'Content-Type: application/xml' \
+  -d '<?xml version="1.0" encoding="UTF-8"?>
+  <properties>
+    <entry key="com.bigdata.rdf.sail.namespace">mynode</entry>
+    <entry key="com.bigdata.rdf.store.AbstractTripleStore.quads">true</entry>
+    <entry key="com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers">false</entry>
+    <entry key="com.bigdata.rdf.sail.truthMaintenance">false</entry>
+  </properties>'
+
+# Then set the node config to point at the namespace:
+# "store": { "backend": "blazegraph", "options": { "url": "http://127.0.0.1:9999/bigdata/namespace/mynode/sparql" } }
+```
+
+The devnet script (`scripts/devnet.sh`) automates all of this when Docker is available — nodes 4-6 automatically use Blazegraph, while nodes 1-3 use Oxigraph. If Docker is not running, all nodes fall back to Oxigraph.
+
+### Adding a Custom Triple Store
+
+Any SPARQL 1.1–compatible store can be added as a backend. You need to:
+
+1. **Implement the `TripleStore` interface** (`packages/storage/src/triple-store.ts`):
+
+```typescript
+import type { TripleStore, Quad, QueryResult } from '@dkg/storage';
+
+export class MyCustomStore implements TripleStore {
+  async insert(quads: Quad[]): Promise<void> { /* ... */ }
+  async delete(quads: Quad[]): Promise<void> { /* ... */ }
+  async deleteByPattern(pattern: Partial<Quad>): Promise<number> { /* ... */ }
+  async query(sparql: string): Promise<QueryResult> { /* ... */ }
+  async hasGraph(graphUri: string): Promise<boolean> { /* ... */ }
+  async createGraph(graphUri: string): Promise<void> { /* ... */ }
+  async dropGraph(graphUri: string): Promise<void> { /* ... */ }
+  async listGraphs(): Promise<string[]> { /* ... */ }
+  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { /* ... */ }
+  async countQuads(graphUri?: string): Promise<number> { /* ... */ }
+  async close(): Promise<void> { /* ... */ }
+}
+```
+
+2. **Register the adapter** so the factory can create it by name:
+
+```typescript
+import { registerTripleStoreAdapter } from '@dkg/storage';
+
+registerTripleStoreAdapter('my-store', async (options) => {
+  const url = options?.url as string;
+  return new MyCustomStore(url);
+});
+```
+
+3. **Add a side-effect import** in `packages/storage/src/index.ts` so the adapter is auto-registered:
+
+```typescript
+import './adapters/my-store.js';
+```
+
+4. **Use it** in a node config:
+
+```json
+{
+  "store": {
+    "backend": "my-store",
+    "options": { "url": "http://localhost:7200/repositories/dkg" }
+  }
+}
+```
+
+5. **Run the conformance tests** against your backend:
+
+```bash
+# For HTTP-based stores, set the env var and run:
+BLAZEGRAPH_URL=http://127.0.0.1:9999/bigdata/namespace/test/sparql \
+  pnpm --filter @dkg/storage test
+
+# Or add your store to the conformance suite in test/storage.test.ts:
+# tripleStoreConformanceSuite('MyCustomStore', async () => new MyCustomStore(url));
+```
+
+The test suite includes a **shared conformance suite** (`tripleStoreConformanceSuite`) that validates all `TripleStore` interface methods. Any new backend should pass the full suite before being deployed.
+
+### Mixing Backends in a Network
+
+Nodes in the same network can use different backends. This is transparent to the protocol — all inter-node communication happens via GossipSub messages and the HTTP API; the store is purely a local concern.
+
+In the devnet, the default split is:
+
+| Nodes | Backend | Why |
+|---|---|---|
+| 1-2 | `oxigraph-worker` | Production default — event loop stays free |
+| 3-4 | `blazegraph` if Docker is available, else `oxigraph` | Tests remote SPARQL path (or fastest local backend as fallback) |
+| 5-6 | `oxigraph-worker` | Additional worker-thread nodes for load distribution |
+
+When Docker is not available, all nodes gracefully fall back to local Oxigraph backends. The Network Simulator UI shows each node's active backend in the Stats dashboard.

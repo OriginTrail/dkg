@@ -149,7 +149,7 @@ Visual: peer count line chart over time. World map of peer locations
 | Total KCs | SPARQL: count distinct `rdf:type dkg:KC` in meta graphs | 60s |
 | Total KAs | SPARQL: count distinct `rdf:type dkg:KA` in meta graphs | 60s |
 | Triples per paranet | `store.countQuads(graphUri)` per paranet | 60s |
-| Store size on disk | `fs.stat(store.nq)` | 60s |
+| Store size on disk | Backend-dependent: `fs.stat(store.nq)` for Oxigraph, N/A for remote stores (Blazegraph) | 60s |
 | Confirmed vs tentative | SPARQL: count by `dkg:status` | 60s |
 
 Visual: donut chart (triples by paranet), bar chart (KCs over time),

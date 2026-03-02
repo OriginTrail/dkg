@@ -59,6 +59,8 @@ export class DKGPublisher implements Publisher {
   /** Additional wallets that can provide receiver signatures. */
   private readonly additionalSignerWallets: ethers.Wallet[] = [];
   private readonly log = new Logger('DKGPublisher');
+  private readonly sessionId = Date.now().toString(36);
+  private tentativeCounter = 0;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -355,7 +357,8 @@ export class DKGPublisher implements Publisher {
 
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
-    let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/0`;
+    const tentativeSeq = ++this.tentativeCounter;
+    let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
 
     // Build EVM ECDSA signatures for on-chain verification
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
@@ -458,7 +461,7 @@ export class DKGPublisher implements Publisher {
     }
 
     if (status === 'tentative') {
-      ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/0`;
+      // ual already set to the tentative form above; no reassignment needed
       for (const km of kaMetadata) {
         km.kcUal = ual;
       }
@@ -491,6 +494,7 @@ export class DKGPublisher implements Publisher {
 
     const result: PublishResult = {
       kcId: onChainResult?.batchId ?? 0n,
+      ual,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status,
@@ -551,6 +555,7 @@ export class DKGPublisher implements Publisher {
 
     const result: PublishResult = {
       kcId,
+      ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',

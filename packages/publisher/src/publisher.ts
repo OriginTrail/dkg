@@ -30,6 +30,8 @@ export interface PublishOptions {
 
 export interface PublishResult {
   kcId: bigint;
+  /** The UAL assigned to this KC (tentative or confirmed). */
+  ual: string;
   merkleRoot: Uint8Array;
   kaManifest: KAManifestEntry[];
   status: 'tentative' | 'confirmed';

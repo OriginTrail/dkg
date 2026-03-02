@@ -13,6 +13,7 @@ import {
   Hub,
   Token,
   StakingStorage,
+  DelegatorsInfo,
 } from '../../typechain';
 
 type FullIntegrationFixture = {
@@ -23,6 +24,7 @@ type FullIntegrationFixture = {
   Staking: Staking;
   StakingStorage: StakingStorage;
   Token: Token;
+  DelegatorsInfo: DelegatorsInfo;
 };
 
 describe('@unit Ask', () => {
@@ -33,6 +35,7 @@ describe('@unit Ask', () => {
   let Staking: Staking;
   let StakingStorage: StakingStorage;
   let Token: Token;
+  let DelegatorsInfo: DelegatorsInfo;
 
   async function deployAll(): Promise<FullIntegrationFixture> {
     await hre.deployments.fixture([
@@ -50,6 +53,8 @@ describe('@unit Ask', () => {
     StakingStorage =
       await hre.ethers.getContract<StakingStorage>('StakingStorage');
     Token = await hre.ethers.getContract<Token>('Token');
+    const DelegatorsInfoContract =
+      await hre.ethers.getContract<DelegatorsInfo>('DelegatorsInfo');
 
     accounts = await hre.ethers.getSigners();
 
@@ -64,12 +69,14 @@ describe('@unit Ask', () => {
       Staking,
       StakingStorage,
       Token,
+      DelegatorsInfo: DelegatorsInfoContract,
     };
   }
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Profile, Ask, Staking, Token } = await loadFixture(deployAll));
+    ({ accounts, Profile, Ask, Staking, Token, DelegatorsInfo } =
+      await loadFixture(deployAll));
   });
 
   const createProfile = async (
@@ -111,6 +118,7 @@ describe('@unit Ask', () => {
     expect(weightedSum).to.equal(expectedWeighted);
 
     const partialWithdraw = hre.ethers.parseUnits('10000', 18);
+    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
     await Staking.connect(accounts[2]).requestWithdrawal(
       identityId,
       partialWithdraw,
@@ -207,6 +215,7 @@ describe('@unit Ask', () => {
     expect(afterStakeWeighted).to.be.gte(largeStake * 300n);
     expect(afterStakeTotal).to.be.gte(largeStake);
     const partial1 = hre.ethers.parseUnits('40000', 18);
+    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
     await Staking.connect(accounts[2]).requestWithdrawal(identityId, partial1);
     const partialAfterWeighted = await AskStorage.weightedActiveAskSum();
     const partialAfterTotal = await AskStorage.totalActiveStake();
@@ -243,6 +252,7 @@ describe('@unit Ask', () => {
     await time.increase(61);
 
     const partialWithdraw = hre.ethers.parseUnits('79999', 18);
+    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
     await Staking.connect(accounts[2]).requestWithdrawal(
       identityId,
       partialWithdraw,

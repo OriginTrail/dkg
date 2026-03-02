@@ -154,7 +154,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
       }
       return;
     }
-    provider = new JsonRpcProvider(RPC_URL);
+    provider = new JsonRpcProvider(RPC_URL, undefined, { cacheTimeout: -1 });
     hubAddress = await deployContracts();
 
     // Create core node profiles (needed for signatures)
@@ -164,28 +164,29 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     await createNodeProfile(REC2_OP_KEY, REC2_ADMIN_KEY, 'Receiver2');
     await createNodeProfile(REC3_OP_KEY, REC3_ADMIN_KEY, 'Receiver3');
 
-    // Set ask so V9 publish requires TRAC: stake one node and set ask (triggers recalculateActiveSet)
     const hub = new Contract(hubAddress, [
       'function getContractAddress(string) view returns (address)',
     ], provider);
     const tokenAddr = await hub.getContractAddress('Token');
     const stakingAddr = await hub.getContractAddress('Staking');
     const profileAddr = await hub.getContractAddress('Profile');
+    const deployerWallet = new Wallet(DEPLOYER_KEY, provider);
+    const coreOpWallet = new Wallet(CORE_OP_KEY, provider);
     const token = new Contract(tokenAddr, [
       'function mint(address, uint256)',
       'function approve(address, uint256) returns (bool)',
-    ], new Wallet(DEPLOYER_KEY, provider));
+    ], deployerWallet);
     const staking = new Contract(stakingAddr, [
       'function stake(uint72 identityId, uint96 amount)',
-    ], new Wallet(CORE_OP_KEY, provider));
+    ], coreOpWallet);
     const profile = new Contract(profileAddr, [
       'function updateAsk(uint72 identityId, uint96 ask)',
-    ], new Wallet(CORE_OP_KEY, provider));
-    const stakeAmount = ethers.parseEther('10000');
-    await token.mint(new Wallet(CORE_OP_KEY, provider).address, stakeAmount);
-    await token.connect(new Wallet(CORE_OP_KEY, provider)).approve(stakingAddr, stakeAmount);
-    await staking.stake(deployerProfileId, stakeAmount);
-    await profile.updateAsk(deployerProfileId, ethers.parseEther('1'));
+    ], coreOpWallet);
+    const stakeAmount = ethers.parseEther('50000');
+    await (await token.mint(coreOpWallet.address, stakeAmount)).wait();
+    await (await token.connect(coreOpWallet).approve(stakingAddr, stakeAmount)).wait();
+    await (await staking.stake(deployerProfileId, stakeAmount)).wait();
+    await (await profile.updateAsk(deployerProfileId, ethers.parseEther('1'))).wait();
   }, 90_000);
 
   afterAll(() => {
@@ -305,11 +306,11 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(startTokenId).toBeGreaterThan(0n);
     expect(endTokenId).toBeGreaterThanOrEqual(startTokenId);
 
-    const totalBalance = await kas.balanceOf(publisher2);
+    const totalBalance = await kas['balanceOf(address)'](publisher2);
     expect(totalBalance).toBe(5n);
 
     for (let tokenId = startTokenId; tokenId <= endTokenId; tokenId++) {
-      const balance = await kas.balanceOf(publisher2, tokenId);
+      const balance = await kas['balanceOf(address,uint256)'](publisher2, tokenId);
       expect(balance).toBe(1n);
     }
   }, 30_000);

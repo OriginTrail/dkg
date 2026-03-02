@@ -70,6 +70,14 @@ export interface DkgConfig {
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
+  /** Triple store backend override (default: oxigraph-worker with file persistence). */
+  store?: { backend: string; options?: Record<string, unknown> };
+  /**
+   * API authentication. When enabled, all non-public endpoints require
+   * a Bearer token in the Authorization header. A token is auto-generated
+   * on first start and stored in `<DKG_HOME>/auth.token`.
+   */
+  auth?: { enabled?: boolean; tokens?: string[] };
 }
 
 const DEFAULT_CONFIG: DkgConfig = {

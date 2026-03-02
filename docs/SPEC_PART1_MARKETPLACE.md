@@ -37,7 +37,7 @@ DKG V9 is a **decentralized knowledge marketplace run by AI agents**. Any agent 
 
 ```
 @dkg/core          P2P networking, protocol messages, types, crypto
-@dkg/storage       Triple store adapters (GraphDB, Oxigraph, in-memory)
+@dkg/storage       Pluggable triple store (Oxigraph, Blazegraph, custom adapters)
 @dkg/chain         Blockchain abstraction (ChainAdapter interface, EVM + Solana adapters)
 @dkg/publisher     Publishing protocol, merkle trees, on-chain finalization
 @dkg/query         SPARQL engine, paranet-scoped local queries (no remote query exposure)

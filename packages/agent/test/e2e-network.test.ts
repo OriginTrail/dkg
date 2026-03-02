@@ -16,6 +16,8 @@ import { MockChainAdapter } from '@dkg/chain';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+const CUSTOM_CHAIN_ID = 'evm:84532';
+
 describe('Network E2E (3 nodes + relay)', () => {
   let relay: DKGNode;
   let relayAddr: string;
@@ -51,7 +53,6 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(relayAddr).toBeDefined();
 
     // Use a distinct chainId so we can assert broadcast UAL/chainId come from the adapter (not hardcoded)
-    const CUSTOM_CHAIN_ID = 'evm:84532';
     nodeA = await DKGAgent.create({
       name: 'NodeA',
       framework: 'OpenClaw',

@@ -68,7 +68,7 @@ export class EVMChainAdapter implements ChainAdapter {
   private initialized = false;
 
   constructor(config: EVMAdapterConfig) {
-    this.provider = new JsonRpcProvider(config.rpcUrl);
+    this.provider = new JsonRpcProvider(config.rpcUrl, undefined, { cacheTimeout: -1 });
     this.signer = new Wallet(config.privateKey, this.provider);
     this.signerPool = [this.signer];
     for (const key of config.additionalKeys ?? []) {
@@ -635,27 +635,48 @@ export class EVMChainAdapter implements ChainAdapter {
           'Deploy ParanetV9Registry and register it in the Hub, or provide name.',
       );
     }
-    const description = params.description ?? params.metadata?.['description'] ?? '';
     const accessPolicy = params.accessPolicy ?? 0;
-    const tx = await registry.createParanetV9(name, description, accessPolicy);
+    const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
+    const tx = await registry.createParanetV9(onChainId, accessPolicy);
     const receipt = await tx.wait();
     if (!receipt) throw new Error('createParanet: no receipt');
     let paranetIdHex: string | undefined;
-    const created = registry.interface.parseLog({
-      topics: receipt.logs[receipt.logs.length - 1]?.topics as string[],
-      data: receipt.logs[receipt.logs.length - 1]?.data ?? '0x',
-    });
-    if (created?.name === 'ParanetCreated') paranetIdHex = String(created.args.paranetId);
+    for (const log of receipt.logs) {
+      try {
+        const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'ParanetCreated') {
+          paranetIdHex = String(parsed.args.paranetId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+
+    // Optionally reveal cleartext metadata on-chain
+    if (params.revealOnChain) {
+      const description = params.description ?? params.metadata?.['description'] ?? '';
+      await this.revealParanetMetadata(onChainId, name, description);
+    }
+
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
       success: true,
-      paranetId: paranetIdHex,
+      paranetId: paranetIdHex ?? onChainId,
     };
   }
 
   async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> {
     throw new Error('submitToParanet: not yet implemented on EVM adapter (Milestone 5)');
+  }
+
+  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
+    await this.init();
+    const registry = this.contracts.paranetV9Registry;
+    if (!registry) throw new Error('revealParanetMetadata: ParanetV9Registry not available');
+    const tx = await registry.revealMetadata(paranetId, name, description);
+    const receipt = await tx.wait();
+    if (!receipt) throw new Error('revealParanetMetadata: no receipt');
+    return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: true };
   }
 
   async listParanetsFromChain(fromBlock?: number): Promise<ParanetOnChain[]> {
@@ -671,9 +692,9 @@ export class EVMChainAdapter implements ChainAdapter {
       return {
         paranetId: String(parsed.args.paranetId),
         creator: String(parsed.args.creator),
-        name: String(parsed.args.name),
         accessPolicy: Number(parsed.args.accessPolicy),
         blockNumber: log.blockNumber,
+        metadataRevealed: false,
       };
     }).filter((x): x is ParanetOnChain => x !== null);
   }

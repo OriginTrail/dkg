@@ -3,7 +3,7 @@
 # Local DKG Devnet — spins up a Hardhat chain + N DKG nodes for local testing.
 #
 # Usage:
-#   ./scripts/devnet.sh start [N]   Start devnet with N nodes (default 5)
+#   ./scripts/devnet.sh start [N]   Start devnet with N nodes (default 6)
 #   ./scripts/devnet.sh stop         Stop all devnet processes
 #   ./scripts/devnet.sh status       Show running devnet processes
 #   ./scripts/devnet.sh logs [N]     Tail logs for node N (1-based)
@@ -18,9 +18,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
-NUM_NODES="${2:-5}"
+NUM_NODES="${2:-6}"
 API_PORT_BASE=9201
 LIBP2P_PORT_BASE=10001
+NUM_OP_WALLETS=3
+BLAZEGRAPH_PORT=9999
+BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+OXIGRAPH_SERVER_PORT_5=7878
+OXIGRAPH_SERVER_PORT_6=7879
+OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
+OXIGRAPH_CONTAINER_6="devnet-oxigraph-6"
 
 # Hardhat default accounts (first 10 of the well-known mnemonic)
 # "test test test test test test test test test test test junk"
@@ -39,6 +46,14 @@ HARDHAT_KEYS=(
 
 log() {
   echo "[devnet] $*"
+}
+
+fund_wallet() {
+  local address=$1
+  local amount="0x56BC75E2D63100000"  # 100 ETH in hex wei
+  curl -s -X POST "http://127.0.0.1:$HARDHAT_PORT" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"hardhat_setBalance\",\"params\":[\"$address\",\"$amount\"],\"id\":1}" > /dev/null
 }
 
 ensure_built() {
@@ -124,6 +139,127 @@ deploy_contracts() {
   log "Contracts deployed. Hub address: $hub_addr"
 }
 
+BLAZEGRAPH_AVAILABLE=false
+
+start_blazegraph() {
+  if ! docker info > /dev/null 2>&1; then
+    log "Docker not available — nodes 3-4 will use Oxigraph instead of Blazegraph"
+    return 0
+  fi
+
+  if docker inspect "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1; then
+    if docker inspect -f '{{.State.Running}}' "$BLAZEGRAPH_CONTAINER" 2>/dev/null | grep -q true; then
+      log "Blazegraph already running ($BLAZEGRAPH_CONTAINER)"
+      BLAZEGRAPH_AVAILABLE=true
+      return 0
+    fi
+    docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
+  fi
+
+  log "Starting Blazegraph (Docker) on port $BLAZEGRAPH_PORT..."
+  if ! docker run -d --name "$BLAZEGRAPH_CONTAINER" \
+    -p "$BLAZEGRAPH_PORT:8080" \
+    lyrasis/blazegraph:2.1.5 > /dev/null 2>&1; then
+    log "WARNING: Failed to start Blazegraph container — nodes 3-4 will use Oxigraph"
+    return 0
+  fi
+
+  # Wait for Blazegraph to be ready
+  for i in $(seq 1 30); do
+    if curl -s "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/status" > /dev/null 2>&1; then
+      log "Blazegraph ready"
+      BLAZEGRAPH_AVAILABLE=true
+      # Create per-node namespaces for nodes 3–4 (Blazegraph)
+      for n in 3 4; do
+        local ns="node${n}"
+        curl -s -X POST "http://127.0.0.1:$BLAZEGRAPH_PORT/bigdata/namespace" \
+          -H "Content-Type: application/xml" \
+          -d "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<properties>
+  <entry key=\"com.bigdata.rdf.sail.namespace\">$ns</entry>
+  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.quads\">true</entry>
+  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers\">false</entry>
+  <entry key=\"com.bigdata.rdf.store.AbstractTripleStore.textIndex\">false</entry>
+  <entry key=\"com.bigdata.rdf.sail.truthMaintenance\">false</entry>
+</properties>" > /dev/null 2>&1
+        log "Created Blazegraph namespace: $ns"
+      done
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "WARNING: Blazegraph failed to start within 30s — nodes 3-4 will use Oxigraph"
+}
+
+OXIGRAPH_SERVER_AVAILABLE=false
+
+start_oxigraph_servers() {
+  if [ "$NUM_NODES" -lt 5 ]; then
+    return 0
+  fi
+  if ! docker info > /dev/null 2>&1; then
+    log "Docker not available — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+    return 0
+  fi
+  if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
+    log "Oxigraph Docker image not found locally — nodes 5-6 will use in-process Oxigraph (pull oxigraph/oxigraph:latest to enable)"
+    return 0
+  fi
+
+  for name_port in "$OXIGRAPH_CONTAINER_5:$OXIGRAPH_SERVER_PORT_5" "$OXIGRAPH_CONTAINER_6:$OXIGRAPH_SERVER_PORT_6"; do
+    local name="${name_port%%:*}"
+    local port="${name_port#*:}"
+    if docker inspect "$name" > /dev/null 2>&1; then
+      if docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null | grep -q true; then
+        log "Oxigraph server already running ($name, port $port)"
+        continue
+      fi
+      docker rm -f "$name" > /dev/null 2>&1 || true
+    fi
+    log "Starting Oxigraph server (Docker) $name on port $port..."
+    if docker run -d --name "$name" \
+      -p "${port}:7878" \
+      oxigraph/oxigraph:latest serve --bind 0.0.0.0:7878 > /dev/null 2>&1; then
+      log "Oxigraph server started ($name)"
+    else
+      log "WARNING: Failed to start Oxigraph server $name — nodes 5-6 will use in-process Oxigraph"
+      return 0
+    fi
+  done
+
+  # Wait for both to be ready
+  for port in $OXIGRAPH_SERVER_PORT_5 $OXIGRAPH_SERVER_PORT_6; do
+    for i in $(seq 1 15); do
+      if curl -s -X POST "http://127.0.0.1:${port}/query" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "query=SELECT%20*%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20LIMIT%201" > /dev/null 2>&1; then
+        break
+      fi
+      [ "$i" -eq 15 ] && log "WARNING: Oxigraph server on port $port not ready within 15s"
+      sleep 1
+    done
+  done
+  OXIGRAPH_SERVER_AVAILABLE=true
+  log "Oxigraph servers ready (ports $OXIGRAPH_SERVER_PORT_5, $OXIGRAPH_SERVER_PORT_6)"
+}
+
+stop_oxigraph_servers() {
+  for name in $OXIGRAPH_CONTAINER_5 $OXIGRAPH_CONTAINER_6; do
+    if docker inspect "$name" > /dev/null 2>&1; then
+      docker rm -f "$name" > /dev/null 2>&1 || true
+      log "Stopped Oxigraph server ($name)"
+    fi
+  done
+}
+
+stop_blazegraph() {
+  if docker inspect "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1; then
+    docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
+    log "Stopped Blazegraph container"
+  fi
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -148,6 +284,25 @@ create_node_config() {
     relay_value='"relay": "none",'
   fi
 
+  # Backend assignment:
+  #   Node 1-2: oxigraph-worker  (worker thread, file-persisted — production default)
+  #   Node 3-4: oxigraph          (in-process, no worker thread — comparison baseline)
+  #   Node 5-6: blazegraph        (remote SPARQL, if Docker available — else oxigraph-worker)
+  local store_block=""
+  if [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
+    if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then
+      store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/bigdata/namespace/node${node_num}/sparql\" } },"
+    else
+      store_block="\"store\": { \"backend\": \"oxigraph\" },"
+    fi
+  elif [ "$node_num" -ge 5 ] && [ "$node_num" -le 6 ]; then
+    if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
+      local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
+      local ox_port="${!ox_port_var}"
+      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
+    fi
+  fi
+
   # Create config
   cat > "$node_dir/config.json" <<EOCONF
 {
@@ -156,6 +311,7 @@ create_node_config() {
   "listenPort": ${libp2p_port},
   "nodeRole": "${node_role}",
   ${relay_value}
+  ${store_block}
   "paranets": ["devnet-test"],
   "chain": {
     "type": "evm",
@@ -166,27 +322,31 @@ create_node_config() {
 }
 EOCONF
 
-  # Derive the Ethereum address from the private key
-  local wallet_address
-  wallet_address=$(node -e "
+  # Generate wallets.json: primary Hardhat key + NUM_OP_WALLETS additional
+  # operational wallets for parallel EVM transaction submission.
+  # Run from a package that has 'ethers' so require() resolves (pnpm workspace).
+  local extra_addrs
+  extra_addrs=$(cd "$REPO_ROOT/packages/evm-module" && node -e "
+    const crypto = require('crypto');
     const { ethers } = require('ethers');
-    const w = new ethers.Wallet('${HARDHAT_KEYS[$key_idx]}');
-    console.log(w.address);
-  " 2>/dev/null)
-
-  # Create wallets.json with hardhat key and derived address
-  cat > "$node_dir/wallets.json" <<EOWAL
-{
-  "wallets": [
-    {
-      "privateKey": "${HARDHAT_KEYS[$key_idx]}",
-      "address": "${wallet_address}"
+    const fs = require('fs');
+    const primary = new ethers.Wallet('${HARDHAT_KEYS[$key_idx]}');
+    const wallets = [{ privateKey: '${HARDHAT_KEYS[$key_idx]}', address: primary.address }];
+    for (let i = 0; i < ${NUM_OP_WALLETS}; i++) {
+      const key = '0x' + crypto.randomBytes(32).toString('hex');
+      const w = new ethers.Wallet(key);
+      wallets.push({ privateKey: key, address: w.address });
     }
-  ]
-}
-EOWAL
+    fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ wallets }, null, 2));
+    wallets.slice(1).forEach(w => console.log(w.address));
+  ")
 
-  log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role"
+  # Fund each additional wallet via Hardhat's hardhat_setBalance RPC
+  while IFS= read -r addr; do
+    [ -n "$addr" ] && fund_wallet "$addr"
+  done <<< "$extra_addrs"
+
+  log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }
 
 start_node() {
@@ -256,6 +416,21 @@ start_node() {
   log "WARNING: Node $node_num not ready after 20s (check $node_dir/daemon.log)"
 }
 
+stop_devnet_nodes_only() {
+  # Stop DKG node processes only (leave Hardhat, Blazegraph, Oxigraph servers running).
+  # Ensures the next start_node uses freshly written configs (e.g. store backends).
+  for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
+    [ -f "$pidfile" ] || continue
+    local pid
+    pid=$(cat "$pidfile")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      log "Stopped node (PID $pid) for config refresh"
+    fi
+    rm -f "$pidfile"
+  done
+}
+
 cmd_start() {
   log "Starting devnet with $NUM_NODES nodes..."
   mkdir -p "$DEVNET_DIR"
@@ -263,11 +438,26 @@ cmd_start() {
   ensure_built
   start_hardhat
   deploy_contracts
+  start_blazegraph
+  start_oxigraph_servers
+
+  # Stop any already-running devnet nodes so they pick up the config we are about to write
+  stop_devnet_nodes_only
+
+  # Generate a shared auth token for all devnet nodes
+  local shared_token
+  shared_token=$(openssl rand -base64 32 | tr -d '=/+' | head -c 43)
+  log "Shared devnet auth token: $shared_token"
 
   # Create all node configs
   for i in $(seq 1 "$NUM_NODES"); do
+    log "Creating config for node $i..."
     create_node_config "$i"
+    local nd="$DEVNET_DIR/node${i}"
+    printf '# DKG devnet shared auth token\n%s\n' "$shared_token" > "$nd/auth.token"
+    chmod 600 "$nd/auth.token"
   done
+  log "All node configs created. Starting nodes..."
 
   # Start node 1 (relay) first, then the rest
   start_node 1
@@ -284,8 +474,18 @@ cmd_start() {
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
     [ "$i" -eq 1 ] && role="relay"
-    log "Node $i ($role): http://127.0.0.1:$api_port/ui"
+    local store_label="oxigraph-worker"
+    if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
+      [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
+    fi
+    if [ "$i" -ge 5 ]; then
+      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
+    fi
+    log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
   done
+  log ""
+  log "Auth token: $shared_token"
+  log "  curl -H 'Authorization: Bearer $shared_token' http://127.0.0.1:$API_PORT_BASE/api/agents"
   log ""
   log "Hub address:  $(cat "$DEVNET_DIR/hardhat/hub_address" 2>/dev/null || echo 'unknown')"
   log ""
@@ -318,6 +518,9 @@ cmd_stop() {
     fi
     rm -f "$DEVNET_DIR/hardhat.pid"
   fi
+
+  stop_blazegraph
+  stop_oxigraph_servers
 
   log "Devnet stopped."
 }
@@ -381,7 +584,7 @@ case "${1:-}" in
   *)
     echo "Usage: $0 {start|stop|status|logs|clean} [args]"
     echo ""
-    echo "  start [N]    Start devnet with N nodes (default 5)"
+    echo "  start [N]    Start devnet with N nodes (default 6)"
     echo "  stop         Stop all devnet processes"
     echo "  status       Show running nodes and their status"
     echo "  logs [N]     Tail logs for node N (default 1)"

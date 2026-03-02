@@ -313,19 +313,31 @@ export class MockChainAdapter implements ChainAdapter {
   // --- Paranets ---
 
   async createParanet(params: CreateParanetParams): Promise<TxResult> {
-    const id = params.paranetId ?? (params.name ? `mock-${params.name}` : 'mock-paranet');
+    const name = params.name ?? 'mock-paranet';
+    const id = params.paranetId ?? `0x${Buffer.from(name).toString('hex').padEnd(64, '0')}`;
     const meta = params.metadata ?? {
       ...(params.name && { name: params.name }),
       ...(params.description && { description: params.description }),
     };
+    if (this.paranets.has(id)) {
+      throw new Error(`Paranet "${id}" already exists on chain`);
+    }
     this.paranets.set(id, meta);
-    this.pushEvent('ParanetCreated', { paranetId: id });
+    this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
     return { ...result, paranetId: id };
   }
 
   async submitToParanet(kcId: string, paranetId: string): Promise<TxResult> {
     this.pushEvent('KCSubmittedToParanet', { kcId, paranetId });
+    return this.txResult(true);
+  }
+
+  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
+    const meta = this.paranets.get(paranetId);
+    if (!meta) throw new Error(`Paranet "${paranetId}" not found`);
+    this.paranets.set(paranetId, { ...meta, name, description, revealed: 'true' });
+    this.pushEvent('ParanetMetadataRevealed', { paranetId, name, description });
     return this.txResult(true);
   }
 

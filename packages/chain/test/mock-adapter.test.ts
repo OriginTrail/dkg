@@ -325,7 +325,7 @@ describe('MockChainAdapter V9', () => {
     expect(result.paranetId).toBe('test-paranet');
   });
 
-  it('creates a paranet with V9 name/description', async () => {
+  it('creates a paranet with V9 name (privacy-preserving: hash-based ID)', async () => {
     const adapter = createAdapter();
     const result = await adapter.createParanet({
       name: 'MyParanet',
@@ -333,7 +333,30 @@ describe('MockChainAdapter V9', () => {
       accessPolicy: 0,
     });
     expect(result.success).toBe(true);
-    expect(result.paranetId).toBe('mock-MyParanet');
+    expect(result.paranetId).toBeDefined();
+    expect(result.paranetId).toMatch(/^0x/);
+  });
+
+  it('rejects duplicate paranet creation', async () => {
+    const adapter = createAdapter();
+    await adapter.createParanet({ paranetId: 'dup-test', metadata: { name: 'First' } });
+    await expect(
+      adapter.createParanet({ paranetId: 'dup-test', metadata: { name: 'Second' } }),
+    ).rejects.toThrow(/already exists/);
+  });
+
+  it('reveals paranet metadata', async () => {
+    const adapter = createAdapter();
+    const result = await adapter.createParanet({ paranetId: 'reveal-test' });
+    expect(result.success).toBe(true);
+    await adapter.revealParanetMetadata!('reveal-test', 'Revealed Name', 'A description');
+  });
+
+  it('revealParanetMetadata rejects unknown paranet', async () => {
+    const adapter = createAdapter();
+    await expect(
+      adapter.revealParanetMetadata!('unknown-id', 'Name', 'Desc'),
+    ).rejects.toThrow(/not found/);
   });
 
   it('listParanetsFromChain returns empty when mock has no chain events', async () => {

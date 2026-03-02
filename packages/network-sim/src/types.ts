@@ -3,6 +3,7 @@ export interface NodeStatus {
   peerId: string;
   nodeRole: 'core' | 'edge';
   networkId?: string;
+  storeBackend?: string;
   uptimeMs: number;
   connectedPeers: number;
   connections: number;

@@ -28,6 +28,7 @@ import {
   type DkgConfig,
   type AutoUpdateConfig,
 } from './config.js';
+import { loadTokens, httpAuthGuard } from './auth.js';
 
 
 export async function runDaemon(foreground: boolean): Promise<void> {
@@ -54,6 +55,25 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     if (foreground) origStdoutWrite(line + '\n');
     appendFile(logFile, line + '\n').catch(() => {});
   }
+
+  process.on('uncaughtException', (err) => {
+    const msg = err?.message ?? String(err);
+    if (msg.includes('Cannot write to a stream that is') || msg.includes('StreamStateError')) {
+      log(`[warn] Suppressed GossipSub stream error: ${msg}`);
+      return;
+    }
+    log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    if (msg.includes('Cannot write to a stream that is') || msg.includes('StreamStateError')) {
+      log(`[warn] Suppressed GossipSub stream rejection: ${msg}`);
+      return;
+    }
+    log(`[warn] Unhandled rejection: ${reason instanceof Error ? reason.stack : msg}`);
+  });
 
   const role = config.nodeRole ?? 'edge';
 
@@ -111,6 +131,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
+    storeConfig: config.store ? {
+      backend: config.store.backend,
+      options: config.store.options,
+    } : undefined,
     chainConfig: chainBase ? {
       rpcUrl: chainBase.rpcUrl,
       hubAddress: chainBase.hubAddress,
@@ -215,9 +239,9 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }
 
   const metricsSource: MetricsSource = {
-    getPeerCount: () => agent.node.libp2p.getConnections().length,
-    getDirectPeerCount: () => agent.node.libp2p.getConnections().filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit')).length,
-    getRelayedPeerCount: () => agent.node.libp2p.getConnections().filter(c => c.remoteAddr?.toString().includes('/p2p-circuit')).length,
+    getPeerCount: () => new Set(agent.node.libp2p.getConnections().map(c => c.remotePeer.toString())).size,
+    getDirectPeerCount: () => new Set(agent.node.libp2p.getConnections().filter(c => !c.remoteAddr?.toString().includes('/p2p-circuit')).map(c => c.remotePeer.toString())).size,
+    getRelayedPeerCount: () => new Set(agent.node.libp2p.getConnections().filter(c => c.remoteAddr?.toString().includes('/p2p-circuit')).map(c => c.remotePeer.toString())).size,
     getMeshPeerCount: () => {
       try { return (agent.gossip as any).gossipsub?.getMeshPeers?.()?.length ?? 0; } catch { return 0; }
     },
@@ -286,6 +310,17 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     nodeUiStaticDir = join(process.cwd(), 'packages', 'node-ui', 'dist-ui');
   }
 
+  // --- Authentication ---
+
+  const authEnabled = config.auth?.enabled !== false;
+  const validTokens = await loadTokens(config.auth);
+  if (authEnabled) {
+    log(`API authentication enabled (${validTokens.size} token${validTokens.size !== 1 ? 's' : ''} loaded)`);
+    log(`Token file: ${join(dkgDir(), 'auth.token')}`);
+  } else {
+    log('API authentication disabled (auth.enabled = false)');
+  }
+
   // --- HTTP API ---
 
   const server = createServer(async (req, res) => {
@@ -297,14 +332,18 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         });
         res.end();
         return;
       }
 
+      // Auth guard — rejects with 401 if token is invalid/missing
+      if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
+
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector);
+      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined);
       if (handled) return;
 
       await handleRequest(req, res, agent, config, startedAt, dashDb, opWallets, network, tracker);
@@ -373,6 +412,7 @@ async function handleRequest(
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
+      storeBackend: config.store?.backend ?? 'oxigraph-worker',
       uptimeMs: Date.now() - startedAt,
       connectedPeers: uniquePeers.size,
       connections: { total: allConns.length, direct: directConns.length, relayed: relayedConns },
@@ -443,16 +483,21 @@ async function handleRequest(
 
   // POST /api/chat  { to: "name-or-peerId", text: "..." }
   if (req.method === 'POST' && path === '/api/chat') {
+    const serverT0 = Date.now();
     const body = await readBody(req);
     const { to, text } = JSON.parse(body);
     if (!to || !text) return jsonResponse(res, 400, { error: 'Missing "to" or "text"' });
 
+    const resolveT0 = Date.now();
     const peerId = await resolveNameToPeerId(agent, to);
+    const resolveDur = Date.now() - resolveT0;
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${to}" not found` });
 
+    const sendT0 = Date.now();
     const result = await agent.sendChat(peerId, text);
+    const sendDur = Date.now() - sendT0;
     try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text, delivered: result.delivered }); } catch { /* never crash */ }
-    return jsonResponse(res, 200, result);
+    return jsonResponse(res, 200, { ...result, phases: { resolve: resolveDur, send: sendDur, serverTotal: Date.now() - serverT0 } });
   }
 
   // GET /api/messages?peer=<name-or-id>&limit=N
@@ -488,6 +533,7 @@ async function handleRequest(
 
   // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/publish') {
+    const serverT0 = Date.now();
     const body = await readBody(req);
     const { paranetId, quads, privateQuads } = JSON.parse(body);
     if (!paranetId || !quads?.length) {
@@ -495,11 +541,18 @@ async function handleRequest(
     }
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    const phases: Record<string, number> = {};
+    const phaseStarts: Record<string, number> = {};
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
         onPhase: (phase, status) => {
-          if (status === 'start') tracker.startPhase(ctx, phase);
-          else tracker.completePhase(ctx, phase);
+          if (status === 'start') {
+            tracker.startPhase(ctx, phase);
+            phaseStarts[phase] = Date.now();
+          } else {
+            tracker.completePhase(ctx, phase);
+            if (phaseStarts[phase]) phases[phase] = Date.now() - phaseStarts[phase];
+          }
         },
       });
       const chain = result.onChainResult;
@@ -514,6 +567,7 @@ async function handleRequest(
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      phases.serverTotal = Date.now() - serverT0;
       return jsonResponse(res, 200, {
         kcId: String(result.kcId),
         status: result.status,
@@ -521,6 +575,7 @@ async function handleRequest(
           tokenId: String(ka.tokenId),
           rootEntity: ka.rootEntity,
         })),
+        phases,
         ...(chain && {
           txHash: chain.txHash,
           blockNumber: chain.blockNumber,
@@ -536,6 +591,7 @@ async function handleRequest(
 
   // POST /api/workspace/write  { paranetId: "...", quads: [...] }
   if (req.method === 'POST' && path === '/api/workspace/write') {
+    const serverT0 = Date.now();
     const body = await readBody(req);
     const { paranetId, quads } = JSON.parse(body);
     if (!paranetId || !quads?.length) {
@@ -543,10 +599,12 @@ async function handleRequest(
     }
     const ctx = createOperationContext('workspace');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    const storeT0 = Date.now();
     try {
       const result = await agent.writeToWorkspace(paranetId, quads);
+      const storeDur = Date.now() - storeT0;
       tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
-      return jsonResponse(res, 200, result);
+      return jsonResponse(res, 200, { ...result, phases: { store: storeDur, serverTotal: Date.now() - serverT0 } });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
@@ -585,6 +643,7 @@ async function handleRequest(
 
   // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_workspace", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
+    const serverT0 = Date.now();
     const body = await readBody(req);
     const { sparql, paranetId, graphSuffix, includeWorkspace } = JSON.parse(body);
     if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
@@ -594,10 +653,12 @@ async function handleRequest(
     try {
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
+      const execT0 = Date.now();
       const result = await agent.query(sparql, { paranetId, graphSuffix, includeWorkspace });
+      const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
-      return jsonResponse(res, 200, { result });
+      return jsonResponse(res, 200, { result, phases: { execute: execDur, serverTotal: Date.now() - serverT0 } });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;

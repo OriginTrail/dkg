@@ -17,6 +17,11 @@
   },
   {
     "inputs": [],
+    "name": "NameHashMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "OnlyAuthorizedSystemCreator",
     "type": "error"
   },
@@ -49,12 +54,6 @@
         "internalType": "address",
         "name": "creator",
         "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "string",
-        "name": "name",
-        "type": "string"
       },
       {
         "indexed": false,
@@ -91,11 +90,17 @@
       {
         "indexed": false,
         "internalType": "string",
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
         "name": "description",
         "type": "string"
       }
     ],
-    "name": "ParanetMetadataUpdated",
+    "name": "ParanetMetadataRevealed",
     "type": "event"
   },
   {
@@ -140,14 +145,9 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "name_",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "description_",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "paranetId_",
+        "type": "bytes32"
       },
       {
         "internalType": "uint8",
@@ -159,7 +159,7 @@
     "outputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "",
         "type": "bytes32"
       }
     ],
@@ -169,14 +169,9 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "name_",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "description_",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "paranetId_",
+        "type": "bytes32"
       },
       {
         "internalType": "uint8",
@@ -188,7 +183,7 @@
     "outputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "",
         "type": "bytes32"
       }
     ],
@@ -199,7 +194,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "paranetId_",
         "type": "bytes32"
       }
     ],
@@ -212,7 +207,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "paranetId_",
         "type": "bytes32"
       }
     ],
@@ -222,16 +217,6 @@
         "internalType": "address",
         "name": "creator",
         "type": "address"
-      },
-      {
-        "internalType": "string",
-        "name": "name",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "description",
-        "type": "string"
       },
       {
         "internalType": "uint8",
@@ -247,6 +232,21 @@
         "internalType": "bool",
         "name": "active",
         "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "metadataRevealed",
+        "type": "bool"
+      },
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "description",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -268,16 +268,6 @@
         "type": "address"
       },
       {
-        "internalType": "string",
-        "name": "name",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "description",
-        "type": "string"
-      },
-      {
         "internalType": "uint8",
         "name": "accessPolicy",
         "type": "uint8"
@@ -291,6 +281,21 @@
         "internalType": "bool",
         "name": "active",
         "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "metadataRevealed",
+        "type": "bool"
+      },
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "description",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -300,7 +305,30 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "paranetId_",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "string",
+        "name": "name_",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "description_",
+        "type": "string"
+      }
+    ],
+    "name": "revealMetadata",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId_",
         "type": "bytes32"
       },
       {

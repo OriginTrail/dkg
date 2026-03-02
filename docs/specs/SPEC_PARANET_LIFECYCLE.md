@@ -35,7 +35,7 @@ On-chain (Paranet.sol)              Off-chain (Triple Store + GossipSub)
 │ name, description    │             │ actual RDF triples           │
 │ access policies      │             │ merkle roots (per KC)        │
 │ member list          │             │ replicated via gossipsub     │
-│ creation block       │             │ persisted in Oxigraph        │
+│ creation block       │             │ persisted in triple store     │
 └─────────────────────┘             └──────────────────────────────┘
          │                                       │
          │  ChainEventPoller sees                 │  Sync protocol
@@ -259,7 +259,7 @@ The `ChainEventPoller` (already implemented) watches for these events:
 When a node starts (or restarts), it recovers its paranet subscriptions:
 
 ```
-1. Load persisted triple store (Oxigraph)
+1. Load persisted triple store (Oxigraph by default, or Blazegraph/custom)
    → Recovers all previously synced triples
 
 2. Load subscription list from config (~/.dkg/config.json → subscribedParanets)
@@ -276,7 +276,7 @@ When a node starts (or restarts), it recovers its paranet subscriptions:
    → If any match auto-subscribe rules, subscribe
 ```
 
-The subscription list is persisted in the node's config file. The triple store is persisted in Oxigraph. Between these two, a node recovers fully on restart.
+The subscription list is persisted in the node's config file. The triple store is persisted in the configured backend (Oxigraph with file-backed N-Quads by default, or an external store like Blazegraph). Between these two, a node recovers fully on restart.
 
 ---
 

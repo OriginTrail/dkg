@@ -404,3 +404,125 @@ describe('Multi-paranet queries', () => {
     expect(qrAll.bindings).toBeDefined();
   }, 15000);
 });
+
+// ---------------------------------------------------------------------------
+// GossipSub KC/KA metadata replication (regression tests)
+// ---------------------------------------------------------------------------
+describe('GossipSub KC/KA metadata replication', () => {
+  it('receiver stores KC metadata for gossip-replicated publishes', async () => {
+    const agentA = await DKGAgent.create({
+      name: 'MetaPublisher', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    const agentB = await DKGAgent.create({
+      name: 'MetaReceiver', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'meta-test', name: 'MetaTest', description: '' });
+    agentA.subscribeToParanet('meta-test');
+    agentB.subscribeToParanet('meta-test');
+    await sleep(500);
+
+    await agentA.publish('meta-test', [
+      { subject: 'did:dkg:test:MetaEntity', predicate: 'http://schema.org/name', object: '"MetaBot"', graph: '' },
+    ]);
+
+    await sleep(4000);
+
+    // Receiver should have KC metadata (not just data triples)
+    const kcResult = await agentB.query(
+      'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }',
+    );
+    const kcCount = parseInt(kcResult.bindings[0]['c'].match(/^"?(\d+)/)?.[1] ?? '0', 10);
+    expect(kcCount).toBeGreaterThanOrEqual(1);
+
+    // Receiver should have KA metadata
+    const kaResult = await agentB.query(
+      'SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontology/KnowledgeAsset> } }',
+    );
+    const kaCount = parseInt(kaResult.bindings[0]['c'].match(/^"?(\d+)/)?.[1] ?? '0', 10);
+    expect(kaCount).toBeGreaterThanOrEqual(1);
+  }, 20000);
+
+  it('multiple publishes produce distinct KCs on receiver (no UAL collision)', async () => {
+    const agentA = await DKGAgent.create({
+      name: 'MultiPubA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    const agentB = await DKGAgent.create({
+      name: 'MultiPubB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'multi-pub', name: 'MultiPub', description: '' });
+    agentA.subscribeToParanet('multi-pub');
+    agentB.subscribeToParanet('multi-pub');
+    await sleep(500);
+
+    // Count baseline KCs on receiver (from system paranets)
+    const baselineResult = await agentB.query(
+      'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }',
+    );
+    const baseline = parseInt(baselineResult.bindings[0]['c'].match(/^"?(\d+)/)?.[1] ?? '0', 10);
+
+    // Publish 3 separate KCs
+    for (let i = 0; i < 3; i++) {
+      await agentA.publish('multi-pub', [
+        { subject: `did:dkg:test:Multi${i}`, predicate: 'http://schema.org/name', object: `"Multi ${i}"`, graph: '' },
+      ]);
+      await sleep(500);
+    }
+
+    await sleep(4000);
+
+    // Receiver should see exactly 3 new KCs (not 1 due to UAL collision)
+    const afterResult = await agentB.query(
+      'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }',
+    );
+    const afterCount = parseInt(afterResult.bindings[0]['c'].match(/^"?(\d+)/)?.[1] ?? '0', 10);
+    expect(afterCount - baseline).toBe(3);
+  }, 30000);
+
+  it('receiver KC metadata has correct paranet reference', async () => {
+    const agentA = await DKGAgent.create({
+      name: 'ParaRefA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    const agentB = await DKGAgent.create({
+      name: 'ParaRefB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'pararef-test', name: 'ParaRef', description: '' });
+    agentA.subscribeToParanet('pararef-test');
+    agentB.subscribeToParanet('pararef-test');
+    await sleep(500);
+
+    await agentA.publish('pararef-test', [
+      { subject: 'did:dkg:test:RefEntity', predicate: 'http://schema.org/name', object: '"RefBot"', graph: '' },
+    ]);
+
+    await sleep(4000);
+
+    // Check that the replicated KC has correct paranet reference
+    const result = await agentB.query(
+      `SELECT ?kc WHERE {
+        GRAPH ?g { ?kc <http://dkg.io/ontology/paranet> <did:dkg:paranet:pararef-test> }
+      }`,
+    );
+    expect(result.bindings.length).toBeGreaterThanOrEqual(1);
+  }, 20000);
+});

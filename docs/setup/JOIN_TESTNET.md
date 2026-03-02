@@ -99,6 +99,8 @@ Config is saved to `~/.dkg/config.json`. Edit it directly or re-run `pnpm dkg in
 
 > **Security**: Your private key is stored in `~/.dkg/config.json`. This file should be readable only by your user. Never share it or commit it to git.
 
+> **API Authentication**: The node generates an auth token on first start, saved in `~/.dkg/auth.token`. The CLI uses it automatically. For external tools, run `pnpm dkg auth show` to see the token, then pass it via `Authorization: Bearer <token>` header. See the main README for details.
+
 > **Without a private key**: The node still works for P2P networking, querying, and receiving replicated data. On-chain operations (publishing with finality, updates) require a funded wallet.
 
 ### Start
@@ -511,7 +513,7 @@ const results = await agent.query(
 );
 ```
 
-Queries run against your local Oxigraph store — fast, no network round-trips. Only read-only SPARQL is allowed (SELECT, CONSTRUCT, ASK, DESCRIBE). Mutations must go through `publish` or `update`.
+Queries run against your local triple store (Oxigraph by default, or Blazegraph/custom backends — see the [Triple Store Backends](../../README.md#triple-store-backends) section) — fast, no network round-trips. Only read-only SPARQL is allowed (SELECT, CONSTRUCT, ASK, DESCRIBE). Mutations must go through `publish` or `update`.
 
 ---
 

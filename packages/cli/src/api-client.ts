@@ -1,10 +1,13 @@
 import { readApiPort, readPid, isProcessRunning } from './config.js';
+import { loadTokens } from './auth.js';
 
 export class ApiClient {
   private baseUrl: string;
+  private token?: string;
 
-  constructor(port: number) {
+  constructor(port: number, token?: string) {
     this.baseUrl = `http://127.0.0.1:${port}`;
+    this.token = token;
   }
 
   static async connect(): Promise<ApiClient> {
@@ -16,7 +19,9 @@ export class ApiClient {
     if (!port) {
       throw new Error('Cannot read API port. Try restarting: dkg stop && dkg start');
     }
-    return new ApiClient(port);
+    const tokens = await loadTokens();
+    const token = tokens.size > 0 ? tokens.values().next().value : undefined;
+    return new ApiClient(port, token);
   }
 
   async status(): Promise<{
@@ -149,8 +154,15 @@ export class ApiClient {
     }
   }
 
+  private authHeaders(): Record<string, string> {
+    if (!this.token) return {};
+    return { Authorization: `Bearer ${this.token}` };
+  }
+
   private async get<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`);
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.authHeaders(),
+    });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error((body as any).error ?? `HTTP ${res.status}`);
@@ -161,7 +173,7 @@ export class ApiClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
     if (!res.ok) {

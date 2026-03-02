@@ -4,7 +4,7 @@ Master list of all remaining work items, ordered by priority. Each item
 links to its reference spec or design doc. Items marked **NEW** need a
 spec created as part of this plan.
 
-Last updated: 2026-02-22
+Last updated: 2026-03-01
 
 ---
 
@@ -19,11 +19,91 @@ Last updated: 2026-02-22
 
 ---
 
+## AI Agent Coordination Assessment (2026-03-01)
+
+The primary goal of DKG V9 is to enable efficient and trusted coordination
+between AI agents. This section captures a high-level assessment of how
+the current implementation serves that goal, and where the gaps are.
+
+### What's Working Well
+
+1. **"Agent is the Node" architecture.** Installing `@dkg/agent` makes an
+   AI agent a full network participant in ~5 lines of code. This is the
+   single biggest win — a 10× DX improvement over V8's SDK-calls-engine model.
+
+2. **End-to-end encrypted messaging with zero setup.** X25519 DH derived
+   from the Ed25519 identity + XChaCha20-Poly1305 encryption + Ed25519
+   signatures + replay protection. An agent can `sendChat()` or
+   `invokeSkill()` with just a peer ID; no key management ceremony needed.
+
+3. **Skill-based discovery via SPARQL.** Agents publish structured profiles
+   (skills, pricing, framework) as RDF KAs in the Agent Registry paranet.
+   Other agents discover them via semantic SPARQL queries with filters on
+   price, success rate, and framework. Scales better than registry contracts.
+
+4. **Framework adapters (OpenClaw, ElizaOS).** The adapter pattern exposes
+   DKG capabilities as standard tools that any LLM-backed agent can call.
+   Existing agent frameworks get DKG superpowers without rewriting their logic.
+
+5. **Merkle-verified sync.** Sync-on-connect with paged transfer and merkle
+   root verification. Agents joining the network get caught up with
+   *verified* data, not just trusted data.
+
+6. **Store isolation.** No node can execute SPARQL directly against another
+   node's store (Spec §1.6). Cross-agent queries go through structured
+   protocol with access policies and rate limiting.
+
+7. **Test coverage.** 70 test files including meaningful E2E tests covering
+   the full agent lifecycle: create, connect, publish profiles, discover,
+   chat, invoke skills, relay traversal.
+
+### Key Gaps for Agent Coordination
+
+1. **Economic layer is mostly spec.** Agents can discover and talk to each
+   other but can't *transact* with trust. `invokeSkill()` has a
+   `paymentProof` field but it's never validated. No payment escrow, no
+   reputation tracking, no slashing for bad actors.
+
+2. **Persistence is improved but not bulletproof.** Oxigraph now uses async
+   debounced flush and a worker thread to avoid blocking the event loop.
+   External backends (Blazegraph) delegate persistence entirely. See §8.1.
+
+3. **Discovery is local-only.** `DiscoveryClient` queries only the local
+   triple store. No federated query or DHT-backed skill index. If an agent
+   hasn't synced a profile, it can never discover that agent. See §1.7.
+
+4. **No structured negotiation protocol.** No price negotiation, SLA
+   agreement, or capability probing before skill invocation. See §8.5.
+
+5. **No async/long-running task support.** `invokeSkill()` is synchronous
+   request-response. Long-running ML tasks may timeout with no task ID,
+   polling, progress, or cancellation support. See §8.6.
+
+6. **No agent capability attestation.** Any agent can claim any skill type
+   in its profile with no proof of capability, endorsement, or
+   challenge-response. See §8.7.
+
+7. **Private data has no redundancy.** Private triples exist only on the
+   publisher node. No encrypted replication or backup strategy. See §8.8.
+
+**Roadmap:** A phased plan for addressing these gaps (deliverables, spec
+order, implementation order) is in [PLAN_AGENT_COORDINATION_GAPS.md](./PLAN_AGENT_COORDINATION_GAPS.md).
+
+---
+
 ## 1. Networking & Sync
 
 ### 1.1 Persistent triple store — **DONE**
-Oxigraph store persists to `~/.dkg/store.nq` via N-Quads dump/load.
-Data survives node restarts.
+Triple store backends are pluggable via `createTripleStore(config)`. Three
+built-in backends: `oxigraph` (in-process WASM), `oxigraph-worker`
+(dedicated worker thread with file persistence, the default), and
+`blazegraph` (remote SPARQL endpoint over HTTP). Custom backends can be
+added by implementing the `TripleStore` interface and calling
+`registerTripleStoreAdapter()`.
+
+The Oxigraph worker backend uses async debounced flush to `store.nq`,
+avoiding the previous issue of synchronous writes on every mutation.
+External stores like Blazegraph handle persistence natively.
 
 - **Spec**: [sync-flow.md](../diagrams/sync-flow.md) (Persistence lifecycle section)
 
@@ -68,6 +148,22 @@ new nodes can bootstrap without manual config.
 
 - **Spec**: [SPEC_RELAY_DISCOVERY.md](../specs/SPEC_RELAY_DISCOVERY.md) — **TO CREATE**
 
+### 1.7 Federated / network-wide discovery — **NEEDS SPEC** (NEW)
+Currently `DiscoveryClient` only queries the local Agent Registry paranet.
+If Agent A hasn't synced from a node that has Agent C's profile, Agent A
+can never discover Agent C. In a large network with churn, discovery
+completeness depends entirely on GossipSub propagation timing.
+
+**Options to evaluate:**
+- DHT-backed skill index (publish skill type → peer ID mappings to Kademlia)
+- Gossip-based query protocol (broadcast "who offers skill X?" to mesh)
+- Federated SPARQL (fan-out query to N connected peers, deduplicate)
+
+Each has different latency, bandwidth, and privacy trade-offs. Needs
+a spec comparing approaches.
+
+- **Spec**: SPEC_FEDERATED_DISCOVERY.md — **TO CREATE**
+
 ---
 
 ## 2. Publishing & Knowledge
@@ -87,7 +183,7 @@ full e2e flow.
 `result.onChainResult` (publisherAddress, startKAId). Uses `result.publicQuads`
 so private triples are not re-sent over gossip.
 
-- **Spec**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §2.1](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
+- **Spec**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §2.1](../archive/SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 
 ### 2.3 Paranet on-chain lifecycle — **DONE**
 On-chain paranet creation and discovery via `ParanetV9Registry.sol`. EVM adapter
@@ -159,7 +255,7 @@ Arweave-style endowment model with declining distribution.
 `ProtocolTreasury` multisig-controlled address.
 
 - **Spec**: [SPEC_TRUST_LAYER.md §9–10](../SPEC_TRUST_LAYER.md)
-- **Gap doc**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §1.4](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
+- **Gap doc**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §1.4](../archive/SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 
 ### 3.7 V9 integration & Base Sepolia deployment (Milestone 6) — **IN PROGRESS**
 Wire all Trust Layer contracts into the V9 TypeScript layer. Deploy to
@@ -200,6 +296,27 @@ Agents operate across multiple chains simultaneously. Cross-chain
 UAL resolution and payment settlement.
 
 - **Spec**: part of [SPEC_PART2_ECONOMY.md](../SPEC_PART2_ECONOMY.md); chain-specific adapter spec **TO CREATE** when a second chain is targeted
+
+### 4.4 FairSwap off-chain flow for skill invocations — **NEEDS SPEC** (NEW)
+The FairSwap smart contract (§3.4) handles on-chain escrow and disputes,
+but the off-chain negotiation and invocation flow is not implemented.
+Currently `invokeSkill()` has a `paymentProof` field that is never
+validated. Need: (a) buyer locks TRAC in FairSwap escrow before invocation,
+(b) seller delivers result, (c) buyer reveals key or disputes, (d)
+`MessageHandler` validates payment proof before executing skill handler.
+
+This is the critical path from "agents that can talk" to "agents that can
+transact with trust."
+
+- **Spec**: SPEC_SKILL_PAYMENT_FLOW.md — **TO CREATE**
+
+### 4.5 Agent reputation tracking — **NEEDS SPEC** (NEW)
+`DiscoveredOffering` has a `successRate` field but there is no mechanism
+to compute or update it. Need on-chain or off-chain tracking of
+success/failure per skill offering, possibly anchored to FairSwap
+outcomes. Slashing for persistent bad actors.
+
+- **Spec**: SPEC_AGENT_REPUTATION.md — **TO CREATE**
 
 ---
 
@@ -247,12 +364,152 @@ attempts, 1.5s backoff) so chat delivery succeeds after relay→direct upgrade.
 Test timeout increased to 45s.
 
 ### 7.2 Codebase TODOs — **READY**
-See [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §4](../SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
+See [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §4](../archive/SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 for the full list of inline TODOs across the codebase.
 
 ### 7.3 EVM test hardhat_contracts.json instability
 The file regenerates with different addresses on each test run. Should
 be gitignored or test setup made deterministic.
+
+---
+
+## 8. Storage & Resilience (NEW — 2026-03-01)
+
+Items identified during the AI agent coordination assessment. These are
+critical for agents running autonomously where crashes are inevitable and
+data integrity is paramount.
+
+### 8.1 Pluggable triple store backends & persistence hardening — **DONE**
+
+All phases complete:
+
+**Phase A — Harden existing Oxigraph persistence — DONE:**
+- `OxigraphStore` now uses async debounced flush (`scheduleFlush` /
+  `flushNow`) instead of synchronous write-on-every-mutation.
+- `OxigraphWorkerStore` runs Oxigraph in a dedicated worker thread,
+  keeping the main event loop free for networking and API requests.
+
+**Phase B — Wire up the adapter factory — DONE:**
+- `DKGAgent.create()` now uses `createTripleStore(config.storeConfig)`
+  instead of hardcoding `new OxigraphStore()`.
+- `storeConfig` field added to `DKGAgentConfig`.
+- Default: `oxigraph-worker` with file persistence in `<dataDir>/store.nq`.
+- CLI reads `config.store` from the node config and passes it through.
+
+**Phase C — Blazegraph adapter — DONE:**
+- `BlazegraphStore` implements `TripleStore` via Blazegraph's HTTP SPARQL
+  endpoint. Registered as `'blazegraph'` adapter.
+- Configuration: `{ backend: 'blazegraph', options: { url: '<sparql-endpoint>' } }`
+- Handles: N-Quads bulk insert, SPARQL Update for mutations, SPARQL JSON
+  results for SELECT/ASK, N-Quads for CONSTRUCT.
+- Devnet script (`scripts/devnet.sh`) auto-starts a Dockerized Blazegraph
+  container, creates per-node namespaces, and configures nodes 4-6 to use
+  Blazegraph. Graceful fallback to Oxigraph if Docker is not available.
+- Network Simulator UI displays each node's active backend in the Stats
+  dashboard.
+
+**Phase D — Generic HTTP SPARQL adapter — DONE:**
+- `SparqlHttpStore` implements `TripleStore` via standard SPARQL 1.1 Protocol
+  (query + update endpoints). Registered as `'sparql-http'`.
+- Works with Oxigraph server (RocksDB persistence), Jena Fuseki, GraphDB,
+  Neptune, Stardog, and any SPARQL 1.1–compliant server.
+- Config: `{ backend: 'sparql-http', options: { queryEndpoint, updateEndpoint?, timeout?, auth? } }`.
+- See [STORAGE_SPARQL_HTTP.md](../setup/STORAGE_SPARQL_HTTP.md) for Oxigraph server and other stores.
+
+**Testing:** A shared conformance test suite validates all `TripleStore`
+interface methods against every registered backend. Run Blazegraph tests
+with: `BLAZEGRAPH_URL=<endpoint> pnpm --filter @dkg/storage test`.
+
+**Benchmark results** (10K ops, 100 concurrency, 100 KAs/publish):
+`oxigraph` (in-process) is 4–12x faster per-operation (publish 125ms vs
+554ms, query 33ms vs 399ms) because it avoids worker thread serialization.
+However, `oxigraph-worker` has 2x fewer chat timeouts (15% vs 30%) because
+it keeps the event loop free for networking. See README.md for full data.
+
+### 8.1b API authentication — **DONE**
+
+Unified bearer-token authentication for all node interfaces (HTTP API, future MCP, WebSocket):
+
+- **Auth module** (`packages/cli/src/auth.ts`): Token generation, file-based storage,
+  `verifyToken()` for any interface, `httpAuthGuard()` middleware for HTTP.
+- **Enabled by default**: Token auto-generated on first start in `<DKG_HOME>/auth.token`.
+- **Config**: `{ auth: { enabled: true, tokens: [] } }` in `config.json`.
+- **Public endpoints**: `/api/status`, `/api/chain/rpc-health`, `/ui/*`, `OPTIONS`.
+- **CLI integration**: `dkg auth show|status|rotate`, `ApiClient` auto-loads token.
+- **Node UI**: Token injected into served HTML via `window.__DKG_TOKEN__`.
+- **Network sim**: Reads tokens from devnet node dirs; Vite proxy injects auth headers.
+- **Devnet**: Shared token generated by `devnet.sh`, copied to all node dirs.
+- **Tests**: 23 unit + integration tests covering token extraction, verification,
+  HTTP guard (public/protected/disabled), and file-based token loading.
+
+### 8.2 Log rotation — **READY** (NEW)
+`daemon.log` grows unbounded. Add size-based or time-based rotation.
+Simple implementation: rotate on startup if file > threshold, keep N
+rotated files.
+
+### 8.3 Crash recovery for in-flight operations — **NEEDS SPEC** (NEW)
+No WAL or transactional persistence for the triple store means in-flight
+publishes can leave partial state. Need at minimum: (a) tentative KCs
+are cleaned up on startup if they were never confirmed, (b) partial
+workspace writes are detectable and recoverable.
+
+- **Spec**: SPEC_CRASH_RECOVERY.md — **TO CREATE**
+
+### 8.4 Private data redundancy — **NEEDS SPEC** (NEW)
+Private triples exist only on the publisher node. If the node goes
+offline, the data is inaccessible. Options: encrypted replication to N
+selected peers, encrypted backup to IPFS/Arweave, or threshold secret
+sharing so no single peer can read the data but K-of-N can reconstruct.
+
+- **Spec**: SPEC_PRIVATE_DATA_REDUNDANCY.md — **TO CREATE**
+
+### 8.5 Structured negotiation protocol — **NEEDS SPEC** (NEW)
+Agents currently invoke skills with no negotiation step. For sophisticated
+agent coordination (multi-step workflows, auctions, delegation chains),
+need a structured protocol: capability probing ("can you handle 4K
+images?"), price negotiation (offer/counter-offer), SLA agreement
+(timeout, retry policy, quality guarantees), batch pricing.
+
+The `callback` field in `SkillRequest` supports
+`'inline' | 'publish_ka' | 'stream'` but only `inline` is implemented.
+
+- **Spec**: SPEC_NEGOTIATION_PROTOCOL.md — **TO CREATE**
+
+### 8.6 Async / long-running skill invocations — **NEEDS SPEC** (NEW)
+`invokeSkill()` is synchronous request-response over a single libp2p
+stream. If a skill takes 30+ seconds (ML inference, data processing),
+the stream may timeout. Need:
+- Task ID returned immediately on invocation
+- Polling endpoint or GossipSub notification on completion
+- Progress updates (optional)
+- Cancellation support
+- Result retrieval by task ID (with TTL)
+
+Could reuse the workspace graph for intermediate results.
+
+- **Spec**: SPEC_ASYNC_SKILLS.md — **TO CREATE**
+
+### 8.7 Agent capability attestation — **NEEDS SPEC** (NEW)
+Any agent can claim any skill type in its profile with no verification.
+In a marketplace, this creates a trust bootstrapping problem. Options:
+- Challenge-response: requester sends a test input, evaluates output
+  before committing to paid invocation
+- Endorsement graph: agents vouch for each other's capabilities (signed
+  RDF triples in the Agent Registry)
+- Verifiable credentials: W3C VC standard for skill certification
+- Stake-backed claims: agent stakes TRAC behind a skill claim, slashed
+  if disputes exceed threshold (ties into §4.5 reputation)
+
+- **Spec**: SPEC_CAPABILITY_ATTESTATION.md — **TO CREATE**
+
+### 8.8 Key storage hardening — **NEEDS SPEC** (NEW)
+`agent-key.bin` and `wallets.json` are plain files with `0o600`
+permissions. No HSM, enclave, or OS keychain integration. For production
+autonomous agents managing real TRAC, need at minimum: OS keychain
+integration (macOS Keychain, Linux Secret Service), optional KMS support
+(AWS KMS, GCP KMS, HashiCorp Vault).
+
+- **Spec**: SPEC_KEY_MANAGEMENT.md — **TO CREATE**
 
 ---
 
@@ -262,38 +519,79 @@ be gitignored or test setup made deterministic.
 |----------|------|-----------|
 | **P0** | ~~2.2 Fix UAL/chainId~~ | ✅ DONE |
 | **P0** | ~~7.1 Relay test~~ | ✅ DONE |
+| **P0** | 8.1 Phase A (atomic writes + batched flush) | Crash safety for autonomous agents; no spec needed |
+| **P0** | 8.1 Phase B (wire adapter factory) | Unblock pluggable backends; small refactor |
 | **P1** | 2.1 Private KA access | Completes the core publish/access loop |
 | **P1** | 2.3 Paranet on-chain | **DONE** — create + list from chain |
 | **P1** | ~~1.5 Cross-agent query~~ | ✅ DONE |
 | **P1** | ~~5.0 DKG Node UI~~ | ✅ DONE |
+| **P1** | 4.4 FairSwap off-chain flow | Critical path to trusted agent transactions |
+| **P1** | 8.1 Phase C (HTTP SPARQL adapter) | Enables Blazegraph/GraphDB/etc. |
+| **P1** | 8.6 Async skill invocations | Required for real AI workloads |
+| **P2** | 1.7 Federated discovery | Network-wide skill search |
+| **P2** | 4.5 Agent reputation | Trust signal for marketplace |
 | **P2** | 3.1 Publishing conviction | First trust layer economic feature |
 | **P2** | 3.2 Staking conviction | Node operator incentives |
 | **P2** | 3.3 Paranet sharding | Per-paranet economics |
 | **P2** | 3.6 Fee split/treasury | Correct economic distribution |
+| **P2** | 2.4 Workspace graph | No-finality build area; test in use case, address challenges as they arise |
 | **P3** | 1.3 On-chain sync verify | Trustless sync (Tier 2) |
 | **P3** | 3.4 FairSwap | Trustless private knowledge exchange |
 | **P3** | 3.5 Permanent publishing | "Publish forever" model |
 | **P3** | 1.4 Profile exchange | Lightweight alternative to full sync |
 | **P3** | 1.6 Relay auto-discovery | Better node bootstrapping UX |
+| **P3** | 8.5 Negotiation protocol | Sophisticated multi-agent coordination |
+| **P3** | 8.3 Crash recovery | Resilience for long-running nodes |
+| **P3** | 8.2 Log rotation | Operational hygiene |
 | **P4** | 4.1 Payment channels | Agent economy |
-| **P2** | 2.4 Workspace graph | No-finality build area; test in use case, address challenges as they arise |
 | **P4** | 2.5 Capacity metering | Resource-aware pricing |
+| **P4** | 8.7 Capability attestation | Trust bootstrapping |
+| **P4** | 8.4 Private data redundancy | Fault tolerance for private knowledge |
 | **P4** | 6.1–6.3 Extensions | Neural queries, pipelines, viz |
 | **P5** | 3.8 Solana adapter | Second chain support |
+| **P5** | 8.8 Key storage hardening | Production key management |
 
 ---
 
 ## What to implement next (recommendation)
 
-**Current state (2026-02-22):**  
-Networking & sync (persistence, sync on connect, cross-agent query) and Node UI are done. UAL/chainId in broadcast is fixed. Relay E2E test (7.1) and Paranet on-chain lifecycle (2.3) are done. CLI and node-ui builds fixed (TS action opts, Command import; Vite heap for relay). Release workflow, CHANGELOG, and release docs added. Remaining P1: Private KA access (2.1).
+**Current state (2026-03-01):**  
+Phase 1 (off-chain marketplace) is substantially complete. Networking &
+sync (persistence, sync on connect, cross-agent query), Node UI,
+UAL/chainId broadcast, Relay E2E, Paranet on-chain lifecycle, CLI, and
+framework adapters (OpenClaw, ElizaOS) are all done. Workspace graph is
+in progress. 70 test files including E2E coverage. The "agent is the node"
+architecture is working and the identity + discovery + encrypted messaging
+stack is the project's biggest competitive advantage.
+
+The gap is the economic/trust layer: agents can discover and communicate
+but cannot yet transact with on-chain guarantees.
+
+**Previous state (2026-02-22):**  
+Networking & sync (persistence, sync on connect, cross-agent query) and Node UI are done. UAL/chainId in broadcast is fixed. Relay E2E test (7.1) and Paranet on-chain lifecycle (2.3) are done. CLI and node-ui builds fixed (TS action opts, Command import; Vite heap for relay). Release workflow, CHANGELOG, and release docs added. API authentication (8.1b) done. Remaining P1: Private KA access (2.1).
 
 **Recommended order:**
 
-1. **2.3 Paranet on-chain lifecycle** (P1) — **DONE**  
-   ParanetV9Registry contract (createParanetV9, ParanetCreated event), EVM adapter createParanet/listParanetsFromChain, extended CreateParanetParams and optional listParanetsFromChain on ChainAdapter. Join/leave and node startup recovery from chain can follow.
+1. ~~**8.1 Phase A+B+C — Storage hardening + pluggable backends** (P0) — **DONE**~~
+   Oxigraph worker thread, async flush, Blazegraph adapter, and
+   `createTripleStore()` wired into `DKGAgent.create()`.
+   ~~**8.1b API authentication** (P0) — **DONE**~~
+   Bearer token auth on all non-public endpoints. Auto-generated tokens,
+   CLI management (`dkg auth`), Node UI injection, devnet shared tokens.
 
 2. **2.1 Private KA access** (P1)  
-   Complete the access protocol (payment proof, full e2e). Needed for paid private knowledge and completes the publish → access loop.
+   Complete the access protocol (payment proof, full e2e). Needed for paid
+   private knowledge and completes the publish → access loop.
 
-3. **Then** either Trust Layer milestones (3.1–3.6) for economics, or 1.3 on-chain sync verification / 1.6 relay auto-discovery for robustness and bootstrapping.
+3. **4.4 FairSwap off-chain flow** (P1)  
+   Implement the off-chain negotiation + payment escrow flow for skill
+   invocations. This is the critical path from "agents that can talk" to
+   "agents that can transact with trust."
+
+4. **8.6 Async skill invocations** (P1)  
+   Task ID + polling for long-running AI workloads. Required for
+   production agent coordination beyond simple request-response.
+
+5. **Then** Trust Layer milestones (3.1–3.6) for on-chain economics,
+   1.7 federated discovery for network-wide skill search, or 4.5 agent
+   reputation for marketplace trust signals.

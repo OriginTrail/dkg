@@ -8,7 +8,7 @@ Use `@dkg/agent` directly to turn any Node.js/TypeScript project into a DKG V9 n
 npm install @dkg/agent
 ```
 
-This pulls in all DKG packages (`@dkg/core`, `@dkg/storage`, `@dkg/publisher`, `@dkg/query`, `@dkg/chain`) as transitive dependencies. If you want to import from them directly (e.g., `import { OxigraphStore } from '@dkg/storage'`), add them explicitly:
+This pulls in all DKG packages (`@dkg/core`, `@dkg/storage`, `@dkg/publisher`, `@dkg/query`, `@dkg/chain`) as transitive dependencies. If you want to import from them directly (e.g., `import { OxigraphStore } from '@dkg/storage'` or `import { createTripleStore } from '@dkg/storage'`), add them explicitly:
 
 ```bash
 npm install @dkg/agent @dkg/core @dkg/storage
@@ -269,7 +269,7 @@ If you need more control, you can use the individual packages directly:
 
 ```typescript
 import { DKGNode, ProtocolRouter, GossipSubManager } from '@dkg/core';
-import { OxigraphStore } from '@dkg/storage';
+import { OxigraphStore, createTripleStore } from '@dkg/storage';
 import { DKGPublisher } from '@dkg/publisher';
 import { DKGQueryEngine } from '@dkg/query';
 
@@ -277,7 +277,15 @@ import { DKGQueryEngine } from '@dkg/query';
 const node = new DKGNode({ listenAddresses: ['/ip4/0.0.0.0/tcp/9100'] });
 await node.start();
 
+// Option A: Oxigraph directly
 const store = new OxigraphStore();
+
+// Option B: Any registered backend via the factory
+// const store = await createTripleStore({
+//   backend: 'blazegraph',
+//   options: { url: 'http://127.0.0.1:9999/bigdata/namespace/mynode/sparql' },
+// });
+
 const router = new ProtocolRouter(node);
 const gossip = new GossipSubManager(node);
 const query = new DKGQueryEngine(store);

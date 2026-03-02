@@ -556,6 +556,34 @@ describe('Tentative data and chain event confirmation', () => {
 
     expect(handler.hasPendingPublishes).toBe(false);
   }, 10000);
+
+  it('ChainEventPoller invokes onParanetCreated for ParanetCreated events', async () => {
+    const store = new OxigraphStore();
+    const bus = new TypedEventBus();
+    const handler = new PublishHandler(store, bus);
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+
+    await chain.createParanet({ paranetId: 'on-chain-test', accessPolicy: 0 });
+
+    const received: Array<{ paranetId: string; creator: string; accessPolicy: number }> = [];
+    const poller = new ChainEventPoller({
+      chain,
+      publishHandler: handler,
+      intervalMs: 100,
+      onParanetCreated: async (info) => {
+        received.push(info);
+      },
+    });
+
+    poller.start();
+    await new Promise((r) => setTimeout(r, 300));
+    poller.stop();
+
+    expect(received).toHaveLength(1);
+    expect(received[0].paranetId).toBe('on-chain-test');
+    expect(received[0].creator).toBe('mock-creator');
+    expect(received[0].accessPolicy).toBe(0);
+  });
 });
 
 describe('Update flow', () => {
@@ -684,5 +712,90 @@ describe('Update flow', () => {
     const newMerkleHex = Buffer.from(batchAfter!.merkleRoot).toString('hex');
 
     expect(newMerkleHex).not.toBe(oldMerkleHex);
+  });
+});
+
+describe('Tentative publish UAL uniqueness', () => {
+  it('produces a unique UAL for each tentative publish', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 0n, // forces tentative (skips on-chain)
+    });
+
+    const uals = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const result = await publisher.publish({
+        paranetId: PARANET,
+        quads: [q(`did:dkg:agent:Unique${i}`, 'http://schema.org/name', `"Entity${i}"`)],
+      });
+
+      expect(result.status).toBe('tentative');
+      expect(result.ual).toBeTruthy();
+      expect(result.ual).toContain('/t'); // tentative UAL pattern
+      expect(uals.has(result.ual)).toBe(false);
+      uals.add(result.ual);
+    }
+    expect(uals.size).toBe(5);
+  });
+
+  it('includes ual field in confirmed publish results', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"ConfirmedUAL"')],
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.ual).toBeTruthy();
+    expect(result.ual).toContain('did:dkg:');
+  });
+
+  it('stores distinct KC metadata for each tentative publish', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 0n,
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await publisher.publish({
+        paranetId: PARANET,
+        quads: [q(`did:dkg:agent:Meta${i}`, 'http://schema.org/name', `"MetaEntity${i}"`)],
+      });
+    }
+
+    const result = await store.query(
+      `SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE {
+        GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> }
+      }`,
+    );
+
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      const raw = result.bindings[0]['c'];
+      const count = parseInt(raw.match(/^"?(\d+)/)?.[1] ?? '0', 10);
+      expect(count).toBe(3);
+    }
   });
 });

@@ -1,5 +1,6 @@
 import oxigraph from 'oxigraph';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
   TripleStore,
@@ -45,14 +46,28 @@ export class OxigraphStore implements TripleStore {
     }
   }
 
-  private flushToDisk(): void {
-    if (!this.persistPath) return;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushing = false;
+
+  private scheduleFlush(): void {
+    if (!this.persistPath || this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushNow();
+    }, 50);
+  }
+
+  private async flushNow(): Promise<void> {
+    if (!this.persistPath || this.flushing) return;
+    this.flushing = true;
     try {
-      mkdirSync(dirname(this.persistPath), { recursive: true });
+      await mkdir(dirname(this.persistPath), { recursive: true });
       const nquads = this.store.dump({ format: 'application/n-quads' });
-      writeFileSync(this.persistPath, nquads, 'utf-8');
+      await writeFile(this.persistPath, nquads, 'utf-8');
     } catch {
       // Best-effort persistence.
+    } finally {
+      this.flushing = false;
     }
   }
 
@@ -60,7 +75,7 @@ export class OxigraphStore implements TripleStore {
     if (quads.length === 0) return;
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
-    this.flushToDisk();
+    this.scheduleFlush();
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -68,7 +83,7 @@ export class OxigraphStore implements TripleStore {
       const oxQuad = toOxQuad(q);
       if (oxQuad) this.store.delete(oxQuad);
     }
-    this.flushToDisk();
+    this.scheduleFlush();
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -81,7 +96,7 @@ export class OxigraphStore implements TripleStore {
     for (const q of matches) {
       this.store.delete(q);
     }
-    if (matches.length > 0) this.flushToDisk();
+    if (matches.length > 0) this.scheduleFlush();
     return matches.length;
   }
 
@@ -133,7 +148,7 @@ export class OxigraphStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
-    this.flushToDisk();
+    this.scheduleFlush();
   }
 
   async listGraphs(): Promise<string[]> {
@@ -160,7 +175,7 @@ export class OxigraphStore implements TripleStore {
       `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
     );
     const removed = before - this.store.size;
-    if (removed > 0) this.flushToDisk();
+    if (removed > 0) this.scheduleFlush();
     return removed;
   }
 
@@ -177,7 +192,11 @@ export class OxigraphStore implements TripleStore {
   }
 
   async close(): Promise<void> {
-    this.flushToDisk();
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flushNow();
   }
 }
 

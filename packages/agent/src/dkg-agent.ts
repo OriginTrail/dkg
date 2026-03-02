@@ -7,12 +7,13 @@ import {
   Logger, createOperationContext, MerkleTree, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
-import { OxigraphStore, GraphManager, type TripleStore, type Quad } from '@dkg/storage';
+import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
-  type PublishResult, type PhaseCallback,
+  generateTentativeMetadata, generateKCMetadata, getConfirmedStatusQuad,
+  type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
 import {
   DKGQueryEngine, QueryHandler,
@@ -50,6 +51,8 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
+  /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
+  storeConfig?: TripleStoreConfig;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
@@ -144,13 +147,16 @@ export class DKGAgent {
     let store: TripleStore;
     if (config.store) {
       store = config.store;
+    } else if (config.storeConfig) {
+      store = await createTripleStore(config.storeConfig);
+      log.info(ctx, `Triple store backend: ${config.storeConfig.backend}`);
     } else if (config.dataDir) {
       const { join } = await import('node:path');
       const persistPath = join(config.dataDir, 'store.nq');
-      store = new OxigraphStore(persistPath);
-      log.info(ctx, `Persistent triple store: ${persistPath}`);
+      store = await createTripleStore({ backend: 'oxigraph-worker', options: { path: persistPath } });
+      log.info(ctx, `Persistent triple store (worker thread): ${persistPath}`);
     } else {
-      store = new OxigraphStore();
+      store = await createTripleStore({ backend: 'oxigraph' });
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
 
@@ -265,12 +271,15 @@ export class DKGAgent {
       }
     }
 
-    // Start chain event poller for trustless confirmation of tentative publishes.
-    // Only when a real chain adapter is configured (not NoChainAdapter).
+    // Start chain event poller for trustless confirmation of tentative publishes
+    // and discovery of on-chain paranets. Only with a real chain adapter.
     if (this.chain.chainId !== 'none') {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
+        onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
+          this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
+        },
       });
       this.chainPoller.start();
       this.log.info(ctx, `Chain event poller started`);
@@ -767,8 +776,83 @@ export class DKGAgent {
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureParanet(request.paranetId);
         const dataGraph = graphManager.dataGraphUri(request.paranetId);
-        const normalized = quads.map(q => ({ ...q, graph: dataGraph }));
-        await this.store.insert(normalized);
+        let normalized = quads.map(q => ({ ...q, graph: dataGraph }));
+
+        // When receiving ontology-topic broadcasts, skip paranet definition
+        // triples for paranets we already have locally. This prevents duplicate
+        // creator/timestamp triples when multiple nodes create the same paranet
+        // during simultaneous startup.
+        if (request.paranetId === SYSTEM_PARANETS.ONTOLOGY) {
+          const paranetPrefix = 'did:dkg:paranet:';
+          const incomingParanetUris = new Set(
+            normalized
+              .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_PARANET)
+              .map(q => q.subject),
+          );
+          if (incomingParanetUris.size > 0) {
+            const duplicateUris = new Set<string>();
+            for (const uri of incomingParanetUris) {
+              const id = uri.startsWith(paranetPrefix) ? uri.slice(paranetPrefix.length) : null;
+              if (id && await this.paranetExists(id)) {
+                duplicateUris.add(uri);
+              }
+            }
+            if (duplicateUris.size > 0) {
+              const activityUris = new Set(
+                normalized
+                  .filter(q => duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)
+                  .map(q => q.object),
+              );
+              normalized = normalized.filter(q => !duplicateUris.has(q.subject) && !activityUris.has(q.subject));
+            }
+          }
+        }
+
+        if (normalized.length > 0) {
+          await this.store.insert(normalized);
+        }
+
+        if (request.ual) {
+          const partitioned = autoPartition(normalized);
+          const kaRoots: Uint8Array[] = [];
+          const kaMetadata: KAMetadata[] = [];
+
+          for (const [rootEntity, entityQuads] of partitioned) {
+            const publicRoot = computePublicRoot(entityQuads);
+            const kaEntry = request.kas?.find((ka) => ka.rootEntity === rootEntity);
+            const privateRoot = kaEntry?.privateMerkleRoot?.length
+              ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined;
+            kaRoots.push(computeKARoot(publicRoot, privateRoot));
+
+            const tokenId = kaEntry ? protoToNumber(kaEntry.tokenId) : 0;
+            kaMetadata.push({
+              rootEntity,
+              kcUal: request.ual,
+              tokenId: BigInt(tokenId),
+              publicTripleCount: entityQuads.length,
+              privateTripleCount: kaEntry?.privateTripleCount ?? 0,
+              privateMerkleRoot: privateRoot,
+            });
+          }
+
+          const merkleRoot = computeKCRoot(kaRoots);
+          const startKAId = protoToNumber(request.startKAId);
+          const isConfirmedOnChain = startKAId > 0 && !!request.publisherAddress;
+
+          const kcMeta = {
+            ual: request.ual,
+            paranetId: request.paranetId,
+            merkleRoot,
+            kaCount: kaMetadata.length,
+            publisherPeerId: request.publisherAddress || 'unknown',
+            timestamp: new Date(),
+          };
+
+          const metaQuads = isConfirmedOnChain
+            ? [...generateKCMetadata(kcMeta, kaMetadata), getConfirmedStatusQuad(request.ual, request.paranetId)]
+            : generateTentativeMetadata(kcMeta, kaMetadata);
+          await this.store.insert(metaQuads);
+        }
       } catch {
         // Silently handle malformed broadcasts
       }
@@ -790,16 +874,26 @@ export class DKGAgent {
   }
 
   /**
-   * Create a paranet by publishing its definition triples into the system
-   * ontology paranet. This reserves the named graph and makes the paranet
-   * discoverable by all nodes.
+   * Create a paranet by registering it on-chain (if a chain adapter is
+   * available) and publishing its definition triples into the system
+   * ontology paranet.
+   *
+   * On-chain registration is privacy-preserving by default: only
+   * keccak256(bytes(name)) is stored. Set revealOnChain to also publish
+   * cleartext name and description to the contract.
+   *
+   * If the paranet already exists on-chain (another node registered it
+   * first), the local definition is created without a chain call.
    */
   async createParanet(opts: {
     id: string;
     name: string;
     description?: string;
     replicationPolicy?: string;
+    accessPolicy?: number;
+    revealOnChain?: boolean;
   }): Promise<void> {
+    const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
     const paranetUri = paranetDataGraphUri(opts.id);
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
@@ -810,6 +904,30 @@ export class DKGAgent {
       throw new Error(`Paranet "${opts.id}" already exists`);
     }
 
+    // Register on chain if a real chain adapter is configured.
+    // The on-chain ID is keccak256(bytes(name)) — deterministic, so any node
+    // with the same name derives the same ID. First to register wins.
+    let onChainId: string | undefined;
+    if (this.chain.chainId !== 'none') {
+      try {
+        const result = await this.chain.createParanet({
+          name: opts.id,
+          description: opts.description,
+          accessPolicy: opts.accessPolicy ?? 0,
+          revealOnChain: opts.revealOnChain,
+        });
+        onChainId = result.paranetId;
+        this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+          this.log.info(ctx, `Paranet "${opts.id}" already registered on-chain — creating local definition`);
+        } else {
+          this.log.warn(ctx, `On-chain paranet registration failed: ${msg} — creating locally without chain finality`);
+        }
+      }
+    }
+
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
@@ -818,6 +936,15 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
     ];
+
+    if (onChainId) {
+      quads.push({
+        subject: paranetUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
+        object: `"${onChainId}"`,
+        graph: ontologyGraph,
+      });
+    }
 
     if (opts.description) {
       quads.push({
@@ -929,10 +1056,15 @@ export class DKGAgent {
     if (result.type !== 'bindings') return [];
 
     const prefix = 'did:dkg:paranet:';
-    return result.bindings.map((row: Record<string, string>) => {
+    const seen = new Map<string, {
+      id: string; uri: string; name: string; description?: string;
+      creator?: string; createdAt?: string; isSystem: boolean;
+    }>();
+    for (const row of result.bindings as Record<string, string>[]) {
       const uri = row['paranet'] ?? '';
+      if (seen.has(uri)) continue;
       const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
-      return {
+      seen.set(uri, {
         id,
         uri,
         name: stripLiteral(row['name'] ?? id),
@@ -940,8 +1072,9 @@ export class DKGAgent {
         creator: row['creator'],
         createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
         isSystem: !!row['isSystem'],
-      };
-    });
+      });
+    }
+    return Array.from(seen.values());
   }
 
   async networkId(): Promise<string> {
@@ -1004,12 +1137,8 @@ export class DKGAgent {
     }).join('\n');
 
     const onChain = result.onChainResult;
-    const chainId = this.chain.chainId;
-    const ual = onChain
-      ? `did:dkg:${chainId}/${onChain.publisherAddress}/${onChain.startKAId}`
-      : `did:dkg:${chainId}/${result.kcId}`;
     const msg = encodePublishRequest({
-      ual,
+      ual: result.ual,
       nquads: new TextEncoder().encode(ntriples),
       paranetId,
       kas: result.kaManifest.map(ka => ({
@@ -1022,7 +1151,7 @@ export class DKGAgent {
       publisherAddress: onChain?.publisherAddress ?? '',
       startKAId: Number(onChain?.startKAId ?? 0),
       endKAId: Number(onChain?.endKAId ?? 0),
-      chainId,
+      chainId: this.chain.chainId,
       publisherSignatureR: new Uint8Array(0),
       publisherSignatureVs: new Uint8Array(0),
     });
@@ -1097,6 +1226,11 @@ function splitNQuadLine(line: string): string[] {
 function strip(s: string): string {
   if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
   return s;
+}
+
+function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {
+  if (typeof val === 'number') return val;
+  return ((val.high >>> 0) * 0x100000000) + (val.low >>> 0);
 }
 
 function stripLiteral(s: string): string {

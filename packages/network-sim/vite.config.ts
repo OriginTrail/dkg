@@ -1,14 +1,15 @@
-import { defineConfig, Plugin } from 'vite';
+import { defineConfig, Plugin, createLogger } from 'vite';
 import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { simEngine } from './src/server/sim-engine';
 
 const SIM_TARGET = process.env.SIM_TARGET ?? 'devnet'; // 'devnet' | 'testnet'
 
 const DEVNET_DIR = path.resolve(__dirname, '../../.devnet');
 const EVM_DEPLOYMENTS = path.resolve(__dirname, '../evm-module/deployments/localhost');
-const DEVNET_NUM_NODES = 5;
+const DEVNET_NUM_NODES = 6;
 const DEVNET_API_PORT_BASE = 9201;
 const DKG_HOME = process.env.DKG_HOME ?? path.join(os.homedir(), '.dkg');
 
@@ -99,26 +100,41 @@ function networkDiscovery(): Plugin {
   };
 }
 
-function silentProxy(): Plugin {
-  return {
-    name: 'silent-proxy-errors',
-    configureServer(server) {
-      server.middlewares.use((_req, res, next) => {
-        const origEnd = res.end.bind(res);
-        res.end = function (...args: Parameters<typeof origEnd>) {
-          return origEnd(...args);
-        };
-        next();
-      });
-    },
-  };
+const logger = createLogger();
+const originalWarn = logger.warn.bind(logger);
+const originalError = logger.error.bind(logger);
+logger.warn = (msg, opts) => {
+  if (msg.includes('http proxy error') && msg.includes('ECONNREFUSED')) return;
+  originalWarn(msg, opts);
+};
+logger.error = (msg, opts) => {
+  if (msg.includes('http proxy error') && msg.includes('ECONNREFUSED')) return;
+  originalError(msg, opts);
+};
+
+function readDevnetToken(): string | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(DEVNET_DIR, 'node1', 'auth.token'), 'utf-8');
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t.length > 0 && !t.startsWith('#')) return t;
+    }
+  } catch { /* token file not yet created */ }
+  return undefined;
 }
+
+const devnetAuthToken = readDevnetToken();
 
 function makeProxyEntry(target: string, nodeId: number) {
   return {
     target,
     rewrite: (p: string) => p.replace(`/node/${nodeId}`, ''),
     configure: (proxy: { on: (event: string, handler: (...args: unknown[]) => void) => void }) => {
+      if (devnetAuthToken) {
+        proxy.on('proxyReq', (proxyReq: { setHeader: (name: string, value: string) => void }) => {
+          proxyReq.setHeader('Authorization', `Bearer ${devnetAuthToken}`);
+        });
+      }
       proxy.on('error', (_err: unknown, _req: unknown, res: { writeHead?: (code: number, headers: Record<string, string>) => void; end?: (body: string) => void }) => {
         if (res.writeHead && res.end) {
           res.writeHead(502, { 'Content-Type': 'application/json' });
@@ -150,7 +166,8 @@ if (SIM_TARGET === 'testnet') {
 }
 
 export default defineConfig({
-  plugins: [react(), networkDiscovery(), silentProxy()],
+  customLogger: logger,
+  plugins: [react(), networkDiscovery(), simEngine()],
   server: {
     port: 3000,
     proxy: nodeProxies,

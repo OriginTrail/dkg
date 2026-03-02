@@ -3,25 +3,36 @@ import { Logger, createOperationContext, type OperationContext } from '@dkg/core
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 
+/** Callback invoked when a ParanetCreated event is detected on-chain. */
+export type OnParanetCreated = (info: {
+  paranetId: string;
+  creator: string;
+  accessPolicy: number;
+  blockNumber: number;
+}) => Promise<void>;
+
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
   publishHandler: PublishHandler;
   /** Polling interval in ms. Default: 12000 (roughly 1 L2 block). */
   intervalMs?: number;
+  /** Called when a ParanetCreated event is detected on-chain. */
+  onParanetCreated?: OnParanetCreated;
 }
 
 /**
- * Background poller that watches for on-chain KnowledgeBatchCreated events
- * and promotes tentative publishes to confirmed. Runs independently of
- * GossipSub — the chain is the single source of truth for finalization.
+ * Background poller that watches for on-chain events:
+ * - KnowledgeBatchCreated: promotes tentative publishes to confirmed
+ * - ParanetCreated: notifies the agent of new on-chain paranets
  *
- * The GossipSub confirmation (if it arrives first) acts as a fast hint;
- * this poller provides trustless, publisher-independent confirmation.
+ * The chain is the single source of truth for finalization and paranet
+ * registration ordering.
  */
 export class ChainEventPoller {
   private readonly chain: ChainAdapter;
   private readonly publishHandler: PublishHandler;
   private readonly intervalMs: number;
+  private readonly onParanetCreated?: OnParanetCreated;
   private readonly log = new Logger('ChainEventPoller');
   private lastBlock = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -31,6 +42,7 @@ export class ChainEventPoller {
     this.chain = config.chain;
     this.publishHandler = config.publishHandler;
     this.intervalMs = config.intervalMs ?? 12_000;
+    this.onParanetCreated = config.onParanetCreated;
   }
 
   start(): void {
@@ -63,12 +75,17 @@ export class ChainEventPoller {
   }
 
   private async poll(): Promise<void> {
-    if (!this.publishHandler.hasPendingPublishes) return;
+    const hasPending = this.publishHandler.hasPendingPublishes;
+    const watchParanets = !!this.onParanetCreated;
+    if (!hasPending && !watchParanets) return;
 
     const ctx = createOperationContext('publish');
 
+    const eventTypes = ['KnowledgeBatchCreated'];
+    if (watchParanets) eventTypes.push('ParanetCreated');
+
     const filter: EventFilter = {
-      eventTypes: ['KnowledgeBatchCreated'],
+      eventTypes,
       fromBlock: this.lastBlock + 1,
     };
 
@@ -81,6 +98,8 @@ export class ChainEventPoller {
 
       if (event.type === 'KnowledgeBatchCreated') {
         await this.handleBatchCreated(event, ctx);
+      } else if (event.type === 'ParanetCreated') {
+        await this.handleParanetCreated(event, ctx);
       }
     }
 
@@ -118,6 +137,24 @@ export class ChainEventPoller {
 
     if (confirmed) {
       this.log.info(ctx, `Confirmed tentative publish via chain event (block ${event.blockNumber})`);
+    }
+  }
+
+  private async handleParanetCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+    if (!this.onParanetCreated) return;
+    const { data } = event;
+    const paranetId = String(data['paranetId'] ?? '');
+    const creator = String(data['creator'] ?? '');
+    const accessPolicy = Number(data['accessPolicy'] ?? 0);
+
+    this.log.info(ctx,
+      `Chain event: ParanetCreated block=${event.blockNumber} id=${paranetId.slice(0, 16)}… creator=${creator.slice(0, 10)}…`,
+    );
+
+    try {
+      await this.onParanetCreated({ paranetId, creator, accessPolicy, blockNumber: event.blockNumber });
+    } catch (err) {
+      this.log.warn(ctx, `onParanetCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

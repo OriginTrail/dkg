@@ -46,7 +46,7 @@ export interface TripleStore {
   close(): Promise<void>;
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | string;
+export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
 export interface TripleStoreConfig {
   backend: TripleStoreBackend;

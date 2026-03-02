@@ -48,7 +48,7 @@ function AppInner() {
               <span className="selected-name">{selected.name}</span>
               {selected.status && (
                 <span className="selected-detail">
-                  {selected.status.peerId.slice(0, 12)}... | {selected.status.connectedPeers} peers
+                  {selected.status.peerId?.slice(0, 12) ?? '—'}... | {selected.status.connectedPeers ?? 0} peers
                 </span>
               )}
             </div>

@@ -10,11 +10,22 @@ import {
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
+export interface PerTypeMetrics {
+  total: number;
+  success: number;
+  errors: number;
+  totalDurationMs: number;
+  successDurationMs: number;
+  /** Accumulated phase durations (e.g. prepare, store, chain, broadcast) */
+  phaseTotals: Record<string, number>;
+  phaseCounts: Record<string, number>;
+}
+
 export interface LiveOpMetrics {
   total: number;
   success: number;
   errors: number;
-  byType: Record<string, { total: number; success: number; errors: number }>;
+  byType: Record<string, PerTypeMetrics>;
   /** Rolling window of recent op timestamps for ops/sec calculation */
   recentTimestamps: number[];
 }
@@ -29,6 +40,7 @@ export interface SimulationRun {
     opCount: number;
     opsPerSec: number;
     concurrency: number;
+    kasPerPublish: number;
     paranet: string;
     enabledOps: string[];
   };
@@ -55,9 +67,10 @@ type Action =
   | { type: 'ADD_ACTIVITY'; activity: Activity }
   | { type: 'UPDATE_ACTIVITY'; id: string; status: Activity['status']; detail?: string }
   | { type: 'ADD_ANIMATION'; animation: GraphAnimation }
+  | { type: 'ADD_ANIMATIONS'; animations: GraphAnimation[] }
   | { type: 'TICK_ANIMATIONS'; dt: number }
   | { type: 'REMOVE_ANIMATION'; id: string }
-  | { type: 'RECORD_OP'; opType: string; success: boolean; durationMs: number }
+  | { type: 'RECORD_OP'; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
   | { type: 'STOP_SIMULATION' };
@@ -106,6 +119,8 @@ function reducer(state: State, action: Action): State {
       };
     case 'ADD_ANIMATION':
       return { ...state, animations: [...state.animations, action.animation] };
+    case 'ADD_ANIMATIONS':
+      return { ...state, animations: [...state.animations, ...action.animations] };
     case 'TICK_ANIMATIONS':
       return {
         ...state,
@@ -119,9 +134,18 @@ function reducer(state: State, action: Action): State {
       const m = { ...state.liveMetrics };
       m.total++;
       if (action.success) m.success++; else m.errors++;
-      const bt = m.byType[action.opType] ?? { total: 0, success: 0, errors: 0 };
+      const dflt: PerTypeMetrics = { total: 0, success: 0, errors: 0, totalDurationMs: 0, successDurationMs: 0, phaseTotals: {}, phaseCounts: {} };
+      const bt = { ...(m.byType[action.opType] ?? dflt), phaseTotals: { ...(m.byType[action.opType]?.phaseTotals ?? {}) }, phaseCounts: { ...(m.byType[action.opType]?.phaseCounts ?? {}) } };
       bt.total++;
-      if (action.success) bt.success++; else bt.errors++;
+      bt.totalDurationMs += action.durationMs;
+      if (action.success) { bt.success++; bt.successDurationMs += action.durationMs; }
+      else bt.errors++;
+      if (action.phases) {
+        for (const [p, ms] of Object.entries(action.phases)) {
+          bt.phaseTotals[p] = (bt.phaseTotals[p] ?? 0) + ms;
+          bt.phaseCounts[p] = (bt.phaseCounts[p] ?? 0) + 1;
+        }
+      }
       m.byType = { ...m.byType, [action.opType]: bt };
       const now = Date.now();
       m.recentTimestamps = [...m.recentTimestamps.filter((t) => now - t < 10_000), now];
@@ -133,9 +157,17 @@ function reducer(state: State, action: Action): State {
           const rm = { ...r.metrics };
           rm.total++;
           if (action.success) rm.success++; else rm.errors++;
-          const rbt = rm.byType[action.opType] ?? { total: 0, success: 0, errors: 0 };
+          const rbt = { ...(rm.byType[action.opType] ?? { total: 0, success: 0, errors: 0, totalDurationMs: 0, successDurationMs: 0, phaseTotals: {}, phaseCounts: {} }), phaseTotals: { ...(rm.byType[action.opType]?.phaseTotals ?? {}) }, phaseCounts: { ...(rm.byType[action.opType]?.phaseCounts ?? {}) } };
           rbt.total++;
-          if (action.success) rbt.success++; else rbt.errors++;
+          rbt.totalDurationMs += action.durationMs;
+          if (action.success) { rbt.success++; rbt.successDurationMs += action.durationMs; }
+          else rbt.errors++;
+          if (action.phases) {
+            for (const [p, ms] of Object.entries(action.phases)) {
+              rbt.phaseTotals[p] = (rbt.phaseTotals[p] ?? 0) + ms;
+              rbt.phaseCounts[p] = (rbt.phaseCounts[p] ?? 0) + 1;
+            }
+          }
           rm.byType = { ...rm.byType, [action.opType]: rbt };
           rm.recentTimestamps = [...rm.recentTimestamps.filter((t) => now - t < 10_000), now];
           return { ...r, metrics: rm };
@@ -267,18 +299,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           animation: { id, from: sourceNode - 1, to: sourceNode - 1, type, progress: 0, speed: 0.4 },
         });
       } else {
-        targets.forEach((t, i) => {
-          dispatch({
-            type: 'ADD_ANIMATION',
-            animation: {
-              id: `${id}-b${i}`,
-              from: sourceNode - 1,
-              to: t.id - 1,
-              type,
-              progress: -(i * 0.08),
-              speed: 0.5,
-            },
-          });
+        dispatch({
+          type: 'ADD_ANIMATIONS',
+          animations: targets.map((t, i) => ({
+            id: `${id}-b${i}`,
+            from: sourceNode - 1,
+            to: t.id - 1,
+            type,
+            progress: -(i * 0.08),
+            speed: 0.5,
+          })),
         });
       }
       return id;
@@ -302,7 +332,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const isTestnet = config.network === 'testnet';
           const defaultNodes = isTestnet
             ? [{ id: 1, name: 'testnet-node', apiPort: 9200, listenPort: 0, nodeRole: 'edge' }]
-            : Array.from({ length: 5 }, (_, i) => ({
+            : Array.from({ length: 6 }, (_, i) => ({
                 id: i + 1,
                 name: `devnet-node-${i + 1}`,
                 apiPort: 9201 + i,
@@ -314,7 +344,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {
         const fallback: DevnetConfig = {
-          nodes: Array.from({ length: 5 }, (_, i) => ({
+          nodes: Array.from({ length: 6 }, (_, i) => ({
             id: i + 1,
             name: `devnet-node-${i + 1}`,
             apiPort: 9201 + i,
@@ -336,21 +366,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     let allOfflineStreak = 0;
 
     const poll = async () => {
+      const results = await Promise.allSettled(
+        stateRef.current.nodes.map(async (node) => {
+          try {
+            const status = await fetchNodeStatus(node.id);
+            return { id: node.id, online: true, status };
+          } catch {
+            return { id: node.id, online: false, status: null };
+          }
+        }),
+      );
+
+      if (cancelled) return;
       let anyOnline = false;
-      for (const node of stateRef.current.nodes) {
-        if (cancelled) break;
-        try {
-          const status = await fetchNodeStatus(node.id);
-          dispatch({ type: 'UPDATE_NODE', id: node.id, online: true, status });
-          anyOnline = true;
-        } catch {
-          dispatch({ type: 'UPDATE_NODE', id: node.id, online: false, status: null });
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          dispatch({ type: 'UPDATE_NODE', id: r.value.id, online: r.value.online, status: r.value.status });
+          if (r.value.online) anyOnline = true;
         }
       }
 
-      if (cancelled) return;
       allOfflineStreak = anyOnline ? 0 : allOfflineStreak + 1;
-      const delay = anyOnline ? 3000 : Math.min(10000, 3000 + allOfflineStreak * 2000);
+      const simRunning = !!stateRef.current.activeSimulationId;
+      const baseDelay = simRunning ? 10000 : 3000;
+      const delay = anyOnline ? baseDelay : Math.min(15000, baseDelay + allOfflineStreak * 2000);
       timeoutId = setTimeout(poll, delay);
     };
 

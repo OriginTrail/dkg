@@ -50,7 +50,7 @@ export class PublishHandler {
   private readonly pendingPublishes = new Map<string, PendingPublish>();
   private readonly log = new Logger('PublishHandler');
 
-  private static readonly TENTATIVE_TIMEOUT_MS = 10 * 60 * 1000;
+  private static readonly TENTATIVE_TIMEOUT_MS = 60 * 60 * 1000;
 
   constructor(
     store: TripleStore,

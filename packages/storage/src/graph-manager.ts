@@ -9,6 +9,7 @@ import {
 
 export class GraphManager {
   private readonly store: TripleStore;
+  private readonly ensuredParanets = new Set<string>();
 
   constructor(store: TripleStore) {
     this.store = store;
@@ -35,11 +36,13 @@ export class GraphManager {
   }
 
   async ensureParanet(paranetId: string): Promise<void> {
+    if (this.ensuredParanets.has(paranetId)) return;
     await this.store.createGraph(this.dataGraphUri(paranetId));
     await this.store.createGraph(this.metaGraphUri(paranetId));
     await this.store.createGraph(this.privateGraphUri(paranetId));
     await this.store.createGraph(this.workspaceGraphUri(paranetId));
     await this.store.createGraph(this.workspaceMetaGraphUri(paranetId));
+    this.ensuredParanets.add(paranetId);
   }
 
   async listParanets(): Promise<string[]> {
@@ -69,6 +72,7 @@ export class GraphManager {
   }
 
   async dropParanet(paranetId: string): Promise<void> {
+    this.ensuredParanets.delete(paranetId);
     await this.store.dropGraph(this.dataGraphUri(paranetId));
     await this.store.dropGraph(this.metaGraphUri(paranetId));
     await this.store.dropGraph(this.privateGraphUri(paranetId));
