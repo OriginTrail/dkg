@@ -1073,12 +1073,28 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
 }
 
+.graph-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.graph-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(56, 189, 248, 0.1), transparent 45%),
+    radial-gradient(circle at 80% 100%, rgba(168, 85, 247, 0.14), transparent 46%);
+}
+
 .graph-toolbar {
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 10px;
+  background: linear-gradient(180deg, rgba(12, 18, 31, 0.92), rgba(8, 12, 20, 0.65));
 }
 
 .graph-toolbar-row {
@@ -1092,7 +1108,7 @@ a:hover { text-decoration: underline; }
   display: flex;
   gap: 16px;
   padding: 8px 16px;
-  background: var(--bg-input);
+  background: linear-gradient(180deg, rgba(31, 41, 55, 0.6), rgba(31, 41, 55, 0.3));
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   flex-wrap: wrap;
@@ -1123,6 +1139,56 @@ a:hover { text-decoration: underline; }
 
 .checkbox-label input {
   cursor: pointer;
+}
+
+.graph-viewport {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.08), transparent 58%),
+    radial-gradient(circle at 0% 100%, rgba(34, 211, 238, 0.07), transparent 50%),
+    var(--bg-input);
+  box-shadow: inset 0 0 28px rgba(30, 64, 175, 0.15);
+}
+
+.graph-info-pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  color: #7dd3fc;
+  background: rgba(8, 47, 73, 0.25);
+}
+
+.graph-predicate-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(17, 24, 39, 0.4);
+}
+
+.graph-predicate-chip {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text-muted);
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.graph-predicate-chip:hover {
+  color: var(--text);
+  border-color: rgba(125, 211, 252, 0.55);
+}
+
+.graph-predicate-chip.active {
+  color: #dbeafe;
+  border-color: rgba(125, 211, 252, 0.7);
+  background: rgba(30, 64, 175, 0.32);
 }
 
 /* Graph Details Panel */
@@ -1202,7 +1268,7 @@ a:hover { text-decoration: underline; }
 }
 
 .graph-details-triple .predicate {
-  color: var(--primary);
+  color: var(--accent);
   flex-shrink: 0;
 }
 

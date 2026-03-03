@@ -59,6 +59,7 @@ export class RdfGraphViz {
   private _container: HTMLElement;
   private _temporalFilter: TemporalFilter;
   private _timelineOverlay: TimelineOverlay | null = null;
+  private _renderQueued = false;
 
   constructor(container: HTMLElement, config: RdfGraphVizConfig = {}) {
     this._config = config;
@@ -235,7 +236,7 @@ export class RdfGraphViz {
       });
     }
     this._renderCurrent();
-    this._renderer.centerOnNode(nodeId);
+    this._renderer?.centerOnNode(nodeId);
     this._events.emit('focus:change', {
       focalNode: nodeId,
       visibleNodes: this._focusFilter.visibleNodeIds.size,
@@ -301,7 +302,7 @@ export class RdfGraphViz {
 
   /** Fit all visible nodes in view */
   zoomToFit(padding?: number): void {
-    this._renderer.zoomToFit(padding);
+    this._renderer?.zoomToFit(padding);
   }
 
   // --- Label Mode ---
@@ -577,7 +578,7 @@ export class RdfGraphViz {
   destroy(): void {
     this._timelineOverlay?.unmount();
     this._timelineOverlay = null;
-    this._renderer.destroy();
+    this._renderer?.destroy();
     this._events.removeAll();
     this._model.clear();
     this._highlightState.clear();
@@ -615,6 +616,19 @@ export class RdfGraphViz {
 
   /** Render with current focus filter + temporal filter state */
   private _renderCurrent(): void {
+    // In 3D mode, renderer module loads asynchronously.
+    // Queue one deferred render instead of throwing on early data loads.
+    if (!this._renderer) {
+      if (!this._renderQueued) {
+        this._renderQueued = true;
+        this._rendererReady.then(() => {
+          this._renderQueued = false;
+          this._renderCurrent();
+        });
+      }
+      return;
+    }
+
     let { nodes, edges } = this._focusFilter.compute(this._model);
 
     // Apply temporal filter: hide nodes outside the current time window

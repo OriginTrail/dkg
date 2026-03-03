@@ -33,6 +33,14 @@ export class Canvas2DRenderer implements RendererBackend {
   private _fadeInDuration = 1500;
   private _animFrameId: number | null = null;
 
+  /** force-graph version compatibility guard */
+  private _setAlphaTarget(value: number): void {
+    const maybeFn = this._graph?.d3AlphaTarget;
+    if (typeof maybeFn === 'function') {
+      maybeFn.call(this._graph, value);
+    }
+  }
+
   // KA boundary state
   private _kaGroups: Map<string, Set<string>> = new Map();
   private _kaEnabled = false;
@@ -326,7 +334,7 @@ export class Canvas2DRenderer implements RendererBackend {
           setTimeout(() => {
             if (this._graph && !this._riskPulseEnabled) {
               this._graph.cooldownTicks(0);
-              this._graph.d3AlphaTarget(0);
+              this._setAlphaTarget(0);
             }
           }, 100);
         }
@@ -485,10 +493,10 @@ export class Canvas2DRenderer implements RendererBackend {
     if (needsContinuousRender) {
       // Prevent the simulation from ever stopping on its own
       this._graph.cooldownTicks(Infinity);
-      this._graph.d3AlphaTarget(config.driftAlpha ?? 0.008);
+      this._setAlphaTarget(config.driftAlpha ?? 0.008);
     } else {
       this._graph.cooldownTicks(120);
-      this._graph.d3AlphaTarget(0);
+      this._setAlphaTarget(0);
     }
 
     // Stop any previous animation loop before potentially starting a new one
