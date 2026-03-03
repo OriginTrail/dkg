@@ -1,0 +1,20 @@
+{
+  "name": "@dkg/attested-assets",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@dkg/core": "workspace:*",
+    "@dkg/storage": "workspace:*",
+    "protobufjs": "^8.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

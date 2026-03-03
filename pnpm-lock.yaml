@@ -132,6 +132,22 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(tsx@4.21.0)
 
+  packages/attested-assets:
+    dependencies:
+      '@dkg/core':
+        specifier: workspace:*
+        version: link:../core
+      '@dkg/storage':
+        specifier: workspace:*
+        version: link:../storage
+      protobufjs:
+        specifier: ^8.0.0
+        version: 8.0.0
+    devDependencies:
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(tsx@4.21.0)
+
   packages/chain:
     dependencies:
       '@dkg/core':

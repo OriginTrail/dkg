@@ -43,3 +43,11 @@ export function paranetWorkspaceMetaGraphUri(paranetId: string): string {
 export function paranetWorkspaceTopic(paranetId: string): string {
   return `dkg/paranet/${paranetId}/workspace`;
 }
+
+export function paranetSessionsTopic(paranetId: string): string {
+  return `dkg/paranet/${paranetId}/sessions`;
+}
+
+export function paranetSessionTopic(paranetId: string, sessionId: string): string {
+  return `dkg/paranet/${paranetId}/sessions/${sessionId}`;
+}

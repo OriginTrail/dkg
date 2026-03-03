@@ -17,6 +17,13 @@ export const DKGEvent = {
   ACCESS_RESPONSE: 'access:response',
   MESSAGE_RECEIVED: 'message:received',
   MESSAGE_SENT: 'message:sent',
+  AKA_SESSION_PROPOSED: 'aka:session:proposed',
+  AKA_SESSION_ACTIVATED: 'aka:session:activated',
+  AKA_SESSION_FINALIZED: 'aka:session:finalized',
+  AKA_SESSION_ABORTED: 'aka:session:aborted',
+  AKA_ROUND_STARTED: 'aka:round:started',
+  AKA_ROUND_FINALIZED: 'aka:round:finalized',
+  AKA_ROUND_TIMEOUT: 'aka:round:timeout',
 } as const;
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];
