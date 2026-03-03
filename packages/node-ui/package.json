@@ -6,10 +6,10 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc && pnpm build:ui",
-    "build:ui": "NODE_OPTIONS='--max-old-space-size=4096' vite build",
+    "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "dev:ui": "vite",
     "test": "vitest run",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@dkg/core": "workspace:*",
@@ -26,6 +26,7 @@
     "@types/react-dom": "^19",
     "@types/three": "^0.183.1",
     "@vitejs/plugin-react": "^4",
+    "cross-env": "^10.1.0",
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",

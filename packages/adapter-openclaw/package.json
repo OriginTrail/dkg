@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@dkg/agent": "workspace:*",
