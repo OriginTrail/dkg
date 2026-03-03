@@ -91,6 +91,38 @@ order, implementation order) is in [PLAN_AGENT_COORDINATION_GAPS.md](./PLAN_AGEN
 
 ---
 
+## 2026-03-03 Collaboration Experiment Learnings (New)
+
+Tonight's benchmark series (Control, Exp-A, Exp-A2, Exp-B2, Exp-AB, Exp-C1, Exp-C2)
+changed how we should execute DKG V9 delivery:
+
+1. **Raw SPARQL remains the strongest cost primitive** for directed code retrieval.
+   In sequential runs, SPARQL-first beat semantic wrappers on cost and turn count.
+
+2. **Parallelism is the dominant speed lever**, but only if collaboration state
+   is shared in a disciplined way. Multi-agent runs cut wall-clock time nearly in half.
+
+3. **Collaboration substrate affects outcomes**:
+   - Workspace shared memory (C1): lower cost variance, simpler operations.
+   - Full DKG publish/query (C2): better completion reliability and auditable trail.
+
+4. **Conclusion for production execution**:
+   DKG V9 implementation should be coordinated over a **live shared paranet** as the
+   source of truth for plans, decisions, handoffs, and evidence — not markdown files
+   or ad-hoc chat history.
+
+### Production coordination directive
+
+- Use a dedicated coordination paranet for DKGV9 production work.
+- Treat each task, dependency, decision, risk, and experiment as a graph entity.
+- Human + agent teams publish updates in real time; no single human coordinator
+  should be required to manually synchronize execution state.
+
+**Plan artifact (non-MD, graph-native):**
+- [01_PRODUCTION_PLAN_DKG.json](./01_PRODUCTION_PLAN_DKG.json)
+
+---
+
 ## 1. Networking & Sync
 
 ### 1.1 Persistent triple store — **DONE**
@@ -513,12 +545,36 @@ integration (macOS Keychain, Linux Secret Service), optional KMS support
 
 ---
 
+## 9. DKG-native Production Coordination (NEW — 2026-03-03)
+
+### 9.1 Production plan as graph (non-MD source of truth) — **READY**
+
+The production implementation plan is now defined as a graph-native JSON
+artifact designed for publishing into a shared coordination paranet.
+
+- **Plan graph**: [01_PRODUCTION_PLAN_DKG.json](./01_PRODUCTION_PLAN_DKG.json)
+- **Publish utility**: [01_PRODUCTION_PLAN_DKG.publish.mjs](./01_PRODUCTION_PLAN_DKG.publish.mjs)
+- **Query pack**: [01_PRODUCTION_PLAN_DKG.query-pack.json](./01_PRODUCTION_PLAN_DKG.query-pack.json)
+
+This enables real-time human+agent collaboration where teams query the latest
+task graph, dependencies, decisions, and handoffs directly from DKG state.
+
+### 9.2 ROI experiment backlog for production execution — **READY**
+
+Defined in the production plan graph:
+- Smaller-model + DKG collaboration ROI experiment.
+- Swarm same-task experiment: shared Markdown vs DKG nodes.
+- Trust-first experiment: provenance/auditability under conflict.
+
+---
+
 ## Priority order (suggested)
 
 | Priority | Item | Rationale |
 |----------|------|-----------|
 | **P0** | ~~2.2 Fix UAL/chainId~~ | ✅ DONE |
 | **P0** | ~~7.1 Relay test~~ | ✅ DONE |
+| **P0** | 9.1 Production plan as graph + shared paranet execution | Remove manual coordination bottleneck; enable autonomous human+agent collaboration |
 | **P0** | 8.1 Phase A (atomic writes + batched flush) | Crash safety for autonomous agents; no spec needed |
 | **P0** | 8.1 Phase B (wire adapter factory) | Unblock pluggable backends; small refactor |
 | **P1** | 2.1 Private KA access | Completes the core publish/access loop |

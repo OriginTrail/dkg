@@ -1,0 +1,207 @@
+{
+  "planId": "dkgv9-production-plan",
+  "version": "2026-03-03",
+  "updatedAt": "2026-03-03T00:45:00Z",
+  "source": "graph-native",
+  "paranets": [
+    {
+      "id": "dkgv9-production",
+      "uri": "did:dkg:paranet:dkgv9-production",
+      "purpose": "Real-time human+agent implementation coordination and delivery state"
+    },
+    {
+      "id": "dkgv9-trust-lab",
+      "uri": "did:dkg:paranet:dkgv9-trust-lab",
+      "purpose": "Trust, provenance, and adversarial validation experiments"
+    }
+  ],
+  "coordinationModel": {
+    "goal": "Autonomous multi-agent coordination with human oversight, without central manual orchestration",
+    "agentRoles": [
+      "planner-agent",
+      "codegen-agent",
+      "review-agent",
+      "test-agent",
+      "ops-agent",
+      "economics-agent",
+      "trust-agent",
+      "human-lead"
+    ],
+    "loop": [
+      "query latest graph state",
+      "claim next runnable task",
+      "publish plan event",
+      "execute and publish progress",
+      "publish decision + evidence",
+      "handoff or complete"
+    ],
+    "requiredEvents": [
+      "plan",
+      "decision",
+      "risk",
+      "handoff",
+      "evidence",
+      "completion"
+    ]
+  },
+  "workstreams": [
+    {
+      "id": "ws-collab-core-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "name": "Collaboration Substrate V1",
+      "status": "pending",
+      "priority": "P0",
+      "assignee": "planner-agent",
+      "summary": "Operationalize DKG-native coordination for humans and agents in shared production paranet.",
+      "description": "Build claim/progress/handoff protocols, runbook automations, and graph query packs so teams coordinate from graph state.",
+      "roiHypothesis": "Reduce coordination overhead by 30% and improve throughput by 25% in multi-agent development.",
+      "metrics": ["cycleTimeMinutes", "coordinationMessagesPerFeature", "reworkRate", "completionRate"]
+    },
+    {
+      "id": "ws-speed-cost-frontier-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "name": "Speed-Cost Frontier Optimization",
+      "status": "pending",
+      "priority": "P0",
+      "assignee": "economics-agent",
+      "summary": "Tune model mix + collaboration protocol for best throughput-per-dollar.",
+      "description": "Run structured experiments across model sizes and collaboration modes to identify production default strategy.",
+      "roiHypothesis": "Improve features-per-dollar by 20% while keeping completion >=95%.",
+      "metrics": ["costPerSuccessfulFeatureUsd", "throughputFeaturesPerHour", "completionRate"]
+    },
+    {
+      "id": "ws-trust-audit-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "name": "Trust, Provenance, and Auditability",
+      "status": "pending",
+      "priority": "P1",
+      "assignee": "trust-agent",
+      "summary": "Make graph artifacts suitable for compliance-grade reviews and adversarial conditions.",
+      "description": "Add trust metrics, contradiction tracing, and machine-verifiable provenance for decisions and evidence.",
+      "roiHypothesis": "Cut incident root-cause time by 40% and reduce rollback risk through stronger decision traceability.",
+      "metrics": ["provenanceCompleteness", "rootCauseTimeMinutes", "auditReconstructionScore", "rollbackRate"]
+    },
+    {
+      "id": "ws-production-hardening-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "name": "Production Hardening",
+      "status": "pending",
+      "priority": "P1",
+      "assignee": "ops-agent",
+      "summary": "Close persistence, async task, and reliability gaps needed for autonomous operation.",
+      "description": "Implement crash recovery, async long-running skills, key management hardening, and private data redundancy strategy.",
+      "roiHypothesis": "Reduce outage and recovery cost by reducing failure-induced rework and downtime.",
+      "metrics": ["mttrMinutes", "errorRate", "timeoutRate", "dataLossIncidents"]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task-protocol-claim-and-handoff-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P0",
+      "assignee": "planner-agent",
+      "name": "Graph-native claim/progress/handoff protocol",
+      "description": "Define and enforce standard event entities for claim, progress, decision, handoff, completion in dkgv9-production paranet.",
+      "dependsOn": ["ws-collab-core-v1"]
+    },
+    {
+      "id": "task-shared-paranet-bootstrap-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P0",
+      "assignee": "ops-agent",
+      "name": "Shared paranet bootstrap and runbook",
+      "description": "Automate creation/health checks/subscription for dkgv9-production and dkgv9-trust-lab paranets across human+agent teams.",
+      "dependsOn": ["ws-collab-core-v1"]
+    },
+    {
+      "id": "task-model-tier-eval-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P0",
+      "assignee": "economics-agent",
+      "name": "Smaller model with graph assistance evaluation",
+      "description": "Run controlled comparisons of smaller vs larger models under Control, SPARQL, and C2 collaboration to identify best ROI frontier.",
+      "dependsOn": ["ws-speed-cost-frontier-v1"]
+    },
+    {
+      "id": "task-trust-metrics-pipeline-v1",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P1",
+      "assignee": "trust-agent",
+      "name": "Trust metrics extraction pipeline",
+      "description": "Implement automated trust scoring over graph events: provenance completeness, conflict traceability, audit reconstruction.",
+      "dependsOn": ["ws-trust-audit-v1"]
+    }
+  ],
+  "experiments": [
+    {
+      "id": "exp-roi-small-models-c2",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P0",
+      "name": "ROI Experiment: smaller models + graph collaboration",
+      "summary": "Test if smaller models become more competitive when collaboration knowledge is externalized in the DKG.",
+      "hypothesis": "Smaller models + C2 can match or exceed larger-model control on cost-per-success while maintaining >=95% completion.",
+      "arms": ["control-large", "control-small", "exp-a-large", "exp-a-small", "exp-c2-large", "exp-c2-small"],
+      "metrics": ["costPerSuccessfulFeatureUsd", "completionRate", "throughputFeaturesPerHour", "cacheReadTokens", "reworkRate"],
+      "successCriteria": [
+        "exp-c2-small costPerSuccessfulFeatureUsd <= control-large",
+        "exp-c2-small completionRate >= 0.95",
+        "exp-c2-small throughputFeaturesPerHour >= exp-a-large"
+      ]
+    },
+    {
+      "id": "exp-swarm-shared-task-md-vs-dkg",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P1",
+      "name": "Swarm on same task: shared Markdown vs DKG graph",
+      "summary": "Evaluate swarm coordination quality when all agents work on one interdependent task.",
+      "hypothesis": "DKG coordination reduces conflict and rework at equal or lower cost than markdown coordination.",
+      "arms": ["d1-shared-md", "d2-shared-dkg"],
+      "metrics": ["conflictCount", "reworkCount", "mergeFriction", "costPerSuccess", "wallTimeMinutes"],
+      "successCriteria": [
+        "d2 conflictCount <= d1 * 0.7",
+        "d2 reworkCount <= d1 * 0.8",
+        "d2 completionRate >= d1"
+      ]
+    },
+    {
+      "id": "exp-trust-first-md-vs-dkg",
+      "class": "https://ontology.dkg.io/devgraph#Task",
+      "status": "pending",
+      "priority": "P1",
+      "name": "Trust-first experiment: provenance and auditability",
+      "summary": "Compare trust properties of md-based collaboration vs DKG-based collaboration under conflicting requirements.",
+      "hypothesis": "DKG produces significantly higher provenance and audit trace quality even when speed/cost are similar.",
+      "arms": ["e1-md-trust-baseline", "e2-dkg-trust"],
+      "metrics": ["provenanceCompleteness", "rootCauseTimeMinutes", "auditReconstructionScore", "tamperDetectability"],
+      "successCriteria": [
+        "e2 provenanceCompleteness >= e1 + 0.25",
+        "e2 rootCauseTimeMinutes <= e1 * 0.7",
+        "e2 auditReconstructionScore >= e1 + 0.30"
+      ]
+    }
+  ],
+  "initialDecisions": [
+    {
+      "id": "decision-2026-03-03-collab-substrate",
+      "class": "https://ontology.dkg.io/devgraph#Decision",
+      "summary": "Production collaboration state should be DKG-native, with Markdown as optional human-readable projection.",
+      "rationale": "Experiment C showed collaboration substrate changes reliability and traceability. We need machine-queryable shared state for autonomous coordination.",
+      "madeBy": "human-lead",
+      "madeAt": "2026-03-03T00:45:00Z"
+    },
+    {
+      "id": "decision-2026-03-03-exec-default",
+      "class": "https://ontology.dkg.io/devgraph#Decision",
+      "summary": "Default multi-agent execution should use shared paranet protocols with claim/progress/handoff events.",
+      "rationale": "Parallel runs improve speed; structured shared state is required to avoid drift and central coordinator bottlenecks.",
+      "madeBy": "human-lead",
+      "madeAt": "2026-03-03T00:46:00Z"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "description": "Query pack for DKG-native production coordination plan",
+  "queries": [
+    {
+      "id": "list-open-tasks",
+      "sparql": "SELECT ?task ?name ?assignee ?priority WHERE { ?task a <https://ontology.dkg.io/devgraph#Task> ; <https://ontology.dkg.io/devgraph#status> \"pending\" ; <https://ontology.dkg.io/devgraph#name> ?name ; <https://ontology.dkg.io/devgraph#assignee> ?assignee ; <https://ontology.dkg.io/plan#priority> ?priority . FILTER(CONTAINS(STR(?task), \"urn:dkgv9:plan:\")) } ORDER BY ?priority ?name"
+    },
+    {
+      "id": "tasks-by-agent-role",
+      "sparql": "SELECT ?assignee ?task ?name ?status WHERE { ?task a <https://ontology.dkg.io/devgraph#Task> ; <https://ontology.dkg.io/devgraph#assignee> ?assignee ; <https://ontology.dkg.io/devgraph#name> ?name ; <https://ontology.dkg.io/devgraph#status> ?status . FILTER(CONTAINS(STR(?task), \"urn:dkgv9:plan:\")) } ORDER BY ?assignee ?name"
+    },
+    {
+      "id": "experiments-and-hypotheses",
+      "sparql": "SELECT ?exp ?name ?hypothesis WHERE { ?exp <https://ontology.dkg.io/plan#hypothesis> ?hypothesis ; <https://ontology.dkg.io/devgraph#name> ?name . FILTER(CONTAINS(STR(?exp), \"urn:dkgv9:plan:exp-\")) } ORDER BY ?name"
+    },
+    {
+      "id": "decisions-with-rationale",
+      "sparql": "SELECT ?d ?summary ?rationale ?madeBy ?madeAt WHERE { ?d a <https://ontology.dkg.io/devgraph#Decision> ; <https://ontology.dkg.io/devgraph#summary> ?summary ; <https://ontology.dkg.io/devgraph#rationale> ?rationale ; <https://ontology.dkg.io/devgraph#madeBy> ?madeBy ; <https://ontology.dkg.io/devgraph#madeAt> ?madeAt . FILTER(CONTAINS(STR(?d), \"urn:dkgv9:plan:decision-\")) } ORDER BY DESC(?madeAt)"
+    },
+    {
+      "id": "task-dependency-edges",
+      "sparql": "SELECT ?task ?dependsOn WHERE { ?task <https://ontology.dkg.io/devgraph#dependsOn> ?dependsOn . FILTER(CONTAINS(STR(?task), \"urn:dkgv9:plan:task-\")) }"
+    }
+  ]
+}

@@ -1,0 +1,250 @@
+@prefix devgraph: <https://ontology.dkg.io/devgraph#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+
+# =============================================================================
+# DKG Dev Coordination Ontology
+#
+# A lightweight, symbol-level vocabulary for multi-agent development
+# coordination. Agents publish and query these classes to share project
+# knowledge instead of re-exploring the codebase from scratch.
+#
+# Namespace: https://ontology.dkg.io/devgraph#
+# =============================================================================
+
+devgraph: a owl:Ontology ;
+  rdfs:label "DKG Dev Coordination Ontology" ;
+  rdfs:comment "RDF vocabulary for multi-agent development coordination over the Decentralized Knowledge Graph." .
+
+# =============================================================================
+# Coordination Classes
+# =============================================================================
+
+# --- Session ---
+
+devgraph:Session a rdfs:Class ;
+  rdfs:label "Session" ;
+  rdfs:comment "A coding agent work session — tracks what was done, tokens spent, and files touched." .
+
+devgraph:agent a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name or peer ID of the agent that ran this session." .
+
+devgraph:inputTokens a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of input tokens consumed." .
+
+devgraph:outputTokens a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of output tokens generated." .
+
+devgraph:cacheTokens a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of tokens served from cache." .
+
+devgraph:estimatedCost a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Estimated cost in USD (e.g. '$1.20')." .
+
+devgraph:startedAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "ISO 8601 timestamp when this entity started." .
+
+devgraph:endedAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "ISO 8601 timestamp when this entity ended." .
+
+devgraph:filesModified a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of files modified during this session." .
+
+devgraph:summary a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Human-readable summary of what was done or decided." .
+
+devgraph:modifiedFile a rdf:Property ;
+  rdfs:domain devgraph:Session ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "Link to a source file modified during this session." .
+
+# --- Decision ---
+
+devgraph:Decision a rdfs:Class ;
+  rdfs:label "Decision" ;
+  rdfs:comment "An architectural or design decision made during development." .
+
+devgraph:rationale a rdf:Property ;
+  rdfs:domain devgraph:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Reasoning behind this decision." .
+
+devgraph:madeBy a rdf:Property ;
+  rdfs:domain devgraph:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent or person who made this decision." .
+
+devgraph:madeAt a rdf:Property ;
+  rdfs:domain devgraph:Decision ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this decision was made." .
+
+devgraph:affects a rdf:Property ;
+  rdfs:domain devgraph:Decision ;
+  rdfs:comment "Module, package, or file affected by this decision." .
+
+devgraph:supersedes a rdf:Property ;
+  rdfs:domain devgraph:Decision ;
+  rdfs:range devgraph:Decision ;
+  rdfs:comment "Prior decision that this one replaces." .
+
+# --- Task ---
+
+devgraph:Task a rdfs:Class ;
+  rdfs:label "Task" ;
+  rdfs:comment "A planned work item that agents can pick up." .
+
+devgraph:description a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Detailed description of the task or entity." .
+
+devgraph:status a rdf:Property ;
+  rdfs:domain devgraph:Task ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Task status: 'pending', 'in-progress', or 'done'." .
+
+devgraph:assignee a rdf:Property ;
+  rdfs:domain devgraph:Task ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent or person assigned to this task." .
+
+devgraph:dependsOn a rdf:Property ;
+  rdfs:comment "Dependency link (task→task, package→package, module→module)." .
+
+devgraph:completedIn a rdf:Property ;
+  rdfs:domain devgraph:Task ;
+  rdfs:range devgraph:Session ;
+  rdfs:comment "Session in which this task was completed." .
+
+# =============================================================================
+# Code Graph Classes (symbol-level)
+# =============================================================================
+
+# --- Package ---
+
+devgraph:Package a rdfs:Class ;
+  rdfs:label "Package" ;
+  rdfs:comment "A workspace package (e.g. @dkg/chain)." .
+
+devgraph:name a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of this entity (package, module, function, class, contract)." .
+
+devgraph:path a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "File system path relative to the repo root." .
+
+devgraph:containedIn a rdf:Property ;
+  rdfs:range devgraph:Package ;
+  rdfs:comment "Package that contains this module." .
+
+# --- CodeModule ---
+
+devgraph:CodeModule a rdfs:Class ;
+  rdfs:label "CodeModule" ;
+  rdfs:comment "A source file in the repository." .
+
+devgraph:imports a rdf:Property ;
+  rdfs:domain devgraph:CodeModule ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "Module imported by this module." .
+
+devgraph:testFile a rdf:Property ;
+  rdfs:domain devgraph:CodeModule ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "Corresponding test file for this module." .
+
+devgraph:lastModified a rdf:Property ;
+  rdfs:domain devgraph:CodeModule ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Last modification timestamp." .
+
+devgraph:lineCount a rdf:Property ;
+  rdfs:domain devgraph:CodeModule ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of lines in this file." .
+
+# --- Function ---
+
+devgraph:Function a rdfs:Class ;
+  rdfs:label "Function" ;
+  rdfs:comment "An exported function or method." .
+
+devgraph:signature a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Full type signature (e.g. '(sparql: string, paranetId?: string) => Promise<Result>')." .
+
+devgraph:definedIn a rdf:Property ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "Module where this symbol is defined." .
+
+devgraph:calls a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range devgraph:Function ;
+  rdfs:comment "Function called by this function (best-effort static analysis)." .
+
+devgraph:parameter a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Parameter name and type (e.g. 'sparql: string')." .
+
+devgraph:returnType a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Return type annotation." .
+
+# --- Class ---
+
+devgraph:Class a rdfs:Class ;
+  rdfs:label "Class" ;
+  rdfs:comment "An exported class or interface." .
+
+devgraph:hasMethod a rdf:Property ;
+  rdfs:domain devgraph:Class ;
+  rdfs:range devgraph:Function ;
+  rdfs:comment "Method belonging to this class." .
+
+devgraph:extends a rdf:Property ;
+  rdfs:domain devgraph:Class ;
+  rdfs:range devgraph:Class ;
+  rdfs:comment "Parent class (single inheritance)." .
+
+devgraph:implements a rdf:Property ;
+  rdfs:domain devgraph:Class ;
+  rdfs:range devgraph:Class ;
+  rdfs:comment "Interface implemented by this class." .
+
+# --- Contract (Solidity) ---
+
+devgraph:Contract a rdfs:Class ;
+  rdfs:subClassOf devgraph:Class ;
+  rdfs:label "Contract" ;
+  rdfs:comment "A Solidity smart contract." .
+
+devgraph:inherits a rdf:Property ;
+  rdfs:domain devgraph:Contract ;
+  rdfs:range devgraph:Contract ;
+  rdfs:comment "Parent contract (Solidity 'is' clause)." .
+
+devgraph:emitsEvent a rdf:Property ;
+  rdfs:domain devgraph:Contract ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of an event emitted by this contract." .

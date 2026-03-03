@@ -17,7 +17,8 @@
     "@dkg/node-ui": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
-    "n3": "^2.0.1"
+    "n3": "^2.0.1",
+    "typescript": "^5.7"
   },
   "devDependencies": {
     "@types/n3": "^1.26.1",

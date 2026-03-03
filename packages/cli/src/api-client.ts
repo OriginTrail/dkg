@@ -11,14 +11,20 @@ export class ApiClient {
   }
 
   static async connect(): Promise<ApiClient> {
-    const pid = await readPid();
-    if (!pid || !isProcessRunning(pid)) {
-      throw new Error('Daemon is not running. Start it with: dkg start');
-    }
-    const port = await readApiPort();
+    const envPort = process.env.DKG_API_PORT
+      ? parseInt(process.env.DKG_API_PORT, 10)
+      : null;
+
+    let port = envPort ?? (await readApiPort());
+
     if (!port) {
-      throw new Error('Cannot read API port. Try restarting: dkg stop && dkg start');
+      const pid = await readPid();
+      if (!pid || !isProcessRunning(pid)) {
+        throw new Error('Daemon is not running. Start it with: dkg start');
+      }
+      throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');
     }
+
     const tokens = await loadTokens();
     const token = tokens.size > 0 ? tokens.values().next().value : undefined;
     return new ApiClient(port, token);

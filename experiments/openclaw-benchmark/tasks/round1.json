@@ -1,0 +1,42 @@
+{
+  "round": 1,
+  "description": "Cold start — first encounter with OpenClaw codebase (4,885 files, TypeScript monorepo)",
+  "features": [
+    {
+      "id": "r1-f1",
+      "title": "X/Twitter DM Channel Extension",
+      "description": "Add a new channel extension at extensions/x-twitter/ for X (Twitter) Direct Message integration. Follow the existing channel extension pattern (see extensions/discord/ or extensions/telegram/ for reference). Must include: openclaw.plugin.json with kind='channels', channel plugin class with send/receive, onboarding step for API key/OAuth setup, probe for connection health check, and basic test. Use the X API v2 for DM endpoints.",
+      "scope": "extensions/x-twitter/",
+      "touches": ["extensions/x-twitter/"],
+      "independent": true,
+      "prompt": "Add a new X/Twitter DM channel extension at extensions/x-twitter/. Follow the existing channel extension patterns (look at extensions/discord/ and extensions/telegram/ for the structure). It must include: openclaw.plugin.json with kind='channels', a channel plugin class that can send and receive DMs via the X API v2, an onboarding step for API credentials, a probe for health checking the connection, and a basic unit test. Make it functional with proper TypeScript types."
+    },
+    {
+      "id": "r1-f2",
+      "title": "Pinecone Memory Backend Extension",
+      "description": "Add a new memory backend extension at extensions/memory-pinecone/ following the memory-lancedb pattern. Must include: openclaw.plugin.json with kind='memory', a memory provider class that implements the memory interface (upsert, query, delete), Pinecone client initialization from config, and tests. This extends the existing extensible memory system.",
+      "scope": "extensions/memory-pinecone/",
+      "touches": ["extensions/memory-pinecone/"],
+      "independent": true,
+      "prompt": "Add a Pinecone vector database memory backend extension at extensions/memory-pinecone/. Model it after extensions/memory-lancedb/ — use the same plugin interface and memory provider pattern. It must include: openclaw.plugin.json with kind='memory', a memory provider class implementing upsert/query/delete operations against Pinecone, config schema for API key and index name, and a unit test with mocked Pinecone client. Use the @pinecone-database/pinecone SDK."
+    },
+    {
+      "id": "r1-f3",
+      "title": "Session Transcript Export CLI Command",
+      "description": "Add an 'openclaw sessions export' CLI subcommand that exports a session's transcript to Markdown or JSON format. Must integrate with the existing CLI registration system (see src/cli/), read session data from the gateway, format it nicely, and support --format (json|markdown), --output (file path), and --session-id flags.",
+      "scope": "src/cli/",
+      "touches": ["src/cli/", "src/commands/"],
+      "independent": true,
+      "prompt": "Add an 'openclaw sessions export' CLI subcommand that exports a session's chat transcript. Look at the existing CLI commands in src/cli/ and src/commands/ for the registration pattern. It must: connect to the gateway to fetch session history, support --format json|markdown flags, support --output for file path (default stdout), support --session-id to pick a specific session, format messages nicely with timestamps and role labels, and include a basic test. Use the existing session/gateway infrastructure."
+    },
+    {
+      "id": "r1-f4",
+      "title": "Webhook Delivery Log API Endpoints",
+      "description": "Add REST API endpoints to the gateway for querying webhook delivery history. Must include: GET /api/webhooks/deliveries (list recent deliveries with status, timestamp, response code), GET /api/webhooks/deliveries/:id (single delivery detail), and a simple in-memory ring buffer store for delivery records. Wire into the existing gateway server-methods pattern.",
+      "scope": "src/gateway/server-methods/",
+      "touches": ["src/gateway/server-methods/"],
+      "independent": true,
+      "prompt": "Add webhook delivery logging and query endpoints to the OpenClaw gateway. Look at the existing gateway server-methods in src/gateway/server-methods/ for the pattern. Add: (1) a delivery log store (in-memory ring buffer, max 1000 entries) that records each webhook dispatch with timestamp, URL, status code, response time, and payload hash, (2) a 'webhooks.deliveries' gateway method that returns recent deliveries with optional filtering by status and URL, (3) a 'webhooks.delivery' method for single delivery detail. Include a test."
+    }
+  ]
+}

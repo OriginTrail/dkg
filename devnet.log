@@ -1,0 +1,8 @@
+[devnet] Starting devnet with 6 nodes...
+[devnet] Hardhat node already running (PID 53384)
+[devnet] Contracts already deployed
+[devnet] Blazegraph already running (devnet-blazegraph)
+[devnet] Oxigraph server already running (devnet-oxigraph-5, port 7878)
+[devnet] Oxigraph server already running (devnet-oxigraph-6, port 7879)
+[devnet] Oxigraph servers ready (ports 7878, 7879)
+[devnet] Shared devnet auth token: n11UxCsE0KOOeIi5fbVwP6Wn2ozSM44dJh16l9L1o

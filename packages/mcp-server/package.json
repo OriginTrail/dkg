@@ -1,0 +1,21 @@
+{
+  "name": "@dkg/mcp-server",
+  "version": "9.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "dkg-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "zod": "^3.25"
+  },
+  "devDependencies": {
+    "vitest": "^3"
+  }
+}

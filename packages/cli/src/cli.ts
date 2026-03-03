@@ -777,6 +777,80 @@ paranetCmd
     }
   });
 
+// ─── dkg index ──────────────────────────────────────────────────────
+
+program
+  .command('index [directory]')
+  .description('Index a repository\'s code graph and publish to the dev-coordination paranet')
+  .option('-p, --paranet <id>', 'Target paranet', 'dev-coordination')
+  .option('--dry-run', 'Print statistics without publishing')
+  .option('--output <file>', 'Write quads to a JSON file instead of publishing')
+  .action(async (directory: string | undefined, opts: ActionOpts) => {
+    try {
+      const { resolve } = await import('node:path');
+      const repoRoot = resolve(directory ?? '.');
+
+      console.log(`Indexing ${repoRoot}...`);
+      const { indexRepository } = await import('./indexer.js');
+      const result = await indexRepository(repoRoot);
+
+      console.log(`\n  Packages:  ${result.packageCount}`);
+      console.log(`  Modules:   ${result.moduleCount}`);
+      console.log(`  Functions: ${result.functionCount}`);
+      console.log(`  Classes:   ${result.classCount}`);
+      console.log(`  Contracts: ${result.contractCount}`);
+      console.log(`  Quads:     ${result.quads.length}`);
+
+      if (opts.output) {
+        const { writeFile } = await import('node:fs/promises');
+        await writeFile(opts.output, JSON.stringify(result.quads, null, 2));
+        console.log(`\nWritten to ${opts.output}`);
+        return;
+      }
+
+      if (opts.dryRun) {
+        console.log('\n  (dry run — not publishing)');
+        return;
+      }
+
+      const client = await ApiClient.connect();
+
+      // Group quads by root entity (subject) to avoid splitting an entity
+      // across batches, which would trigger Rule 4 duplicate errors.
+      const byEntity = new Map<string, typeof result.quads>();
+      for (const q of result.quads) {
+        const key = q.subject;
+        let arr = byEntity.get(key);
+        if (!arr) { arr = []; byEntity.set(key, arr); }
+        arr.push(q);
+      }
+
+      const MAX_BATCH_QUADS = 500;
+      let batch: typeof result.quads = [];
+      let published = 0;
+      const entities = [...byEntity.values()];
+
+      for (const entityQuads of entities) {
+        if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
+          await client.publish(opts.paranet, batch);
+          published += batch.length;
+          process.stdout.write(`\r  Publishing: ${published}/${result.quads.length} quads`);
+          batch = [];
+        }
+        batch.push(...entityQuads);
+      }
+      if (batch.length > 0) {
+        await client.publish(opts.paranet, batch);
+        published += batch.length;
+        process.stdout.write(`\r  Publishing: ${published}/${result.quads.length} quads`);
+      }
+      console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg logs ────────────────────────────────────────────────────────
 
 program

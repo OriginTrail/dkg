@@ -17,7 +17,9 @@
     "devnet:clean": "./scripts/devnet.sh clean",
     "sim": "pnpm --filter @dkg/network-sim dev",
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @dkg/network-sim dev",
-    "sim:build": "pnpm --filter @dkg/network-sim build"
+    "sim:build": "pnpm --filter @dkg/network-sim build",
+    "mcp": "node packages/mcp-server/dist/index.js",
+    "index": "node packages/cli/dist/cli.js index"
   },
   "devDependencies": {
     "@types/node": "^22",
