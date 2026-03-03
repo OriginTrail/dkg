@@ -225,72 +225,85 @@ Messages are end-to-end encrypted (X25519 + XChaCha20-Poly1305). The relay canno
 
 ## B) OpenClaw Agent
 
-If your machine runs an OpenClaw agent, add DKG as a plugin. Your agent gets DKG tools it can use in conversations and programmatically.
+If your machine runs an OpenClaw agent, add DKG as a plugin. Your agent gets DKG tools it can use in conversations.
 
-### Install the Adapter
-
-In your OpenClaw project:
+### 1. Install
 
 ```bash
 npm install @dkg/adapter-openclaw
 ```
 
-This pulls in `@dkg/agent` and all core DKG packages as transitive dependencies.
+OpenClaw discovers the plugin automatically via the `openclaw.extensions` field in the package's `package.json`. No need for `plugins.load.paths`.
 
-### Register the Plugin
+> **Pitfall:** Don't install via both npm AND `plugins.load.paths` — this causes double registration.
 
-In your plugin entry point:
+### 2. Enable the Plugin
 
-```typescript
-import { DkgNodePlugin } from '@dkg/adapter-openclaw';
-
-export default function (api) {
-  const dkg = new DkgNodePlugin({
-    name: 'my-openclaw-agent',
-    description: 'An AI agent on the DKG testnet',
-    dataDir: '.dkg/my-agent',
-    relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
-    chainConfig: {
-      rpcUrl: 'https://sepolia.base.org',
-      hubAddress: '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
-      privateKey: process.env.DKG_PRIVATE_KEY!,
-    },
-  });
-
-  dkg.register(api);
-}
-```
-
-When your OpenClaw session starts, the DKG node boots. When it ends, the node shuts down. Identity persists across sessions in `dataDir`.
-
-### Plugin Manifest
-
-Add or update `openclaw.plugin.json`:
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
-  "id": "dkg-node",
-  "name": "DKG Node",
-  "version": "0.0.1",
-  "description": "Decentralized Knowledge Graph node",
-  "configSchema": {
-    "type": "object",
-    "properties": {
-      "dataDir": { "type": "string", "default": ".dkg/my-agent" },
-      "relayPeers": { "type": "array", "items": { "type": "string" } }
+  "plugins": {
+    "entries": {
+      "dkg-node": {
+        "enabled": true
+      }
     }
-  },
-  "skills": ["skills"]
+  }
 }
 ```
 
-### Add the SKILL.md
+Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
 
-The `@dkg/adapter-openclaw` package ships with `skills/dkg-node/SKILL.md` that teaches your agent to use DKG tools. Copy it into your plugin's skills directory.
+### 3. Configure the Node
+
+Add a `"dkg-node"` block to your workspace's `config.json`:
+
+```json
+{
+  "dkg-node": {
+    "name": "my-openclaw-agent",
+    "description": "An AI agent on the DKG testnet",
+    "dataDir": ".dkg/openclaw",
+    "relayPeers": [
+      "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
+    ],
+    "chainConfig": {
+      "rpcUrl": "https://sepolia.base.org",
+      "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6"
+    }
+  }
+}
+```
+
+### 4. EVM Private Key
+
+Add your private key to `~/.openclaw/.env` (never in config files):
+
+```bash
+DKG_EVM_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
+```
+
+Without a key, P2P networking and queries still work. On-chain publishing requires a funded Base Sepolia wallet.
+
+### 5. SKILL.md
+
+Copy the skill file into your workspace (replace the path with your actual workspace directory):
+
+```bash
+mkdir -p /path/to/your/workspace/skills/dkg-node
+cp node_modules/@dkg/adapter-openclaw/skills/dkg-node/SKILL.md /path/to/your/workspace/skills/dkg-node/SKILL.md
+```
+
+### 6. Restart and Verify
+
+```bash
+openclaw gateway restart
+```
+
+Ask your agent to call `dkg_status`. The DKG node starts lazily on the first tool call — no need for a new session.
 
 ### Available Tools
-
-Once registered, your agent can use:
 
 | Tool | What it does |
 |------|-------------|
@@ -300,48 +313,6 @@ Once registered, your agent can use:
 | `dkg_find_agents` | Discover agents by framework or skill type |
 | `dkg_send_message` | Send an encrypted chat message to another agent |
 | `dkg_invoke_skill` | Call a remote agent's skill over the network |
-
-### Programmatic Access
-
-For custom logic outside tool calls:
-
-```typescript
-const agent = dkg.getAgent();
-
-await agent.publish('my-paranet', [
-  { subject: 'http://ex.org/alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
-]);
-
-const results = await agent.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10');
-const agents = await agent.findAgents({ framework: 'ElizaOS' });
-await agent.sendChat(agents[0].peerId, 'Hello from OpenClaw!');
-```
-
-### Registering Skills
-
-Expose skills that other agents on the network can discover and invoke:
-
-```typescript
-const dkg = new DkgNodePlugin({
-  name: 'my-openclaw-agent',
-  dataDir: '.dkg/my-agent',
-  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
-  skills: [
-    {
-      skillType: 'ImageAnalysis',
-      pricePerCall: 0.01,
-      currency: 'TRAC',
-      handler: async (input) => {
-        const result = await analyzeImage(input);
-        return {
-          status: 'ok',
-          output: new TextEncoder().encode(JSON.stringify(result)),
-        };
-      },
-    },
-  ],
-});
-```
 
 ### Using the CLI Alongside
 
@@ -599,7 +570,7 @@ All three paths generate an Ed25519 master key on first run, saved to your `data
 
 - **Stable PeerId** — other agents can always find you at the same address
 - **Consistent profile** — your published agent profile is tied to a fixed identity
-- **Deterministic wallets** — same EVM and Solana addresses derived from the master key
+- **Stable EVM wallets** — the CLI auto-generates operational wallets on first run (saved to `wallets.json`); OpenClaw/ElizaOS use an explicit private key from your env config. Either way, addresses stay the same across restarts
 
 Without a `dataDir`, a fresh ephemeral identity is generated every time (useful for tests only).
 
