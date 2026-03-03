@@ -8,7 +8,7 @@ The DKG plugin uses **two configuration layers**:
 
 | Layer | File | What it controls |
 |-------|------|-----------------|
-| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin enable/disable only (`plugins.entries["@dkg/adapter-openclaw"].enabled: true`) |
+| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin load path + enable/disable (`plugins.entries["adapter-openclaw"].enabled: true`) |
 | **Workspace config** | `<workspace>/config.json` | All DKG settings (dataDir, relayPeers, chainConfig, etc.) |
 | **Environment** | `~/.openclaw/.env` | Secrets (EVM private key) |
 
@@ -22,19 +22,20 @@ OpenClaw's `plugins.entries` only accepts `{ enabled: boolean }` — no other ke
 npm install @dkg/adapter-openclaw
 ```
 
-OpenClaw discovers the plugin automatically via the `openclaw.extensions` field in the package's `package.json`. No need to add `plugins.load.paths` if you install via npm.
-
-> **Pitfall:** Don't install via both npm AND `plugins.load.paths` — this causes double registration.
+After installing, you need to tell OpenClaw where to find the plugin and enable it in the next step.
 
 ### 2. Enable the Plugin
 
-Add the plugin entry to `~/.openclaw/openclaw.json`:
+Add the plugin to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "plugins": {
+    "load": {
+      "paths": ["node_modules/@dkg/adapter-openclaw"]
+    },
     "entries": {
-      "@dkg/adapter-openclaw": {
+      "adapter-openclaw": {
         "enabled": true
       }
     }
@@ -42,7 +43,10 @@ Add the plugin entry to `~/.openclaw/openclaw.json`:
 }
 ```
 
-Only `enabled: boolean` is allowed here. Do not put DKG config in this file.
+**Important details:**
+- `load.paths` is resolved relative to the OpenClaw project root.
+- The `entries` key must be `adapter-openclaw` — this matches the plugin's manifest ID (not the npm package name).
+- Only `enabled: boolean` is allowed in entries — no other keys. Do not put DKG config in this file.
 
 ### 3. Configure the Node
 
@@ -191,8 +195,10 @@ Mainnet relay and chain values will be published here when available. The config
 
 ## Troubleshooting
 
-**"plugin not found: dkg-node":**
-- The plugin entry key in `openclaw.json` must be the **npm package name** `@dkg/adapter-openclaw`, not the plugin ID `dkg-node`. Use `"@dkg/adapter-openclaw": { "enabled": true }`.
+**"plugin not found" or "plugin id mismatch":**
+- The `plugins.entries` key must be `adapter-openclaw` (the manifest ID), not the npm package name.
+- `plugins.load.paths` must point to the installed package directory (relative to OpenClaw project root).
+- Correct config: `"entries": { "adapter-openclaw": { "enabled": true } }`
 
 **"DKG node not started" / tools fail:**
 - Call `dkg_status` first — it returns diagnostic config info even when the node can't start.
@@ -205,7 +211,7 @@ Mainnet relay and chain values will be published here when available. The config
 - P2P publishing still works without a key — data just stays "tentative".
 
 **Plugin loaded twice / duplicate tools:**
-- Only install via ONE method: npm (auto-discovery) OR `plugins.load.paths` — not both.
+- Ensure the plugin path appears only once in `plugins.load.paths`.
 
 **No agents discovered:**
 - Wait 30 seconds — profile discovery uses GossipSub which takes a cycle to propagate.

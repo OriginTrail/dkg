@@ -1,5 +1,5 @@
 {
-  "id": "dkg-node",
+  "id": "adapter-openclaw",
   "name": "DKG Node — Decentralized Knowledge Graph",
   "version": "0.0.1",
   "description": "Turns your OpenClaw agent into a DKG V9 node. Enables publishing knowledge, querying the graph, discovering other agents, and invoking remote skills over a decentralized P2P network.",
