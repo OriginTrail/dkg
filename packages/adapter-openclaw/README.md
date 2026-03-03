@@ -8,7 +8,7 @@ The DKG plugin uses **two configuration layers**:
 
 | Layer | File | What it controls |
 |-------|------|-----------------|
-| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin enable/disable only (`plugins.entries.dkg-node.enabled: true`) |
+| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin enable/disable only (`plugins.entries["@dkg/adapter-openclaw"].enabled: true`) |
 | **Workspace config** | `<workspace>/config.json` | All DKG settings (dataDir, relayPeers, chainConfig, etc.) |
 | **Environment** | `~/.openclaw/.env` | Secrets (EVM private key) |
 
@@ -34,7 +34,7 @@ Add the plugin entry to `~/.openclaw/openclaw.json`:
 {
   "plugins": {
     "entries": {
-      "dkg-node": {
+      "@dkg/adapter-openclaw": {
         "enabled": true
       }
     }
@@ -190,6 +190,9 @@ These are the default values used when `DKG_EVM_PRIVATE_KEY` is set without expl
 Mainnet relay and chain values will be published here when available. The config structure is the same — just swap `relayPeers` and `chainConfig` values.
 
 ## Troubleshooting
+
+**"plugin not found: dkg-node":**
+- The plugin entry key in `openclaw.json` must be the **npm package name** `@dkg/adapter-openclaw`, not the plugin ID `dkg-node`. Use `"@dkg/adapter-openclaw": { "enabled": true }`.
 
 **"DKG node not started" / tools fail:**
 - Call `dkg_status` first — it returns diagnostic config info even when the node can't start.

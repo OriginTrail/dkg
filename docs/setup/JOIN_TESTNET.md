@@ -247,7 +247,7 @@ Add to `~/.openclaw/openclaw.json`:
 {
   "plugins": {
     "entries": {
-      "dkg-node": {
+      "@dkg/adapter-openclaw": {
         "enabled": true
       }
     }
