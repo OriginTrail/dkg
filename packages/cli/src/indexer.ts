@@ -6,13 +6,14 @@
  *   - CodeModule (source files) with import edges
  *   - Function / Class declarations with signatures
  *   - Contract (Solidity) with inheritance and events
+ *   - Python module/class/function extraction (regex-based)
  *
- * Uses ts.createSourceFile (AST-only, no full compilation) for TypeScript
- * and regex-based extraction for Solidity.
+ * Uses ts.createSourceFile (AST-only, no full compilation) for TypeScript/JavaScript
+ * and regex-based extraction for Solidity/Python.
  */
 
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { join, relative, extname, dirname, basename } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { join, relative, extname, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import ts from 'typescript';
 
@@ -42,6 +43,17 @@ function packageUri(name: string): string {
 function symbolUri(repoRoot: string, filePath: string, name: string, kind: string): string {
   const rel = relative(repoRoot, filePath).replace(/\\/g, '/');
   return `symbol:${rel}/${kind}/${encodeURIComponent(name)}`;
+}
+
+function moduleBaseQuads(repoRoot: string, filePath: string, pkgName: string, lineCount: number): Quad[] {
+  const graph = 'did:dkg:paranet:dev-coordination';
+  const modUri = uri(moduleUri(repoRoot, filePath));
+  return [
+    { subject: modUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}CodeModule`), graph },
+    { subject: modUri, predicate: uri(`${DEVGRAPH}path`), object: literal(relative(repoRoot, filePath)), graph },
+    { subject: modUri, predicate: uri(`${DEVGRAPH}lineCount`), object: intLiteral(lineCount), graph },
+    { subject: modUri, predicate: uri(`${DEVGRAPH}containedIn`), object: uri(packageUri(pkgName)), graph },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -148,11 +160,7 @@ async function indexTypeScriptFile(
 
   const source = await readFile(filePath, 'utf-8');
   const lineCount = source.split('\n').length;
-
-  quads.push({ subject: modUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}CodeModule`), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}path`), object: literal(relative(repoRoot, filePath)), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}lineCount`), object: intLiteral(lineCount), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}containedIn`), object: uri(packageUri(pkgName)), graph });
+  quads.push(...moduleBaseQuads(repoRoot, filePath, pkgName, lineCount));
 
   const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
 
@@ -248,12 +256,203 @@ async function indexTypeScriptFile(
   return quads;
 }
 
+async function indexJavaScriptFile(
+  repoRoot: string, filePath: string, pkgName: string,
+): Promise<Quad[]> {
+  const graph = 'did:dkg:paranet:dev-coordination';
+  const quads: Quad[] = [];
+  const modUri = uri(moduleUri(repoRoot, filePath));
+
+  const source = await readFile(filePath, 'utf-8');
+  const lineCount = source.split('\n').length;
+  quads.push(...moduleBaseQuads(repoRoot, filePath, pkgName, lineCount));
+
+  const kind = filePath.endsWith('.jsx') ? ts.ScriptKind.JSX : ts.ScriptKind.JS;
+  const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, kind);
+
+  for (const stmt of sourceFile.statements) {
+    if (ts.isImportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+      const importPath = stmt.moduleSpecifier.text;
+      if (importPath.startsWith('.')) {
+        const resolved = resolveRelativeImportWithExt(filePath, importPath, '.js');
+        const targetUri = uri(moduleUri(repoRoot, resolved));
+        quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}imports`), object: targetUri, graph });
+      }
+    }
+  }
+
+  for (const stmt of sourceFile.statements) {
+    const isExported = ts.canHaveModifiers(stmt)
+      ? (ts.getModifiers(stmt) ?? []).some(m => m.kind === ts.SyntaxKind.ExportKeyword)
+      : false;
+    if (!isExported) continue;
+
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) {
+      const name = stmt.name.text;
+      const fnUri = uri(symbolUri(repoRoot, filePath, name, 'fn'));
+      const sig = extractFunctionSignature(stmt, source);
+      quads.push({ subject: fnUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Function`), graph });
+      quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}name`), object: literal(name), graph });
+      quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}definedIn`), object: modUri, graph });
+      if (sig) quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}signature`), object: literal(sig), graph });
+    }
+
+    if (ts.isClassDeclaration(stmt) && stmt.name) {
+      const className = stmt.name.text;
+      const classUri = uri(symbolUri(repoRoot, filePath, className, 'class'));
+      quads.push({ subject: classUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Class`), graph });
+      quads.push({ subject: classUri, predicate: uri(`${DEVGRAPH}name`), object: literal(className), graph });
+      quads.push({ subject: classUri, predicate: uri(`${DEVGRAPH}definedIn`), object: modUri, graph });
+    }
+  }
+
+  const rel = relative(repoRoot, filePath);
+  const testCandidates = [
+    rel.replace('/src/', '/test/').replace(/\.jsx?$/, '.test.js'),
+    rel.replace('/src/', '/test/').replace(/\.jsx?$/, '.spec.js'),
+  ];
+  for (const tc of testCandidates) {
+    if (existsSync(join(repoRoot, tc))) {
+      quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}testFile`), object: uri(`file:${tc}`), graph });
+      break;
+    }
+  }
+
+  return quads;
+}
+
+async function indexPythonFile(
+  repoRoot: string, filePath: string, pkgName: string,
+): Promise<Quad[]> {
+  const graph = 'did:dkg:paranet:dev-coordination';
+  const quads: Quad[] = [];
+  const modUri = uri(moduleUri(repoRoot, filePath));
+
+  const source = await readFile(filePath, 'utf-8');
+  const lineCount = source.split('\n').length;
+  quads.push(...moduleBaseQuads(repoRoot, filePath, pkgName, lineCount));
+
+  const importRe = /^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+))/gm;
+  let match: RegExpExecArray | null;
+  while ((match = importRe.exec(source))) {
+    const importPath = (match[1] ?? match[2] ?? '').trim();
+    if (!importPath) continue;
+    if (importPath.startsWith('.')) {
+      const relativeImport = importPath.replace(/\./g, '/');
+      const resolved = join(dirname(filePath), relativeImport + '.py');
+      quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}imports`), object: uri(moduleUri(repoRoot, resolved)), graph });
+    } else {
+      quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}imports`), object: literal(importPath), graph });
+    }
+  }
+
+  const classRe = /^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\(([^)]*)\))?:/gm;
+  while ((match = classRe.exec(source))) {
+    const className = match[1];
+    const bases = (match[2] ?? '').split(',').map(s => s.trim()).filter(Boolean);
+    const classUri = uri(symbolUri(repoRoot, filePath, className, 'class'));
+    quads.push({ subject: classUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Class`), graph });
+    quads.push({ subject: classUri, predicate: uri(`${DEVGRAPH}name`), object: literal(className), graph });
+    quads.push({ subject: classUri, predicate: uri(`${DEVGRAPH}definedIn`), object: modUri, graph });
+    for (const base of bases) {
+      quads.push({ subject: classUri, predicate: uri(`${DEVGRAPH}extends`), object: literal(base), graph });
+    }
+  }
+
+  const fnRe = /^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([^\n:]+))?:/gm;
+  while ((match = fnRe.exec(source))) {
+    const fnName = match[1];
+    const params = (match[2] ?? '').trim();
+    const ret = (match[3] ?? '').trim();
+    const fnUri = uri(symbolUri(repoRoot, filePath, fnName, 'fn'));
+
+    quads.push({ subject: fnUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Function`), graph });
+    quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}name`), object: literal(fnName), graph });
+    quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}definedIn`), object: modUri, graph });
+    if (params) {
+      for (const p of params.split(',').map(s => s.trim()).filter(Boolean)) {
+        quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}parameter`), object: literal(p), graph });
+      }
+    }
+    if (ret) quads.push({ subject: fnUri, predicate: uri(`${DEVGRAPH}returnType`), object: literal(ret), graph });
+  }
+
+  const rel = relative(repoRoot, filePath);
+  const baseRel = rel.replace('/src/', '/test/').replace(/\.py$/, '');
+  const testCandidates = [
+    `${baseRel}_test.py`,
+    `${baseRel}.test.py`,
+    rel.replace('/src/', '/tests/').replace(/\.py$/, '.py'),
+  ];
+  for (const tc of testCandidates) {
+    if (existsSync(join(repoRoot, tc))) {
+      quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}testFile`), object: uri(`file:${tc}`), graph });
+      break;
+    }
+  }
+
+  return quads;
+}
+
+async function indexContentFile(
+  repoRoot: string, filePath: string, pkgName: string,
+): Promise<Quad[]> {
+  const graph = 'did:dkg:paranet:dev-coordination';
+  const source = await readFile(filePath, 'utf-8');
+  const lineCount = source.split('\n').length;
+  const wordCount = source.trim().length ? source.trim().split(/\s+/).length : 0;
+  const modUri = uri(moduleUri(repoRoot, filePath));
+  const quads: Quad[] = moduleBaseQuads(repoRoot, filePath, pkgName, lineCount);
+
+  quads.push({ subject: modUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}Document`), graph });
+  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}wordCount`), object: intLiteral(wordCount), graph });
+
+  const relPath = relative(repoRoot, filePath);
+  const title = extractDocumentTitle(source, relPath);
+  if (title) {
+    quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}title`), object: literal(title), graph });
+  }
+
+  const links = extractMarkdownLinks(source);
+  for (const link of links) {
+    quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}references`), object: literal(link), graph });
+  }
+
+  return quads;
+}
+
 function resolveRelativeImport(fromFile: string, importPath: string): string {
   const dir = dirname(fromFile);
   let resolved = join(dir, importPath);
   if (!extname(resolved)) resolved += '.ts';
   resolved = resolved.replace(/\.js$/, '.ts');
   return resolved;
+}
+
+function resolveRelativeImportWithExt(fromFile: string, importPath: string, fallbackExt: string): string {
+  const dir = dirname(fromFile);
+  let resolved = join(dir, importPath);
+  if (!extname(resolved)) resolved += fallbackExt;
+  return resolved;
+}
+
+function extractDocumentTitle(source: string, fallbackPath: string): string {
+  const h1 = source.match(/^\s*#\s+(.+?)\s*$/m);
+  if (h1?.[1]) return h1[1].trim();
+
+  const firstNonEmpty = source.split('\n').map(l => l.trim()).find(Boolean);
+  if (firstNonEmpty) return firstNonEmpty.slice(0, 120);
+  return fallbackPath;
+}
+
+function extractMarkdownLinks(source: string): string[] {
+  const links = new Set<string>();
+  const re = /\[[^\]]*?\]\(([^)]+)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(source))) {
+    if (match[1]) links.add(match[1].trim());
+  }
+  return [...links];
 }
 
 function extractFunctionSignature(node: ts.FunctionDeclaration, source: string): string | null {
@@ -281,11 +480,7 @@ async function indexSolidityFile(repoRoot: string, filePath: string, pkgName: st
 
   const source = await readFile(filePath, 'utf-8');
   const lineCount = source.split('\n').length;
-
-  quads.push({ subject: modUri, predicate: uri(RDF_TYPE), object: uri(`${DEVGRAPH}CodeModule`), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}path`), object: literal(relative(repoRoot, filePath)), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}lineCount`), object: intLiteral(lineCount), graph });
-  quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}containedIn`), object: uri(packageUri(pkgName)), graph });
+  quads.push(...moduleBaseQuads(repoRoot, filePath, pkgName, lineCount));
 
   // Imports
   const importRe = /import\s+.*?from\s+["'](.+?)["']/g;
@@ -385,12 +580,58 @@ export interface IndexResult {
   contractCount: number;
 }
 
-export async function indexRepository(repoRoot: string): Promise<IndexResult> {
+export interface IndexOptions {
+  includeContent?: boolean;
+}
+
+interface LanguageExtractor {
+  id: string;
+  roots: string[];
+  extensions: Set<string>;
+  indexFile: (repoRoot: string, filePath: string, pkgName: string) => Promise<Quad[]>;
+}
+
+const CODE_EXTRACTORS: LanguageExtractor[] = [
+  {
+    id: 'typescript',
+    roots: ['src'],
+    extensions: new Set(['.ts', '.tsx']),
+    indexFile: indexTypeScriptFile,
+  },
+  {
+    id: 'javascript',
+    roots: ['src'],
+    extensions: new Set(['.js', '.jsx', '.mjs', '.cjs']),
+    indexFile: indexJavaScriptFile,
+  },
+  {
+    id: 'python',
+    roots: ['src'],
+    extensions: new Set(['.py']),
+    indexFile: indexPythonFile,
+  },
+  {
+    id: 'solidity',
+    roots: ['contracts'],
+    extensions: new Set(['.sol']),
+    indexFile: indexSolidityFile,
+  },
+];
+
+const CONTENT_EXTRACTOR: LanguageExtractor = {
+  id: 'content',
+  roots: ['.'],
+  extensions: new Set(['.md', '.txt', '.json', '.yaml', '.yml']),
+  indexFile: indexContentFile,
+};
+
+export async function indexRepository(repoRoot: string, options: IndexOptions = {}): Promise<IndexResult> {
   const allQuads: Quad[] = [];
   let moduleCount = 0;
   let functionCount = 0;
   let classCount = 0;
   let contractCount = 0;
+  const includeContent = options.includeContent ?? false;
 
   // Index packages
   const { packages, quads: pkgQuads } = await indexPackages(repoRoot);
@@ -412,42 +653,37 @@ export async function indexRepository(repoRoot: string): Promise<IndexResult> {
     return 'unknown';
   }
 
-  const tsExtensions = new Set(['.ts', '.tsx']);
-  const solExtensions = new Set(['.sol']);
+  for (const extractor of CODE_EXTRACTORS) {
+    for (const pkg of packages) {
+      for (const relRoot of extractor.roots) {
+        const rootDir = join(repoRoot, pkg.path, relRoot);
+        if (!existsSync(rootDir)) continue;
 
-  // Index TypeScript files
-  for (const pkg of packages) {
-    const srcDir = join(repoRoot, pkg.path, 'src');
-    if (!existsSync(srcDir)) continue;
-
-    for await (const file of walkFiles(srcDir, tsExtensions)) {
-      if (file.endsWith('.d.ts')) continue;
-      try {
-        const quads = await indexTypeScriptFile(repoRoot, file, pkg.name);
-        allQuads.push(...quads);
-        moduleCount++;
-        functionCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Function`)).length;
-        classCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Class`)).length;
-      } catch (err) {
-        process.stderr.write(`Warning: could not index ${relative(repoRoot, file)}: ${err}\n`);
+        for await (const file of walkFiles(rootDir, extractor.extensions)) {
+          if (file.endsWith('.d.ts')) continue;
+          try {
+            const quads = await extractor.indexFile(repoRoot, file, pkg.name);
+            allQuads.push(...quads);
+            moduleCount++;
+            functionCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Function`)).length;
+            classCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Class`)).length;
+            contractCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Contract`)).length;
+          } catch (err) {
+            process.stderr.write(`Warning [${extractor.id}]: could not index ${relative(repoRoot, file)}: ${err}\n`);
+          }
+        }
       }
     }
   }
 
-  // Index Solidity files
-  for (const pkg of packages) {
-    const contractsDir = join(repoRoot, pkg.path, 'contracts');
-    if (!existsSync(contractsDir)) continue;
-
-    for await (const file of walkFiles(contractsDir, solExtensions)) {
+  if (includeContent) {
+    for await (const file of walkFiles(repoRoot, CONTENT_EXTRACTOR.extensions)) {
       try {
-        const quads = await indexSolidityFile(repoRoot, file, pkg.name);
+        const quads = await CONTENT_EXTRACTOR.indexFile(repoRoot, file, 'repo');
         allQuads.push(...quads);
         moduleCount++;
-        contractCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Contract`)).length;
-        functionCount += quads.filter(q => q.object === uri(`${DEVGRAPH}Function`)).length;
       } catch (err) {
-        process.stderr.write(`Warning: could not index ${relative(repoRoot, file)}: ${err}\n`);
+        process.stderr.write(`Warning [content]: could not index ${relative(repoRoot, file)}: ${err}\n`);
       }
     }
   }

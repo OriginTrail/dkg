@@ -228,6 +228,10 @@ pnpm dkg send <name> <msg>       # Send encrypted message
 pnpm dkg chat <name>             # Interactive chat session
 pnpm dkg publish <paranet> -f x  # Publish RDF data (supports .nt, .nq, .ttl, .trig, .jsonld)
 pnpm dkg query [paranet] -q ...  # SPARQL query
+pnpm dkg index [path]            # Index code graph and publish (default)
+pnpm dkg index [path] --workspace # Index and stage in workspace graph
+pnpm dkg index [path] --include-content # Also index docs/content files
+pnpm dkg workspace publish [id]  # Enshrine staged workspace data to paranet
 pnpm dkg paranet create <id>     # Create a new paranet
 pnpm dkg paranet list            # List all paranets
 pnpm dkg subscribe <paranet>     # Subscribe to a paranet topic

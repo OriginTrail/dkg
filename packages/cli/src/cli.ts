@@ -781,8 +781,10 @@ paranetCmd
 
 program
   .command('index [directory]')
-  .description('Index a repository\'s code graph and publish to the dev-coordination paranet')
+  .description('Index a repository and write to workspace graph or publish directly')
   .option('-p, --paranet <id>', 'Target paranet', 'dev-coordination')
+  .option('--workspace', 'Write indexed quads to workspace graph instead of publishing')
+  .option('--include-content', 'Index docs/content files in addition to source code')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
   .action(async (directory: string | undefined, opts: ActionOpts) => {
@@ -792,7 +794,9 @@ program
 
       console.log(`Indexing ${repoRoot}...`);
       const { indexRepository } = await import('./indexer.js');
-      const result = await indexRepository(repoRoot);
+      const result = await indexRepository(repoRoot, {
+        includeContent: Boolean(opts.includeContent),
+      });
 
       console.log(`\n  Packages:  ${result.packageCount}`);
       console.log(`  Modules:   ${result.moduleCount}`);
@@ -814,37 +818,53 @@ program
       }
 
       const client = await ApiClient.connect();
+      const verb = opts.workspace ? 'Staging in workspace' : 'Publishing';
+      const applyBatch = opts.workspace
+        ? async (batch: typeof result.quads) => client.workspaceWrite(opts.paranet, batch)
+        : async (batch: typeof result.quads) => client.publish(opts.paranet, batch);
 
-      // Group quads by root entity (subject) to avoid splitting an entity
-      // across batches, which would trigger Rule 4 duplicate errors.
-      const byEntity = new Map<string, typeof result.quads>();
-      for (const q of result.quads) {
-        const key = q.subject;
-        let arr = byEntity.get(key);
-        if (!arr) { arr = []; byEntity.set(key, arr); }
-        arr.push(q);
-      }
+      await publishEntityBatches(result.quads, applyBatch, (sent) => {
+        process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
+      });
 
-      const MAX_BATCH_QUADS = 500;
-      let batch: typeof result.quads = [];
-      let published = 0;
-      const entities = [...byEntity.values()];
+      if (opts.workspace) {
+        console.log(`\n\n  Staged ${result.quads.length} quads to workspace graph for paranet "${opts.paranet}".`);
+        console.log('  Next: dkg workspace publish ' + opts.paranet);
+      } else {
+        console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
 
-      for (const entityQuads of entities) {
-        if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
-          await client.publish(opts.paranet, batch);
-          published += batch.length;
-          process.stdout.write(`\r  Publishing: ${published}/${result.quads.length} quads`);
-          batch = [];
-        }
-        batch.push(...entityQuads);
+// ─── dkg workspace ───────────────────────────────────────────────────
+
+const workspaceCmd = program
+  .command('workspace')
+  .description('Workspace graph operations (stage-first workflow)');
+
+workspaceCmd
+  .command('publish [paranet]')
+  .description('Enshrine staged workspace graph into a paranet publish')
+  .option('--keep', 'Keep workspace triples after enshrining')
+  .option('--root <entity...>', 'Enshrine only specific root entities')
+  .action(async (paranet: string | undefined, opts: ActionOpts) => {
+    try {
+      const targetParanet = paranet ?? 'dev-coordination';
+      const client = await ApiClient.connect();
+      const selection = opts.root?.length
+        ? { rootEntities: opts.root as string[] }
+        : 'all';
+      const result = await client.workspaceEnshrine(targetParanet, selection, !opts.keep);
+      console.log(`Workspace enshrined to "${targetParanet}":`);
+      console.log(`  Status: ${result.status}`);
+      console.log(`  KC ID:  ${result.kcId}`);
+      console.log(`  KAs:    ${result.kas.length}`);
+      if (result.txHash) {
+        console.log(`  TX:     ${result.txHash}`);
       }
-      if (batch.length > 0) {
-        await client.publish(opts.paranet, batch);
-        published += batch.length;
-        process.stdout.write(`\r  Publishing: ${published}/${result.quads.length} quads`);
-      }
-      console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
     } catch (err: any) {
       console.error(err.message);
       process.exit(1);
@@ -1062,6 +1082,41 @@ function formatUptime(ms: number): string {
   if (hrs < 24) return `${hrs}h ${mins % 60}m`;
   const days = Math.floor(hrs / 24);
   return `${days}d ${hrs % 24}h`;
+}
+
+async function publishEntityBatches(
+  quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+  applyBatch: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => Promise<unknown>,
+  onProgress?: (publishedQuadCount: number) => void,
+): Promise<void> {
+  // Keep entities intact per batch to avoid partial-entity writes.
+  const byEntity = new Map<string, typeof quads>();
+  for (const q of quads) {
+    const key = q.subject;
+    let arr = byEntity.get(key);
+    if (!arr) { arr = []; byEntity.set(key, arr); }
+    arr.push(q);
+  }
+
+  const MAX_BATCH_QUADS = 500;
+  let batch: typeof quads = [];
+  let sent = 0;
+
+  for (const entityQuads of byEntity.values()) {
+    if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
+      await applyBatch(batch);
+      sent += batch.length;
+      onProgress?.(sent);
+      batch = [];
+    }
+    batch.push(...entityQuads);
+  }
+
+  if (batch.length > 0) {
+    await applyBatch(batch);
+    sent += batch.length;
+    onProgress?.(sent);
+  }
 }
 
 function stripQuotes(s: string): string {

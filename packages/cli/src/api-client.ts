@@ -92,6 +92,32 @@ export class ApiClient {
     return this.post('/api/publish', { paranetId, quads, privateQuads });
   }
 
+  async workspaceWrite(paranetId: string, quads: Array<{
+    subject: string; predicate: string; object: string; graph: string;
+  }>): Promise<{
+    workspaceOperationId: string;
+    paranetId: string;
+    graph: string;
+    triplesWritten: number;
+    skolemizedBlankNodes?: number;
+  }> {
+    return this.post('/api/workspace/write', { paranetId, quads });
+  }
+
+  async workspaceEnshrine(
+    paranetId: string,
+    selection: 'all' | { rootEntities: string[] } = 'all',
+    clearAfter = true,
+  ): Promise<{
+    kcId: string;
+    status: 'tentative' | 'confirmed';
+    kas: Array<{ tokenId: string; rootEntity: string }>;
+    txHash?: string;
+    blockNumber?: number;
+  }> {
+    return this.post('/api/workspace/enshrine', { paranetId, selection, clearAfter });
+  }
+
   async query(sparql: string, paranetId?: string): Promise<{ result: any }> {
     return this.post('/api/query', { sparql, paranetId });
   }
