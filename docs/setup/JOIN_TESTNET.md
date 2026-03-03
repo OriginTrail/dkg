@@ -237,8 +237,6 @@ npm install @dkg/adapter-openclaw
 
 OpenClaw discovers the plugin automatically via the `openclaw.extensions` field in the package's `package.json`. No need for `plugins.load.paths`.
 
-> **Pitfall:** Don't install via both npm AND `plugins.load.paths` — this causes double registration.
-
 ### 2. Enable the Plugin
 
 Add to `~/.openclaw/openclaw.json`:
@@ -246,8 +244,11 @@ Add to `~/.openclaw/openclaw.json`:
 ```json
 {
   "plugins": {
+    "load": {
+      "paths": ["node_modules/@dkg/adapter-openclaw"]
+    },
     "entries": {
-      "@dkg/adapter-openclaw": {
+      "adapter-openclaw": {
         "enabled": true
       }
     }
@@ -255,7 +256,9 @@ Add to `~/.openclaw/openclaw.json`:
 }
 ```
 
-Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
+- `load.paths` is resolved relative to the OpenClaw project root.
+- The `entries` key must be `adapter-openclaw` (the plugin manifest ID), not the npm package name.
+- Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
 
 ### 3. Configure the Node
 
