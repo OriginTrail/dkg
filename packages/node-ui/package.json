@@ -6,7 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc && pnpm build:ui",
-    "build:ui": "NODE_OPTIONS=--max-old-space-size=4096 vite build",
+    "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "dev:ui": "vite",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

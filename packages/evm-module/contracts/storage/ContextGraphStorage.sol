@@ -59,6 +59,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian {
         uint8 requiredSignatures,
         uint256 metadataBatchId
     ) external onlyContracts returns (uint256 contextGraphId) {
+        if (manager == address(0)) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero address manager");
+        }
         if (participantIdentityIds.length == 0) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty participants");
         }

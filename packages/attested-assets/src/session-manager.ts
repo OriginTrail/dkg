@@ -42,6 +42,7 @@ import {
   encodeSessionAcceptedPayload,
   decodeRoundProposalPayload,
   decodeInputPayload,
+  decodeRoundStartPayload,
   decodeRoundAckPayload,
   decodeSessionConfig,
 } from './proto/aka-events.js';
@@ -361,6 +362,16 @@ export class SessionManager {
   private handleSessionProposed(event: AKAEvent): void {
     try {
       const config = decodeSessionConfig(event.payload);
+
+      const expectedHash = computeConfigHash(config);
+      if (expectedHash !== config.configHash) return;
+
+      if (config.sessionId !== event.sessionId) return;
+
+      const signerIsMember = config.membership.some(m => m.peerId === event.signerPeerId);
+      if (!signerIsMember) return;
+      if (event.signerPeerId !== config.createdBy) return;
+
       const isMember = config.membership.some((m) => m.peerId === this.config.localPeerId);
       if (!isMember) return;
 
@@ -412,8 +423,8 @@ export class SessionManager {
     roundState.status = 'collecting_inputs';
     roundState.startTime = event.timestamp;
 
-    const payload = decodeInputPayload(event.payload);
-    roundState.deadline = event.timestamp + session.config.roundTimeout;
+    const payload = decodeRoundStartPayload(event.payload);
+    roundState.deadline = payload.deadline || (event.timestamp + session.config.roundTimeout);
 
     this.eventBus.emit(AKASessionEvent.ROUND_STARTED, {
       sessionId: event.sessionId,

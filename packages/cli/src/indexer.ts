@@ -338,8 +338,13 @@ async function indexPythonFile(
     const importPath = (match[1] ?? match[2] ?? '').trim();
     if (!importPath) continue;
     if (importPath.startsWith('.')) {
-      const relativeImport = importPath.replace(/\./g, '/');
-      const resolved = join(dirname(filePath), relativeImport + '.py');
+      const leadingDots = importPath.match(/^(\.+)/)![1];
+      const depth = leadingDots.length - 1;
+      const moduleName = importPath.slice(leadingDots.length);
+      let baseDir = dirname(filePath);
+      for (let d = 0; d < depth; d++) baseDir = dirname(baseDir);
+      const modulePath = moduleName ? moduleName.replace(/\./g, '/') + '.py' : '__init__.py';
+      const resolved = join(baseDir, modulePath);
       quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}imports`), object: uri(moduleUri(repoRoot, resolved)), graph });
     } else {
       quads.push({ subject: modUri, predicate: uri(`${DEVGRAPH}imports`), object: literal(importPath), graph });

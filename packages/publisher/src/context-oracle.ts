@@ -68,6 +68,7 @@ export class ContextOracle {
     entityUri: string,
   ): Promise<EntityLookupResult> {
     const graphUri = contextGraphDataUri(paranetId, contextGraphId);
+    assertSafeIri(entityUri);
 
     const result = await this.store.query(`
       SELECT ?s ?p ?o WHERE {
@@ -208,10 +209,23 @@ function uniqueBatchIds(triples: ProvedTriple[]): string[] {
   return [...new Set(triples.map(t => t.proof.batchId))];
 }
 
+const UNSAFE_IRI_CHARS = /[<>"{}|\\^`\x00-\x20]/;
+
+function assertSafeIri(value: string): string {
+  if (UNSAFE_IRI_CHARS.test(value)) {
+    throw new Error(`Unsafe characters in IRI: ${value}`);
+  }
+  return value;
+}
+
 function formatSparqlTerm(term: string): string {
   if (term.startsWith('"')) return term;
   if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
+  if (term.startsWith('<')) {
+    assertSafeIri(term.slice(1, -1));
+    return term;
+  }
+  assertSafeIri(term);
   return `<${term}>`;
 }
 

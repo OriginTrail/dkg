@@ -22,7 +22,7 @@
     "mcp": "node packages/mcp-server/dist/index.js",
     "index": "node packages/cli/dist/cli.js index"
   },
-  "dependencies": {
+  "optionalDependencies": {
     "dkg-app-oregon-trail": "link:../oregon-trail-dkg"
   },
   "devDependencies": {
