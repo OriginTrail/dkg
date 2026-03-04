@@ -439,6 +439,12 @@ export class SessionManager {
   }
 
   private handleSessionActivated(event: AKAEvent, session: SessionState): void {
+    const nonCreatorMembers = session.config.membership.filter(
+      m => m.peerId !== session.config.createdBy,
+    );
+    const allAccepted = nonCreatorMembers.every(m => session.acceptedMembers.has(m.peerId));
+    if (!allAccepted) return;
+
     session.config.status = 'active';
     this.clearTimer(`accept-${event.sessionId}`);
     this.eventBus.emit(AKASessionEvent.SESSION_ACTIVATED, { sessionId: event.sessionId });
@@ -540,7 +546,7 @@ export class SessionManager {
     this.checkQuorumAndFinalize(session, event.round).catch(() => {});
   }
 
-  private handleRoundFinalized(event: AKAEvent, session: SessionState): void {
+  private async handleRoundFinalized(event: AKAEvent, session: SessionState): Promise<void> {
     const roundState = session.roundStates.get(event.round);
     if (!roundState?.proposal) return;
 
@@ -561,9 +567,42 @@ export class SessionManager {
       if (!isQuorumMet(session.config.quorumPolicy, activeMemberCount, uniqueSigners.size)) {
         return;
       }
-      const memberPeerIds = new Set(session.config.membership.map(m => m.peerId));
-      const allSignersAreMembers = finPayload.signerPeerIds.every(id => memberPeerIds.has(id));
-      if (!allSignersAreMembers) return;
+
+      const memberByPeerId = new Map(session.config.membership.map(m => [m.peerId, m]));
+      if (!finPayload.signerPeerIds.every(id => memberByPeerId.has(id))) return;
+
+      const expectedTurnCommitment = computeTurnCommitment(
+        session.config.sessionId,
+        event.round,
+        roundState.proposal.prevStateHash,
+        roundState.proposal.inputSetHash,
+        finPayload.nextStateHash,
+        session.config.reducer.version,
+        session.config.membershipRoot,
+      );
+      const expectedAck = encodeRoundAckPayload({
+        round: event.round,
+        prevStateHash: roundState.proposal.prevStateHash,
+        inputSetHash: roundState.proposal.inputSetHash,
+        nextStateHash: finPayload.nextStateHash,
+        turnCommitment: expectedTurnCommitment,
+      });
+      const sigCtx: SigningContext = {
+        domain: 'AKA-v1',
+        network: this.config.network,
+        paranetId: session.config.paranetId,
+        sessionId: event.sessionId,
+        round: event.round,
+        type: 'RoundAck',
+      };
+
+      for (let i = 0; i < finPayload.signerPeerIds.length; i++) {
+        const member = memberByPeerId.get(finPayload.signerPeerIds[i])!;
+        const valid = await verifyAKASignature(
+          sigCtx, Array.from(expectedAck), finPayload.signatures[i], member.pubKey,
+        );
+        if (!valid) return;
+      }
     } catch {
       return;
     }

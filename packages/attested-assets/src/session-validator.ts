@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   AKAEvent,
   SessionState,
@@ -121,10 +122,10 @@ export class SessionValidator {
       return { valid: false, reason: `duplicate nonce: ${event.nonce}` };
     }
 
-    // For RoundAck, include a payload fingerprint so conflicting ACKs from the
+    // For RoundAck, include a full payload hash so conflicting ACKs from the
     // same signer reach the SessionManager for equivocation detection.
     const payloadSuffix = event.type === 'RoundAck'
-      ? `|${Array.from(event.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join('')}`
+      ? `|${createHash('sha256').update(event.payload).digest('hex')}`
       : '';
     const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}${payloadSuffix}`;
     if (this.seenTuples.has(tupleKey)) {
@@ -212,7 +213,7 @@ export class SessionValidator {
 
   private recordEvent(event: AKAEvent): void {
     const payloadSuffix = event.type === 'RoundAck'
-      ? `|${Array.from(event.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join('')}`
+      ? `|${createHash('sha256').update(event.payload).digest('hex')}`
       : '';
     const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}${payloadSuffix}`;
     this.seenTuples.add(tupleKey);
