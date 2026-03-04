@@ -22,9 +22,6 @@
     "mcp": "node packages/mcp-server/dist/index.js",
     "index": "node packages/cli/dist/cli.js index"
   },
-  "dependencies": {
-    "dkg-app-oregon-trail": "github:OriginTrail/oregon-trail-dkg"
-  },
   "devDependencies": {
     "@types/node": "^22",
     "@vitest/coverage-v8": "^3",
@@ -40,17 +37,7 @@
       "oxigraph",
       "protobufjs"
     ],
-    "peerDependencyRules": {
-      "ignoreMissing": [
-        "@dkg/agent",
-        "@dkg/core",
-        "@dkg/storage"
-      ]
-    },
     "overrides": {
-      "@dkg/agent": "workspace:*",
-      "@dkg/core": "workspace:*",
-      "@dkg/storage": "workspace:*",
       "axios@<1.8.2": "1.8.2",
       "minimatch@<10.2.3": "10.2.3",
       "serialize-javascript@<7.0.3": "7.0.3",

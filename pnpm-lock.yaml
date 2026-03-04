@@ -5,9 +5,6 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@dkg/agent': workspace:*
-  '@dkg/core': workspace:*
-  '@dkg/storage': workspace:*
   axios@<1.8.2: 1.8.2
   minimatch@<10.2.3: 10.2.3
   serialize-javascript@<7.0.3: 7.0.3
@@ -24,10 +21,6 @@ patchedDependencies:
 importers:
 
   .:
-    dependencies:
-      dkg-app-oregon-trail:
-        specifier: github:OriginTrail/oregon-trail-dkg
-        version: git+https://github.com/OriginTrail/oregon-trail-dkg.git#e303e996ea8403863bb78d88a82628e8ec356f9d
     devDependencies:
       '@types/node':
         specifier: ^22
@@ -2617,14 +2610,6 @@ packages:
     resolution: {integrity: sha512-WkrWp9GR4KXfKGYzOLmTuGVi1UWFfws377n9cc55/tb6DuqyF6pcQ5AbiHEshaDpY9v6oaSr2XCDidGmMwdzIA==}
     engines: {node: '>=8'}
 
-  dkg-app-oregon-trail@git+https://github.com/OriginTrail/oregon-trail-dkg.git#e303e996ea8403863bb78d88a82628e8ec356f9d:
-    resolution: {commit: e303e996ea8403863bb78d88a82628e8ec356f9d, repo: https://github.com/OriginTrail/oregon-trail-dkg.git, type: git}
-    version: 0.1.0
-    peerDependencies:
-      '@dkg/agent': workspace:*
-      '@dkg/core': workspace:*
-      '@dkg/storage': workspace:*
-
   dns-packet@5.6.1:
     resolution: {integrity: sha512-l4gcSouhcgIKRvyy99RNVOgxXiicE+2jZoNmaNmZ6JXiGajBOJAesk1OBlJuM5k2c+eudGdLxDqXuPCKIj6kpw==}
     engines: {node: '>=6'}
@@ -4715,10 +4700,6 @@ packages:
 
   uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
-    hasBin: true
-
-  uuid@9.0.1:
-    resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
     hasBin: true
 
   v8-compile-cache-lib@3.0.1:
@@ -7400,10 +7381,6 @@ snapshots:
     dependencies:
       path-type: 4.0.0
 
-  dkg-app-oregon-trail@git+https://github.com/OriginTrail/oregon-trail-dkg.git#e303e996ea8403863bb78d88a82628e8ec356f9d:
-    dependencies:
-      uuid: 9.0.1
-
   dns-packet@5.6.1:
     dependencies:
       '@leichtgewicht/ip-codec': 2.0.5
@@ -9830,8 +9807,6 @@ snapshots:
   util-deprecate@1.0.2: {}
 
   uuid@8.3.2: {}
-
-  uuid@9.0.1: {}
 
   v8-compile-cache-lib@3.0.1: {}
 
