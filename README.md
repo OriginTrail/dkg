@@ -351,7 +351,15 @@ pnpm install            # Install dependencies
 pnpm build              # Build all packages (respects dependency order)
 pnpm test               # Run all tests
 pnpm --filter @dkg/agent test   # Run tests for a specific package
+pnpm test:coverage      # Run tests with coverage (Vitest v8 + Hardhat solidity-coverage)
+pnpm --filter @dkg/core test:coverage   # Coverage for a single package
 ```
+
+Coverage outputs:
+- **Vitest packages**: `coverage/` in each package (HTML report in `coverage/index.html`, plus `lcov` for CI).
+- **EVM contracts** (`@dkg/evm-module`): `hardhat coverage` writes to `coverage/` in that package.
+
+**Coverage gate:** CI runs `pnpm test:coverage` and fails if any package is below the thresholds in `vitest.coverage.ts` (default 20% lines/functions/branches/statements). To block PRs until coverage passes, enable **branch protection** in GitHub: require the "Build & Test (TypeScript)" (or equivalent) check to pass before merge.
 
 ## Tech Stack
 

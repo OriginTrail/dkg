@@ -36,6 +36,14 @@ export function paranetWorkspaceGraphUri(paranetId: string): string {
   return `did:dkg:paranet:${paranetId}/_workspace`;
 }
 
+export function contextGraphDataUri(paranetId: string, contextGraphId: string): string {
+  return `did:dkg:paranet:${paranetId}/context/${contextGraphId}`;
+}
+
+export function contextGraphMetaUri(paranetId: string, contextGraphId: string): string {
+  return `did:dkg:paranet:${paranetId}/context/${contextGraphId}/_meta`;
+}
+
 export function paranetWorkspaceMetaGraphUri(paranetId: string): string {
   return `did:dkg:paranet:${paranetId}/_workspace_meta`;
 }

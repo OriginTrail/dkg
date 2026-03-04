@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Join Testnet → Play Oregon Trail (Sequence)</title>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'neutral', sequence: { useMaxWidth: true } });
+  </script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; background: #fafafa; }
+    h1 { font-size: 1.25rem; color: #333; }
+    .mermaid { background: #fff; padding: 1rem; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Sequence: Join Testnet → Play Oregon Trail from Node UI</h1>
+  <p>1 wagon = 1 game = 1 context graph. Each player runs a node and plays from their UI. Min 3 players; votes via workspace; GM proposes CG entry; at least floor(2/3*N) signatures to commit on-chain.</p>
+  <div class="mermaid">
+sequenceDiagram
+    autonumber
+    actor PlayerA as Player A
+    actor PlayerB as Player B
+    actor PlayerC as Player C
+    participant NodeA as Node A GM
+    participant NodeB as Node B
+    participant NodeC as Node C
+    participant Workspace as Workspace
+    participant CG as Context Graph
+
+    Note over PlayerA, CG: Each player runs node, join testnet, open Node UI on own machine
+    PlayerA->>NodeA: start node, open UI
+    NodeA->>Workspace: connect to paranet
+    PlayerB->>NodeB: start node, open Node UI
+    PlayerC->>NodeC: start node, open Node UI
+    NodeB->>Workspace: connect to paranet
+    NodeC->>Workspace: connect to paranet
+
+    Note over PlayerA, CG: Lobby - wagons are context graphs, min 3 players to create
+    PlayerA->>NodeA: Create wagon or Join existing
+    NodeA->>Workspace: create wagon, new context graph
+    Workspace-->>NodeB: wagon created
+    Workspace-->>NodeC: wagon created
+    NodeA->>CG: bootstrap context graph
+    NodeA-->>PlayerA: wagon view
+
+    Note over PlayerA, CG: Vote on next action - travel, hunt, rest, ford, ferry
+    PlayerA->>NodeA: vote Travel pace 2
+    PlayerB->>NodeB: vote Rest
+    PlayerC->>NodeC: vote Travel pace 2
+    NodeA->>Workspace: publish vote
+    NodeB->>Workspace: publish vote
+    NodeC->>Workspace: publish vote
+    Workspace-->>NodeA: all votes
+    Workspace-->>NodeB: all votes
+    Workspace-->>NodeC: all votes
+
+    Note over NodeA, CG: GM proposes new CG entry - floor 2/3 N signatures to commit on-chain
+    NodeA->>NodeA: compute outcome, build new state entry
+    NodeA->>NodeB: request signature for CG entry
+    NodeA->>NodeC: request signature for CG entry
+    NodeB->>NodeB: verify, sign
+    NodeC->>NodeC: verify, sign
+    NodeB->>NodeA: signature
+    NodeC->>NodeA: signature
+    NodeA->>CG: commit entry on-chain
+    CG-->>NodeA: entry accepted
+    CG-->>NodeB: entry accepted
+    CG-->>NodeC: entry accepted
+
+    NodeA-->>PlayerA: updated wagon view
+    NodeB-->>PlayerB: updated wagon view
+    NodeC-->>PlayerC: updated wagon view
+  </div>
+</body>
+</html>

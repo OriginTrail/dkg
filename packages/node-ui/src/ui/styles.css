@@ -100,6 +100,35 @@ a:hover { text-decoration: underline; }
   color: var(--accent);
 }
 
+.sidebar-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 12px 12px 4px;
+  opacity: 0.7;
+}
+
+.sidebar-app-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+  text-decoration: none;
+}
+
+.sidebar-app-link:hover {
+  background: var(--bg-input);
+  color: var(--text);
+  text-decoration: none;
+}
+
 .main-content {
   flex: 1;
   overflow-y: auto;

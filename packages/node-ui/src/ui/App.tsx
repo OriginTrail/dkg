@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
 import { NetworkPage } from './pages/Network.js';
@@ -11,7 +11,29 @@ import { ChatPanel } from './components/ChatPanel.js';
 import { ParticleSphere } from './components/ParticleSphere.js';
 import { BackgroundNetwork } from './components/BackgroundNetwork.js';
 
+interface InstalledApp {
+  id: string;
+  label: string;
+  path: string;
+}
+
+function useInstalledApps(): InstalledApp[] {
+  const [apps, setApps] = useState<InstalledApp[]>([]);
+  useEffect(() => {
+    const token = (window as any).__DKG_TOKEN__;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    fetch('/api/apps', { headers })
+      .then(r => r.ok ? r.json() : [])
+      .then(setApps)
+      .catch(() => {});
+  }, []);
+  return apps;
+}
+
 export function App() {
+  const installedApps = useInstalledApps();
+
   return (
     <div className="app-layout">
       <BackgroundNetwork />
@@ -49,6 +71,17 @@ export function App() {
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h4v4H2V2zm8 0h4v4h-4V2zM2 10h4v4H2v-4zm8 0h4v4h-4v-4z"/></svg>
             Integrations
           </NavLink>
+          {installedApps.length > 0 && (
+            <>
+              <div className="sidebar-section-label">Apps</div>
+              {installedApps.map(app => (
+                <a key={app.id} href={app.path + '/'} className="sidebar-app-link">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1h10a2 2 0 012 2v10a2 2 0 01-2 2H3a2 2 0 01-2-2V3a2 2 0 012-2zm0 2v10h10V3H3z"/></svg>
+                  {app.label}
+                </a>
+              ))}
+            </>
+          )}
         </nav>
       </aside>
       <main className="main-content">

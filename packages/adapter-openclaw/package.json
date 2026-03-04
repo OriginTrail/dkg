@@ -20,6 +20,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
@@ -32,6 +33,7 @@
   },
   "bundledDependencies": ["@dkg/agent", "@dkg/core", "@dkg/storage"],
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   }
 }

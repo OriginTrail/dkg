@@ -828,7 +828,8 @@ describe('@integration RandomSampling', () => {
       expect(challenge.knowledgeCollectionId)
         .to.be.a('bigint')
         .and.to.be.equal(1n);
-      expect(challenge.chunkId).to.be.a('bigint').and.to.be.greaterThan(0n);
+      // chunkId is 0 when KC byteSize <= CHUNK_BYTE_SIZE; otherwise > 0
+      expect(challenge.chunkId).to.be.a('bigint').and.to.be.greaterThanOrEqual(0n);
       expect(challenge.epoch).to.be.a('bigint').and.to.be.equal(1n);
       expect(challenge.activeProofPeriodStartBlock)
         .to.be.a('bigint')

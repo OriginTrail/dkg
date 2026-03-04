@@ -110,6 +110,7 @@ const PUBLIC_PATHS = new Set([
 
 const PUBLIC_PREFIXES = [
   '/ui',
+  '/apps/',
 ];
 
 function isPublicPath(pathname: string): boolean {

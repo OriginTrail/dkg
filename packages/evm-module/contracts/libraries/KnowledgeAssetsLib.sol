@@ -38,6 +38,15 @@ library KnowledgeAssetsLib {
         uint256 createdAt;
     }
 
+    struct ContextGraph {
+        address manager;
+        uint72[] participantIdentityIds;
+        uint8 requiredSignatures;
+        uint256 metadataBatchId;
+        bool active;
+        uint256 createdAt;
+    }
+
     error PublisherRangeExhausted(address publisher, uint64 needed, uint64 available);
     error KAIdNotInPublisherRange(address publisher, uint64 kaId);
     error KAIdAlreadyUsed(address publisher, uint64 kaId);
@@ -53,4 +62,7 @@ library KnowledgeAssetsLib {
     error MinSignaturesRequirementNotMet(uint256 required, uint256 received);
     error NotNamespaceOwner(address namespace, address caller);
     error NamespaceAlreadyExists(address target);
+    error InvalidContextGraphConfig(string reason);
+    error ContextGraphNotActive(uint256 contextGraphId);
+    error ContextGraphNotFound(uint256 contextGraphId);
 }

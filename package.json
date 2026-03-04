@@ -6,6 +6,7 @@
   "scripts": {
     "build": "turbo build",
     "test": "turbo test",
+    "test:coverage": "turbo test:coverage",
     "lint": "turbo lint",
     "clean": "turbo clean",
     "dev": "turbo dev",
@@ -21,8 +22,12 @@
     "mcp": "node packages/mcp-server/dist/index.js",
     "index": "node packages/cli/dist/cli.js index"
   },
+  "dependencies": {
+    "dkg-app-oregon-trail": "link:../oregon-trail-dkg"
+  },
   "devDependencies": {
     "@types/node": "^22",
+    "@vitest/coverage-v8": "^3",
     "tsx": "^4.21.0",
     "turbo": "^2",
     "typescript": "^5.7",
