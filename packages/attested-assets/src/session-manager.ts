@@ -212,6 +212,17 @@ export class SessionManager {
       throw new Error('only the creator can activate a session');
     }
 
+    const nonCreatorMembers = session.config.membership.filter(
+      m => m.peerId !== session.config.createdBy,
+    );
+    const pendingMembers = nonCreatorMembers.filter(
+      m => !session.acceptedMembers.has(m.peerId),
+    );
+    if (pendingMembers.length > 0) {
+      const pendingIds = pendingMembers.map(m => m.peerId).join(', ');
+      throw new Error(`cannot activate: members have not yet accepted: ${pendingIds}`);
+    }
+
     session.config.status = 'active';
     this.clearTimer(`accept-${sessionId}`);
 
@@ -407,8 +418,7 @@ export class SessionManager {
   }
 
   private handleSessionAccepted(event: AKAEvent, session: SessionState): void {
-    // Track accepted members. If all accepted and we're creator, we can activate.
-    // For now, just emit event.
+    session.acceptedMembers.add(event.signerPeerId);
     this.eventBus.emit('aka:session:member_accepted', {
       sessionId: event.sessionId,
       peerId: event.signerPeerId,
@@ -479,11 +489,23 @@ export class SessionManager {
     if (!roundState) return;
 
     const ackPayload = decodeRoundAckPayload(event.payload);
+
+    if (roundState.proposal) {
+      if (
+        ackPayload.prevStateHash !== roundState.proposal.prevStateHash ||
+        ackPayload.inputSetHash !== roundState.proposal.inputSetHash ||
+        ackPayload.nextStateHash !== roundState.proposal.nextStateHash
+      ) {
+        return;
+      }
+    }
+
     const existing = roundState.acks.get(event.signerPeerId);
 
     if (existing && detectEquivocation(existing, ackPayload)) {
       session.equivocators.add(event.signerPeerId);
       roundState.acks.delete(event.signerPeerId);
+      roundState.ackSignatures.delete(event.signerPeerId);
       this.eventBus.emit(AKASessionEvent.EQUIVOCATION_DETECTED, {
         sessionId: event.sessionId,
         round: event.round,
@@ -493,6 +515,7 @@ export class SessionManager {
     }
 
     roundState.acks.set(event.signerPeerId, ackPayload);
+    roundState.ackSignatures.set(event.signerPeerId, event.signature);
 
     this.eventBus.emit(AKASessionEvent.ACK_RECEIVED, {
       sessionId: event.sessionId,
@@ -523,6 +546,13 @@ export class SessionManager {
       if (!allSignersAreMembers) return;
     } catch {
       return;
+    }
+
+    const reducer = this.reducerRegistry.resolve(session.config.reducer);
+    if (reducer) {
+      const prevStateBytes = this.getStateBytes(session);
+      const nextStateBytes = reducer.reduce(prevStateBytes, roundState.proposal.includedInputs);
+      session.latestStateBytes = nextStateBytes;
     }
 
     roundState.status = 'finalized';
@@ -614,6 +644,11 @@ export class SessionManager {
     const reducer = this.reducerRegistry.resolve(session.config.reducer);
     if (!reducer) return;
 
+    const localInputSetHash = computeInputSetHash(proposal.includedInputs);
+    if (localInputSetHash !== proposal.inputSetHash) {
+      return;
+    }
+
     const prevStateBytes = this.getStateBytes(session);
     const localNextState = reducer.reduce(prevStateBytes, proposal.includedInputs);
     const localNextHash = computeStateHash(localNextState);
@@ -668,13 +703,22 @@ export class SessionManager {
       return;
     }
 
+    const reducer = this.reducerRegistry.resolve(session.config.reducer);
+    if (reducer) {
+      const prevStateBytes = this.getStateBytes(session);
+      const nextStateBytes = reducer.reduce(prevStateBytes, roundState.proposal.includedInputs);
+      session.latestStateBytes = nextStateBytes;
+    }
+
     roundState.status = 'finalized';
     session.latestFinalizedRound = round;
     session.latestStateHash = roundState.proposal.nextStateHash;
     session.consecutiveSkips = 0;
 
     const signerPeerIds = [...roundState.acks.keys()];
-    const signatures: Uint8Array[] = [];
+    const signatures = signerPeerIds.map(
+      id => roundState.ackSignatures.get(id) ?? new Uint8Array(0),
+    );
 
     const payload = encodeRoundFinalizedPayload({
       round,
@@ -748,6 +792,10 @@ export class SessionManager {
 
     if (roundState.proposerPeerId === this.config.localPeerId) {
       this.startRound(sessionId).catch(() => {});
+    } else {
+      this.setTimer(`timeout-${sessionId}-${round}`, session.config.roundTimeout, () => {
+        this.handleRoundTimeout(sessionId, round);
+      });
     }
 
     this.eventBus.emit(AKASessionEvent.ROUND_TIMEOUT, {
@@ -785,10 +833,12 @@ export class SessionManager {
       currentRound: 0,
       latestFinalizedRound: 0,
       latestStateHash: config.genesisStateHash,
+      latestStateBytes: genesisState,
       roundStates: new Map(),
       equivocators: new Set(),
       inactiveMembers: new Map(),
       consecutiveSkips: 0,
+      acceptedMembers: new Set(),
     };
   }
 
@@ -806,6 +856,7 @@ export class SessionManager {
         inputs: new Map(),
         proposal: null,
         acks: new Map(),
+        ackSignatures: new Map(),
         startTime: null,
         deadline: null,
       };
@@ -850,10 +901,7 @@ export class SessionManager {
   }
 
   private getStateBytes(session: SessionState): Uint8Array {
-    // In a full implementation, this would retrieve the actual state bytes
-    // from a state store. For now, the reducer maintains state externally.
-    // The session only tracks the hash.
-    return new TextEncoder().encode(session.latestStateHash);
+    return session.latestStateBytes;
   }
 
   private setTimer(key: string, ms: number, fn: () => void): void {

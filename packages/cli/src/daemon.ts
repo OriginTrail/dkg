@@ -28,7 +28,7 @@ import {
   type DkgConfig,
   type AutoUpdateConfig,
 } from './config.js';
-import { loadTokens, httpAuthGuard } from './auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, type LoadedApp } from './app-loader.js';
 
 
@@ -355,8 +355,15 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
+      // Only inject the auth token into HTML when the request itself is authenticated,
+      // preventing token exfiltration via the public /apps/ path.
       if (installedApps.length > 0) {
-        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, authEnabled ? firstToken : undefined);
+        let appInjectToken: string | undefined;
+        if (authEnabled && firstToken) {
+          const reqToken = extractBearerToken(req.headers.authorization);
+          if (reqToken && validTokens.has(reqToken)) appInjectToken = firstToken;
+        }
+        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken);
         if (appHandled) return;
       }
 

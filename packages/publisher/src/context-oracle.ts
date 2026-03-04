@@ -230,7 +230,9 @@ function formatSparqlTerm(term: string): string {
 }
 
 function wrapWithGraph(sparql: string, graphUri: string): string {
-  if (sparql.toLowerCase().includes('graph ')) return sparql;
+  if (sparql.toLowerCase().includes('graph ')) {
+    throw new Error('User queries must not contain GRAPH clauses — graph scoping is enforced by the oracle');
+  }
 
   const whereIdx = sparql.search(/WHERE\s*\{/i);
   if (whereIdx === -1) return sparql;
@@ -254,13 +256,12 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
 }
 
 /**
- * Convert a SELECT query into a CONSTRUCT that returns the underlying triples.
- * This is a best-effort transform for extracting provenance triples.
+ * Fetch all triples in the context graph for provenance attachment.
+ * We return every triple in the graph rather than attempting to convert
+ * the SELECT body into a CONSTRUCT template (which risks cross-joins
+ * when the body uses different variable names).
+ * The caller's proof index filters the result to relevant triples.
  */
-function selectToConstruct(sparql: string, graphUri: string): string {
-  const whereMatch = sparql.match(/WHERE\s*\{([\s\S]*)\}/i);
-  if (!whereMatch) return sparql;
-
-  const body = whereMatch[1].trim();
-  return `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o . { ${body} } } }`;
+function selectToConstruct(_sparql: string, graphUri: string): string {
+  return `SELECT ?s ?p ?o WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`;
 }

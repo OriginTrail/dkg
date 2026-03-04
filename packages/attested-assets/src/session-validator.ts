@@ -78,7 +78,7 @@ export class SessionValidator {
     if (session.config.sessionId !== event.sessionId) {
       return { valid: false, reason: `session ${event.sessionId} not found` };
     }
-    if (event.type !== 'SessionAccepted' && event.type !== 'SessionActivated') {
+    if (event.type !== 'SessionAccepted' && event.type !== 'SessionActivated' && event.type !== 'SessionAborted') {
       if (session.config.status !== 'active') {
         return { valid: false, reason: `session is ${session.config.status}, not active` };
       }
@@ -115,15 +115,20 @@ export class SessionValidator {
   }
 
   private checkReplayProtection(event: AKAEvent): ValidationResult {
-    const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}`;
-    if (this.seenTuples.has(tupleKey)) {
-      return { valid: false, reason: `duplicate event tuple: ${tupleKey}` };
-    }
-
     const nonceKey = `${event.sessionId}|${event.signerPeerId}`;
     const nonces = this.seenNonces.get(nonceKey);
     if (nonces?.has(event.nonce)) {
       return { valid: false, reason: `duplicate nonce: ${event.nonce}` };
+    }
+
+    // For RoundAck, include a payload fingerprint so conflicting ACKs from the
+    // same signer reach the SessionManager for equivocation detection.
+    const payloadSuffix = event.type === 'RoundAck'
+      ? `|${Array.from(event.payload.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join('')}`
+      : '';
+    const tupleKey = `${event.sessionId}|${event.round}|${event.signerPeerId}|${event.type}${payloadSuffix}`;
+    if (this.seenTuples.has(tupleKey)) {
+      return { valid: false, reason: `duplicate event tuple: ${tupleKey}` };
     }
 
     return { valid: true };

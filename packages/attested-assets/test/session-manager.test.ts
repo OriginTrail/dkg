@@ -83,6 +83,15 @@ describe('SessionManager', () => {
   const quorumPolicy: QuorumPolicy = { type: 'THRESHOLD', numerator: 2, denominator: 3, minSigners: 2 };
   const reducerConfig = { name: 'test-reducer', version: '1.0.0', hash: 'test-hash-123' };
 
+  function acceptAllMembers(sessionId: string) {
+    const session = manager.getSession(sessionId)!;
+    for (const m of session.config.membership) {
+      if (m.peerId !== session.config.createdBy) {
+        session.acceptedMembers.add(m.peerId);
+      }
+    }
+  }
+
   it('creates a session with correct config', async () => {
     const config = await manager.createSession(
       'paranet-1', 'test-app', membership, quorumPolicy, reducerConfig, 30000, null,
@@ -172,11 +181,20 @@ describe('SessionManager', () => {
     const handler = vi.fn();
     eventBus.on(AKASessionEvent.SESSION_ACTIVATED, handler);
 
+    acceptAllMembers(config.sessionId);
     await manager.activateSession(config.sessionId);
 
     const session = manager.getSession(config.sessionId);
     expect(session!.config.status).toBe('active');
     expect(handler).toHaveBeenCalledWith({ sessionId: config.sessionId });
+  });
+
+  it('activateSession rejects when members have not accepted', async () => {
+    const config = await manager.createSession(
+      'paranet-1', 'test-app', membership, quorumPolicy, reducerConfig, 30000, null,
+    );
+
+    await expect(manager.activateSession(config.sessionId)).rejects.toThrow('members have not yet accepted');
   });
 
   it('activateSession rejects if not creator', async () => {
@@ -199,6 +217,7 @@ describe('SessionManager', () => {
     const config = await manager.createSession(
       'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
     );
+    acceptAllMembers(config.sessionId);
     await manager.activateSession(config.sessionId);
 
     const session = manager.getSession(config.sessionId)!;
@@ -225,6 +244,7 @@ describe('SessionManager', () => {
     const config = await manager.createSession(
       'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
     );
+    acceptAllMembers(config.sessionId);
     await manager.activateSession(config.sessionId);
 
     const session = manager.getSession(config.sessionId)!;
@@ -238,6 +258,7 @@ describe('SessionManager', () => {
     const config = await manager.createSession(
       'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
     );
+    acceptAllMembers(config.sessionId);
     await manager.activateSession(config.sessionId);
 
     const session = manager.getSession(config.sessionId)!;
@@ -255,6 +276,7 @@ describe('SessionManager', () => {
     const config = await manager.createSession(
       'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
     );
+    acceptAllMembers(config.sessionId);
     await manager.activateSession(config.sessionId);
 
     await expect(
@@ -396,6 +418,7 @@ describe('SessionManager', () => {
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
+      acceptAllMembers(config.sessionId);
       await manager.activateSession(config.sessionId);
 
       const session = manager.getSession(config.sessionId)!;
@@ -410,6 +433,7 @@ describe('SessionManager', () => {
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
+      acceptAllMembers(config.sessionId);
       await manager.activateSession(config.sessionId);
 
       const session = manager.getSession(config.sessionId)!;
@@ -422,6 +446,7 @@ describe('SessionManager', () => {
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
+      acceptAllMembers(config.sessionId);
       await manager.activateSession(config.sessionId);
 
       const session = manager.getSession(config.sessionId)!;
@@ -437,6 +462,7 @@ describe('SessionManager', () => {
       const config = await manager.createSession(
         'paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null,
       );
+      acceptAllMembers(config.sessionId);
       await manager.activateSession(config.sessionId);
 
       const session = manager.getSession(config.sessionId)!;

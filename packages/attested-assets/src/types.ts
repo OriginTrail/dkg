@@ -128,6 +128,7 @@ export interface RoundState {
   inputs: Map<string, InputPayload>;
   proposal: RoundProposalPayload | null;
   acks: Map<string, RoundAckPayload>;
+  ackSignatures: Map<string, Uint8Array>;
   startTime: number | null;
   deadline: number | null;
 }
@@ -137,10 +138,12 @@ export interface SessionState {
   currentRound: number;
   latestFinalizedRound: number;
   latestStateHash: string;
+  latestStateBytes: Uint8Array;
   roundStates: Map<number, RoundState>;
   equivocators: Set<string>;
   inactiveMembers: Map<string, number>;
   consecutiveSkips: number;
+  acceptedMembers: Set<string>;
 }
 
 export interface AKAEventEnvelope {

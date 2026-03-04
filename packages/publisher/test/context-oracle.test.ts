@@ -158,15 +158,11 @@ describe('ContextOracle', () => {
       expect(wrappedSparql).toContain(`GRAPH <${GRAPH_URI}>`);
     });
 
-    it('does not double-wrap when query already has GRAPH', async () => {
-      const empty: SelectResult = { type: 'bindings', bindings: [] };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(empty);
-
+    it('rejects queries that already contain GRAPH clauses', async () => {
       const alreadyWrapped = `SELECT ?s WHERE { GRAPH <${GRAPH_URI}> { ?s ?p ?o } }`;
-      await oracle.queryWithProofs(PARANET, CG_ID, alreadyWrapped);
-
-      const sparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-      expect(sparql).toBe(alreadyWrapped);
+      await expect(
+        oracle.queryWithProofs(PARANET, CG_ID, alreadyWrapped),
+      ).rejects.toThrow('User queries must not contain GRAPH clauses');
     });
   });
 
