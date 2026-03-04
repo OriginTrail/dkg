@@ -11,16 +11,26 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "skills",
+    "openclaw-entry.mjs",
+    "openclaw.plugin.json"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run --passWithNoTests",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@dkg/agent": "workspace:*",
     "@dkg/core": "workspace:*",
     "@dkg/storage": "workspace:*"
   },
+  "openclaw": {
+    "extensions": ["./openclaw-entry.mjs"]
+  },
+  "bundledDependencies": ["@dkg/agent", "@dkg/core", "@dkg/storage"],
   "devDependencies": {
     "vitest": "^4.0.18"
   }

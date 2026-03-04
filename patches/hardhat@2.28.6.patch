@@ -1,0 +1,39 @@
+diff --git a/internal/cli/version-notifier.js b/internal/cli/version-notifier.js
+index c24b5bded7e9420a5070ac57b247808595505859..3e4a754323fa99dd6f921de316af8e669e7db0a8 100644
+--- a/internal/cli/version-notifier.js
++++ b/internal/cli/version-notifier.js
+@@ -205,7 +205,7 @@ async function getV3ReleaseMessage(v3Release) {
+     try {
+         const githubResponse = await request(versionNotifierAsset.browser_download_url, {
+             method: "GET",
+-            maxRedirections: 10,
++            // maxRedirections removed for undici v7 compatibility
+         });
+         v3ReleaseMessage = await githubResponse.body.text();
+     }
+diff --git a/internal/core/providers/http.js b/internal/core/providers/http.js
+index cf8cbed2f7994c227a10cb8d2d98942cdac6c73c..0d0d707e3f8768ba7a68c50a0c0b3b26c259bd29 100644
+--- a/internal/core/providers/http.js
++++ b/internal/core/providers/http.js
+@@ -153,7 +153,7 @@ class HttpProvider extends events_1.EventEmitter {
+                 dispatcher: this._dispatcher,
+                 method: "POST",
+                 body: JSON.stringify(request),
+-                maxRedirections: 10,
++                // maxRedirections removed for undici v7 compatibility
+                 headersTimeout: process.env.DO_NOT_SET_THIS_ENV_VAR____IS_HARDHAT_CI !== undefined
+                     ? 0
+                     : this._timeout,
+diff --git a/internal/util/download.js b/internal/util/download.js
+index 099179f34fc40571895058d3126ee3f0fac9642b..5c9ef93b2fc622682d6e3681e975b1c0e0edd981 100644
+--- a/internal/util/download.js
++++ b/internal/util/download.js
+@@ -54,7 +54,7 @@ async function download(url, filePath, timeoutMillis = 10000, extraHeaders = {})
+     const response = await request(url, {
+         dispatcher,
+         headersTimeout: timeoutMillis,
+-        maxRedirections: 10,
++        // maxRedirections removed for undici v7 compatibility
+         method: "GET",
+         headers: {
+             ...extraHeaders,

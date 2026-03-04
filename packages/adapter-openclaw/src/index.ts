@@ -1,8 +1,8 @@
 export { DkgNodePlugin } from './DkgNodePlugin.js';
 export type {
   DkgOpenClawConfig,
+  JSONSchemaObject,
   OpenClawPluginApi,
   OpenClawTool,
-  OpenClawToolParam,
   OpenClawToolResult,
 } from './types.js';
