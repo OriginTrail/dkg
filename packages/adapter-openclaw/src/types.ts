@@ -7,28 +7,30 @@
  */
 
 export interface OpenClawPluginApi {
+  config: Record<string, unknown>;
+  pluginConfig?: Record<string, unknown>;
   registerTool(tool: OpenClawTool): void;
-  registerHook(hookName: string, handler: (...args: any[]) => Promise<void>): void;
+  registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
   on(event: string, handler: (...args: any[]) => void): void;
+  logger: { info?(...args: any[]): void; warn?(...args: any[]): void; debug?(...args: any[]): void };
 }
 
 export interface OpenClawTool {
   name: string;
   description: string;
-  parameters: Record<string, OpenClawToolParam>;
-  handler: (args: Record<string, unknown>) => Promise<OpenClawToolResult>;
+  parameters: JSONSchemaObject;
+  execute(toolCallId: string, params: Record<string, unknown>): Promise<OpenClawToolResult>;
 }
 
-export interface OpenClawToolParam {
-  type: string;
-  description: string;
-  required?: boolean;
+export interface JSONSchemaObject {
+  type: 'object';
+  properties: Record<string, { type: string; description?: string }>;
+  required?: string[];
 }
 
 export interface OpenClawToolResult {
-  status: 'ok' | 'error';
-  data?: unknown;
-  message?: string;
+  content: Array<{ type: 'text'; text: string }>;
+  details?: unknown;
 }
 
 export interface DkgOpenClawConfig {
@@ -44,6 +46,12 @@ export interface DkgOpenClawConfig {
   name?: string;
   /** Agent description. */
   description?: string;
+  /** On-chain config (private key via DKG_EVM_PRIVATE_KEY env var). */
+  chainConfig?: {
+    rpcUrl?: string;
+    hubAddress?: string;
+    privateKey?: string;
+  };
   /** Skills this agent offers. */
   skills?: Array<{
     skillType: string;
