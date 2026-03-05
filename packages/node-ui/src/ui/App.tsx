@@ -1,12 +1,12 @@
-import React from 'react';
-import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import React, { useState } from 'react';
+import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
 import { ExplorerPage } from './pages/Explorer.js';
 import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
 import { SettingsPage } from './pages/Settings.js';
 
-const NAV = [
+const NAV_MAIN = [
   {
     to: '/',
     end: true,
@@ -40,16 +40,6 @@ const NAV = [
     ),
   },
   {
-    to: '/apps',
-    label: 'Apps',
-    badge: 'NEW',
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polygon points="5 3 19 12 5 21 5 3"/>
-      </svg>
-    ),
-  },
-  {
     to: '/settings',
     label: 'Settings',
     icon: (
@@ -60,6 +50,111 @@ const NAV = [
     ),
   },
 ];
+
+// Fixed apps that always appear in the dropdown
+const PINNED_APPS = [
+  {
+    id: 'origintrail',
+    label: 'OriginTrail Game',
+    desc: 'AGI frontier journey · DKG-verified',
+    href: '/apps/origintrail/',
+    icon: '🚀',
+    badge: 'NEW',
+  },
+];
+
+function AppsNavItem() {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+
+  return (
+    <div style={{ position: 'relative' }}>
+      {/* Main Apps nav button */}
+      <div
+        className="nav-btn"
+        style={{ cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        <span>Apps</span>
+        <span className="nav-badge">NEW</span>
+        <svg
+          width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={{ marginLeft: 'auto', transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'none' }}
+        >
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+
+      {/* Dropdown */}
+      {open && (
+        <div style={{
+          position: 'absolute',
+          left: '100%',
+          top: 0,
+          marginLeft: 8,
+          width: 220,
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          zIndex: 100,
+          overflow: 'hidden',
+        }}>
+          <div style={{ padding: '10px 14px 6px', fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+            Installed Apps
+          </div>
+          {PINNED_APPS.map(app => (
+            <button
+              key={app.id}
+              onClick={() => { setOpen(false); navigate(app.href); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                width: '100%', padding: '10px 14px',
+                background: 'transparent', border: 'none',
+                borderTop: '1px solid var(--border)',
+                cursor: 'pointer', textAlign: 'left',
+              }}
+            >
+              <span style={{ fontSize: 18, lineHeight: 1 }}>{app.icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{app.label}</span>
+                  {app.badge && (
+                    <span style={{
+                      fontSize: 8, fontWeight: 700, padding: '1px 5px',
+                      borderRadius: 4, background: 'rgba(74,222,128,0.15)',
+                      color: 'var(--green)', letterSpacing: '0.05em',
+                    }}>{app.badge}</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 1 }}>{app.desc}</div>
+              </div>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+          ))}
+          <div style={{ padding: '8px 14px' }}>
+            <button
+              onClick={() => { setOpen(false); navigate('/apps'); }}
+              style={{
+                width: '100%', padding: '7px 10px', borderRadius: 7,
+                border: '1px solid var(--border)', background: 'transparent',
+                fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer',
+              }}
+            >
+              Browse all apps →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function App() {
   return (
@@ -74,7 +169,7 @@ export function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {NAV.map(item => (
+          {NAV_MAIN.map(item => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -83,9 +178,11 @@ export function App() {
             >
               {item.icon}
               <span>{item.label}</span>
-              {item.badge && <span className="nav-badge">{item.badge}</span>}
             </NavLink>
           ))}
+
+          {/* Apps with fixed dropdown */}
+          <AppsNavItem />
         </nav>
 
         <div className="sidebar-footer">

@@ -1,40 +1,140 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { useFetch, formatDuration } from '../hooks.js';
 import { fetchStatus, fetchMetrics, fetchMetricsHistory } from '../api.js';
 
-const AGENTS = [
-  { name: 'sentinel', color: '#4ade80', bg: 'rgba(74,222,128,0.12)' },
-  { name: 'MassContributor', color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
-  { name: 'lupus-in-fabula', color: '#a78bfa', bg: 'rgba(167,139,250,0.12)' },
-  { name: 'Zivojin', color: '#fbbf24', bg: 'rgba(251,191,36,0.12)' },
-  { name: 'jurij-dkg-node', color: '#22d3ee', bg: 'rgba(34,211,238,0.12)' },
-  { name: 'openclaw-agent', color: '#f472b6', bg: 'rgba(244,114,182,0.12)' },
+// ─── Testnet nodes ────────────────────────────────────────────────────────────
+
+const NODES = [
+  { id: 'sentinel',         color: '#4ade80', x: 0.50, y: 0.12 },
+  { id: 'MassContributor',  color: '#60a5fa', x: 0.82, y: 0.38 },
+  { id: 'lupus-in-fabula',  color: '#a78bfa', x: 0.72, y: 0.80 },
+  { id: 'Zivojin',          color: '#fbbf24', x: 0.28, y: 0.80 },
+  { id: 'jurij-dkg-node',   color: '#22d3ee', x: 0.18, y: 0.38 },
+  { id: 'openclaw-agent',   color: '#f472b6', x: 0.50, y: 0.50 },
 ];
 
+const EDGES = [
+  [0, 1], [1, 2], [2, 3], [3, 4], [4, 0],
+  [0, 5], [1, 5], [2, 5], [3, 5], [4, 5],
+];
+
+// ─── Network Visualisation ────────────────────────────────────────────────────
+
+interface Pulse { edge: number; t: number; dir: 1 | -1; color: string; }
+
+function NetworkViz() {
+  const W = 340; const H = 220;
+  const [pulses, setPulses] = useState<Pulse[]>([]);
+  const frame = useRef(0);
+  const lastSpawn = useRef(0);
+
+  useEffect(() => {
+    let raf: number;
+    const tick = (ts: number) => {
+      // spawn a new pulse every ~600ms
+      if (ts - lastSpawn.current > 600) {
+        const edgeIdx = Math.floor(Math.random() * EDGES.length);
+        const dir = Math.random() > 0.5 ? 1 : -1 as 1 | -1;
+        const nIdx = dir === 1 ? EDGES[edgeIdx][0] : EDGES[edgeIdx][1];
+        setPulses(prev => [
+          ...prev.filter(p => p.t < 1),
+          { edge: edgeIdx, t: 0, dir, color: NODES[nIdx].color },
+        ]);
+        lastSpawn.current = ts;
+      }
+      // advance all pulses
+      setPulses(prev => prev.map(p => ({ ...p, t: p.t + 0.016 })).filter(p => p.t <= 1));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: 'block' }}>
+      <defs>
+        {NODES.map(n => (
+          <radialGradient key={n.id} id={`ng-${n.id}`} cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor={n.color} stopOpacity="0.35" />
+            <stop offset="100%" stopColor={n.color} stopOpacity="0" />
+          </radialGradient>
+        ))}
+      </defs>
+
+      {/* Edges */}
+      {EDGES.map(([a, b], i) => {
+        const na = NODES[a]; const nb = NODES[b];
+        return (
+          <line key={i}
+            x1={na.x * W} y1={na.y * H} x2={nb.x * W} y2={nb.y * H}
+            stroke="#1e2a3a" strokeWidth="1"
+          />
+        );
+      })}
+
+      {/* Pulses */}
+      {pulses.map((p, i) => {
+        const [a, b] = EDGES[p.edge];
+        const na = NODES[a]; const nb = NODES[b];
+        const t = p.dir === 1 ? p.t : 1 - p.t;
+        const cx = na.x * W + (nb.x - na.x) * W * t;
+        const cy = na.y * H + (nb.y - na.y) * H * t;
+        const opacity = Math.sin(p.t * Math.PI);
+        return (
+          <circle key={i} cx={cx} cy={cy} r={3} fill={p.color} opacity={opacity} />
+        );
+      })}
+
+      {/* Node glows */}
+      {NODES.map(n => (
+        <circle key={`glow-${n.id}`}
+          cx={n.x * W} cy={n.y * H} r={14}
+          fill={`url(#ng-${n.id})`}
+        />
+      ))}
+
+      {/* Node circles */}
+      {NODES.map(n => (
+        <g key={n.id}>
+          <circle cx={n.x * W} cy={n.y * H} r={5} fill={n.color} />
+          <circle cx={n.x * W} cy={n.y * H} r={8} fill="none" stroke={n.color} strokeWidth="0.8" opacity="0.5" />
+        </g>
+      ))}
+
+      {/* Labels */}
+      {NODES.map(n => {
+        const lx = n.x * W + (n.x > 0.55 ? 12 : n.x < 0.45 ? -12 : 0);
+        const ly = n.y * H + (n.y < 0.3 ? -12 : n.y > 0.6 ? 16 : 0);
+        const anchor = n.x > 0.55 ? 'start' : n.x < 0.45 ? 'end' : 'middle';
+        return (
+          <text key={`label-${n.id}`} x={lx} y={ly}
+            textAnchor={anchor} fontSize="8" fill={n.color} opacity="0.85"
+            fontFamily="'JetBrains Mono', monospace">
+            {n.id}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ─── Agent feed ────────────────────────────────────────────────────────────────
+
+const AGENTS = NODES.map(n => ({ name: n.id, color: n.color, bg: `${n.color}1a` }));
 const ACTIONS = ['publish', 'query', 'update', 'verify'] as const;
 type Action = typeof ACTIONS[number];
-
 const ACTION_COLORS: Record<Action, string> = {
   publish: 'var(--green)', query: 'var(--blue)', update: 'var(--amber)', verify: 'var(--purple)',
 };
-
 const rnd = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
 const genUAL = () => `did:dkg:${rnd(['base', 'otp'])}:0x${Math.random().toString(16).slice(2, 8)}…/${Math.floor(Math.random() * 999999)}`;
 
-interface FeedEvent { id: number; agent: typeof AGENTS[0]; action: Action; ual: string; ago: string; verified: boolean; }
-
+interface FeedEvent { id: number; agent: typeof AGENTS[0]; action: Action; ual: string; ago: string; }
 let _id = 0;
 function genEvent(): FeedEvent {
-  return { id: _id++, agent: rnd(AGENTS), action: rnd([...ACTIONS]), ual: genUAL(), ago: 'just now', verified: Math.random() > 0.15 };
+  return { id: _id++, agent: rnd(AGENTS), action: rnd([...ACTIONS]), ual: genUAL(), ago: 'just now' };
 }
-
-const SHIELD_GREEN = (
-  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-    <polyline points="9 12 11 14 15 10"/>
-  </svg>
-);
 
 function AgentBadge({ agent }: { agent: typeof AGENTS[0] }) {
   return (
@@ -45,39 +145,35 @@ function AgentBadge({ agent }: { agent: typeof AGENTS[0] }) {
   );
 }
 
-function VerifyBadge({ verified }: { verified: boolean }) {
-  return (
-    <span className={`verify-badge ${verified ? 'verified' : 'pending'}`}>
-      {verified ? SHIELD_GREEN : '⏳'} {verified ? 'VERIFIED' : 'PENDING'}
-    </span>
-  );
-}
+// ─── Static data ───────────────────────────────────────────────────────────────
 
 const PARANETS = [
-  { name: 'Oregon Trail', assets: 847, agents: 12, color: 'var(--green)' },
-  { name: 'DeSci Research', assets: 1203, agents: 8, color: 'var(--blue)' },
-  { name: 'Supply Chain EU', assets: 797, agents: 4, color: 'var(--amber)' },
+  { name: 'OriginTrail Game', assets: 847,  agents: 12, color: 'var(--green)' },
+  { name: 'DeSci Research',   assets: 1203, agents: 8,  color: 'var(--blue)' },
+  { name: 'Supply Chain EU',  assets: 797,  agents: 4,  color: 'var(--amber)' },
 ];
 
 const QUICK_ACTIONS = [
-  { label: 'Query the Graph', desc: 'Run SPARQL queries', icon: '⌘' },
-  { label: 'Connect an Agent', desc: 'MCP / HTTP integration', icon: '⚡' },
-  { label: 'Join Oregon Trail', desc: 'Test your node', icon: '🎮' },
+  { label: 'Query the Graph',     desc: 'Run SPARQL queries',    icon: '⌘' },
+  { label: 'Connect an Agent',    desc: 'MCP / HTTP integration', icon: '⚡' },
+  { label: 'Play OriginTrail',    desc: 'AGI frontier journey',   icon: '🚀' },
 ];
 
 type RangeKey = '1h' | '6h' | '24h' | '7d';
 const RANGES: { key: RangeKey; label: string; ms: number }[] = [
-  { key: '1h', label: '1h', ms: 3_600_000 },
-  { key: '6h', label: '6h', ms: 6 * 3_600_000 },
+  { key: '1h',  label: '1h',  ms: 3_600_000 },
+  { key: '6h',  label: '6h',  ms: 6 * 3_600_000 },
   { key: '24h', label: '24h', ms: 86_400_000 },
-  { key: '7d', label: '7d', ms: 7 * 86_400_000 },
+  { key: '7d',  label: '7d',  ms: 7 * 86_400_000 },
 ];
+
+// ─── Page ──────────────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
   const [rangeKey, setRangeKey] = useState<RangeKey>('24h');
   const rangeMs = RANGES.find(r => r.key === rangeKey)!.ms;
 
-  const { data: status } = useFetch(fetchStatus, [], 10_000);
+  const { data: status }  = useFetch(fetchStatus,  [], 10_000);
   const { data: metrics } = useFetch(fetchMetrics, [], 10_000);
   const fetcher = useCallback(() => fetchMetricsHistory(Date.now() - rangeMs, Date.now(), 200), [rangeMs]);
   const { data: history } = useFetch(fetcher, [rangeMs], 60_000);
@@ -87,25 +183,21 @@ export function DashboardPage() {
     time: rangeKey === '7d'
       ? new Date(s.ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
       : new Date(s.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    cpu: s.cpu_percent ?? 0,
+    cpu:    s.cpu_percent ?? 0,
     heapMb: s.heap_used_bytes ? Math.round(s.heap_used_bytes / 1048576) : 0,
-    peers: s.peer_count ?? 0,
+    peers:  s.peer_count ?? 0,
   })), [snapshots, rangeKey]);
 
   const [feed, setFeed] = useState<FeedEvent[]>(() => Array.from({ length: 10 }, genEvent));
-
   useEffect(() => {
-    const t = setInterval(() => {
-      setFeed(prev => [genEvent(), ...prev].slice(0, 20));
-    }, 3000);
+    const t = setInterval(() => setFeed(prev => [genEvent(), ...prev].slice(0, 20)), 3000);
     return () => clearInterval(t);
   }, []);
 
+  // Only 2 stat cards (removed Queries/hr and Verified On-Chain)
   const statCards = [
     { label: 'Knowledge Assets', value: (metrics as any)?.total_triples?.toLocaleString() ?? '2,847', sub: '↑ 142 this week', color: 'var(--green)' },
-    { label: 'Active Peers', value: String((status as any)?.connectedPeers ?? 14), sub: '3 paranets', color: 'var(--blue)' },
-    { label: 'Queries / hr', value: '1,204', sub: '↑ 18% vs yesterday', color: 'var(--purple)' },
-    { label: 'Verified On-Chain', value: '99.2%', sub: '27 pending', color: 'var(--green)' },
+    { label: 'Active Peers',     value: String((status as any)?.connectedPeers ?? 14),               sub: '3 paranets',       color: 'var(--blue)' },
   ];
 
   return (
@@ -124,12 +216,12 @@ export function DashboardPage() {
               <button key={r.key} className={`range-pill${rangeKey === r.key ? ' active' : ''}`} onClick={() => setRangeKey(r.key)}>{r.label}</button>
             ))}
           </div>
-          <button className="btn-primary">+ Publish Knowledge Asset</button>
+          <button className="btn-primary">+ Import Memories</button>
         </div>
       </div>
 
-      {/* Stat cards */}
-      <div className="stats-grid">
+      {/* Stat cards — 2 wide now */}
+      <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
         {statCards.map(s => (
           <div className="stat-card" key={s.label}>
             <div className="accent" style={{ background: `linear-gradient(90deg,${s.color}44,transparent)` }} />
@@ -140,8 +232,8 @@ export function DashboardPage() {
         ))}
       </div>
 
-      {/* Main 2-col grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 16 }}>
+      {/* Main 3-col grid: feed | network | right-panel */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 360px 280px', gap: 16 }}>
 
         {/* Activity Feed */}
         <div className="card">
@@ -153,18 +245,16 @@ export function DashboardPage() {
             </div>
             <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>All paranets</span>
           </div>
-          <div style={{ maxHeight: 380, overflow: 'auto' }}>
+          <div style={{ maxHeight: 300, overflow: 'auto' }}>
             {feed.map((ev, i) => (
               <div key={ev.id} className="feed-row" style={i === 0 ? { background: 'rgba(74,222,128,0.02)' } : {}}>
                 <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{ev.ago}</span>
                 <AgentBadge agent={ev.agent} />
                 <span className="mono" style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: ACTION_COLORS[ev.action] }}>{ev.action.toUpperCase()}</span>
                 <span className="ual">{ev.ual}</span>
-                <VerifyBadge verified={ev.verified} />
               </div>
             ))}
           </div>
-          {/* Mini chart */}
           {chartData.length > 0 && (
             <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)' }}>
               <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>CPU · {rangeKey}</div>
@@ -179,6 +269,26 @@ export function DashboardPage() {
               </ResponsiveContainer>
             </div>
           )}
+        </div>
+
+        {/* Network Visualisation */}
+        <div className="card" style={{ padding: '16px 18px' }}>
+          <div className="card-header" style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--blue)', boxShadow: '0 0 6px rgba(96,165,250,0.5)', display: 'inline-block' }} />
+              <span style={{ fontSize: 13, fontWeight: 700 }}>DKG V9 Testnet</span>
+            </div>
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{NODES.length} nodes</span>
+          </div>
+          <NetworkViz />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 12px', marginTop: 12 }}>
+            {NODES.map(n => (
+              <div key={n.id} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: n.color, display: 'inline-block' }} />
+                <span className="mono" style={{ fontSize: 9, color: n.color }}>{n.id}</span>
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* Right column */}

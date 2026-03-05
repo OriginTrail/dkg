@@ -35,7 +35,7 @@ const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }
   coming: { bg: 'var(--amber-dim)', color: 'var(--amber)',  label: 'COMING SOON' },
 };
 
-function OregonTrail() {
+function OriginTrailGame() {
   return (
     <>
       <div className="trail-hero">
@@ -44,7 +44,7 @@ function OregonTrail() {
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--green)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
             Node Health Check + Multi-Agent Demo
           </div>
-          <h3 className="serif" style={{ fontSize: 24, fontWeight: 700, margin: '0 0 8px' }}>Oregon Trail Multiplayer on DKG v9</h3>
+          <h3 className="serif" style={{ fontSize: 24, fontWeight: 700, margin: '0 0 8px' }}>OriginTrail — AI Frontier Journey on DKG v9</h3>
           <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, maxWidth: 560, margin: '0 0 20px' }}>
             Every wagon decision is a Knowledge Asset. Every river crossing is on-chain. The leaderboard is provably fair.
             If this game works, your node is healthy, connected, and ready.
@@ -64,7 +64,7 @@ function OregonTrail() {
               <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,0.53)', display: 'inline-block' }} />
               <span style={{ fontSize: 13, fontWeight: 700 }}>Live Leaderboard</span>
             </div>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Oregon Trail Paranet · 847 Knowledge Assets</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>OriginTrail Paranet · 847 Knowledge Assets</span>
           </div>
           {TEAMS.map((t, i) => (
             <div key={t.name} className="lb-row" style={t.name === 'Your Team' ? { background: 'rgba(74,222,128,0.03)' } : {}}>
@@ -80,7 +80,7 @@ function OregonTrail() {
             </div>
           ))}
           <div style={{ padding: '12px 18px', fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 6 }}>
-            🛡 Every position, health value, and decision is a verified Knowledge Asset on the Oregon Trail paranet
+            🛡 Every position, health value, and decision is a verified Knowledge Asset on the OriginTrail paranet
           </div>
         </div>
 
@@ -159,7 +159,7 @@ export function AppsPage() {
   const [tab, setTab] = useState<AppsTab>('trail');
 
   const TABS: { id: AppsTab; label: string; tag?: string }[] = [
-    { id: 'trail',     label: '🎮 Oregon Trail',      tag: 'HELLO WORLD' },
+    { id: 'trail',     label: '🚀 OriginTrail Game',      tag: 'HELLO WORLD' },
     { id: 'benchmark', label: '⚡ Coding Benchmark' },
     { id: 'connect',   label: '🔗 Connect Agents' },
   ];
@@ -180,7 +180,7 @@ export function AppsPage() {
         ))}
       </div>
 
-      {tab === 'trail'     && <OregonTrail />}
+      {tab === 'trail'     && <OriginTrailGame />}
       {tab === 'benchmark' && <Benchmark />}
       {tab === 'connect'   && <ConnectAgents />}
     </div>
