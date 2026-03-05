@@ -94,7 +94,7 @@ export function App() {
           <Route path="/operations/*" element={<OperationsPage />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
-          <Route path="/app/:appId" element={<AppHostPage />} />
+          <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
         </Routes>
       </main>
       <ChatPanel />
