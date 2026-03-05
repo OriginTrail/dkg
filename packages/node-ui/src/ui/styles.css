@@ -1092,7 +1092,8 @@ a:hover { text-decoration: underline; }
 .graph-explorer-layout {
   display: flex;
   gap: 16px;
-  min-height: 600px;
+  height: calc(100vh - 140px);
+  min-height: 500px;
 }
 
 .graph-explorer-main {

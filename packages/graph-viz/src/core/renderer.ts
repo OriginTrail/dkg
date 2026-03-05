@@ -214,10 +214,18 @@ export class Canvas2DRenderer implements RendererBackend {
       .onBackgroundClick((_event: any) => {
         this._events.emit('background:click', { x: 0, y: 0 });
       })
-      .cooldownTicks(120)
-      .d3AlphaDecay(0.03)
-      .d3VelocityDecay(0.4)
-      .warmupTicks(30);
+      .cooldownTicks(200)
+      .d3AlphaDecay(0.02)
+      .d3VelocityDecay(0.3)
+      .warmupTicks(60);
+
+    // Tune the default d3 forces for better spread with large graphs
+    const charge = this._graph.d3Force('charge') as any;
+    if (charge?.strength) { charge.strength(-150); charge.distanceMax?.(1000); }
+    const link = this._graph.d3Force('link') as any;
+    if (link?.distance) { link.distance(80).strength(0.2); }
+    const center = this._graph.d3Force('center') as any;
+    if (center?.strength) { center.strength(0.03); }
   }
 
   /**
@@ -252,9 +260,8 @@ export class Canvas2DRenderer implements RendererBackend {
       const existing = this._currentNodes.get(id);
       newNodes.set(id, {
         id,
-        // Preserve position if node already exists, otherwise random spread
-        x: existing?.x ?? (Math.random() - 0.5) * 300,
-        y: existing?.y ?? (Math.random() - 0.5) * 300,
+        x: existing?.x ?? (Math.random() - 0.5) * 800,
+        y: existing?.y ?? (Math.random() - 0.5) * 800,
         vx: existing?.vx,
         vy: existing?.vy,
         fx: existing?.fx,
