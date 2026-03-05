@@ -331,7 +331,11 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   if (installedApps.length > 0) {
     log(`${installedApps.length} DKG app(s) loaded: ${installedApps.map(a => a.label).join(', ')}`);
     const appHost = config.apiHost || '127.0.0.1';
-    const desiredAppPort = (config.apiPort || 19200) + 100;
+    let desiredAppPort = (config.apiPort || 19200) + 100;
+    if (config.listenPort && desiredAppPort === config.listenPort) {
+      desiredAppPort = config.listenPort + 1;
+      log(`App static port would collide with libp2p listenPort ${config.listenPort}, using ${desiredAppPort}`);
+    }
     try {
       const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiPortRef, log);
       appStaticServer = result.server;
