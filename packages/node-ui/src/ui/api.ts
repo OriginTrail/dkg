@@ -149,3 +149,24 @@ export const fetchIntegrations = () =>
   get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; paranets: any[] }>('/api/integrations');
 export const subscribeToParanet = (paranetId: string) =>
   post<{ subscribed: string }>('/api/subscribe', { paranetId });
+
+// --- OriginTrail Game ---
+const GAME_BASE = '/api/apps/origin-trail-game';
+
+export const gameApi = {
+  info:   () => get<any>(`${GAME_BASE}/info`),
+  lobby:  () => get<{ openSwarms: any[]; mySwarms: any[] }>(`${GAME_BASE}/lobby`),
+  swarm:  (id: string) => get<any>(`${GAME_BASE}/swarm/${id}`),
+  create: (playerName: string, swarmName: string, maxPlayers?: number) =>
+    post<any>(`${GAME_BASE}/create`, { playerName, swarmName, maxPlayers }),
+  join:   (swarmId: string, playerName: string) =>
+    post<any>(`${GAME_BASE}/join`, { swarmId, playerName }),
+  leave:  (swarmId: string) =>
+    post<any>(`${GAME_BASE}/leave`, { swarmId }),
+  start:  (swarmId: string) =>
+    post<any>(`${GAME_BASE}/start`, { swarmId }),
+  vote:   (swarmId: string, voteAction: string, params?: Record<string, any>) =>
+    post<any>(`${GAME_BASE}/vote`, { swarmId, voteAction, params }),
+  forceResolve: (swarmId: string) =>
+    post<any>(`${GAME_BASE}/force-resolve`, { swarmId }),
+};
