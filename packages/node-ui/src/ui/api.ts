@@ -155,7 +155,7 @@ const GAME_BASE = '/api/apps/origin-trail-game';
 
 export const gameApi = {
   info:   () => get<any>(`${GAME_BASE}/info`),
-  lobby:  () => get<{ openWagons: any[]; myWagons: any[] }>(`${GAME_BASE}/lobby`),
+  lobby:  () => get<{ openSwarms: any[]; mySwarms: any[] }>(`${GAME_BASE}/lobby`),
   swarm:  (id: string) => get<any>(`${GAME_BASE}/swarm/${id}`),
   create: (playerName: string, swarmName: string, maxPlayers?: number) =>
     post<any>(`${GAME_BASE}/create`, { playerName, swarmName, maxPlayers }),

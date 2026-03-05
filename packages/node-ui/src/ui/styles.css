@@ -180,6 +180,29 @@ input::placeholder{color:#475569}
 .graph-details-label{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:6px}
 .graph-details-value{font-size:13px;word-break:break-all;display:flex;align-items:center;gap:6px;margin-bottom:4px}
 
+/* ── Compatibility: tab-group, tab-item (Explorer, Wallet, Operations) ── */
+.tab-group{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:20px}
+.tab-item{padding:10px 20px;font-size:13px;font-weight:600;color:var(--text-muted);cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit}
+.tab-item:hover{color:var(--text)}
+.tab-item.active{color:var(--green);border-bottom-color:var(--green)}
+
+/* ── Compatibility: chat-layout (Messages page) ── */
+.chat-layout{display:flex;height:calc(100vh - 120px);border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--surface)}
+.chat-layout .chat-input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;font-family:inherit;outline:none}
+.chat-layout .chat-input:focus{border-color:var(--green)}
+.chat-peers{width:240px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto}
+.chat-peers-header{padding:14px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted);border-bottom:1px solid var(--border)}
+.chat-peers-empty{padding:24px 16px;color:var(--text-muted);font-size:13px;text-align:center}
+.chat-peer-item{display:flex;flex-direction:column;gap:4px;padding:12px 16px;border:none;background:none;color:var(--text);text-align:left;cursor:pointer;border-bottom:1px solid var(--border);transition:background .15s;width:100%;font-family:inherit}
+.chat-peer-item:hover{background:rgba(74,222,128,.08)}
+.chat-peer-item.active{background:rgba(74,222,128,.15)}
+.chat-peer-name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:6px}
+.online-indicator{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.online-indicator.online{background:var(--green);box-shadow:0 0 4px var(--green)}
+.online-indicator.offline{background:var(--text-muted);opacity:.5}
+.chat-status-text{color:var(--text-muted);font-size:11px;margin-left:4px}
+.chat-peer-meta{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-muted)}
+
 @media(max-width:900px){
   .sidebar{width:60px}
   .sidebar-logo>div:last-child,.nav-btn span,.sidebar-footer>div:last-child,.apps-dropdown{display:none!important}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
 import { ExplorerPage } from './pages/Explorer.js';
 import { AgentHubPage } from './pages/AgentHub.js';
@@ -126,6 +126,11 @@ export function App() {
           <Route path="/apps/*" element={<AppsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
+          {/* Backward-compatible redirects for legacy routes */}
+          <Route path="/network" element={<Navigate to="/" replace />} />
+          <Route path="/operations/*" element={<Navigate to="/" replace />} />
+          <Route path="/wallet" element={<Navigate to="/settings" replace />} />
+          <Route path="/integrations" element={<Navigate to="/settings" replace />} />
         </Routes>
       </main>
       <ChatPanel />

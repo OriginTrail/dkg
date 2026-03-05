@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
@@ -18,6 +18,10 @@ export function ExplorerPage() {
         <Route path="/" element={<GraphTab />} />
         <Route path="/sparql" element={<SparqlTab />} />
         <Route path="/paranets" element={<ParanetsTab />} />
+        {/* Redirects for retired sub-routes */}
+        <Route path="/publish" element={<Navigate to="/explorer" replace />} />
+        <Route path="/history" element={<Navigate to="/explorer" replace />} />
+        <Route path="/saved" element={<Navigate to="/explorer" replace />} />
       </Routes>
     </div>
   );
