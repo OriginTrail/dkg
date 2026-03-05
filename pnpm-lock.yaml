@@ -138,13 +138,13 @@ importers:
       '@noble/hashes':
         specifier: ^2
         version: 2.0.1
+      ethers:
+        specifier: ^6
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(tsx@4.21.0))
-      ethers:
-        specifier: ^6
-        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(tsx@4.21.0)
