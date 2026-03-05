@@ -412,12 +412,12 @@ function stripLiteralsAndComments(sparql: string): string {
       continue;
     }
 
-    // IRI: <...> — distinguish from comparison operators (< <=).
-    // Comparisons are followed by whitespace, =, >, or end-of-input.
-    // IRIs are followed by any other char (letter, digit, #, /, :, etc).
+    // IRI: <...> — only when followed by a valid IRI-start character.
+    // Letters (scheme like http:), #, /, ., _ cover all real IRIs.
+    // Digits (?v<1), ? (?v<?w), $, ", ', (, - are comparisons.
     if (ch === '<') {
-      const next = i + 1 < n ? sparql[i + 1] : '';
-      if (next && next !== ' ' && next !== '\t' && next !== '\n' && next !== '\r' && next !== '=' && next !== '>') {
+      const next = sparql[i + 1];
+      if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
         const start = i;
         i++;
         while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
