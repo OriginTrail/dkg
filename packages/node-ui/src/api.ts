@@ -161,12 +161,13 @@ export async function handleNodeUIRequest(
   // --- Memory ---
 
   if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
-    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    const limit = Math.max(1, Math.min(isNaN(rawLimit) ? 20 : rawLimit, 100));
     try {
       const sessions = await memoryManager.getRecentChats(limit);
       return json(res, 200, { sessions });
     } catch (err: any) {
-      return json(res, 200, { sessions: [] });
+      return json(res, 500, { error: err.message ?? 'Failed to fetch sessions' });
     }
   }
 
@@ -175,7 +176,7 @@ export async function handleNodeUIRequest(
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 200, { paranetId: 'agent-memory', initialized: false, chatTriples: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 
@@ -183,10 +184,13 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
     const body = await readBody(req);
-    const { message } = JSON.parse(body);
+    const { message, sessionId } = JSON.parse(body);
     if (!message) return json(res, 400, { error: 'Missing "message"' });
     try {
       const reply = await chatAssistant.answer({ message });
+      if (memoryManager && sessionId) {
+        memoryManager.storeChatExchange(sessionId, message, reply.reply).catch(() => {});
+      }
       return json(res, 200, reply);
     } catch (err: any) {
       return json(res, 500, { error: err.message });

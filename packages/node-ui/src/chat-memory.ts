@@ -15,7 +15,7 @@ export interface MemoryToolContext {
 export interface MemoryStats {
   paranetId: string;
   initialized: boolean;
-  chatTriples: number;
+  messageCount: number;
   knowledgeTriples: number;
   totalTriples: number;
   sessionCount: number;
@@ -45,6 +45,13 @@ const SCHEMA = 'http://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+
+function stripRdfLiteral(value: string): string {
+  if (!value) return '';
+  const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
+  if (typed) return typed[1];
+  return value;
+}
 
 function parseRdfInt(value: string): number {
   if (!value) return 0;
@@ -180,6 +187,7 @@ export class ChatMemoryManager {
     userMessage: string,
     assistantReply: string,
   ): Promise<number> {
+    await this.ensureInitialized();
     const exchange = `User: ${userMessage}\nAssistant: ${assistantReply}`;
     const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
@@ -262,7 +270,7 @@ export class ChatMemoryManager {
     const base: MemoryStats = {
       paranetId: MEMORY_PARANET,
       initialized: true,
-      chatTriples: 0,
+      messageCount: 0,
       knowledgeTriples: 0,
       totalTriples: 0,
       sessionCount: 0,
@@ -285,7 +293,19 @@ export class ChatMemoryManager {
         `SELECT (COUNT(*) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Message> }`,
         { paranetId: MEMORY_PARANET, includeWorkspace: true },
       );
-      base.chatTriples = sumBindingValues(msgs.bindings, 'c');
+      base.messageCount = sumBindingValues(msgs.bindings, 'c');
+
+      const chatRelatedTriples = await this.tools.query(
+        `SELECT (COUNT(*) AS ?c) WHERE {
+          { ?s <${RDF_TYPE}> <${SCHEMA}Message> . ?s ?p ?o }
+          UNION
+          { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> . ?s ?p ?o }
+          UNION
+          { ?s <${RDF_TYPE}> <${DKG_ONT}ToolInvocation> . ?s ?p ?o }
+        }`,
+        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      );
+      const chatTripleCount = sumBindingValues(chatRelatedTriples.bindings, 'c');
 
       const entities = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?e) AS ?c) WHERE { ?e <${RDF_TYPE}> ?t . FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:")) }`,
@@ -293,7 +313,7 @@ export class ChatMemoryManager {
       );
       base.entityCount = sumBindingValues(entities.bindings, 'c');
 
-      base.knowledgeTriples = Math.max(0, base.totalTriples - base.chatTriples);
+      base.knowledgeTriples = Math.max(0, base.totalTriples - chatTripleCount);
     } catch { /* stats are best-effort */ }
     return base;
   }
@@ -336,10 +356,11 @@ export class ChatMemoryManager {
     await this.ensureInitialized();
     try {
       const sessionsResult = await this.tools.query(
-        `SELECT DISTINCT ?s ?sid WHERE {
+        `SELECT ?s ?sid (MAX(?mts) AS ?latest) WHERE {
           ?s <${RDF_TYPE}> <${SCHEMA}Conversation> .
-          ?s <${DKG_ONT}sessionId> ?sid
-        } LIMIT ${limit}`,
+          ?s <${DKG_ONT}sessionId> ?sid .
+          OPTIONAL { ?m <${SCHEMA}isPartOf> ?s . ?m <${SCHEMA}dateCreated> ?mts }
+        } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${limit}`,
         { paranetId: MEMORY_PARANET, includeWorkspace: true },
       );
       const chats: Array<{ session: string; messages: Array<{ author: string; text: string; ts: string }> }> = [];
@@ -353,13 +374,13 @@ export class ChatMemoryManager {
           } ORDER BY ?ts LIMIT 100`,
           { paranetId: MEMORY_PARANET, includeWorkspace: true },
         );
-        const sessionId = typeof sb.sid === 'string' && sb.sid.startsWith('"') ? sb.sid.slice(1, -1) : (sb.sid ?? sb.s);
+        const sessionId = stripRdfLiteral(sb.sid ?? sb.s);
         chats.push({
           session: sessionId,
           messages: (msgsResult.bindings ?? []).map((mb: any) => ({
             author: mb.author?.includes('user') ? 'user' : 'agent',
-            text: mb.text ?? '',
-            ts: mb.ts ?? '',
+            text: stripRdfLiteral(mb.text ?? ''),
+            ts: stripRdfLiteral(mb.ts ?? ''),
           })),
         });
       }

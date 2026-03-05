@@ -111,7 +111,7 @@ export interface MemorySession {
 export const fetchMemorySessions = (limit = 20) =>
   get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
 export const fetchMemoryStats = () =>
-  get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
+  get<{ paranetId: string; initialized: boolean; messageCount: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>

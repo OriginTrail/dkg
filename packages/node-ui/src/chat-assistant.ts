@@ -50,7 +50,7 @@ export class ChatAssistant {
     if (!this.llmConfig) throw new Error('LLM not configured');
     const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    const systemPrompt = `You are a DKG (Decentralized Knowledge Graph) node assistant. The user operates a node that stores RDF triples and can run SPARQL queries.
+    const systemPrompt = this.llmConfig.systemPrompt ?? `You are a DKG (Decentralized Knowledge Graph) node assistant. The user operates a node that stores RDF triples and can run SPARQL queries.
 
 Answer briefly and helpfully. For questions about the node (uptime, peers, triples, CPU, memory, operations, logs), give a short direct answer if you can infer it, or suggest they try the built-in commands.
 

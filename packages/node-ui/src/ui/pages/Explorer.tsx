@@ -710,7 +710,7 @@ function SparqlTab() {
   useEffect(() => {
     if (searchParams.has('q') && !autoRan) {
       setAutoRan(true);
-      setSearchParams({}, { replace: true });
+      setSearchParams((prev) => { prev.delete('q'); return prev; }, { replace: true });
       run();
     }
   }, [searchParams, autoRan, run, setSearchParams]);

@@ -97,7 +97,8 @@ export function AgentHubPage() {
   }, []);
 
   const visualizeSession = useCallback((session: MemorySession) => {
-    const sessionUri = `urn:dkg:chat:session:${session.session}`;
+    const safeId = encodeURIComponent(session.session).replace(/%/g, '');
+    const sessionUri = `urn:dkg:chat:session:${safeId}`;
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { ?s <http://schema.org/isPartOf> <${sessionUri}> . ?s ?p ?o } LIMIT 5000`;
     navigate(`/explorer/sparql?q=${encodeURIComponent(sparql)}`);
   }, [navigate]);
