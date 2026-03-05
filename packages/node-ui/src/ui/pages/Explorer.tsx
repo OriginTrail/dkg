@@ -170,6 +170,12 @@ function escapeSparqlString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+const SAFE_IRI_RE = /^[a-zA-Z][a-zA-Z0-9+\-.]*:[^\s<>"{}|\\^`]*$/;
+
+function validateIri(uri: string): string | null {
+  return SAFE_IRI_RE.test(uri) ? uri : null;
+}
+
 function buildPredicateStats(triples: Triple[], maxItems = 12): PredicateStat[] {
   const counts = new Map<string, number>();
   for (const t of triples) counts.set(t.predicate, (counts.get(t.predicate) ?? 0) + 1);
@@ -292,14 +298,16 @@ function GraphTab() {
     try {
       let sparql: string;
       if (selectedParanet?.uri) {
-        const escapedUri = escapeSparqlString(selectedParanet.uri);
+        const safeIri = validateIri(selectedParanet.uri);
+        if (!safeIri) {
+          setError('Invalid paranet URI');
+          setLoading(false);
+          return;
+        }
+        const escapedUri = escapeSparqlString(safeIri);
         sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-          {
-            GRAPH ?g { ?s ?p ?o }
-            FILTER(STRSTARTS(STR(?g), "${escapedUri}"))
-          } UNION {
-            GRAPH <${escapedUri}> { ?s ?p ?o }
-          }
+          GRAPH ?g { ?s ?p ?o }
+          FILTER(?g = <${safeIri}> || STRSTARTS(STR(?g), "${escapedUri}/"))
         } LIMIT ${limit}`;
       } else {
         sparql = `CONSTRUCT { ?s ?p ?o } WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT ${limit}`;
@@ -311,8 +319,11 @@ function GraphTab() {
       try {
         let countSparql: string;
         if (selectedParanet?.uri) {
-          const escapedUri = escapeSparqlString(selectedParanet.uri);
-          countSparql = `SELECT (COUNT(*) AS ?count) WHERE { { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${escapedUri}")) } UNION { GRAPH <${escapedUri}> { ?s ?p ?o } } }`;
+          const safeIri = validateIri(selectedParanet.uri);
+          const escapedUri = safeIri ? escapeSparqlString(safeIri) : '';
+          countSparql = safeIri
+            ? `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${safeIri}> || STRSTARTS(STR(?g), "${escapedUri}/")) }`
+            : `SELECT (COUNT(*) AS ?count) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } }`;
         } else {
           countSparql = `SELECT (COUNT(*) AS ?count) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } }`;
         }

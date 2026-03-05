@@ -171,7 +171,7 @@ export function DashboardPage() {
 
   const peerCount = status?.connectedPeers ?? (status as any)?.peerCount ?? null;
   const totalAssets = (metrics as any)?.total_triples ?? null;
-  const agentCount = (agentData?.agents ?? []).length || null;
+  const agentCount = agentData?.agents != null ? agentData.agents.length : null;
 
   useEffect(() => {
     const t = setInterval(() => {

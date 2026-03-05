@@ -155,6 +155,11 @@ describe('dashboard uses runtime data', () => {
     expect(dashboard).toContain('agentCount');
   });
 
+  it('agentCount preserves zero (does not use || null)', () => {
+    expect(dashboard).not.toMatch(/agents.*\)\.length\s*\|\|\s*null/);
+    expect(dashboard).toMatch(/agentData\?\.agents\s*!=\s*null/);
+  });
+
   it('activity feed is labeled DEMO, not LIVE', () => {
     expect(dashboard).not.toMatch(/['"]LIVE['"]/);
     expect(dashboard).toContain('DEMO');
@@ -180,11 +185,17 @@ describe('sidebar uses live status', () => {
   });
 });
 
-describe('explorer graph query fallback', () => {
-  it('paranet query uses UNION with exact graph match for fallback', () => {
-    const explorer = readFile('pages/Explorer.tsx');
-    expect(explorer).toContain('UNION');
-    expect(explorer).toMatch(/GRAPH\s*<\$\{escapedUri\}>/);
+describe('explorer graph query safety', () => {
+  const explorer = readFile('pages/Explorer.tsx');
+
+  it('validates paranet URI as safe IRI before interpolating', () => {
+    expect(explorer).toContain('validateIri');
+    expect(explorer).toContain('SAFE_IRI_RE');
+  });
+
+  it('uses single FILTER with exact + prefix match (no UNION double-count)', () => {
+    expect(explorer).toMatch(/FILTER\(\?g\s*=\s*</);
+    expect(explorer).toMatch(/STRSTARTS\(STR\(\?g\),\s*".*\/"\)/);
   });
 });
 
