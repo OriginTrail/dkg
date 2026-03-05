@@ -6,7 +6,8 @@ export const AccessRequestSchema = new Type('AccessRequest')
   .add(new Field('kaUal', 1, 'string'))
   .add(new Field('requesterPeerId', 2, 'string'))
   .add(new Field('paymentProof', 3, 'bytes'))
-  .add(new Field('requesterSignature', 4, 'bytes'));
+  .add(new Field('requesterSignature', 4, 'bytes'))
+  .add(new Field('requesterPublicKey', 5, 'bytes'));
 
 export const AccessResponseSchema = new Type('AccessResponse')
   .add(new Field('granted', 1, 'bool'))
@@ -19,6 +20,8 @@ export interface AccessRequestMsg {
   requesterPeerId: string;
   paymentProof: Uint8Array;
   requesterSignature: Uint8Array;
+  /** Ed25519 public key for signature verification. */
+  requesterPublicKey?: Uint8Array;
 }
 
 export interface AccessResponseMsg {

@@ -232,10 +232,13 @@ export class DKGAgent {
     const publishHandler = new PublishHandler(this.store, this.eventBus);
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
 
-    // Register cross-agent query handler
+    // Register cross-agent query handler (deny-by-default for security)
     const queryAccessConfig: QueryAccessConfig = this.config.queryAccess ?? {
-      defaultPolicy: 'public',
+      defaultPolicy: 'deny',
     };
+    if (queryAccessConfig.defaultPolicy === 'public') {
+      this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
+    }
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
     this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
 

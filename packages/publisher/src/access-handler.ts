@@ -64,15 +64,26 @@ export class AccessHandler {
         return this.deny('KA not found');
       }
 
-      // Verify requester Ed25519 signature over (kaUal || paymentProof)
-      if (request.requesterSignature.length > 0) {
+      // Require signature for non-public access policies
+      if (meta.accessPolicy !== 'public') {
+        if (!request.requesterSignature || request.requesterSignature.length === 0) {
+          return this.deny('Access denied: signature required for non-public access');
+        }
+        if (!request.requesterPublicKey || request.requesterPublicKey.length === 0) {
+          return this.deny('Access denied: public key required for signature verification');
+        }
+
         const message = new TextEncoder().encode(
           request.kaUal + toHex(request.paymentProof),
         );
-        // We need the requester's public key to verify. For now we verify
-        // the signature was produced by a valid Ed25519 key by attempting
-        // verification if a public key is derivable from the peer ID.
-        // Full payment proof verification deferred to Part 2.
+        const valid = await ed25519Verify(
+          request.requesterSignature,
+          message,
+          request.requesterPublicKey,
+        );
+        if (!valid) {
+          return this.deny('Access denied: invalid signature');
+        }
       }
 
       // Enforce access policy
@@ -95,7 +106,7 @@ export class AccessHandler {
           return this.deny('Access denied: not on allow list');
         }
       }
-      // 'public' policy: no restrictions
+      // 'public' policy: no restrictions (signature optional)
 
       const hasPrivate =
         this.privateStore.hasPrivateTriples(meta.paranetId, meta.rootEntity) ||

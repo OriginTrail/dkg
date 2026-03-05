@@ -69,6 +69,21 @@ describe('Protobuf: AccessRequest round-trip', () => {
     expect(decoded.kaUal).toBe(original.kaUal);
     expect(decoded.requesterPeerId).toBe('QmRequester');
   });
+
+  it('round-trips requesterPublicKey', () => {
+    const pubKey = new Uint8Array(32).fill(0xab);
+    const original = {
+      kaUal: 'did:dkg:base:8453/0xKCS/1/1',
+      requesterPeerId: 'QmRequester',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(64).fill(0xcd),
+      requesterPublicKey: pubKey,
+    };
+    const encoded = encodeAccessRequest(original);
+    const decoded = decodeAccessRequest(encoded);
+    expect(decoded.requesterPublicKey).toBeDefined();
+    expect(new Uint8Array(decoded.requesterPublicKey!)).toEqual(pubKey);
+  });
 });
 
 describe('Protobuf: WorkspacePublishRequest round-trip', () => {

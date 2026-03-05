@@ -163,4 +163,34 @@ describe('Access Protocol', () => {
       expect(quad.subject).toContain(ENTITY);
     }
   }, 20000);
+
+  it('AccessClient sends requesterPublicKey for ownerOnly access', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA);
+
+    const onChain = result.onChainResult!;
+    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+
+    await storeA.insert([
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeB.peerId}"`, graph: metaGraph },
+    ]);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(true);
+    expect(accessResult.quads.length).toBe(2);
+  }, 20000);
 });

@@ -48,6 +48,7 @@ export class AccessClient {
       requesterPeerId: this.peerId,
       paymentProof,
       requesterSignature: signature,
+      requesterPublicKey: this.keypair.publicKey,
     });
 
     const responseData = await this.router.send(
