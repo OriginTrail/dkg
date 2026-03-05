@@ -1,7 +1,8 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetDataGraphUri, paranetMetaGraphUri,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic,
+  paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
@@ -31,6 +32,8 @@ import { multiaddr } from '@multiformats/multiaddr';
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
+const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
+const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
 export interface DKGAgentConfig {
   name: string;
@@ -74,6 +77,8 @@ export interface DKGAgentConfig {
   queryAccess?: QueryAccessConfig;
   /** Additional paranet IDs to sync on peer connect (beyond system paranets). */
   syncParanets?: string[];
+  /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
+  workspaceTtlMs?: number;
 }
 
 /**
@@ -106,6 +111,7 @@ export class DKGAgent {
 
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
+  private workspaceCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly config: DKGAgentConfig;
   private started = false;
 
@@ -317,41 +323,103 @@ export class DKGAgent {
 
     // Register sync handler: responds with a page of data + meta triples.
     // Request format: "paranetId|offset|limit"  (offset/limit default to 0/500)
+    //   or: "workspace:paranetId|offset|limit" for workspace graph sync
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
     this.router.register(PROTOCOL_SYNC, async (data) => {
       const text = new TextDecoder().decode(data).trim();
       const [paranetPart, offsetStr, limitStr] = text.split('|');
-      const paranetId = paranetPart || SYSTEM_PARANETS.AGENTS;
       const offset = parseInt(offsetStr, 10) || 0;
       const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
 
-      const dataGraph = paranetDataGraphUri(paranetId);
-      const metaGraph = paranetMetaGraphUri(paranetId);
+      const isWorkspace = paranetPart.startsWith('workspace:');
+      const paranetId = isWorkspace ? paranetPart.slice('workspace:'.length) : (paranetPart || SYSTEM_PARANETS.AGENTS);
       const nquads: string[] = [];
 
-      const dataResult = await this.store.query(
-        `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-      );
-      if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
-        return new TextEncoder().encode('');
-      }
-      for (const b of dataResult.bindings) {
-        const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-        nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
-      }
+      if (isWorkspace) {
+        const wsGraph = paranetWorkspaceGraphUri(paranetId);
+        const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+        const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
 
-      // Include the full meta graph on the first page so the receiver
-      // can verify merkle roots. On subsequent pages it's redundant but
-      // small enough to re-send.
-      if (offset === 0) {
-        const metaResult = await this.store.query(
-          `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+        // Build a set of non-expired root entities so we only serve fresh data.
+        let allowedEntities: Set<string> | null = null;
+        if (wsTtl > 0) {
+          const cutoff = new Date(Date.now() - wsTtl).toISOString();
+          const liveOps = await this.store.query(
+            `SELECT ?re WHERE {
+              GRAPH <${wsMetaGraph}> {
+                ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+                ?op <http://dkg.io/ontology/publishedAt> ?ts .
+                ?op <http://dkg.io/ontology/rootEntity> ?re .
+                FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+              }
+            }`,
+          );
+          if (liveOps.type === 'bindings') {
+            allowedEntities = new Set(liveOps.bindings.map((b: any) => b['re']).filter(Boolean));
+          }
+        }
+
+        const wsResult = await this.store.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
         );
-        if (metaResult.type === 'bindings') {
-          for (const b of metaResult.bindings) {
-            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
+        if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
+          return new TextEncoder().encode('');
+        }
+        for (const b of wsResult.bindings) {
+          if (allowedEntities && !allowedEntities.has(b['s'])) continue;
+          const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+          nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
+        }
+
+        if (offset === 0) {
+          // Only send meta for non-expired operations
+          const metaQuery = wsTtl > 0
+            ? `SELECT ?s ?p ?o WHERE {
+                GRAPH <${wsMetaGraph}> { ?s ?p ?o }
+                FILTER EXISTS {
+                  GRAPH <${wsMetaGraph}> {
+                    ?s <http://dkg.io/ontology/publishedAt> ?ts .
+                    FILTER(?ts >= "${new Date(Date.now() - wsTtl).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                  }
+                }
+              } ORDER BY ?s ?p ?o`
+            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsMetaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`;
+
+          const metaResult = await this.store.query(metaQuery);
+          if (metaResult.type === 'bindings') {
+            for (const b of metaResult.bindings) {
+              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
+            }
+          }
+        }
+
+        if (nquads.length === 0) return new TextEncoder().encode('');
+      } else {
+        const dataGraph = paranetDataGraphUri(paranetId);
+        const metaGraph = paranetMetaGraphUri(paranetId);
+
+        const dataResult = await this.store.query(
+          `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+        );
+        if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
+          return new TextEncoder().encode('');
+        }
+        for (const b of dataResult.bindings) {
+          const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+          nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
+        }
+
+        if (offset === 0) {
+          const metaResult = await this.store.query(
+            `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`,
+          );
+          if (metaResult.type === 'bindings') {
+            for (const b of metaResult.bindings) {
+              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
+              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
+            }
           }
         }
       }
@@ -390,9 +458,15 @@ export class DKGAgent {
           this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${peer.protocols.join(', ')})`);
           return;
         }
-        this.log.info(ctx, `Syncing agents paranet from peer ${shortPeer}...`);
+        this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
         const synced = await this.syncFromPeer(remotePeer);
-        this.log.info(ctx, `Synced ${synced} triples from peer ${shortPeer}`);
+        this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+
+        const wsParanets = this.config.syncParanets ?? [];
+        if (wsParanets.length > 0) {
+          const wsSynced = await this.syncWorkspaceFromPeer(remotePeer, wsParanets);
+          this.log.info(ctx, `Synced ${wsSynced} workspace triples from peer ${shortPeer}`);
+        }
       } catch (err: any) {
         this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${err.message}`);
       }
@@ -407,6 +481,16 @@ export class DKGAgent {
     const alreadyConnected = this.node.libp2p.getPeers();
     for (const pid of alreadyConnected) {
       setTimeout(() => trySyncFromPeer(pid.toString()), 3000);
+    }
+
+    // Start periodic workspace cleanup
+    const ttl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+    if (ttl > 0) {
+      this.cleanupExpiredWorkspace().catch(() => {});
+      this.workspaceCleanupTimer = setInterval(() => {
+        this.cleanupExpiredWorkspace().catch(() => {});
+      }, WORKSPACE_CLEANUP_INTERVAL_MS);
+      if (this.workspaceCleanupTimer.unref) this.workspaceCleanupTimer.unref();
     }
   }
 
@@ -497,6 +581,191 @@ export class DKGAgent {
       this.log.warn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
+  }
+
+  /**
+   * Pull workspace graph triples for the given paranets from a remote peer.
+   * Workspace data is not merkle-verified (no chain finality) — it is
+   * accepted as-is and merged into the local workspace + workspace_meta graphs.
+   * The workspaceOwnedEntities set is updated so Rule 4 stays consistent.
+   */
+  async syncWorkspaceFromPeer(
+    remotePeerId: string,
+    paranetIds: string[] = [...(this.config.syncParanets ?? [])],
+  ): Promise<number> {
+    const ctx = createOperationContext('sync');
+    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
+    let totalSynced = 0;
+
+    try {
+      for (const pid of paranetIds) {
+        const wsGraph = paranetWorkspaceGraphUri(pid);
+        const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+
+        const allQuads: Quad[] = [];
+        let offset = 0;
+        this.log.info(ctx, `Syncing workspace for paranet "${pid}" from ${remotePeerId}`);
+
+        while (true) {
+          if (Date.now() > deadline) {
+            this.log.warn(ctx, `Workspace sync timeout (${allQuads.length} triples received so far)`);
+            break;
+          }
+
+          const payload = new TextEncoder().encode(`workspace:${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+
+          const responseBytes = await withRetry(
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload),
+            {
+              maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
+              baseDelayMs: 1000,
+              onRetry: (attempt, delay, err) => {
+                this.log.warn(ctx, `Workspace sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} offset=${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+              },
+            },
+          );
+
+          const nquadsText = new TextDecoder().decode(responseBytes).trim();
+          if (!nquadsText) break;
+
+          const quads = parseNQuads(nquadsText);
+          if (quads.length === 0) break;
+          allQuads.push(...quads);
+
+          const wsCount = quads.filter(q => q.graph === wsGraph).length;
+          offset += wsCount;
+          this.log.info(ctx, `  workspace page: ${quads.length} triples (${allQuads.length} total)`);
+          if (wsCount < SYNC_PAGE_SIZE) break;
+        }
+
+        if (allQuads.length === 0) continue;
+
+        const wsQuads = allQuads.filter(q => q.graph === wsGraph);
+        const wsMetaQuads = allQuads.filter(q => q.graph === wsMetaGraph);
+
+        const graphManager = new GraphManager(this.store);
+        await graphManager.ensureParanet(pid);
+
+        if (wsQuads.length > 0) {
+          await this.store.insert(wsQuads);
+          totalSynced += wsQuads.length;
+        }
+        if (wsMetaQuads.length > 0) {
+          await this.store.insert(wsMetaQuads);
+          totalSynced += wsMetaQuads.length;
+        }
+
+        // Update workspaceOwnedEntities for Rule 4 consistency.
+        // Extract rootEntities from the workspace meta quads.
+        const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
+        if (!this.workspaceOwnedEntities.has(pid)) {
+          this.workspaceOwnedEntities.set(pid, new Set());
+        }
+        const ownedSet = this.workspaceOwnedEntities.get(pid)!;
+        for (const q of wsMetaQuads) {
+          if (q.predicate === DKG_ROOT_ENTITY) {
+            const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
+            ownedSet.add(entity);
+          }
+        }
+
+        // Also discover root entities from workspace quads directly
+        // (subjects that are not blank nodes or skolemized URIs).
+        for (const q of wsQuads) {
+          if (!q.subject.startsWith('_:') && !q.subject.includes('/.well-known/genid/')) {
+            ownedSet.add(q.subject);
+          }
+        }
+
+        this.log.info(ctx, `Workspace sync for "${pid}": ${wsQuads.length} data + ${wsMetaQuads.length} meta triples`);
+      }
+      if (totalSynced > 0) {
+        this.log.info(ctx, `Workspace sync complete: ${totalSynced} triples from ${remotePeerId}`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Workspace sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return totalSynced;
+  }
+
+  /**
+   * Remove expired workspace operations and their data.
+   * Queries workspace_meta for operations with publishedAt older than the TTL,
+   * deletes the corresponding triples from workspace and workspace_meta,
+   * and removes the root entities from workspaceOwnedEntities.
+   */
+  async cleanupExpiredWorkspace(): Promise<number> {
+    const ttl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+    if (ttl <= 0) return 0;
+
+    const ctx = createOperationContext('workspace');
+    const cutoff = new Date(Date.now() - ttl).toISOString();
+    let totalDeleted = 0;
+
+    try {
+      const graphManager = new GraphManager(this.store);
+      const paranets = await graphManager.listParanets();
+
+      for (const pid of paranets) {
+        const wsGraph = paranetWorkspaceGraphUri(pid);
+        const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+
+        const expiredOps = await this.store.query(
+          `SELECT ?op WHERE {
+            GRAPH <${wsMetaGraph}> {
+              ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
+              ?op <http://dkg.io/ontology/publishedAt> ?ts .
+              FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+            }
+          }`,
+        );
+
+        if (expiredOps.type !== 'bindings' || expiredOps.bindings.length === 0) continue;
+
+        for (const row of expiredOps.bindings) {
+          const opUri = row['op'];
+          if (!opUri) continue;
+
+          const rootEntitiesResult = await this.store.query(
+            `SELECT ?re WHERE {
+              GRAPH <${wsMetaGraph}> {
+                <${opUri}> <http://dkg.io/ontology/rootEntity> ?re .
+              }
+            }`,
+          );
+
+          const rootEntities: string[] = [];
+          if (rootEntitiesResult.type === 'bindings') {
+            for (const r of rootEntitiesResult.bindings) {
+              if (r['re']) rootEntities.push(r['re']);
+            }
+          }
+
+          for (const re of rootEntities) {
+            const deleted = await this.store.deleteBySubjectPrefix(wsGraph, re);
+            totalDeleted += deleted;
+          }
+
+          const metaDeleted = await this.store.deleteBySubjectPrefix(wsMetaGraph, opUri);
+          totalDeleted += metaDeleted;
+
+          const ownedSet = this.workspaceOwnedEntities.get(pid);
+          if (ownedSet) {
+            for (const re of rootEntities) {
+              ownedSet.delete(re);
+            }
+          }
+        }
+
+        if (expiredOps.bindings.length > 0) {
+          this.log.info(ctx, `Workspace cleanup for "${pid}": evicted ${expiredOps.bindings.length} expired operation(s), ${totalDeleted} triples`);
+        }
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Workspace cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return totalDeleted;
   }
 
   async publishProfile(): Promise<PublishResult> {
@@ -1130,6 +1399,10 @@ export class DKGAgent {
     if (this.chainPoller) {
       this.chainPoller.stop();
       this.chainPoller = null;
+    }
+    if (this.workspaceCleanupTimer) {
+      clearInterval(this.workspaceCleanupTimer);
+      this.workspaceCleanupTimer = null;
     }
     await this.node.stop();
     this.started = false;
