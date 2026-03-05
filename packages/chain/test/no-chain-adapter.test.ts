@@ -42,7 +42,14 @@ describe('NoChainAdapter', () => {
     ['revealParanetMetadata', () => adapter.revealParanetMetadata('p1', 'name', 'desc')],
   ];
 
-  it.each(throwingMethods)('%s throws "No blockchain configured"', async (name, fn) => {
+  it.each(throwingMethods)('%s throws "No blockchain configured"', async (_name, fn) => {
     await expect(fn()).rejects.toThrow('No blockchain configured');
+  });
+
+  it('listenForEvents throws "No blockchain configured"', async () => {
+    const iter = adapter.listenForEvents({ eventTypes: ['test'] });
+    await expect(async () => {
+      for await (const _event of iter) { /* consume */ }
+    }).rejects.toThrow('No blockchain configured');
   });
 });

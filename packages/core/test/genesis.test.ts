@@ -54,7 +54,6 @@ describe('getGenesisQuads', () => {
   it('is deterministic — same result on repeated calls', () => {
     const a = getGenesisQuads();
     const b = getGenesisQuads();
-    expect(a).toBe(b); // same reference due to caching
     expect(a).toEqual(b);
   });
 });

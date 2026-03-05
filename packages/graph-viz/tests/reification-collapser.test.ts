@@ -60,9 +60,10 @@ describe('ReificationCollapser', () => {
   it('attaches annotations from collapsed node to subject node property', () => {
     const model = new GraphModel();
 
-    model.addTriple({ subject: 'urn:alice', predicate: 'http://ex.org/knows', object: 'urn:bob' });
+    // Use a literal object so it's stored as a property (not an edge)
+    model.addTriple({ subject: 'urn:alice', predicate: 'http://ex.org/age', object: '"30"' });
 
-    addStandardReification(model, 'urn:stmt1', 'urn:alice', 'http://ex.org/knows', 'urn:bob', [
+    addStandardReification(model, 'urn:stmt1', 'urn:alice', 'http://ex.org/age', '"30"', [
       { pred: 'http://ex.org/confidence', val: '"0.95"' },
     ]);
 
@@ -72,13 +73,14 @@ describe('ReificationCollapser', () => {
     const aliceNode = model.getNode('urn:alice');
     expect(aliceNode).toBeDefined();
 
-    const knowsProps = aliceNode!.properties.get('http://ex.org/knows');
-    if (knowsProps) {
-      const hasAnnotation = knowsProps.some(pv =>
-        pv.annotations?.some(a => a.predicate === 'http://ex.org/confidence'),
-      );
-      expect(hasAnnotation).toBe(true);
-    }
+    const ageProps = aliceNode!.properties.get('http://ex.org/age');
+    expect(ageProps).toBeDefined();
+    expect(ageProps!.length).toBeGreaterThan(0);
+
+    const hasAnnotation = ageProps!.some(pv =>
+      pv.annotations?.some(a => a.predicate === 'http://ex.org/confidence' && a.value === '"0.95"'),
+    );
+    expect(hasAnnotation).toBe(true);
   });
 
   it('skips statements without a reified subject', () => {
