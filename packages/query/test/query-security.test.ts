@@ -213,4 +213,40 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.status).toBe('ERROR');
     expect(response.error).toContain('GRAPH clauses are not allowed');
   });
+
+  it('rejects SPARQL with prefixed IRI in GRAPH clause', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `PREFIX ex: <${OTHER_GRAPH}/> SELECT ?name WHERE { GRAPH ex:data { ?s <${SCHEMA_NAME}> ?name } }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH clauses are not allowed');
+  });
+
+  it('rejects SPARQL with prefixed IRI in FROM clause', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `PREFIX ex: <${OTHER_GRAPH}/> SELECT ?name FROM ex:data WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+  });
+
+  it('rejects SPARQL with prefixed IRI in FROM NAMED clause', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `PREFIX ex: <${OTHER_GRAPH}/> SELECT ?name FROM NAMED ex:data WHERE { ?s <${SCHEMA_NAME}> ?name }`,
+      }),
+      'peer-attacker',
+    );
+
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+  });
 });

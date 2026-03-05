@@ -288,13 +288,14 @@ export class QueryHandler {
     // Block explicit GRAPH clauses that could bypass paranet scoping.
     // The query engine's wrapWithGraph() skips wrapping when it detects
     // an existing GRAPH clause, which would allow cross-paranet access.
-    // Must catch both GRAPH <uri> and GRAPH ?var forms.
-    if (/\bGRAPH\s*[?$<]/i.test(sparql)) {
+    // Uses \bGRAPH\s+ to catch all forms: <uri>, ?var, and prefix:name.
+    if (/\bGRAPH\s+/i.test(sparql)) {
       return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
-    // Block FROM/FROM NAMED clauses that could also bypass graph scoping
-    if (/\bFROM\s+(NAMED\s+)?</i.test(sparql)) {
+    // Block FROM/FROM NAMED clauses that could also bypass graph scoping.
+    // Uses \bFROM\s+ to catch all IRI forms: <uri>, prefix:name, etc.
+    if (/\bFROM\s+/i.test(sparql)) {
       return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
     }
 
