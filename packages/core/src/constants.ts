@@ -48,6 +48,10 @@ export function paranetWorkspaceMetaGraphUri(paranetId: string): string {
   return `did:dkg:paranet:${paranetId}/_workspace_meta`;
 }
 
+export function paranetAppTopic(paranetId: string): string {
+  return `dkg/paranet/${paranetId}/app`;
+}
+
 export function paranetWorkspaceTopic(paranetId: string): string {
   return `dkg/paranet/${paranetId}/workspace`;
 }

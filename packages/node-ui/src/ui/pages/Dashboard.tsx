@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics } from '../api.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents } from '../api.js';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────
 
@@ -28,7 +28,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
         <textarea placeholder="Paste your exported memories here..." />
         <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
           <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
-          <button style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700 }}>Publish as Knowledge Assets</button>
+          <button disabled style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700, opacity: 0.5, cursor: 'default' }} title="Coming soon">Publish as Knowledge Assets (coming soon)</button>
         </div>
       </div>
     </div>
@@ -143,7 +143,7 @@ interface FeedEvent { id: number; agent: typeof FEED_AGENTS[0]; action: string; 
 let _fid = 0;
 const genEvent = (): FeedEvent => ({ id: _fid++, agent: rnd(FEED_AGENTS), action: rnd([...ACTIONS]), ual: genUAL(), verified: Math.random() > 0.15 });
 
-const PARANETS = [
+const FALLBACK_PARANETS = [
   { name: 'OriginTrail Game', assets: 847,  agents: 12, color: 'var(--green)' },
   { name: 'DeSci Research',   assets: 1203, agents: 8,  color: 'var(--blue)' },
   { name: 'Supply Chain EU',  assets: 797,  agents: 4,  color: 'var(--amber)' },
@@ -156,6 +156,23 @@ export function DashboardPage() {
   const [feed, setFeed] = useState<FeedEvent[]>(() => Array.from({ length: 12 }, genEvent));
   const { data: status } = useFetch(fetchStatus, [], 10_000);
   const { data: metrics } = useFetch(fetchMetrics, [], 10_000);
+  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
+  const { data: agentData } = useFetch(fetchAgents, [], 15_000);
+
+  const PARANET_COLORS = ['var(--green)', 'var(--blue)', 'var(--amber)', 'var(--purple)', '#f472b6', '#22d3ee'];
+  const paranets = (paranetData?.paranets ?? []).map((p: any, i: number) => ({
+    id: p.id ?? `paranet-${i}`,
+    name: p.name ?? p.id ?? `Paranet ${i + 1}`,
+    assets: p.assetCount ?? p.assets ?? '—',
+    agents: p.agentCount ?? p.agents ?? '—',
+    color: PARANET_COLORS[i % PARANET_COLORS.length],
+  }));
+  const displayParanets = paranets.length > 0 ? paranets : FALLBACK_PARANETS;
+  const isLiveParanets = paranets.length > 0;
+
+  const peerCount = status?.connectedPeers ?? (status as any)?.peerCount ?? null;
+  const totalAssets = (metrics as any)?.total_triples ?? null;
+  const agentCount = agentData?.agents != null ? agentData.agents.length : null;
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -174,7 +191,7 @@ export function DashboardPage() {
         <div>
           <h1 className="serif" style={{ fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
           <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-            Your node is live and participating in 3 paranets
+            {status ? `Your node is live${paranets.length ? ` and participating in ${paranets.length} paranet${paranets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
           </p>
         </div>
         <button
@@ -186,11 +203,12 @@ export function DashboardPage() {
         </button>
       </div>
 
-      {/* Stat cards — 2 only */}
+      {/* Stat cards */}
       <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
         {[
-          { label: 'Knowledge Assets', value: (metrics as any)?.total_triples?.toLocaleString() ?? '2,847', sub: '↑ 142 this week', color: 'var(--green)' },
-          { label: 'Active Agents', value: '6', sub: 'Across 3 paranets', color: 'var(--blue)' },
+          { label: 'Knowledge Assets', value: totalAssets != null ? Number(totalAssets).toLocaleString() : '—', sub: totalAssets != null ? 'from node metrics' : 'loading…', color: 'var(--green)' },
+          { label: 'Connected Peers', value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
+          { label: 'Agents Discovered', value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
         ].map(s => (
           <div className="stat-card" key={s.label}>
             <div className="accent" style={{ background: `linear-gradient(90deg,${s.color}44,transparent)` }} />
@@ -208,7 +226,7 @@ export function DashboardPage() {
           <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
             <span style={{ fontSize: 12, fontWeight: 700 }}>DKG v9 Testnet</span>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>14 NODES</span>
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{peerCount != null ? `${peerCount} PEERS` : '… PEERS'}</span>
           </div>
           <NetworkViz />
         </div>
@@ -216,9 +234,12 @@ export function DashboardPage() {
         {/* Paranets + quick actions */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div className="card" style={{ padding: '16px 18px', flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Paranets</div>
-            {PARANETS.map(p => (
-              <div key={p.name} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, marginBottom: 12 }}>
+              Paranets
+              {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
+            </div>
+            {displayParanets.map((p: any, i: number) => (
+              <div key={p.id ?? `fallback-${i}`} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', marginBottom: 6, cursor: 'pointer' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
@@ -258,7 +279,7 @@ export function DashboardPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
             <span style={{ fontSize: 13, fontWeight: 700 }}>Agent Activity Feed</span>
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>LIVE</span>
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>DEMO</span>
           </div>
           <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>All paranets</span>
         </div>

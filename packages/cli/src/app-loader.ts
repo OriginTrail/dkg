@@ -99,6 +99,8 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
   return apps;
 }
 
+const ALLOWED_PROTOS = new Set(['http', 'https']);
+
 /**
  * Derive a client-facing origin URL from request headers.
  * Uses `x-forwarded-proto` for scheme (respects reverse proxies/TLS termination)
@@ -107,7 +109,8 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
 export function deriveOrigin(req: IncomingMessage, port: number): string {
   const rawProto = req.headers['x-forwarded-proto'];
   const protoHeader = Array.isArray(rawProto) ? rawProto[0] : rawProto;
-  const proto = protoHeader?.split(',')[0]?.trim() || 'http';
+  const candidate = protoHeader?.split(',')[0]?.trim()?.toLowerCase();
+  const proto = candidate && ALLOWED_PROTOS.has(candidate) ? candidate : 'http';
   const reqHost = req.headers.host;
   const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
   return `${proto}://${hostname}:${port}`;
@@ -214,9 +217,10 @@ async function serveAppStatic(
 
 /**
  * Start a separate-origin HTTP server for app static files.
- * Running on a different port gives each app a different browser origin,
- * providing real isolation (no sandbox hacks needed) while allowing
- * localStorage, sessionStorage, and normal asset loading.
+ * Running on a different port from the main API gives cross-origin
+ * isolation between the Node UI and app iframes. Note: all apps
+ * currently share a single static-server origin (same port), so
+ * inter-app isolation relies on iframe sandboxing, not separate origins.
  */
 export async function startAppStaticServer(
   apps: LoadedApp[],

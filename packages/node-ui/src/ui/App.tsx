@@ -38,11 +38,11 @@ function useInstalledApps(): InstalledApp[] {
   return apps;
 }
 
-function AppsNavSection() {
+function AppsNavSection({ installedApps }: { installedApps: InstalledApp[] }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
-  const isAppsActive = location.pathname.startsWith('/apps');
+  const isAppsActive = location.pathname.startsWith('/apps') || location.pathname.startsWith('/app/');
 
   return (
     <>
@@ -52,7 +52,7 @@ function AppsNavSection() {
       >
         {NAV_ICONS.play}
         <span>Apps</span>
-        <span className="nav-badge">NEW</span>
+        {installedApps.length > 0 && <span className="nav-badge">{installedApps.length}</span>}
         <span style={{ marginLeft: 'auto', transition: 'transform .2s', transform: open ? 'rotate(180deg)' : 'none', display: 'flex' }}>
           {chevronIcon}
         </span>
@@ -63,17 +63,44 @@ function AppsNavSection() {
           onClick={() => { navigate('/apps'); }}
         >
           🎮 OriginTrail Game
-          <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--green-dim)', color: 'var(--green)', fontWeight: 700, marginLeft: 'auto' }}>
-            HELLO WORLD
-          </span>
         </button>
+        {installedApps.filter(a => a.id !== 'origin-trail-game').map(a => (
+          <button
+            key={a.id}
+            className={`apps-sub-btn${location.pathname === `/app/${a.id}` ? ' active-sub' : ''}`}
+            onClick={() => { navigate(`/app/${a.id}`); }}
+          >
+            {a.label}
+          </button>
+        ))}
       </div>
     </>
   );
 }
 
+function useLiveStatus() {
+  const [status, setStatus] = useState<any>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = () => {
+      const token = (window as any).__DKG_TOKEN__;
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      fetch('/api/status', { headers })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (!cancelled) setStatus(d); })
+        .catch(() => { if (!cancelled) setStatus(null); });
+    };
+    poll();
+    const t = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+  return status;
+}
+
 export function App() {
   const installedApps = useInstalledApps();
+  const liveStatus = useLiveStatus();
 
   return (
     <div className="app-layout">
@@ -101,7 +128,7 @@ export function App() {
           <NavLink to="/messages" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
             {NAV_ICONS.messages}<span>Messages</span>
           </NavLink>
-          <AppsNavSection />
+          <AppsNavSection installedApps={installedApps} />
           <NavLink to="/settings" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
             {NAV_ICONS.settings}<span>Settings</span>
           </NavLink>
@@ -109,11 +136,15 @@ export function App() {
 
         <div className="sidebar-footer">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-            <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 8px rgba(74,222,128,.4)', display: 'inline-block' }} />
-            <span style={{ color: 'var(--green)', fontWeight: 600 }}>Online</span>
-            <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>14 peers</span>
+            <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: liveStatus ? 'var(--green)' : 'var(--text-dim)', boxShadow: liveStatus ? '0 0 8px rgba(74,222,128,.4)' : 'none', display: 'inline-block' }} />
+            <span style={{ color: liveStatus ? 'var(--green)' : 'var(--text-muted)', fontWeight: 600 }}>{liveStatus ? 'Online' : 'Connecting…'}</span>
+            <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>
+              {liveStatus?.connectedPeers != null ? `${liveStatus.connectedPeers} peers` : liveStatus?.peerCount != null ? `${liveStatus.peerCount} peers` : '…'}
+            </span>
           </div>
-          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>Base Sepolia · syncing…</div>
+          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+            {liveStatus?.networkId ?? liveStatus?.chainId ?? 'unknown network'}{liveStatus?.syncing ? ' · syncing…' : ''}
+          </div>
         </div>
       </aside>
 

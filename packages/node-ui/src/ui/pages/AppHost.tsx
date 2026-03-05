@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 
 export interface InstalledApp {
@@ -26,8 +26,25 @@ export interface InstalledApp {
 export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
   const { appId } = useParams<{ appId: string }>();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [src, setSrc] = useState<string | null>(null);
+  const triedStatic = useRef(false);
 
   const app = apps.find(a => a.id === appId);
+
+  useEffect(() => {
+    if (!app) return;
+    let cancelled = false;
+    triedStatic.current = false;
+
+    if (app.staticUrl) {
+      fetch(app.staticUrl, { method: 'HEAD', mode: 'no-cors' })
+        .then(() => { if (!cancelled) setSrc(app.staticUrl!); })
+        .catch(() => { if (!cancelled) setSrc(`${app.path}/`); });
+    } else {
+      setSrc(`${app.path}/`);
+    }
+    return () => { cancelled = true; };
+  }, [app?.id, app?.staticUrl, app?.path]);
 
   const sendToken = useCallback(() => {
     const token = (window as any).__DKG_TOKEN__;
@@ -38,6 +55,14 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
       );
     }
   }, []);
+
+  const handleError = useCallback(() => {
+    if (!app) return;
+    if (app.staticUrl && !triedStatic.current) {
+      triedStatic.current = true;
+      setSrc(`${app.path}/`);
+    }
+  }, [app]);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -57,13 +82,14 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
     );
   }
 
-  const iframeSrc = app.staticUrl || `${app.path}/`;
+  if (!src) return null;
 
   return (
     <iframe
       ref={iframeRef}
-      src={iframeSrc}
+      src={src}
       onLoad={sendToken}
+      onError={handleError}
       sandbox="allow-scripts allow-forms allow-popups"
       style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
       title={app.label}
