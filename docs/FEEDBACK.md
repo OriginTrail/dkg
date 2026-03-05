@@ -32,16 +32,16 @@ Issue IDs stay stable on purpose, so references do not break.
 
 | Area | Risk | Severity | Linked items |
 |---|---|---|---|
-| Merge conflicts | `dkg-agent.ts` and `daemon.ts` are hotspots for parallel work | High | I-012 |
-| Updatability model | Forking the full monorepo does not scale for upstream updates | High | I-018 |
+| Merge conflicts | `dkg-agent.ts` (1451 lines, 7+ concerns) and `daemon.ts` (943 lines, 5+ concerns) are hotspots | High | I-012 |
+| Updatability model | Fork-and-edit is the only model (packages not published to npm) | High | I-018 |
 | Reliability contract | Queueless mode has no clear ownership for retries/finality checks | High | I-011 |
 | Extension rules | Upstreaming and extension boundaries are not explicit | High | I-013 |
 | Plugin runtime | No first-class plugin kernel yet | High | I-017 |
-| Publish recovery | In-flight publish state is lost on restart | High | I-001 |
+| Publish recovery | In-flight publish state is lost on restart; tentative data becomes permanently orphaned | High | I-001 |
 | Query exposure | Remote queries are too open by default and can bypass graph limits | High | I-004, I-009 |
 | Publish verification speed | GossipSub broadcast missing txHash/blockNumber forces receivers to poll chain | High | I-022 |
 | Signature trust | Receiver signature flow is unclear and effectively self-attested | High | I-003 |
-| Access checks | Private access verification is incomplete | High | I-005 |
+| Access checks | Private access verification is completely unimplemented (zero code behind misleading comment) | High | I-005 |
 | Update safety | Daemon auto-update can hard reset local state | High | I-006 |
 | Secrets | Keys/tokens are stored as plaintext on disk | Medium | I-007 |
 | Query architecture | Query handler depends on a concrete class | Medium | I-008 |
@@ -52,9 +52,9 @@ Issue IDs stay stable on purpose, so references do not break.
 
 ## Quick Clarifications (Requested)
 
-- `I-002`: same publish data can pass through different validation levels depending on entry path.
+- `I-002`: gossip ingestion skips all validation (structural, cryptographic, on-chain) and can mark unverified data as "confirmed" based on self-reported fields.
 - `I-003`: receiver approval is represented in a way that can currently be produced by publisher flow.
-- `I-005`: private-access verification path is partially implemented.
+- `I-005`: private-access verification is completely unimplemented — `ed25519Verify` is imported but never called, the verification block is a no-op behind a misleading comment.
 - `I-008`: query handler is hard-wired to one engine class, so swapping/testing is harder.
 - `I-009`: specific SPARQL shapes can bypass intended paranet query limits.
 
@@ -62,19 +62,19 @@ Issue IDs stay stable on purpose, so references do not break.
 
 ### I-001 - No durable crash recovery for in-flight operations
 - Severity: High
-- What is happening: in-flight publish state is kept in memory (`pendingPublishes`) and not restored after restart.
-- Why it matters: a restart can lose publish progress.
+- What is happening: in-flight publish state is kept in memory (`pendingPublishes`, a plain `Map<string, PendingPublish>` at `publish-handler.ts:50`) and not restored after restart. No serialization, WAL, or journal exists.
+- Why it matters: a restart does not just lose publish progress — it creates **orphaned tentative data**. The quads and tentative metadata are persisted in the triple store (lines 257, 281), but the in-memory map that links them to expected on-chain confirmation (merkle root, KA range, publisher address) is gone. Post-restart, `confirmByMerkleRoot()` (line 86-108) finds nothing in the map and returns `false`, so even if the chain event arrives, the data can never be promoted to confirmed. The tentative timeout handle (line 284-287) is also lost, so orphaned tentative data is never expired or cleaned up. Additionally, `ownedEntities` tracking (line 46) is in-memory only, so entity-overlap validation after restart may allow duplicate root entities.
 - Decision option A (keep this design): make user-owned retries explicit, document it as a product contract, and expose clear status/finality APIs.
 - Decision option B (change, recommended): add a durable publish journal + startup reconciliation.
-- Evidence: `packages/publisher/src/publish-handler.ts:50`, `packages/publisher/src/publish-handler.ts:288`.
+- Evidence: `packages/publisher/src/publish-handler.ts:50`, `packages/publisher/src/publish-handler.ts:86-108`, `packages/publisher/src/publish-handler.ts:257`, `packages/publisher/src/publish-handler.ts:281`, `packages/publisher/src/publish-handler.ts:284-287`.
 
-### I-002 - Gossip ingestion path diverges from strict publish validation path
+### I-002 - Gossip ingestion path skips all validation that publish path enforces
 - Severity: High
-- What is happening: one ingest path stores gossip payloads directly, while another path uses stricter checks.
-- Why it matters: the same data can be accepted/rejected differently depending on route.
+- What is happening: the P2P protocol publish path (`PublishHandler.handlePublish`, `publish-handler.ts:174-331`) enforces 5 validation steps: `validatePublishRequest()` (line 195), merkle verification (lines 201-218), UAL consistency (lines 221-229), on-chain range ownership via `chainAdapter.verifyPublisherOwnsRange()` (lines 236-252), and signed ack (lines 315-326). The GossipSub broadcast path (`dkg-agent.ts:771-858`) skips **all** of these: it decodes the protobuf, parses N-Quads, and directly inserts into the store (`this.store.insert(normalized)` at line 812) with no validation. Errors are silently swallowed (line 856-857: `catch { // Silently handle malformed broadcasts }`).
+- Why it matters: this is not just a validation gap — it is a data injection vector. At line 840, the gossip path uses a heuristic `const isConfirmedOnChain = startKAId > 0 && !!request.publisherAddress` to decide confirmed vs tentative status. This trusts the gossip message's self-reported fields without any chain verification. A malicious peer can broadcast a message with fabricated `startKAId=1` and any `publisherAddress`, and the receiving node will store it as **confirmed** knowledge. No `validatePublishRequest`, no merkle verification, no UAL consistency check, no on-chain ownership check, no signed ack.
 - Decision option A (keep this design): mark gossip ingest as trusted/internal only and block it for untrusted peers.
-- Decision option B (change, recommended): use one shared validation pipeline for all publish ingress paths.
-- Evidence: `packages/agent/src/dkg-agent.ts:771`, `packages/agent/src/dkg-agent.ts:811`, `packages/publisher/src/publish-handler.ts:195`, `packages/publisher/src/publish-handler.ts:240`.
+- Decision option B (change, recommended): use one shared validation pipeline for all publish ingress paths. At minimum, require on-chain verification before marking gossip-received data as confirmed.
+- Evidence: `packages/agent/src/dkg-agent.ts:771-858` (gossip path), `packages/agent/src/dkg-agent.ts:812` (direct store insert), `packages/agent/src/dkg-agent.ts:840` (trusted heuristic), `packages/publisher/src/publish-handler.ts:195-252` (validation steps skipped).
 
 ### I-003 - Receiver-signature semantics are effectively self-attested in publisher path
 - Severity: High
@@ -92,13 +92,13 @@ Issue IDs stay stable on purpose, so references do not break.
 - Decision option B (change, recommended): switch to deny-by-default and require explicit allow rules.
 - Evidence: `packages/agent/src/dkg-agent.ts:236`, `packages/query/src/query-handler.ts:120`.
 
-### I-005 - Access protocol verification is incomplete
+### I-005 - Access protocol verification is completely unimplemented
 - Severity: High
-- What is happening: requester signature/payment checks are still partial.
-- Why it matters: private data controls are weaker than expected.
-- Decision option A (keep this design): keep feature marked experimental and off by default in production.
+- What is happening: requester signature and payment checks are not partial — they are **zero implementation**. In `access-handler.ts:67-76`, the `ed25519Verify` function is imported (line 6) but never called. The signature verification block constructs message bytes (`new TextEncoder().encode(request.kaUal + toHex(request.paymentProof))`) but does nothing with them. The comment says "we verify" but no verification code exists. Payment proof is explicitly deferred ("Full payment proof verification deferred to Part 2"). Additionally, the signature check is optional: `if (request.requesterSignature.length > 0)` means a requester can send an empty signature to skip the entire block. The `ownerOnly` and `allowList` policies (lines 79-97) do work based on `fromPeerId`, but there is no cryptographic proof the peer controls the claimed identity (no challenge-response, no signed nonce).
+- Why it matters: private data access controls are not "weaker than expected" — they are non-existent. Any peer on the allow list or querying under a `public` policy can access data with zero cryptographic proof of identity beyond the libp2p peer ID. The misleading comment creates a false sense of security.
+- Decision option A (keep this design): keep feature marked experimental and off by default in production. Remove the misleading comment.
 - Decision option B (change, recommended): finish requester signature + payment verification before production use.
-- Evidence: `packages/publisher/src/access-handler.ts:67`.
+- Evidence: `packages/publisher/src/access-handler.ts:6` (unused import), `packages/publisher/src/access-handler.ts:67-76` (no-op verification block), `packages/publisher/src/access-handler.ts:79-97` (identity-only access policy).
 
 ### I-006 - Auto-update uses destructive `git reset --hard` in daemon flow
 - Severity: High
@@ -150,11 +150,11 @@ Issue IDs stay stable on purpose, so references do not break.
 
 ### I-012 - Core integration files are merge-conflict hotspots
 - Severity: High
-- What is happening: too much orchestration lives in `dkg-agent.ts` and `daemon.ts`.
-- Why it matters: parallel work collides and merges are slow/risky.
+- What is happening: `dkg-agent.ts` is **1451 lines** with a single class mixing at least **7 concerns**: node lifecycle (lines 216-302, 1092-1128), protocol handler registration (lines 228-370), gossip subscription and message handling (lines 764-866), publishing orchestration (lines 600-670, 1130-1166), query delegation (lines 669-762), agent discovery and messaging (lines 496-566), and paranet management (lines 764-1078). `daemon.ts` is **943 lines** mixing at least **5 concerns**: process lifecycle (lines 34-384), HTTP API with 20+ route handlers (lines 326-802), metrics/dashboard (lines 214-301), authentication (lines 313-322), and auto-update (lines 863-943).
+- Why it matters: any change to publishing, querying, gossip handling, or API routes touches one of these two files. Two developers working on unrelated features (e.g., query improvements and a new API endpoint) will likely conflict. The original evidence lines (216, 764) understated the scope — they suggested ~550 lines of concern when the full file is nearly 3x that.
 - Decision option A (keep this design): keep file structure short term, but enforce strict code ownership and change windows.
 - Decision option B (change, recommended): split into smaller modules and keep top-level files thin.
-- Evidence: `packages/agent/src/dkg-agent.ts:216`, `packages/agent/src/dkg-agent.ts:764`, `packages/cli/src/daemon.ts:401`.
+- Evidence: `packages/agent/src/dkg-agent.ts` (1451 lines, 7+ concerns), `packages/cli/src/daemon.ts` (943 lines, 5+ concerns).
 
 ### I-013 - Extensibility seams exist, but upstreaming and interface strategy are under-specified
 - Severity: High
@@ -196,13 +196,13 @@ Issue IDs stay stable on purpose, so references do not break.
 - Decision option B (change, recommended): add a plugin kernel on top of `@dkg/agent` with explicit activation and checks.
 - Evidence: `packages/agent/src/dkg-agent.ts:46`, `packages/agent/src/dkg-agent.ts:305`, `packages/adapter-openclaw/src/DkgNodePlugin.ts:32`, `packages/storage/src/triple-store.ts:62`.
 
-### I-018 - Forking the full monorepo is not a scalable implementation model
+### I-018 - Forking the full monorepo is the only available implementation model
 - Severity: High
-- What is happening: implementations fork the whole monorepo and edit hotspot files.
-- Why it matters: upstream updates become expensive and merge conflicts grow.
+- What is happening: packages are **not published to npm** (README line 240: "The CLI is not yet published to npm. Until then, use `pnpm dkg` from the repo root."). There is no `@dkg/agent` on any registry. Fork-and-edit is not just the default path — it is the **only** path. The config surface (`DKGAgentConfig` at `dkg-agent.ts:34-83`) covers only basic settings: name, ports, relay peers, skills, store backend, chain config. Anything beyond these (custom protocol handlers, custom gossip logic, custom API routes, custom validation) requires source modification in the hotspot files. The `DKGAgent.create()` factory (line 133-214) hardcodes all component wiring with no extension points for custom composition.
+- Why it matters: upstream updates are not just expensive — they are the only option for getting fixes and features, and every implementer's fork will diverge in the same hotspot files. This compounds I-012 (merge hotspots) because the files most likely to be customized are the same files that mix 7+ concerns.
 - Decision option A (keep this design): allow forks only for short-lived prototypes with strict rebase windows.
-- Decision option B (change, recommended): move to package-consumption model (implementation repo + config + plugins), and treat full forks as last resort.
-- Evidence: `package.json:1`, `pnpm-workspace.yaml:1`, `packages/agent/src/dkg-agent.ts:216`, `packages/cli/src/daemon.ts:401`.
+- Decision option B (change, recommended): publish packages to npm, move to package-consumption model (implementation repo + config + plugins), and treat full forks as last resort.
+- Evidence: `README.md:240` (not published to npm), `pnpm-workspace.yaml:1-3` (all packages in one repo), `packages/agent/src/dkg-agent.ts:34-83` (limited config surface), `packages/agent/src/dkg-agent.ts:133-214` (hardcoded wiring in `create()`).
 
 ## Decision Asks for Architecture Owner
 
