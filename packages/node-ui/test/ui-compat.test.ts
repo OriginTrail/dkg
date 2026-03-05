@@ -34,7 +34,7 @@ describe('backward-compatible route redirects', () => {
     expect(app).toContain('path="/wallet"');
     expect(app).toContain('path="/integrations"');
     for (const route of ['/network', '/operations/*', '/wallet', '/integrations']) {
-      const pattern = new RegExp(`path="${route.replace('*', '\\*')}"[^>]*element=\\{<Navigate`);
+      const pattern = new RegExp(`path="${route.replace(/\*/g, '\\*')}"[^>]*element=\\{<Navigate`);
       expect(app).toMatch(pattern);
     }
   });
