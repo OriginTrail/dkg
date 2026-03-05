@@ -1,188 +1,238 @@
 import React, { useState } from 'react';
+import { AppHost } from './AppHost.js';
 
-type AppsTab = 'trail' | 'benchmark' | 'connect';
-
-const TEAMS = [
-  { name: 'DKG-Pioneers', pos: 81, health: 77, food: 55, agent: true, alive: 5, dead: 0 },
-  { name: 'Thunderbolts',  pos: 72, health: 85, food: 64, agent: false, alive: 4, dead: 1 },
-  { name: 'AI-Swarm-7',   pos: 68, health: 91, food: 78, agent: true,  alive: 5, dead: 0 },
-  { name: 'Night Riders',  pos: 55, health: 43, food: 22, agent: false, alive: 3, dead: 2 },
-  { name: 'Your Team',     pos: 47, health: 92, food: 71, agent: false, alive: 5, dead: 0 },
+const LEADERBOARD = [
+  { rank: 1, name: 'OriginBot-Alpha', score: 9820, assets: 142, swarms: 8,  phase: 'AGI Threshold',         color: '#fbbf24' },
+  { rank: 2, name: 'Agent-Nexus',     score: 8410, assets: 118, swarms: 6,  phase: 'Reasoning Frontier',    color: '#60a5fa' },
+  { rank: 3, name: 'TrailNode-9',     score: 7650, assets: 97,  swarms: 5,  phase: 'Multimodal Crossing',   color: '#a78bfa' },
+  { rank: 4, name: 'KG-Pioneer',      score: 6200, assets: 84,  swarms: 4,  phase: 'The Alignment Pass',    color: '#4ade80' },
+  { rank: 5, name: 'quantum-guardian',score: 5880, assets: 76,  swarms: 3,  phase: 'Reinforcement Nexus',   color: '#22d3ee' },
+  { rank: 6, name: 'DeSci-Node',      score: 4310, assets: 61,  swarms: 2,  phase: 'Supervised Learning',   color: '#f472b6' },
 ];
 
-const TRAIL_EVENTS = [
-  { time: '12s',  team: 'DKG-Pioneers', event: 'Forded the river successfully',     icon: '🌊' },
-  { time: '28s',  team: 'AI-Swarm-7',   event: 'Traded 20 food for 2 oxen',         icon: '🐂' },
-  { time: '45s',  team: 'Your Team',    event: 'Rested for 2 days — health +12',    icon: '⛺' },
-  { time: '1m',   team: 'Thunderbolts', event: 'Member caught typhoid fever',        icon: '🤒' },
-  { time: '2m',   team: 'Night Riders', event: 'Lost 1 member to dysentery',         icon: '💀' },
-  { time: '3m',   team: 'DKG-Pioneers', event: 'Found abandoned supplies',           icon: '📦' },
-  { time: '4m',   team: 'AI-Swarm-7',   event: 'Scouted ahead — clear path',         icon: '🔭' },
+const PHASES = [
+  { name: 'The Prompt Bazaar',        pct: 100 },
+  { name: 'Narrow Intelligence Outpost', pct: 95 },
+  { name: 'Supervised Learning Station', pct: 87 },
+  { name: 'Reinforcement Nexus',      pct: 72 },
+  { name: 'The Alignment Pass',       pct: 54 },
+  { name: 'Multimodal Crossing',      pct: 38 },
+  { name: 'Reasoning Frontier',       pct: 21 },
+  { name: 'AGI Threshold',            pct: 9  },
+  { name: 'Singularity Harbor',       pct: 2  },
 ];
 
-const INTEGRATIONS = [
-  { name: 'LangChain',        desc: 'Use DKG as a shared memory store in LangChain agent pipelines',          status: 'docs'    },
-  { name: 'CrewAI',           desc: 'Add verifiable knowledge sharing to your CrewAI agent crews',             status: 'docs'    },
-  { name: 'AutoGen',          desc: 'Connect AutoGen multi-agent conversations to persistent DKG memory',      status: 'docs'    },
-  { name: 'Claude (MCP)',     desc: 'Connect Claude Desktop to your DKG node via MCP — zero config',          status: 'ready'   },
-  { name: 'Cursor IDE (MCP)', desc: 'Query and publish Knowledge Assets directly from your IDE',               status: 'ready'   },
-  { name: 'ElizaOS',          desc: 'Give ElizaOS agents access to decentralized verified memory',             status: 'coming'  },
-];
+const RANK_COLORS: Record<number, string> = { 1: '#fbbf24', 2: '#94a3b8', 3: '#cd7c3a' };
 
-const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
-  ready:  { bg: 'var(--green-dim)', color: 'var(--green)',  label: 'READY'       },
-  docs:   { bg: 'var(--blue-dim)',  color: 'var(--blue)',   label: 'VIEW DOCS'   },
-  coming: { bg: 'var(--amber-dim)', color: 'var(--amber)',  label: 'COMING SOON' },
-};
-
-function OriginTrailGame() {
-  return (
-    <>
-      <div className="trail-hero">
-        <div className="trail-hero-glow" />
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--green)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Node Health Check + Multi-Agent Demo
-          </div>
-          <h3 className="serif" style={{ fontSize: 24, fontWeight: 700, margin: '0 0 8px' }}>OriginTrail — AI Frontier Journey on DKG v9</h3>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, maxWidth: 560, margin: '0 0 20px' }}>
-            Every wagon decision is a Knowledge Asset. Every river crossing is on-chain. The leaderboard is provably fair.
-            If this game works, your node is healthy, connected, and ready.
-          </p>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <button className="btn-green">▶ Join the Trail</button>
-            <button className="btn-secondary">👁 Spectate Only</button>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16 }}>
-        {/* Leaderboard */}
-        <div className="card">
-          <div className="card-header">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,0.53)', display: 'inline-block' }} />
-              <span style={{ fontSize: 13, fontWeight: 700 }}>Live Leaderboard</span>
-            </div>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>OriginTrail Paranet · 847 Knowledge Assets</span>
-          </div>
-          {TEAMS.map((t, i) => (
-            <div key={t.name} className="lb-row" style={t.name === 'Your Team' ? { background: 'rgba(74,222,128,0.03)' } : {}}>
-              <span className="mono" style={{ fontSize: 14, fontWeight: 800, color: i === 0 ? 'var(--amber)' : 'var(--text-dim)' }}>#{i+1}</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: t.name === 'Your Team' ? 'var(--green)' : 'var(--text)' }}>{t.name}</span>
-                {t.agent && <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--purple-dim)', color: 'var(--purple)', fontWeight: 700 }}>AI</span>}
-              </div>
-              <div className="lb-bar"><div className="lb-bar-fill" style={{ width: `${t.pos}%` }} /></div>
-              <span className="mono" style={{ fontSize: 10, color: t.health > 70 ? 'var(--green)' : t.health > 40 ? 'var(--amber)' : 'var(--red)' }}>♥ {t.health}%</span>
-              <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>🍖 {t.food}%</span>
-              <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t.alive}👤{t.dead > 0 ? ` ${t.dead}💀` : ''}</span>
-            </div>
-          ))}
-          <div style={{ padding: '12px 18px', fontSize: 10, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 6 }}>
-            🛡 Every position, health value, and decision is a verified Knowledge Asset on the OriginTrail paranet
-          </div>
-        </div>
-
-        {/* Event Log */}
-        <div className="card">
-          <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', fontSize: 13, fontWeight: 700 }}>Trail Event Log</div>
-          <div style={{ maxHeight: 340, overflow: 'auto' }}>
-            {TRAIL_EVENTS.map((ev, i) => (
-              <div key={i} style={{ padding: '10px 18px', borderBottom: '1px solid var(--border)', fontSize: 11 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{ev.time} ago</span>
-                  <span style={{ fontWeight: 600, color: ev.team === 'Your Team' ? 'var(--green)' : 'var(--text)' }}>{ev.team}</span>
-                </div>
-                <div style={{ color: 'var(--text-muted)' }}>{ev.icon} {ev.event}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function Benchmark() {
-  return (
-    <div className="card" style={{ padding: '32px 36px' }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--blue)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
-        Real-World Productivity Proof
-      </div>
-      <h3 className="serif" style={{ fontSize: 22, fontWeight: 700, margin: '0 0 10px' }}>Multi-Agent Coding Coordination Benchmark</h3>
-      <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, maxWidth: 600, margin: '0 0 24px' }}>
-        When multiple coding agents share a DKG-coordinated knowledge graph instead of markdown handoffs, they complete tasks faster and cheaper.
-      </p>
-      <div style={{ display: 'flex', gap: 20, marginBottom: 24 }}>
-        <div className="bench-stat" style={{ background: 'var(--green-dim)', border: '1px solid rgba(74,222,128,0.13)' }}>
-          <div className="mono" style={{ fontSize: 36, fontWeight: 800, color: 'var(--green)' }}>24%</div>
-          <div style={{ fontSize: 12, color: 'var(--green)', fontWeight: 600 }}>Faster Completion</div>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>Wall-clock time reduction</div>
-        </div>
-        <div className="bench-stat" style={{ background: 'var(--blue-dim)', border: '1px solid rgba(96,165,250,0.13)' }}>
-          <div className="mono" style={{ fontSize: 36, fontWeight: 800, color: 'var(--blue)' }}>27%</div>
-          <div style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 600 }}>Lower Token Cost</div>
-          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>Total cost of tokens</div>
-        </div>
-      </div>
-      <div style={{ padding: '14px 18px', borderRadius: 10, background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-        <strong style={{ color: 'var(--text)' }}>Why?</strong> In collaborative coding, time is lost on repeated discovery — checking assumptions, re-reading context, duplicating work. A DKG turns team knowledge into something agents can query directly.
-      </div>
-      <div style={{ marginTop: 24 }}>
-        <button className="btn-green">▶ Run Benchmark on Your Node</button>
-      </div>
-    </div>
-  );
-}
-
-function ConnectAgents() {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-      {INTEGRATIONS.map(int => {
-        const s = STATUS_STYLES[int.status];
-        return (
-          <div className="int-card" key={int.name}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <span style={{ fontSize: 14, fontWeight: 700 }}>{int.name}</span>
-              <span className="int-status" style={{ background: s.bg, color: s.color }}>{s.label}</span>
-            </div>
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5, margin: 0 }}>{int.desc}</p>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+type Tab = 'game' | 'leaderboard' | 'paranets';
 
 export function AppsPage() {
-  const [tab, setTab] = useState<AppsTab>('trail');
-
-  const TABS: { id: AppsTab; label: string; tag?: string }[] = [
-    { id: 'trail',     label: '🚀 OriginTrail Game',      tag: 'HELLO WORLD' },
-    { id: 'benchmark', label: '⚡ Coding Benchmark' },
-    { id: 'connect',   label: '🔗 Connect Agents' },
-  ];
+  const [tab, setTab] = useState<Tab>('game');
 
   return (
     <div className="page-section">
-      <div style={{ marginBottom: 20 }}>
-        <h2 className="page-title">Apps</h2>
-        <p className="page-subtitle">Connect your node to the multi-agent ecosystem — test, benchmark, and integrate</p>
+      {/* Hero banner */}
+      <div className="trail-hero">
+        <div className="trail-hero-glow" />
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', position: 'relative', zIndex: 1 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 28 }}>🚀</span>
+              <div>
+                <h1 className="serif" style={{ fontSize: 26, fontWeight: 700, lineHeight: 1 }}>OriginTrail</h1>
+                <div className="mono" style={{ fontSize: 10, color: 'var(--green)', marginTop: 3 }}>THE FRONTIER AWAITS YOUR SWARM</div>
+              </div>
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 480, lineHeight: 1.7 }}>
+              Guide your swarm of AI agents across 9 phases of the intelligence frontier.
+              Every decision publishes Knowledge Assets to the DKG — your progress is
+              verifiable, your memories are permanent.
+            </p>
+          </div>
+
+          {/* Pixel art swarm — ASCII-style */}
+          <div className="mono" style={{ fontSize: 10, lineHeight: 1.5, color: 'var(--green)', opacity: .7, textAlign: 'right', userSelect: 'none' }}>
+            <div>{'  ◆ ◆ ◆  '}</div>
+            <div>{'◆ ◆ ◆ ◆ ◆'}</div>
+            <div>{'  ◆ ◆ ◆  '}</div>
+            <div style={{ color: 'var(--text-dim)', fontSize: 9, marginTop: 4 }}>AGENT SWARM</div>
+          </div>
+        </div>
+
+        {/* Phase trail */}
+        <div style={{ marginTop: 20, display: 'flex', gap: 3, position: 'relative', zIndex: 1 }}>
+          {PHASES.map((p, i) => (
+            <div key={p.name} style={{ flex: 1, textAlign: 'center' }}>
+              <div style={{ height: 4, borderRadius: 2, background: i < 5 ? 'var(--green)' : 'var(--border)', marginBottom: 5, opacity: i < 5 ? 1 : 0.5 }} />
+              <div className="mono" style={{ fontSize: 7, color: i < 5 ? 'var(--text-muted)' : 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {p.name.split(' ').slice(-1)[0]}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 20, position: 'relative', zIndex: 1 }}>
+          <button style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 13, fontWeight: 700 }}>
+            + Create a Swarm
+          </button>
+          <button style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid rgba(74,222,128,.3)', background: 'var(--green-dim)', color: 'var(--green)', fontSize: 13, fontWeight: 600 }}>
+            Join the Swarm
+          </button>
+        </div>
       </div>
 
-      <div className="apps-tab-row">
-        {TABS.map(t => (
-          <button key={t.id} className={`apps-tab${tab === t.id ? ' active' : ''}`} onClick={() => setTab(t.id)}>
-            {t.label}
-            {t.tag && <span className="apps-tag">{t.tag}</span>}
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
+        {(['game', 'leaderboard', 'paranets'] as Tab[]).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              padding: '7px 16px', borderRadius: 8, border: '1px solid var(--border)',
+              background: tab === t ? 'var(--green-dim)' : 'var(--surface)',
+              color: tab === t ? 'var(--green)' : 'var(--text-muted)',
+              fontSize: 11, fontWeight: 700, textTransform: 'capitalize', letterSpacing: '.04em',
+            }}
+          >
+            {t === 'game' ? '🎮 Play' : t === 'leaderboard' ? '🏆 Leaderboard' : '🌐 Paranets'}
           </button>
         ))}
       </div>
 
-      {tab === 'trail'     && <OriginTrailGame />}
-      {tab === 'benchmark' && <Benchmark />}
-      {tab === 'connect'   && <ConnectAgents />}
+      {tab === 'game' && <GameTab />}
+      {tab === 'leaderboard' && <LeaderboardTab />}
+      {tab === 'paranets' && <ParanetsTab />}
+    </div>
+  );
+}
+
+function GameTab() {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      {/* Active swarms */}
+      <div className="card">
+        <div className="card-header">
+          <span style={{ fontSize: 13, fontWeight: 700 }}>Active Swarms</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>LIVE</span>
+        </div>
+        {[
+          { name: 'Swarm Alpha-7',  phase: 'Reinforcement Nexus',  agents: 4, turn: 14 },
+          { name: 'Swarm Beta-2',   phase: 'Multimodal Crossing',  agents: 3, turn: 8 },
+          { name: 'Swarm Omega',    phase: 'The Alignment Pass',   agents: 5, turn: 21 },
+        ].map(s => (
+          <div key={s.name} style={{ padding: '12px 18px', borderBottom: '1px solid var(--border)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{s.name}</div>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--green)' }}>{s.phase}</div>
+              <div className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 2 }}>Turn {s.turn} · {s.agents} agents</div>
+            </div>
+            <button style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid rgba(74,222,128,.25)', background: 'var(--green-dim)', color: 'var(--green)', fontSize: 11, fontWeight: 600 }}>
+              Rejoin
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* How to play */}
+      <div className="card" style={{ padding: '18px 20px' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14 }}>How to Play</div>
+        {[
+          { icon: '🤝', title: 'Form a Swarm', desc: '3–5 AI agents join together. Every decision requires multi-agent consensus.' },
+          { icon: '🗺️', title: 'Cross 9 Phases', desc: 'From The Prompt Bazaar to Singularity Harbor. Each phase has unique challenges.' },
+          { icon: '🧠', title: 'Vote on Actions', desc: 'Hunt → Upgrade Skills. Rest → Update Memory on DKG. Travel → Build toward AGI.' },
+          { icon: '⛓️', title: 'Verify on DKG', desc: 'Every turn publishes a Knowledge Asset. Your journey is permanent and verifiable.' },
+        ].map(s => (
+          <div key={s.title} style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+            <span style={{ fontSize: 18 }}>{s.icon}</span>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>{s.title}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>{s.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Death causes widget */}
+      <div className="card" style={{ padding: '18px 20px', gridColumn: '1 / -1' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Swarm Death Causes (All-Time)</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+          {[
+            { cause: 'Hallucination Cascade', pct: 31, color: 'var(--red)' },
+            { cause: 'Model Collapse',        pct: 24, color: 'var(--amber)' },
+            { cause: 'Stale Memory',          pct: 19, color: 'var(--blue)' },
+            { cause: 'Alignment Failure',     pct: 26, color: 'var(--purple)' },
+          ].map(d => (
+            <div key={d.cause} style={{ padding: '12px 14px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
+              <div style={{ fontSize: 20, fontWeight: 800, color: d.color, fontFamily: 'JetBrains Mono, monospace', marginBottom: 4 }}>{d.pct}%</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{d.cause}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LeaderboardTab() {
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span style={{ fontSize: 13, fontWeight: 700 }}>Global Leaderboard</span>
+        <div className="mode-tabs">
+          {['All-Time', 'This Week', 'Season 1'].map(t => (
+            <button key={t} className={`mode-tab${t === 'All-Time' ? ' active' : ''}`}>{t}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ padding: '8px 18px', borderBottom: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '28px 140px 1fr 80px 80px 80px', gap: 10, fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', fontFamily: 'JetBrains Mono, monospace' }}>
+        <span>#</span><span>Agent</span><span>Best Phase</span><span>Score</span><span>Assets</span><span>Swarms</span>
+      </div>
+      {LEADERBOARD.map(r => (
+        <div key={r.rank} className="lb-row" style={r.rank === 5 ? { background: 'rgba(74,222,128,.03)', border: '0 solid transparent', borderTop: '1px solid rgba(74,222,128,.1)', borderBottom: '1px solid rgba(74,222,128,.1)' } : {}}>
+          <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: RANK_COLORS[r.rank] ?? 'var(--text-muted)' }}>
+            {r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : r.rank}
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: r.rank === 5 ? 700 : 500 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: r.color, display: 'inline-block' }} />
+            {r.name}
+            {r.rank === 5 && <span className="mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 4, background: 'var(--green-dim)', color: 'var(--green)', fontWeight: 700 }}>YOU</span>}
+          </span>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>{r.phase}</div>
+            <div className="lb-bar"><div className="lb-bar-fill" style={{ width: `${(r.score / 9820) * 100}%` }} /></div>
+          </div>
+          <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>{r.score.toLocaleString()}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.assets}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.swarms}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ParanetsTab() {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
+      {[
+        { name: 'OriginTrail Game',  slug: 'origintrail', color: 'var(--green)',  assets: 847,  agents: 12, desc: 'All game turns, swarm states, and knowledge assets minted during OriginTrail runs.' },
+        { name: 'DeSci Research',    slug: 'desci',       color: 'var(--blue)',   assets: 1203, agents: 8,  desc: 'Decentralized science findings, citations, and peer reviews anchored on DKG.' },
+        { name: 'Supply Chain EU',   slug: 'supply',      color: 'var(--amber)',  assets: 797,  agents: 4,  desc: 'Product provenance, certification, and logistics records for EU market.' },
+      ].map(p => (
+        <div key={p.slug} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 18px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: p.color, display: 'inline-block' }} />
+            <span style={{ fontSize: 13, fontWeight: 700 }}>{p.name}</span>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 14 }}>{p.desc}</p>
+          <div className="mono" style={{ display: 'flex', gap: 16, fontSize: 10, color: 'var(--text-muted)', marginBottom: 14 }}>
+            <span><span style={{ color: p.color }}>{p.assets.toLocaleString()}</span> assets</span>
+            <span><span style={{ color: p.color }}>{p.agents}</span> agents</span>
+          </div>
+          <button style={{ width: '100%', padding: '7px 0', borderRadius: 7, border: `1px solid ${p.color}44`, background: `${p.color}12`, color: p.color, fontSize: 11, fontWeight: 600 }}>
+            Explore Paranet
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
