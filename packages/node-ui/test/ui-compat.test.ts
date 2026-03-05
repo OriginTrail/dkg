@@ -254,14 +254,14 @@ describe('Apps.tsx playerName handling', () => {
     expect(apps).toMatch(/disabled=\{.*!playerName/);
   });
 
-  it('auto-populates playerName from gameApi.info() response', () => {
-    expect(apps).toContain('data.nodeName');
-    expect(apps).toContain('setPlayerName(');
+  it('auto-populates playerName from gameApi.info() response with null guard', () => {
+    expect(apps).toContain('data?.nodeName');
+    expect(apps).toContain('setPlayerName(data.nodeName)');
   });
 
-  it('only marks app as not-installed on 404, not transient errors', () => {
-    expect(apps).toMatch(/404/);
-    expect(apps).toMatch(/is404\s*\?\s*false\s*:\s*null/);
+  it('only marks app as not-installed on structured 404 status, not transient errors', () => {
+    expect(apps).toMatch(/err\?\.status\s*===\s*404/);
+    expect(apps).not.toMatch(/\/404\/\.test/);
   });
 });
 

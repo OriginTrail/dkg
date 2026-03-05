@@ -43,11 +43,10 @@ function GameTab() {
       .then((data: any) => {
         setInfo(data);
         setAppInstalled(true);
-        if (data.nodeName) setPlayerName(data.nodeName);
+        if (data?.nodeName) setPlayerName(data.nodeName);
       })
       .catch((err: any) => {
-        const is404 = /404/.test(String(err?.message ?? err));
-        setAppInstalled(is404 ? false : null);
+        setAppInstalled(err?.status === 404 ? false : null);
       });
   }, []);
 
