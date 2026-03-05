@@ -554,7 +554,7 @@ export class EVMChainAdapter implements ChainAdapter {
     for (const eventType of filter.eventTypes) {
       if (eventType === 'KnowledgeBatchCreated') {
         const eventFilter = storage.filters.KnowledgeBatchCreated();
-        const logs = await storage.queryFilter(eventFilter, filter.fromBlock ?? 0);
+        const logs = await storage.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
 
         for (const log of logs) {
           const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
@@ -568,6 +568,7 @@ export class EVMChainAdapter implements ChainAdapter {
                 merkleRoot: parsed.args.merkleRoot,
                 startKAId: parsed.args.startKAId.toString(),
                 endKAId: parsed.args.endKAId.toString(),
+                txHash: log.transactionHash,
               },
             };
           }

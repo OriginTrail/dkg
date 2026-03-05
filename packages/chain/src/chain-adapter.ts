@@ -78,6 +78,8 @@ export interface ChainEvent {
 export interface EventFilter {
   eventTypes: string[];
   fromBlock?: number;
+  /** Upper block bound (inclusive). Limits scan range to prevent expensive queries. */
+  toBlock?: number;
 }
 
 export interface CreateParanetParams {

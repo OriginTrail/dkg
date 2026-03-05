@@ -6,8 +6,9 @@
  * - Gossip-received data is always stored as tentative (never confirmed from self-reported fields)
  * - On-chain verification promotes tentative → confirmed
  * - Malformed gossip messages are handled gracefully with logging
+ * - Integration: real gossip flow through subscribeToParanet triggers verification
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   encodePublishRequest,
   decodePublishRequest,
@@ -26,6 +27,7 @@ import {
   getConfirmedStatusQuad,
   type KAMetadata,
 } from '@dkg/publisher';
+import { DKGAgent } from '../src/index.js';
 
 const PARANET = 'test-gossip';
 
@@ -253,6 +255,54 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     expect(startKA).toBe(5);
   });
 
+  it('listenForEvents respects toBlock and filters by txHash in event data', async () => {
+    const publisherAddress = '0x2222222222222222222222222222222222222222';
+    const chain = new MockChainAdapter('mock:31337', publisherAddress);
+
+    const result1 = await chain.publishKnowledgeAssets({
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      publicByteSize: 100n,
+      epochs: 1,
+      tokenAmount: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      receiverSignatures: [],
+    });
+    const result2 = await chain.publishKnowledgeAssets({
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x02),
+      publicByteSize: 100n,
+      epochs: 1,
+      tokenAmount: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      receiverSignatures: [],
+    });
+
+    const eventsBlock1: { blockNumber: number; txHash: unknown }[] = [];
+    for await (const evt of chain.listenForEvents({
+      eventTypes: ['KnowledgeBatchCreated'],
+      fromBlock: result1.blockNumber,
+      toBlock: result1.blockNumber,
+    })) {
+      eventsBlock1.push({ blockNumber: evt.blockNumber, txHash: evt.data['txHash'] });
+    }
+
+    expect(eventsBlock1).toHaveLength(1);
+    expect(eventsBlock1[0].blockNumber).toBe(result1.blockNumber);
+    expect(eventsBlock1[0].txHash).toBe(result1.txHash);
+
+    const eventsAll: number[] = [];
+    for await (const evt of chain.listenForEvents({
+      eventTypes: ['KnowledgeBatchCreated'],
+      fromBlock: result1.blockNumber,
+    })) {
+      eventsAll.push(evt.blockNumber);
+    }
+    expect(eventsAll.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('merkle verification detects tampered gossip data', () => {
     const entity = 'did:dkg:agent:QmTampered';
     const legitimateTriples = [
@@ -284,4 +334,121 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     expect(Buffer.from(legitimateMerkleRoot).toString('hex'))
       .not.toBe(Buffer.from(tamperedMerkleRoot).toString('hex'));
   });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: gossip flow through subscribeToParanet with on-chain verification
+// ---------------------------------------------------------------------------
+const integrationAgents: DKGAgent[] = [];
+
+afterEach(async () => {
+  for (const a of integrationAgents) {
+    try { await a.stop(); } catch {}
+  }
+  integrationAgents.length = 0;
+});
+
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+describe('Integration: gossip ingestion verifies on-chain and promotes to confirmed', () => {
+  it('receiver gossip data starts tentative and promotes to confirmed via shared chain', async () => {
+    const sharedChain = new MockChainAdapter('mock:31337', '0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+
+    const agentA = await DKGAgent.create({
+      name: 'GossipSender',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: sharedChain,
+    });
+    const agentB = await DKGAgent.create({
+      name: 'GossipReceiver',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: sharedChain,
+    });
+    integrationAgents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'gossip-verify', name: 'GV', description: '' });
+    agentA.subscribeToParanet('gossip-verify');
+    agentB.subscribeToParanet('gossip-verify');
+    await sleep(500);
+
+    await agentA.publish('gossip-verify', [
+      { subject: 'did:dkg:test:Verified', predicate: 'http://schema.org/name', object: '"VerifiedBot"', graph: '' },
+    ]);
+
+    await sleep(4000);
+
+    const statusResult = await agentB.query(
+      `SELECT ?status WHERE {
+        GRAPH <did:dkg:paranet:gossip-verify/_meta> {
+          ?kc <http://dkg.io/ontology/status> ?status
+        }
+      }`,
+      'gossip-verify',
+    );
+
+    const statuses = statusResult.bindings.map(b => b['status']);
+    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
+    expect(hasConfirmed).toBe(true);
+
+    const hasTentative = statuses.some(s => s?.includes('tentative'));
+    expect(hasTentative).toBe(false);
+  }, 25000);
+
+  it('receiver without shared chain leaves gossip data as tentative', async () => {
+    const chainA = new MockChainAdapter('mock:31337', '0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB');
+    const chainB = new MockChainAdapter('mock:31337', '0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC');
+
+    const agentA = await DKGAgent.create({
+      name: 'TentSender',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chainA,
+    });
+    const agentB = await DKGAgent.create({
+      name: 'TentReceiver',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: chainB,
+    });
+    integrationAgents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'gossip-tent', name: 'GT', description: '' });
+    agentA.subscribeToParanet('gossip-tent');
+    agentB.subscribeToParanet('gossip-tent');
+    await sleep(500);
+
+    await agentA.publish('gossip-tent', [
+      { subject: 'did:dkg:test:Tentative', predicate: 'http://schema.org/name', object: '"TentativeBot"', graph: '' },
+    ]);
+
+    await sleep(4000);
+
+    const statusResult = await agentB.query(
+      `SELECT ?status WHERE {
+        GRAPH <did:dkg:paranet:gossip-tent/_meta> {
+          ?kc <http://dkg.io/ontology/status> ?status
+        }
+      }`,
+      'gossip-tent',
+    );
+
+    const statuses = statusResult.bindings.map(b => b['status']);
+    const hasTentative = statuses.some(s => s?.includes('tentative'));
+    expect(hasTentative).toBe(true);
+
+    const hasConfirmed = statuses.some(s => s?.includes('confirmed'));
+    expect(hasConfirmed).toBe(false);
+  }, 25000);
 });

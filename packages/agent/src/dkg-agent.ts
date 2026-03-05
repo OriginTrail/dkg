@@ -1197,7 +1197,9 @@ export class DKGAgent {
 
   /**
    * Verify a gossip-received publish by doing a targeted on-chain lookup
-   * using the txHash and blockNumber from the gossip message.
+   * at the exact block specified in the gossip message. Uses both fromBlock
+   * and toBlock to constrain the scan to a single block, and validates
+   * txHash against event data when available.
    */
   private async verifyGossipOnChain(
     txHash: string,
@@ -1209,14 +1211,26 @@ export class DKGAgent {
     ctx: OperationContext,
   ): Promise<boolean> {
     if (this.chain.chainId === 'none') return false;
+
+    if (blockNumber <= 0) {
+      this.log.warn(ctx, `Gossip verification skipped: invalid blockNumber=${blockNumber}`);
+      return false;
+    }
+
     try {
       const filter: EventFilter = {
         eventTypes: ['KnowledgeBatchCreated'],
         fromBlock: blockNumber,
+        toBlock: blockNumber,
       };
       for await (const event of this.chain.listenForEvents(filter)) {
-        if (event.blockNumber > blockNumber) break;
         if (event.blockNumber !== blockNumber) continue;
+
+        if (txHash && event.data['txHash']) {
+          if ((event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase()) {
+            continue;
+          }
+        }
 
         const eventMerkle = typeof event.data['merkleRoot'] === 'string'
           ? ethers.getBytes(event.data['merkleRoot'] as string)
@@ -1225,12 +1239,11 @@ export class DKGAgent {
         const eventStartKAId = BigInt(event.data['startKAId'] as string ?? '0');
         const eventEndKAId = BigInt(event.data['endKAId'] as string ?? '0');
 
-        if (
-          ethers.hexlify(eventMerkle) === ethers.hexlify(expectedMerkleRoot) &&
-          eventPublisher.toLowerCase() === expectedPublisher.toLowerCase() &&
-          eventStartKAId === expectedStartKAId &&
-          eventEndKAId === expectedEndKAId
-        ) {
+        const merkleMatch = ethers.hexlify(eventMerkle) === ethers.hexlify(expectedMerkleRoot);
+        const publisherMatch = eventPublisher.toLowerCase() === expectedPublisher.toLowerCase();
+        const rangeMatch = eventStartKAId === expectedStartKAId && eventEndKAId === expectedEndKAId;
+
+        if (merkleMatch && publisherMatch && rangeMatch) {
           return true;
         }
       }

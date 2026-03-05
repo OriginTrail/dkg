@@ -134,6 +134,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const blockNumber = this.nextBlock++;
     const blockTimestamp = Math.floor(Date.now() / 1000);
+    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}`;
 
     this.events.push({
       type: 'KnowledgeBatchCreated',
@@ -146,6 +147,7 @@ export class MockChainAdapter implements ChainAdapter {
         startKAId: startId.toString(),
         endKAId: endId.toString(),
         kaCount: params.kaCount,
+        txHash,
       },
     });
 
@@ -153,7 +155,7 @@ export class MockChainAdapter implements ChainAdapter {
       batchId,
       startKAId: startId,
       endKAId: endId,
-      txHash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
+      txHash,
       blockNumber,
       blockTimestamp,
       publisherAddress: this.signerAddress,
@@ -175,6 +177,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const blockNumber = this.nextBlock++;
     const blockTimestamp = Math.floor(Date.now() / 1000);
+    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}`;
 
     this.events.push({
       type: 'KnowledgeBatchCreated',
@@ -187,6 +190,7 @@ export class MockChainAdapter implements ChainAdapter {
         endKAId: endId.toString(),
         kaCount: params.kaCount,
         isPermanent: true,
+        txHash,
       },
     });
 
@@ -194,7 +198,7 @@ export class MockChainAdapter implements ChainAdapter {
       batchId,
       startKAId: startId,
       endKAId: endId,
-      txHash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
+      txHash,
       blockNumber,
       blockTimestamp,
       publisherAddress: this.signerAddress,
@@ -300,7 +304,9 @@ export class MockChainAdapter implements ChainAdapter {
 
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     const from = filter.fromBlock ?? 0;
+    const to = filter.toBlock ?? Infinity;
     for (const evt of this.events) {
+      if (evt.blockNumber > to) break;
       if (
         evt.blockNumber >= from &&
         filter.eventTypes.includes(evt.type)
