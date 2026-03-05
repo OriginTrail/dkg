@@ -7,6 +7,7 @@ import { ExplorerPage } from './pages/Explorer.js';
 import { WalletPage } from './pages/Wallet.js';
 import { IntegrationsPage } from './pages/Integrations.js';
 import { MessagesPage } from './pages/Messages.js';
+import { AppHostPage } from './pages/AppHost.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { ParticleSphere } from './components/ParticleSphere.js';
 import { BackgroundNetwork } from './components/BackgroundNetwork.js';
@@ -75,10 +76,10 @@ export function App() {
             <>
               <div className="sidebar-section-label">Apps</div>
               {installedApps.map(app => (
-                <a key={app.id} href={app.path + '/'} className="sidebar-app-link">
+                <NavLink key={app.id} to={`/app/${app.id}`}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1h10a2 2 0 012 2v10a2 2 0 01-2 2H3a2 2 0 01-2-2V3a2 2 0 012-2zm0 2v10h10V3H3z"/></svg>
                   {app.label}
-                </a>
+                </NavLink>
               ))}
             </>
           )}
@@ -93,6 +94,7 @@ export function App() {
           <Route path="/operations/*" element={<OperationsPage />} />
           <Route path="/wallet" element={<WalletPage />} />
           <Route path="/integrations" element={<IntegrationsPage />} />
+          <Route path="/app/:appId" element={<AppHostPage />} />
         </Routes>
       </main>
       <ChatPanel />
