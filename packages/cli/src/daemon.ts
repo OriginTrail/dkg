@@ -839,7 +839,11 @@ async function resolveNameToPeerId(agent: DKGAgent, nameOrId: string): Promise<s
 
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  });
   res.end(JSON.stringify(data));
 }
 
