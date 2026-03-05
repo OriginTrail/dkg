@@ -37,6 +37,7 @@ function GameTab() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [appInstalled, setAppInstalled] = useState<boolean | null>(null);
+  const trimmedName = useMemo(() => playerName.trim(), [playerName]);
 
   useEffect(() => {
     gameApi.info()
@@ -45,7 +46,10 @@ function GameTab() {
         setAppInstalled(true);
         if (data.nodeName) setPlayerName(data.nodeName);
       })
-      .catch(() => { setAppInstalled(false); });
+      .catch((err: any) => {
+        const is404 = /404/.test(String(err?.message ?? err));
+        setAppInstalled(is404 ? false : null);
+      });
   }, []);
 
   const refreshLobby = useCallback(async () => {
@@ -329,9 +333,9 @@ function CreateSwarmForm({ playerName, loading, onSubmit }: { playerName: string
         ))}
       </div>
       <button
-        disabled={!name.trim() || loading}
+        disabled={!name.trim() || !playerName || loading}
         onClick={() => onSubmit(name.trim(), max)}
-        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() ? 'var(--green)' : 'var(--border)', color: name.trim() ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
+        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
       >
         Launch Swarm
       </button>

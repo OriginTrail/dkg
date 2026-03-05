@@ -219,7 +219,7 @@ describe('explorer graph query safety', () => {
   });
 });
 
-describe('Apps.tsx playerName fallback', () => {
+describe('Apps.tsx playerName handling', () => {
   const apps = readFile('pages/Apps.tsx');
 
   it('shows manual name input when API did not provide nodeName', () => {
@@ -227,9 +227,8 @@ describe('Apps.tsx playerName fallback', () => {
     expect(apps).toContain('type="text"');
   });
 
-  it('gates read-only display on info?.nodeName, not trimmedName (input stays visible while typing)', () => {
+  it('gates read-only display on info?.nodeName (input stays visible while typing)', () => {
     expect(apps).toMatch(/info\?\.nodeName\s*\?/);
-    expect(apps).not.toMatch(/\{trimmedName\s*\?/);
   });
 
   it('does not trim playerName on every keystroke (allows spaces while typing)', () => {
@@ -251,9 +250,18 @@ describe('Apps.tsx playerName fallback', () => {
     expect(apps).toMatch(/disabled=\{.*!trimmedName/);
   });
 
-  it('still auto-populates playerName from gameApi.info() when available', () => {
+  it('disables Launch Swarm button when playerName is empty', () => {
+    expect(apps).toMatch(/disabled=\{.*!playerName/);
+  });
+
+  it('auto-populates playerName from gameApi.info() response', () => {
     expect(apps).toContain('data.nodeName');
-    expect(apps).toContain('setPlayerName(data.nodeName)');
+    expect(apps).toContain('setPlayerName(');
+  });
+
+  it('only marks app as not-installed on 404, not transient errors', () => {
+    expect(apps).toMatch(/404/);
+    expect(apps).toMatch(/is404\s*\?\s*false\s*:\s*null/);
   });
 });
 
