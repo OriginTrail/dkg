@@ -29,7 +29,7 @@ import {
   type AutoUpdateConfig,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
-import { loadApps, handleAppRequest, type LoadedApp } from './app-loader.js';
+import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 
 export async function runDaemon(foreground: boolean): Promise<void> {
@@ -325,8 +325,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   // --- Installable Apps ---
 
   const installedApps: LoadedApp[] = await loadApps(agent, config, log);
+  let appStaticBaseUrl: string | undefined;
+  let appStaticServer: import('node:http').Server | undefined;
   if (installedApps.length > 0) {
     log(`${installedApps.length} DKG app(s) loaded: ${installedApps.map(a => a.label).join(', ')}`);
+    const appHost = config.apiHost || '127.0.0.1';
+    const appPort = (config.apiPort || 19200) + 100;
+    const mainApiOrigin = `http://${appHost}:${config.apiPort || 19200}`;
+    const result = await startAppStaticServer(installedApps, appHost, appPort, mainApiOrigin, log);
+    appStaticServer = result.server;
+    appStaticBaseUrl = `http://${appHost}:${result.port}`;
   }
 
   // --- HTTP API ---
@@ -363,7 +371,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
           const reqToken = extractBearerToken(req.headers.authorization);
           if (reqToken && validTokens.has(reqToken)) appInjectToken = reqToken;
         }
-        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken);
+        const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticBaseUrl);
         if (appHandled) return;
       }
 
@@ -392,6 +400,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     if (updateInterval) clearInterval(updateInterval);
     metricsCollector.stop();
     server.close();
+    appStaticServer?.close();
     await agent.stop();
     dashDb.close();
     await removePid();

@@ -5,6 +5,11 @@ const INSTALLED_APPS = [
   { id: 'my-app', label: 'My App', path: '/apps/my-app' },
 ];
 
+const INSTALLED_APPS_WITH_STATIC_URL = [
+  { id: 'oregon-trail', label: 'Oregon Trail', path: '/apps/oregon-trail', staticUrl: 'http://127.0.0.1:19300/apps/oregon-trail/' },
+  { id: 'my-app', label: 'My App', path: '/apps/my-app', staticUrl: 'http://127.0.0.1:19300/apps/my-app/' },
+];
+
 function resolveApp(appId: string | undefined, apps: typeof INSTALLED_APPS) {
   return apps.find(a => a.id === appId);
 }
@@ -40,29 +45,39 @@ describe('AppHost — app resolution security', () => {
   });
 });
 
-describe('AppHost — iframe sandbox policy', () => {
-  it('component source includes sandbox attribute', async () => {
+describe('AppHost — separate-origin isolation', () => {
+  it('component does NOT use sandbox attribute (relies on cross-origin isolation)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    expect(src).toContain('sandbox=');
-    expect(src).toContain('allow-scripts');
-    expect(src).not.toContain('allow-top-navigation');
+    expect(src).not.toMatch(/\bsandbox[=\s]/);
   });
 
-  it('sandbox does not include allow-same-origin (prevents iframe escaping sandbox)', async () => {
+  it('uses staticUrl (different origin) when available, falling back to same-origin path', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
       join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
       'utf-8',
     );
-    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
-    expect(sandboxMatch).toBeTruthy();
-    expect(sandboxMatch![1]).not.toContain('allow-same-origin');
+    expect(src).toContain('app.staticUrl');
+    expect(src).toContain('app.path');
+  });
+
+  it('iframe src resolves to separate-origin URL when staticUrl is provided', () => {
+    const app = INSTALLED_APPS_WITH_STATIC_URL.find(a => a.id === 'oregon-trail')!;
+    const iframeSrc = app.staticUrl || `${app.path}/`;
+    expect(iframeSrc).toBe('http://127.0.0.1:19300/apps/oregon-trail/');
+    expect(new URL(iframeSrc).port).toBe('19300');
+  });
+
+  it('iframe src falls back to same-origin path when staticUrl is absent', () => {
+    const app = INSTALLED_APPS.find(a => a.id === 'oregon-trail')!;
+    const iframeSrc = (app as any).staticUrl || `${app.path}/`;
+    expect(iframeSrc).toBe('/apps/oregon-trail/');
   });
 
   it('component does not render iframe when app is not found', async () => {
@@ -77,8 +92,8 @@ describe('AppHost — iframe sandbox policy', () => {
   });
 });
 
-describe('AppHost — postMessage token handoff with opaque-origin iframe', () => {
-  it('uses wildcard target origin for postMessage (opaque iframe origin)', async () => {
+describe('AppHost — postMessage token handoff', () => {
+  it('uses wildcard target origin for postMessage (cross-origin iframe)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(

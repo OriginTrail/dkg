@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { handleAppRequest, type LoadedApp } from '../src/app-loader.js';
+import { handleAppRequest, startAppStaticServer, type LoadedApp } from '../src/app-loader.js';
 
 async function write(path: string, content: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
@@ -142,11 +142,140 @@ describe('app-loader', () => {
     });
 
     it('serveAppStatic does not inject token when authToken is undefined', async () => {
-      // Server does not pass authToken to handleAppRequest, so token must not appear
       const res = await httpGet(server, '/apps/test-app/');
       expect(res.status).toBe(200);
       expect(res.body).toContain('App UI');
       expect(res.body).not.toContain('__DKG_TOKEN__');
     });
   });
+
+  describe('/api/apps response with appStaticBaseUrl', () => {
+    it('includes staticUrl when appStaticBaseUrl is provided', async () => {
+      const { req, res } = fakeReqRes();
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 'http://127.0.0.1:19300');
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://127.0.0.1:19300/apps/test-app/');
+    });
+
+    it('omits staticUrl when appStaticBaseUrl is not provided', async () => {
+      const { req, res } = fakeReqRes();
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBeUndefined();
+    });
+  });
 });
+
+describe('startAppStaticServer', () => {
+  let staticDir: string;
+  let apps: LoadedApp[];
+  let appServer: Server;
+
+  beforeEach(async () => {
+    staticDir = join(tmpdir(), `app-static-test-${Date.now()}`);
+    await mkdir(staticDir, { recursive: true });
+    await write(join(staticDir, 'index.html'), '<html><head></head><body>Separate Origin App</body></html>');
+    await write(join(staticDir, 'assets', 'app.js'), 'console.log("hello")');
+    apps = [makeApp('test-app', staticDir)];
+  });
+
+  afterEach(async () => {
+    if (appServer) await new Promise<void>(r => appServer.close(() => r()));
+    await rm(staticDir, { recursive: true, force: true });
+  });
+
+  it('starts on the specified port and serves app static files', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+    expect(result.port).toBeGreaterThan(0);
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('Separate Origin App');
+  });
+
+  it('serves nested assets', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/assets/app.js');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('console.log');
+  });
+
+  it('returns 404 for unknown app', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/unknown/');
+    expect(res.status).toBe(404);
+  });
+
+  it('does not serve API routes', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/api/apps');
+    expect(res.status).toBe(404);
+  });
+
+  it('does NOT inject auth tokens into HTML (static-only server)', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain('__DKG_TOKEN__');
+  });
+
+  it('injects apiOrigin into HTML so apps know where to send API calls', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:19200"');
+  });
+
+  it('includes CORS headers on static responses', async () => {
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, 'http://127.0.0.1:19200');
+    appServer = result.server;
+
+    const res = await httpGetPortFull(result.port, '/apps/test-app/');
+    expect(res.headers['access-control-allow-origin']).toBe('*');
+  });
+});
+
+function httpGetPort(port: number, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    import('node:http').then(({ get }) => {
+      get(`http://127.0.0.1:${port}${path}`, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      }).on('error', reject);
+    });
+  });
+}
+
+function httpGetPortFull(port: number, path: string): Promise<{ status: number; body: string; headers: Record<string, string> }> {
+  return new Promise((resolve, reject) => {
+    import('node:http').then(({ get }) => {
+      get(`http://127.0.0.1:${port}${path}`, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({
+          status: res.statusCode!,
+          body,
+          headers: res.headers as Record<string, string>,
+        }));
+      }).on('error', reject);
+    });
+  });
+}

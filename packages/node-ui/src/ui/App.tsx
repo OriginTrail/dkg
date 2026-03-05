@@ -7,16 +7,10 @@ import { ExplorerPage } from './pages/Explorer.js';
 import { WalletPage } from './pages/Wallet.js';
 import { IntegrationsPage } from './pages/Integrations.js';
 import { MessagesPage } from './pages/Messages.js';
-import { AppHostPage } from './pages/AppHost.js';
+import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
 import { ChatPanel } from './components/ChatPanel.js';
 import { ParticleSphere } from './components/ParticleSphere.js';
 import { BackgroundNetwork } from './components/BackgroundNetwork.js';
-
-interface InstalledApp {
-  id: string;
-  label: string;
-  path: string;
-}
 
 function useInstalledApps(): InstalledApp[] {
   const [apps, setApps] = useState<InstalledApp[]>([]);
