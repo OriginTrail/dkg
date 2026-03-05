@@ -12,7 +12,6 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const app = apps.find(a => a.id === appId);
-  const src = app ? `${app.path}/` : `/apps/${appId}/`;
 
   const handleLoad = useCallback(() => {
     const token = (window as any).__DKG_TOKEN__;
@@ -24,13 +23,22 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
     }
   }, []);
 
+  if (!app) {
+    return (
+      <div style={{ padding: 32, color: '#aaa' }}>
+        App <strong>{appId}</strong> is not installed.
+      </div>
+    );
+  }
+
   return (
     <iframe
       ref={iframeRef}
-      src={src}
+      src={`${app.path}/`}
       onLoad={handleLoad}
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
-      title={app?.label ?? appId}
+      title={app.label}
     />
   );
 }
