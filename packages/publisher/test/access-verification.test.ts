@@ -258,3 +258,66 @@ describe('I-005: Access handler signature verification', () => {
     expect(res.rejectionReason).toContain('signature required');
   });
 });
+
+describe('I-005: Policy checks run before signature verification (perf + clarity)', () => {
+  it('ownerOnly: wrong peer rejected with owner-only error, not signature error', async () => {
+    const store = await setupStoreWithPolicy('ownerOnly', 'real-owner');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'wrong-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'wrong-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('owner-only');
+    expect(res.rejectionReason).not.toContain('signature');
+  });
+
+  it('ownerOnly: wrong peer with valid signature still fails on policy, not signature', async () => {
+    const keypair = await generateEd25519Keypair();
+    const store = await setupStoreWithPolicy('ownerOnly', 'real-owner');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const paymentProof = new Uint8Array(0);
+    const message = new TextEncoder().encode(KA_UAL + toHex(paymentProof));
+    const signature = await ed25519Sign(message, keypair.secretKey);
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'wrong-peer',
+      paymentProof,
+      requesterSignature: signature,
+      requesterPublicKey: keypair.publicKey,
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'wrong-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('owner-only');
+  });
+
+  it('ownerOnly: correct peer still needs valid signature', async () => {
+    const store = await setupStoreWithPolicy('ownerOnly', 'owner-peer');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'owner-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'owner-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('signature required');
+  });
+});

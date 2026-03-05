@@ -688,3 +688,35 @@ describe('Node Roles', () => {
     expect(capType).toBeDefined();
   });
 });
+
+describe('DKGAgent config — syncParanets and queryAccess warning', () => {
+  it('DKGAgentConfig accepts syncParanets array', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncConfigTest',
+      chainAdapter: new MockChainAdapter(),
+      syncParanets: ['my-custom-paranet', 'another-paranet'],
+    });
+    expect(agent).toBeDefined();
+    await agent.stop().catch(() => {});
+  });
+
+  it('syncFromPeer uses config.syncParanets instead of hard-coded values', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'dkg-agent.ts'),
+      'utf-8',
+    );
+    expect(src).not.toContain("'origin-trail-game'");
+    expect(src).toContain('this.config.syncParanets');
+  });
+
+  it('queryAccess warning checks explicit config, not fallback-applied value', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'dkg-agent.ts'),
+      'utf-8',
+    );
+    expect(src).toContain("this.config.queryAccess?.defaultPolicy === 'public'");
+    expect(src).not.toMatch(/queryAccessConfig\.defaultPolicy === ['"]public['"]\s*\)/);
+  });
+});

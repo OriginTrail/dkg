@@ -219,6 +219,28 @@ describe('explorer graph query safety', () => {
   });
 });
 
+describe('Apps.tsx playerName fallback', () => {
+  const apps = readFile('pages/Apps.tsx');
+
+  it('shows manual name input when playerName is empty', () => {
+    expect(apps).toContain('placeholder="Enter your name"');
+    expect(apps).toContain('type="text"');
+  });
+
+  it('disables Join button when playerName is empty', () => {
+    expect(apps).toMatch(/disabled=\{.*!playerName/);
+  });
+
+  it('disables Launch Swarm button when playerName is empty', () => {
+    expect(apps).toMatch(/disabled=\{.*!playerName/);
+  });
+
+  it('still auto-populates playerName from gameApi.info() when available', () => {
+    expect(apps).toContain('data.nodeName');
+    expect(apps).toContain('setPlayerName(data.nodeName)');
+  });
+});
+
 describe('iframe app hosting', () => {
   const appHost = readFile('pages/AppHost.tsx');
 

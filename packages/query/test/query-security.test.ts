@@ -250,3 +250,90 @@ describe('I-009: SPARQL graph scope bypass prevention', () => {
     expect(response.error).toContain('FROM');
   });
 });
+
+describe('I-009: SPARQL keyword detection — no false positives on literals/comments', () => {
+  let store: OxigraphStore;
+  let engine: DKGQueryEngine;
+  let handler: QueryHandler;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    engine = new DKGQueryEngine(store);
+
+    await store.insert([
+      q(ENTITY_A, SCHEMA_NAME, '"Alice"', GRAPH),
+    ]);
+
+    handler = new QueryHandler(engine, {
+      defaultPolicy: 'deny',
+      paranets: {
+        [PARANET]: { policy: 'public', sparqlEnabled: true },
+      },
+    });
+  });
+
+  it('allows GRAPH keyword inside a string literal (not a real GRAPH clause)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <${SCHEMA_NAME}> "This describes a GRAPH structure" }`,
+      }),
+      'peer-1',
+    );
+    expect(response.status).toBe('OK');
+  });
+
+  it('allows FROM keyword inside a string literal (not a real FROM clause)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <${SCHEMA_NAME}> "data FROM multiple sources" }`,
+      }),
+      'peer-1',
+    );
+    expect(response.status).toBe('OK');
+  });
+
+  it('allows SERVICE keyword inside a string literal', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <${SCHEMA_NAME}> "runs a SERVICE endpoint" }`,
+      }),
+      'peer-1',
+    );
+    expect(response.status).toBe('OK');
+  });
+
+  it('allows GRAPH keyword inside a SPARQL comment', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE {
+# This comment mentions GRAPH and FROM clauses
+  ?s <${SCHEMA_NAME}> ?name
+}`,
+      }),
+      'peer-1',
+    );
+    expect(response.status).toBe('OK');
+  });
+
+  it('still rejects real GRAPH clause even when literals are present', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <${SCHEMA_NAME}> "some text" . GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH');
+  });
+
+  it('still rejects real FROM clause even when string literals are present', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s FROM <${OTHER_GRAPH}> WHERE { ?s <${SCHEMA_NAME}> "mentions FROM in text" }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+  });
+});

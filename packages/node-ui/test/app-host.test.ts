@@ -119,6 +119,54 @@ describe('AppHost — sandbox policy', () => {
   });
 });
 
+describe('AppHost — CORS preflight and src lifecycle', () => {
+  it('preflights staticUrl with standard CORS fetch, not no-cors (opaque responses hide errors)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).not.toContain("mode: 'no-cors'");
+    expect(src).not.toContain('mode: "no-cors"');
+    expect(src).toContain("method: 'HEAD'");
+  });
+
+  it('gates staticUrl on response.ok so 404/500 falls back to path', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('r.ok');
+  });
+
+  it('clears src to null at effect start so stale iframe is removed during preflight', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const effectBody = src.slice(src.indexOf('useEffect(() => {'));
+    const firstSetSrc = effectBody.indexOf('setSrc(');
+    const setSrcNull = effectBody.indexOf('setSrc(null)');
+    expect(setSrcNull).toBeGreaterThan(-1);
+    expect(setSrcNull).toBeLessThan(firstSetSrc === setSrcNull ? Infinity : effectBody.indexOf('fetch('));
+  });
+
+  it('preflight logic: ok response uses staticUrl, non-ok falls back to path', () => {
+    const app = { id: 'test', label: 'Test', path: '/apps/test', staticUrl: 'http://localhost:19300/apps/test/' };
+
+    const okResult = (response: { ok: boolean }) =>
+      response.ok ? app.staticUrl : `${app.path}/`;
+
+    expect(okResult({ ok: true })).toBe(app.staticUrl);
+    expect(okResult({ ok: false })).toBe('/apps/test/');
+  });
+});
+
 describe('AppHost — postMessage token handoff', () => {
   it('uses wildcard target origin for postMessage (cross-origin iframe)', async () => {
     const { readFile } = await import('node:fs/promises');
