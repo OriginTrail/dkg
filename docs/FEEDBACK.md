@@ -276,6 +276,30 @@ Issue IDs stay stable on purpose, so references do not break.
 ### D-024 - Upstream learning loop (dev -> validate -> release)
 - This is one possible workflow option (not the only valid one): local linking/tarball test -> pre-release -> validation in reference implementation -> stable release, without editing `node_modules`.
 
+### I-019 - OpenClaw adapter missing paranet discovery tool
+- Severity: Medium
+- What is happening: the OpenClaw adapter exposes `dkg_status`, `dkg_publish`, `dkg_query`, `dkg_find_agents`, `dkg_send_message`, and `dkg_invoke_skill`, but has no tool for discovering available paranets. The agent must know the paranet ID upfront.
+- Why it matters: agents have no way to discover which paranets exist on the network before publishing or querying. This forces hardcoded paranet IDs or user intervention.
+- Decision option A (keep this design): document that paranet IDs must be provided by the user or configured in advance.
+- Decision option B (change, recommended): add a `dkg_list_paranets` tool that wraps the existing `DKGAgent.listParanets()` method.
+- Evidence: `packages/adapter-openclaw/src/DkgNodePlugin.ts:119`, `packages/agent/src/dkg-agent.ts:1021`.
+
+### I-020 - OpenClaw adapter plugin ID is too generic
+- Severity: Low
+- What is happening: the plugin manifest ID is `adapter-openclaw` (from `openclaw.plugin.json`). This appears in `plugins.entries` and `plugins.allow` as just `adapter-openclaw`.
+- Why it matters: if an operator runs multiple plugins, the name does not convey that this is a DKG adapter. Could be confused with any other adapter.
+- Decision option A (keep this design): keep `adapter-openclaw` while there is only one DKG plugin.
+- Decision option B (change, recommended): rename to `dkg-node` or `dkg-openclaw-adapter` in the manifest ID to be self-descriptive.
+- Evidence: `packages/adapter-openclaw/openclaw.plugin.json:2`.
+
+### I-021 - Stale dist when installing adapter from local path (dev-only)
+- Severity: Low
+- What is happening: when installing `@dkg/adapter-openclaw` from a local monorepo path (pre-publish), the compiled `dist/` can be stale (e.g. using `handler` instead of `execute` for tool functions). This causes `tool.execute is not a function` at runtime.
+- Why it matters: local development setup appears to work (plugin loads, tools register by name) but silently fails on first use. Only affects pre-publish local installs — once published to npm, `prepublishOnly` ensures fresh builds.
+- Decision option A (recommended): document in README that local installs require `pnpm --filter @dkg/adapter-openclaw run build` before `npm install`. Add a `prepack` script as a safety net.
+- Decision option B: no action needed if all contributors use published packages.
+- Evidence: `packages/adapter-openclaw/package.json:23`.
+
 ## eval.txt Coverage (Issues and Decisions)
 
 Only issue/decision mappings are listed here. Clarification-only mappings live in `.ai/clarifications.md`.
