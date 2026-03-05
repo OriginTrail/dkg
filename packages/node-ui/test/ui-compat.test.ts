@@ -227,12 +227,22 @@ describe('Apps.tsx playerName fallback', () => {
     expect(apps).toContain('type="text"');
   });
 
-  it('disables Join button when playerName is empty', () => {
-    expect(apps).toMatch(/disabled=\{.*!playerName/);
+  it('does not trim playerName on every keystroke (allows spaces while typing)', () => {
+    expect(apps).not.toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\.trim\(\)\)/);
+    expect(apps).toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\)/);
   });
 
-  it('disables Launch Swarm button when playerName is empty', () => {
-    expect(apps).toMatch(/disabled=\{.*!playerName/);
+  it('trims playerName at submit/join time, not in onChange', () => {
+    expect(apps).toMatch(/gameApi\.join\([^,]+,\s*playerName\.trim\(\)\)/);
+    expect(apps).toMatch(/gameApi\.create\(playerName\.trim\(\)/);
+  });
+
+  it('disables Join button when trimmed playerName is empty', () => {
+    expect(apps).toMatch(/disabled=\{.*!playerName\.trim\(\)/);
+  });
+
+  it('disables Launch Swarm button when trimmed playerName is empty', () => {
+    expect(apps).toMatch(/!playerName\.trim\(\)\s*\|\|\s*loading/);
   });
 
   it('still auto-populates playerName from gameApi.info() when available', () => {

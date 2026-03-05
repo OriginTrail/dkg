@@ -336,4 +336,36 @@ describe('I-009: SPARQL keyword detection — no false positives on literals/com
     expect(response.status).toBe('ERROR');
     expect(response.error).toContain('FROM');
   });
+
+  it('rejects GRAPH clause after IRI containing # fragment (# inside <> is not a comment)', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <http://example.org/vocab#name> ?name . GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('GRAPH');
+  });
+
+  it('rejects FROM clause after IRI containing # fragment', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s FROM <${OTHER_GRAPH}> WHERE { ?s <http://example.org/vocab#type> ?t }`,
+      }),
+      'peer-attacker',
+    );
+    expect(response.status).toBe('ERROR');
+    expect(response.error).toContain('FROM');
+  });
+
+  it('allows query using IRIs with # fragments when no GRAPH/FROM clause present', async () => {
+    const response = await handler.handle(
+      makeRequest({
+        sparql: `SELECT ?s WHERE { ?s <http://example.org/vocab#name> ?name }`,
+      }),
+      'peer-1',
+    );
+    expect(response.status).toBe('OK');
+  });
 });

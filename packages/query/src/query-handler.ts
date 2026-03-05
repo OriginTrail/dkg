@@ -361,12 +361,19 @@ function encode(response: QueryResponse): Uint8Array {
 }
 
 /**
- * Replaces string literals (single/double/triple-quoted) and # comments
- * with whitespace so that keyword regexes don't match inside values.
+ * Replaces string literals (single/double/triple-quoted), IRIs, and
+ * line comments with spaces so keyword regexes don't false-positive.
+ *
+ * Order matters: triple-quoted first, then regular strings, then IRIs
+ * (so `#` inside `<http://x/#frag>` is not treated as comment), then
+ * line comments last.
+ *
+ * String patterns use the "unrolled loop" form to avoid polynomial
+ * backtracking (ReDoS): `"[^"\\]*(?:\\.[^"\\]*)*"`.
  */
 function stripLiteralsAndComments(sparql: string): string {
   return sparql.replace(
-    /"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|#[^\n]*/g,
+    /"""[\s\S]*?"""|'''[\s\S]*?'''|"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|<[^>]*>|#[^\n]*/g,
     (m) => ' '.repeat(m.length),
   );
 }

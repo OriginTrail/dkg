@@ -700,23 +700,46 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
     await agent.stop().catch(() => {});
   });
 
-  it('syncFromPeer uses config.syncParanets instead of hard-coded values', async () => {
-    const { readFile } = await import('node:fs/promises');
-    const src = await readFile(
-      join(import.meta.dirname, '..', 'src', 'dkg-agent.ts'),
-      'utf-8',
+  it('emits warning when queryAccess.defaultPolicy is explicitly "public"', async () => {
+    const { Logger } = await import('@dkg/core');
+    const logs: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => logs.push(entry));
+
+    const agent = await DKGAgent.create({
+      name: 'PublicWarnTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      queryAccess: { defaultPolicy: 'public' },
+    });
+    await agent.start();
+
+    const warning = logs.find(
+      l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
     );
-    expect(src).not.toContain("'origin-trail-game'");
-    expect(src).toContain('this.config.syncParanets');
+    expect(warning).toBeDefined();
+
+    await agent.stop().catch(() => {});
+    Logger.setSink(null);
   });
 
-  it('queryAccess warning checks explicit config, not fallback-applied value', async () => {
-    const { readFile } = await import('node:fs/promises');
-    const src = await readFile(
-      join(import.meta.dirname, '..', 'src', 'dkg-agent.ts'),
-      'utf-8',
+  it('does not emit public-query warning when queryAccess is omitted (deny default)', async () => {
+    const { Logger } = await import('@dkg/core');
+    const logs: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => logs.push(entry));
+
+    const agent = await DKGAgent.create({
+      name: 'DenyDefaultTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    const warning = logs.find(
+      l => l.level === 'warn' && l.message.includes('Query access policy is "public"'),
     );
-    expect(src).toContain("this.config.queryAccess?.defaultPolicy === 'public'");
-    expect(src).not.toMatch(/queryAccessConfig\.defaultPolicy === ['"]public['"]\s*\)/);
+    expect(warning).toBeUndefined();
+
+    await agent.stop().catch(() => {});
+    Logger.setSink(null);
   });
 });

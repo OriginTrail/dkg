@@ -91,7 +91,7 @@ function GameTab() {
                 type="text"
                 placeholder="Enter your name"
                 value={playerName}
-                onChange={e => setPlayerName(e.target.value.trim())}
+                onChange={e => setPlayerName(e.target.value)}
                 style={{ padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text)', fontSize: 12, width: 160 }}
               />
             </>
@@ -126,8 +126,8 @@ function GameTab() {
             ) : lobby.openSwarms.map(w => (
               <SwarmRow key={w.id} swarm={w} action={
                 <button
-                  onClick={() => act(() => gameApi.join(w.id, playerName))}
-                  disabled={loading || !playerName}
+                  onClick={() => act(() => gameApi.join(w.id, playerName.trim()))}
+                  disabled={loading || !playerName.trim()}
                   style={{ padding: '5px 12px', borderRadius: 6, border: '1px solid rgba(74,222,128,.25)', background: 'var(--green-dim)', color: 'var(--green)', fontSize: 11, fontWeight: 600 }}
                 >
                   Join
@@ -140,7 +140,7 @@ function GameTab() {
           <CreateSwarmForm
             playerName={playerName}
             loading={loading}
-            onSubmit={(swarmName, max) => act(() => gameApi.create(playerName, swarmName, max))}
+            onSubmit={(swarmName, max) => act(() => gameApi.create(playerName.trim(), swarmName, max))}
           />
 
           {/* How to play */}
@@ -316,9 +316,9 @@ function CreateSwarmForm({ playerName, loading, onSubmit }: { playerName: string
         ))}
       </div>
       <button
-        disabled={!name.trim() || !playerName || loading}
+        disabled={!name.trim() || !playerName.trim() || loading}
         onClick={() => onSubmit(name.trim(), max)}
-        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
+        style={{ padding: '10px 24px', borderRadius: 8, border: 'none', background: name.trim() && playerName.trim() ? 'var(--green)' : 'var(--border)', color: name.trim() && playerName.trim() ? 'var(--bg)' : 'var(--text-dim)', fontSize: 13, fontWeight: 700 }}
       >
         Launch Swarm
       </button>
