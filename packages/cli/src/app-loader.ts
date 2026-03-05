@@ -12,7 +12,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { join, dirname, resolve, relative } from 'node:path';
 import { createRequire } from 'node:module';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 
 export interface DkgAppManifest {
   id: string;
@@ -100,6 +100,20 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
 }
 
 /**
+ * Derive a client-facing origin URL from request headers.
+ * Uses `x-forwarded-proto` for scheme (respects reverse proxies/TLS termination)
+ * and the `Host` header for hostname, replacing the port.
+ */
+export function deriveOrigin(req: IncomingMessage, port: number): string {
+  const rawProto = req.headers['x-forwarded-proto'];
+  const protoHeader = Array.isArray(rawProto) ? rawProto[0] : rawProto;
+  const proto = protoHeader?.split(',')[0]?.trim() || 'http';
+  const reqHost = req.headers.host;
+  const hostname = reqHost ? reqHost.replace(/:\d+$/, '') : '127.0.0.1';
+  return `${proto}://${hostname}:${port}`;
+}
+
+/**
  * Handle incoming requests for installed apps.
  * - GET /api/apps → list of installed apps
  * - GET /apps/:id/* → serve static UI files
@@ -113,11 +127,21 @@ export async function handleAppRequest(
   url: URL,
   apps: LoadedApp[],
   authToken?: string,
+  appStaticPort?: number,
 ): Promise<boolean> {
   const path = url.pathname;
 
   if (req.method === 'GET' && path === '/api/apps') {
-    const list = apps.map(a => ({ id: a.id, label: a.label, path: a.path }));
+    let staticBaseUrl: string | undefined;
+    if (appStaticPort) {
+      staticBaseUrl = deriveOrigin(req, appStaticPort);
+    }
+    const list = apps.map(a => ({
+      id: a.id,
+      label: a.label,
+      path: a.path,
+      ...(staticBaseUrl ? { staticUrl: `${staticBaseUrl}${a.path}/` } : {}),
+    }));
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(list));
     return true;
@@ -139,7 +163,13 @@ export async function handleAppRequest(
   return false;
 }
 
-async function serveAppStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
+async function serveAppStatic(
+  res: ServerResponse,
+  staticDir: string,
+  urlPath: string,
+  authToken?: string,
+  apiOrigin?: string,
+): Promise<true> {
   const resolved = resolve(staticDir, (urlPath && urlPath !== '/') ? urlPath.replace(/^\//, '') : 'index.html');
   const rel = relative(staticDir, resolved);
   if (rel.startsWith('..') || resolve(staticDir, rel) !== resolved) {
@@ -157,23 +187,88 @@ async function serveAppStatic(res: ServerResponse, staticDir: string, urlPath: s
   const isHtml = mimeExt === '.html';
 
   try {
-    if (isHtml && authToken) {
+    const needsInjection = isHtml && (authToken || apiOrigin);
+    if (needsInjection) {
       const html = await readFile(filePath, 'utf-8');
-      const injection = `<script>window.__DKG_TOKEN__=${JSON.stringify(authToken)}</script>`;
+      const parts: string[] = [];
+      if (authToken) parts.push(`window.__DKG_TOKEN__=${JSON.stringify(authToken)}`);
+      if (apiOrigin) parts.push(`window.__DKG_API_ORIGIN__=${JSON.stringify(apiOrigin)}`);
+      const injection = `<script>${parts.join(';')}</script>`;
       const injected = html.replace('</head>', `${injection}</head>`);
       const buf = Buffer.from(injected, 'utf-8');
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache' });
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.byteLength, 'Cache-Control': 'no-cache', 'Access-Control-Allow-Origin': '*' });
       res.end(buf);
     } else {
       const s = await stat(filePath);
       const contentType = MIME[mimeExt] ?? 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': s.size, 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable' });
+      res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': s.size, 'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable', 'Access-Control-Allow-Origin': '*' });
       createReadStream(filePath).pipe(res);
     }
   } catch {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.writeHead(404, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
     res.end('App UI not found');
   }
 
   return true;
+}
+
+/**
+ * Start a separate-origin HTTP server for app static files.
+ * Running on a different port gives each app a different browser origin,
+ * providing real isolation (no sandbox hacks needed) while allowing
+ * localStorage, sessionStorage, and normal asset loading.
+ */
+export async function startAppStaticServer(
+  apps: LoadedApp[],
+  host: string,
+  port: number,
+  apiPortRef: { value: number },
+  log?: (msg: string) => void,
+): Promise<{ server: Server; port: number }> {
+  const appServer = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const path = url.pathname;
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        });
+        res.end();
+        return;
+      }
+
+      if (path.startsWith('/apps/')) {
+        const segments = path.slice('/apps/'.length).split('/');
+        const appId = segments[0];
+        const app = apps.find(a => a.id === appId);
+        if (app) {
+          const apiOrigin = apiPortRef.value ? deriveOrigin(req, apiPortRef.value) : undefined;
+          await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
+          return;
+        }
+      }
+
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+    } catch {
+      if (!res.headersSent) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad request');
+      }
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    appServer.once('error', reject);
+    appServer.listen(port, host, () => {
+      appServer.removeListener('error', reject);
+      resolve();
+    });
+  });
+  const boundPort = (appServer.address() as any).port as number;
+  log?.(`App static server listening on http://${host}:${boundPort}`);
+  return { server: appServer, port: boundPort };
 }

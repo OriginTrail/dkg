@@ -5,6 +5,11 @@ const INSTALLED_APPS = [
   { id: 'my-app', label: 'My App', path: '/apps/my-app' },
 ];
 
+const INSTALLED_APPS_WITH_STATIC_URL = [
+  { id: 'oregon-trail', label: 'Oregon Trail', path: '/apps/oregon-trail', staticUrl: 'http://127.0.0.1:19300/apps/oregon-trail/' },
+  { id: 'my-app', label: 'My App', path: '/apps/my-app', staticUrl: 'http://127.0.0.1:19300/apps/my-app/' },
+];
+
 function resolveApp(appId: string | undefined, apps: typeof INSTALLED_APPS) {
   return apps.find(a => a.id === appId);
 }
@@ -17,8 +22,7 @@ describe('AppHost — app resolution security', () => {
   });
 
   it('returns undefined for an unknown app ID', () => {
-    const app = resolveApp('nonexistent', INSTALLED_APPS);
-    expect(app).toBeUndefined();
+    expect(resolveApp('nonexistent', INSTALLED_APPS)).toBeUndefined();
   });
 
   it('returns undefined for path-traversal attempts', () => {
@@ -40,20 +44,8 @@ describe('AppHost — app resolution security', () => {
   });
 });
 
-describe('AppHost — iframe sandbox policy', () => {
-  it('component source includes sandbox attribute', async () => {
-    const { readFile } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    const src = await readFile(
-      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
-      'utf-8',
-    );
-    expect(src).toContain('sandbox=');
-    expect(src).toContain('allow-scripts');
-    expect(src).not.toContain('allow-top-navigation');
-  });
-
-  it('sandbox does not include allow-same-origin (prevents iframe escaping sandbox)', async () => {
+describe('AppHost — sandbox policy', () => {
+  it('sandbox never includes allow-same-origin (apps share one static-server origin)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
@@ -63,6 +55,56 @@ describe('AppHost — iframe sandbox policy', () => {
     const sandboxMatch = src.match(/sandbox="([^"]*)"/);
     expect(sandboxMatch).toBeTruthy();
     expect(sandboxMatch![1]).not.toContain('allow-same-origin');
+  });
+
+  it('sandbox includes allow-scripts, allow-forms, allow-popups', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).toContain('allow-scripts');
+    expect(sandboxMatch![1]).toContain('allow-forms');
+    expect(sandboxMatch![1]).toContain('allow-popups');
+  });
+
+  it('sandbox blocks top-level navigation (no allow-top-navigation in sandbox value)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    const sandboxMatch = src.match(/sandbox="([^"]*)"/);
+    expect(sandboxMatch).toBeTruthy();
+    expect(sandboxMatch![1]).not.toContain('allow-top-navigation');
+  });
+
+  it('uses staticUrl (different origin) when available, falling back to same-origin path', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('app.staticUrl');
+    expect(src).toContain('app.path');
+  });
+
+  it('iframe src resolves to separate-origin URL when staticUrl is provided', () => {
+    const app = INSTALLED_APPS_WITH_STATIC_URL.find(a => a.id === 'oregon-trail')!;
+    const iframeSrc = app.staticUrl || `${app.path}/`;
+    expect(iframeSrc).toBe('http://127.0.0.1:19300/apps/oregon-trail/');
+    expect(new URL(iframeSrc).port).toBe('19300');
+  });
+
+  it('iframe src falls back to same-origin path when staticUrl is absent', () => {
+    const app = INSTALLED_APPS.find(a => a.id === 'oregon-trail')!;
+    const iframeSrc = (app as any).staticUrl || `${app.path}/`;
+    expect(iframeSrc).toBe('/apps/oregon-trail/');
   });
 
   it('component does not render iframe when app is not found', async () => {
@@ -77,8 +119,8 @@ describe('AppHost — iframe sandbox policy', () => {
   });
 });
 
-describe('AppHost — postMessage token handoff with opaque-origin iframe', () => {
-  it('uses wildcard target origin for postMessage (opaque iframe origin)', async () => {
+describe('AppHost — postMessage token handoff', () => {
+  it('uses wildcard target origin for postMessage (cross-origin iframe)', async () => {
     const { readFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const src = await readFile(
@@ -90,6 +132,16 @@ describe('AppHost — postMessage token handoff with opaque-origin iframe', () =
     for (const call of postMessageCalls) {
       expect(call).toContain("'*'");
     }
+  });
+
+  it('sends apiOrigin alongside token in postMessage', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const src = await readFile(
+      join(import.meta.dirname, '..', 'src', 'ui', 'pages', 'AppHost.tsx'),
+      'utf-8',
+    );
+    expect(src).toContain('apiOrigin: window.location.origin');
   });
 
   it('responds to dkg-token-request from iframe via message listener', async () => {
@@ -115,7 +167,10 @@ describe('AppHost — postMessage token handoff with opaque-origin iframe', () =
     const sendToken = () => {
       const t = (globalThis as any).__DKG_TOKEN__;
       if (t && mockIframe.contentWindow) {
-        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+        mockIframe.contentWindow.postMessage(
+          { type: 'dkg-token', token: t, apiOrigin: 'http://localhost:19200' },
+          '*',
+        );
       }
     };
 
@@ -123,7 +178,7 @@ describe('AppHost — postMessage token handoff with opaque-origin iframe', () =
 
     expect(mockPostMessage).toHaveBeenCalledOnce();
     expect(mockPostMessage).toHaveBeenCalledWith(
-      { type: 'dkg-token', token: 'test-token-abc123' },
+      { type: 'dkg-token', token: 'test-token-abc123', apiOrigin: 'http://localhost:19200' },
       '*',
     );
 
@@ -132,21 +187,16 @@ describe('AppHost — postMessage token handoff with opaque-origin iframe', () =
 
   it('does not send token when no token is set', () => {
     const mockPostMessage = vi.fn();
-    const mockIframe = {
-      contentWindow: { postMessage: mockPostMessage },
-    };
-
     delete (globalThis as any).__DKG_TOKEN__;
 
     const sendToken = () => {
       const t = (globalThis as any).__DKG_TOKEN__;
-      if (t && mockIframe.contentWindow) {
-        mockIframe.contentWindow.postMessage({ type: 'dkg-token', token: t }, '*');
+      if (t) {
+        mockPostMessage({ type: 'dkg-token', token: t }, '*');
       }
     };
 
     sendToken();
-
     expect(mockPostMessage).not.toHaveBeenCalled();
   });
 

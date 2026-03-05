@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { handleAppRequest, type LoadedApp } from '../src/app-loader.js';
+import { handleAppRequest, startAppStaticServer, deriveOrigin, type LoadedApp } from '../src/app-loader.js';
 
 async function write(path: string, content: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
@@ -20,11 +20,11 @@ function makeApp(id: string, staticDir: string): LoadedApp {
   };
 }
 
-function httpGet(server: Server, path: string): Promise<{ status: number; body: string }> {
+function httpGet(server: Server, path: string, headers?: Record<string, string>): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const addr = server.address() as { port: number };
     import('node:http').then(({ get }) => {
-      get(`http://127.0.0.1:${addr.port}${path}`, (res) => {
+      get(`http://127.0.0.1:${addr.port}${path}`, { headers }, (res) => {
         let body = '';
         res.on('data', (c: Buffer) => { body += c.toString(); });
         res.on('end', () => resolve({ status: res.statusCode!, body }));
@@ -33,8 +33,8 @@ function httpGet(server: Server, path: string): Promise<{ status: number; body: 
   });
 }
 
-function fakeReqRes(): { req: IncomingMessage; res: ServerResponse & { _status: number; _body: string; _headers: Record<string, unknown> } } {
-  const req = { method: 'GET', headers: {} } as unknown as IncomingMessage;
+function fakeReqRes(host?: string): { req: IncomingMessage; res: ServerResponse & { _status: number; _body: string; _headers: Record<string, unknown> } } {
+  const req = { method: 'GET', headers: { host: host || '127.0.0.1:19200' } } as unknown as IncomingMessage;
   const collected = { _status: 0, _body: '', _headers: {} as Record<string, unknown> };
   const res = {
     ...collected,
@@ -142,11 +142,254 @@ describe('app-loader', () => {
     });
 
     it('serveAppStatic does not inject token when authToken is undefined', async () => {
-      // Server does not pass authToken to handleAppRequest, so token must not appear
       const res = await httpGet(server, '/apps/test-app/');
       expect(res.status).toBe(200);
       expect(res.body).toContain('App UI');
       expect(res.body).not.toContain('__DKG_TOKEN__');
     });
   });
+
+  describe('/api/apps staticUrl derived from request Host header', () => {
+    it('includes staticUrl using request hostname when appStaticPort is provided', async () => {
+      const { req, res } = fakeReqRes('mynode.example.com:19200');
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://mynode.example.com:19300/apps/test-app/');
+    });
+
+    it('strips port from Host header when deriving hostname', async () => {
+      const { req, res } = fakeReqRes('192.168.1.50:19200');
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://192.168.1.50:19300/apps/test-app/');
+    });
+
+    it('uses https scheme when x-forwarded-proto is https', async () => {
+      const { req, res } = fakeReqRes('mynode.example.com:19200');
+      (req as any).headers['x-forwarded-proto'] = 'https';
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('https://mynode.example.com:19300/apps/test-app/');
+    });
+
+    it('falls back to 127.0.0.1 when Host header is missing', async () => {
+      const { req, res } = fakeReqRes();
+      (req as any).headers = {};
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps, undefined, 19300);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBe('http://127.0.0.1:19300/apps/test-app/');
+    });
+
+    it('omits staticUrl when appStaticPort is not provided', async () => {
+      const { req, res } = fakeReqRes();
+      const url = { pathname: '/api/apps' } as URL;
+      (req as any).method = 'GET';
+
+      await handleAppRequest(req, res, url, apps);
+      const list = JSON.parse(res._body);
+      expect(list[0].staticUrl).toBeUndefined();
+    });
+  });
 });
+
+describe('startAppStaticServer', () => {
+  let staticDir: string;
+  let apps: LoadedApp[];
+  let appServer: Server;
+
+  beforeEach(async () => {
+    staticDir = join(tmpdir(), `app-static-test-${Date.now()}`);
+    await mkdir(staticDir, { recursive: true });
+    await write(join(staticDir, 'index.html'), '<html><head></head><body>Separate Origin App</body></html>');
+    await write(join(staticDir, 'assets', 'app.js'), 'console.log("hello")');
+    apps = [makeApp('test-app', staticDir)];
+  });
+
+  afterEach(async () => {
+    if (appServer) await new Promise<void>(r => appServer.close(() => r()));
+    await rm(staticDir, { recursive: true, force: true });
+  });
+
+  it('starts on the specified port and serves app static files', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+    expect(result.port).toBeGreaterThan(0);
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('Separate Origin App');
+  });
+
+  it('serves nested assets', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/assets/app.js');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('console.log');
+  });
+
+  it('returns 404 for unknown app', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/unknown/');
+    expect(res.status).toBe(404);
+  });
+
+  it('does not serve API routes', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/api/apps');
+    expect(res.status).toBe(404);
+  });
+
+  it('does NOT inject auth tokens into HTML (static-only server)', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain('__DKG_TOKEN__');
+  });
+
+  it('derives apiOrigin at request time from Host header and apiPort', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:19200"');
+  });
+
+  it('reads apiPortRef.value at request time (supports late binding)', async () => {
+    const ref = { value: 0 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    ref.value = 55555;
+    const res = await httpGetPort(result.port, '/apps/test-app/');
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('window.__DKG_API_ORIGIN__="http://127.0.0.1:55555"');
+  });
+
+  it('includes CORS headers on static responses', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPortFull(result.port, '/apps/test-app/');
+    expect(res.headers['access-control-allow-origin']).toBe('*');
+  });
+
+  it('returns 400 for malformed requests instead of crashing', async () => {
+    const ref = { value: 19200 };
+    const result = await startAppStaticServer(apps, '127.0.0.1', 0, ref);
+    appServer = result.server;
+
+    const res = await httpGetPort(result.port, '/%00%00%00');
+    expect([200, 400, 404]).toContain(res.status);
+  });
+
+  it('rejects with EADDRINUSE when port is already taken', async () => {
+    const blocker = createServer();
+    const blockerPort = await new Promise<number>((resolve) => {
+      blocker.listen(0, '127.0.0.1', () => {
+        resolve((blocker.address() as any).port);
+      });
+    });
+
+    try {
+      const ref = { value: 19200 };
+      await expect(
+        startAppStaticServer(apps, '127.0.0.1', blockerPort, ref),
+      ).rejects.toThrow(/EADDRINUSE/);
+    } finally {
+      await new Promise<void>(r => blocker.close(() => r()));
+    }
+  });
+});
+
+describe('deriveOrigin', () => {
+  function fakeReq(host?: string, proto?: string | string[]): IncomingMessage {
+    const headers: Record<string, string | string[]> = {};
+    if (host) headers.host = host;
+    if (proto) headers['x-forwarded-proto'] = proto;
+    return { headers } as unknown as IncomingMessage;
+  }
+
+  it('derives http origin from Host header', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:19200'), 19300)).toBe('http://mynode.local:19300');
+  });
+
+  it('uses https when x-forwarded-proto is https', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'https'), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('handles x-forwarded-proto with multiple values (uses first)', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'https, http'), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('handles x-forwarded-proto as string[] (Node repeated headers)', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', ['https', 'http']), 19300)).toBe('https://mynode.local:19300');
+  });
+
+  it('falls back to 127.0.0.1 when Host header is missing', () => {
+    expect(deriveOrigin(fakeReq(), 19300)).toBe('http://127.0.0.1:19300');
+  });
+
+  it('strips port from Host header', () => {
+    expect(deriveOrigin(fakeReq('192.168.1.50:19200'), 19300)).toBe('http://192.168.1.50:19300');
+  });
+
+  it('handles Host header without port', () => {
+    expect(deriveOrigin(fakeReq('mynode.local'), 19300)).toBe('http://mynode.local:19300');
+  });
+});
+
+function httpGetPort(port: number, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    import('node:http').then(({ get }) => {
+      get(`http://127.0.0.1:${port}${path}`, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      }).on('error', reject);
+    });
+  });
+}
+
+function httpGetPortFull(port: number, path: string): Promise<{ status: number; body: string; headers: Record<string, string> }> {
+  return new Promise((resolve, reject) => {
+    import('node:http').then(({ get }) => {
+      get(`http://127.0.0.1:${port}${path}`, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({
+          status: res.statusCode!,
+          body,
+          headers: res.headers as Record<string, string>,
+        }));
+      }).on('error', reject);
+    });
+  });
+}
