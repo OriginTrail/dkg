@@ -178,6 +178,14 @@ export const fetchWalletsBalances = () =>
 export const fetchRpcHealth = () =>
   get<{ ok: boolean; rpcUrl: string | null; latencyMs: number | null; blockNumber: number | null; error?: string }>('/api/chain/rpc-health');
 
+// --- Apps ---
+export const fetchApps = () =>
+  get<Array<{ id: string; label: string; path: string; staticUrl?: string }>>('/api/apps');
+
+// --- Node control ---
+export const shutdownNode = () =>
+  post<{ ok: boolean }>('/api/shutdown', {});
+
 // --- Integrations ---
 export const fetchIntegrations = () =>
   get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; paranets: any[] }>('/api/integrations');

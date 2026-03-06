@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchLlmSettings, updateLlmSettings } from '../api.js';
+import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode } from '../api.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -11,20 +11,23 @@ function Field({ label, value, mono = false }: { label: string; value: string; m
   );
 }
 
-function Toggle({ label, desc, on }: { label: string; desc: string; on: boolean }) {
+function Toggle({ label, desc, on, disabled }: { label: string; desc: string; on: boolean; disabled?: boolean }) {
   const [active, setActive] = useState(on);
+  useEffect(() => { setActive(on); }, [on]);
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid var(--border)', opacity: disabled ? 0.5 : 1 }}>
       <div>
         <div style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
       </div>
       <button
-        onClick={() => setActive(a => !a)}
+        onClick={() => !disabled && setActive(a => !a)}
+        disabled={disabled}
         style={{
           width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
           background: active ? 'var(--green)' : 'var(--border)',
           transition: 'background .2s', position: 'relative', marginLeft: 16,
+          cursor: disabled ? 'not-allowed' : 'pointer',
         }}
       >
         <span style={{
@@ -207,9 +210,60 @@ function LlmSection() {
   );
 }
 
+function formatUptime(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h ${min % 60}m`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ${hrs % 24}h`;
+}
+
+function truncateAddress(addr: string): string {
+  if (addr.length <= 12) return addr;
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+function chainLabel(chainId: string | null | undefined): string {
+  if (!chainId) return 'Unknown';
+  const id = chainId.includes(':') ? chainId.split(':')[1] : chainId;
+  switch (id) {
+    case '84532': return 'Base Sepolia (Testnet)';
+    case '8453': return 'Base (Mainnet)';
+    case '1': return 'Ethereum Mainnet';
+    case '11155111': return 'Sepolia (Testnet)';
+    case '31337': return 'Local (Hardhat)';
+    default: return `Chain ${id}`;
+  }
+}
+
 export function SettingsPage() {
   const { data: status } = useFetch(fetchStatus, [], 30_000);
+  const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
+  const { data: apps } = useFetch(fetchApps, []);
   const s = status as any;
+  const w = wallets as any;
+
+  const [shutdownConfirm, setShutdownConfirm] = useState(false);
+  const [shuttingDown, setShuttingDown] = useState(false);
+
+  const peerCount = s?.connectedPeers ?? 0;
+  const isOnline = s?.peerId != null;
+  const primaryWallet = w?.balances?.[0];
+
+  const handleShutdown = useCallback(async () => {
+    if (!shutdownConfirm) {
+      setShutdownConfirm(true);
+      setTimeout(() => setShutdownConfirm(false), 5000);
+      return;
+    }
+    setShuttingDown(true);
+    try {
+      await shutdownNode();
+    } catch { /* node will be gone */ }
+  }, [shutdownConfirm]);
 
   return (
     <div className="page-section">
@@ -219,76 +273,117 @@ export function SettingsPage() {
       </div>
 
       <div className="settings-grid">
-        {/* LLM Configuration — first card */}
+        {/* LLM Configuration */}
         <LlmSection />
 
         {/* Node Identity */}
         <div className="settings-card">
           <div className="settings-title">Node Identity</div>
-          <Field label="Node ID" value={s?.nodeId ?? 'quantum-guardian-v9'} mono />
-          <Field label="Network" value={s?.network ?? 'DKG v9 Testnet · Base Sepolia'} />
-          <Field label="API Port" value={String(s?.apiPort ?? 19200)} mono />
-          <Field label="Version" value={s?.version ?? '9.0.0-alpha'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--green-dim)', border: '1px solid rgba(74,222,128,.2)' }}>
-            <div className="mono" style={{ fontSize: 10, color: 'var(--green)', fontWeight: 700 }}>● ONLINE</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>Connected to 14 peers</div>
+          <Field label="Name" value={s?.name ?? '—'} />
+          <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
+          <Field label="Role" value={s?.nodeRole ?? '—'} />
+          <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
+          <Field label="Store" value={s?.storeBackend ?? '—'} mono />
+          <div style={{ padding: '10px 14px', borderRadius: 8, background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
+            <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
+              {isOnline ? '● ONLINE' : '● OFFLINE'}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+              {isOnline
+                ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed · up ${formatUptime(s?.uptimeMs ?? 0)}`
+                : 'Node is not responding'}
+            </div>
           </div>
         </div>
 
         {/* Blockchain */}
         <div className="settings-card">
           <div className="settings-title">Blockchain Config</div>
-          <Field label="Chain" value="Base Sepolia (Testnet)" />
-          <Field label="Operational Wallet" value={s?.operationalWallet ?? '0xe689…f6AE'} mono />
-          <Field label="Management Wallet" value={s?.managementWallet ?? '0xa4B1…9F60'} mono />
-          <Field label="TRAC Balance" value={s?.tracBalance ?? '—'} mono />
-          <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
-          </div>
+          <Field label="Chain" value={chainLabel(w?.chainId)} />
+          {w?.balances?.length > 0 ? (
+            w.balances.map((b: any, i: number) => (
+              <div key={b.address} style={{ marginBottom: 10 }}>
+                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
+                <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{parseFloat(b.eth).toFixed(6)} ETH</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>{parseFloat(b.trac).toFixed(2)} {b.symbol}</span>
+                </div>
+              </div>
+            ))
+          ) : (
+            <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
+          )}
+          {w?.rpcUrl && (
+            <Field label="RPC" value={w.rpcUrl} mono />
+          )}
+          {w?.error ? (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
+            </div>
+          ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
+            </div>
+          ) : null}
         </div>
 
         {/* Privacy & Memory */}
         <div className="settings-card">
           <div className="settings-title">Privacy & Memory</div>
-          <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} />
-          <Toggle label="Memory Indexing" desc="Index imported memories for fast agent retrieval." on={true} />
-          <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG v9." on={false} />
-          <Toggle label="Agent Access" desc="Allow other agents to query your public Knowledge Assets." on={true} />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+            These settings are not yet configurable via the UI. Edit <span className="mono" style={{ fontSize: 10 }}>~/.dkg/config.json</span> directly.
+          </div>
+          <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} disabled />
+          <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG v9." on={false} disabled />
         </div>
 
         {/* Apps */}
         <div className="settings-card">
           <div className="settings-title">Installed Apps</div>
-          {[
-            { name: 'OriginTrail Game', id: 'origintrail', version: '0.1.0', status: 'active' },
-          ].map(app => (
-            <div key={app.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-              <span style={{ fontSize: 18 }}>🚀</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>{app.name}</div>
-                <div className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>v{app.version} · {app.id}</div>
+          {apps && (apps as any[]).length > 0 ? (
+            (apps as any[]).map((app: any) => (
+              <div key={app.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 18 }}>🚀</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{app.label}</div>
+                  <div className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{app.id} · {app.path}</div>
+                </div>
+                <span className="mono" style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: 'var(--green-dim)', color: 'var(--green)', fontWeight: 700 }}>
+                  ACTIVE
+                </span>
               </div>
-              <span className="mono" style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: 'var(--green-dim)', color: 'var(--green)', fontWeight: 700 }}>
-                {app.status.toUpperCase()}
-              </span>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '12px 0' }}>
+              No apps installed. Apps are loaded from <span className="mono" style={{ fontSize: 10 }}>config.json</span> on startup.
             </div>
-          ))}
+          )}
         </div>
 
         {/* Danger zone */}
         <div className="settings-card" style={{ gridColumn: '1 / -1', borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
           <div className="settings-title" style={{ color: 'var(--red)' }}>Danger Zone</div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {[
-              { label: 'Restart Node', desc: 'Restart the DKG v9 daemon', color: 'var(--amber)' },
-              { label: 'Clear Cache', desc: 'Wipe local query cache', color: 'var(--amber)' },
-              { label: 'Wipe Node Data', desc: 'Irreversible — deletes all local data', color: 'var(--red)' },
-            ].map(a => (
-              <button key={a.label} style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${a.color}44`, background: `${a.color}11`, color: a.color, fontSize: 12, fontWeight: 600 }}>
-                {a.label}
-              </button>
-            ))}
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              onClick={handleShutdown}
+              disabled={shuttingDown}
+              style={{
+                padding: '8px 16px', borderRadius: 8,
+                border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
+                background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
+                color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
+                fontSize: 12, fontWeight: 600,
+                cursor: shuttingDown ? 'not-allowed' : 'pointer',
+                opacity: shuttingDown ? 0.5 : 1,
+              }}
+            >
+              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
+            </button>
+            {shutdownConfirm && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click again to confirm. The node process will terminate.</span>
+            )}
           </div>
         </div>
       </div>
