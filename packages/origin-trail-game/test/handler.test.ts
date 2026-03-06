@@ -98,7 +98,7 @@ describe('OriginTrail Game API handler', () => {
     expect(lobby.mySwarms[0].players[0].isLeader).toBe(true);
   });
 
-  it('GET /swarm/:id returns formatted swarm', async () => {
+  it('GET /swarm/:id returns formatted swarm with leader info', async () => {
     const reqCreate = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Bob', swarmName: 'My Swarm' });
     const mockCreate = createMockRes();
     await handler(reqCreate, mockCreate.res, new URL(reqCreate.url, 'http://localhost'));
@@ -112,6 +112,8 @@ describe('OriginTrail Game API handler', () => {
     expect(wagon.playerCount).toBe(1);
     expect(wagon.leaderId).toBe('test-peer-1');
     expect(wagon.leaderName).toBe('Bob');
+    expect(wagon.players[0].isLeader).toBe(true);
+    expect(wagon.players[0].name).toBe('Bob');
   });
 
   it('POST /create returns error if playerName missing', async () => {
@@ -204,6 +206,42 @@ describe('OriginTrail Game API handler', () => {
     const mock = createMockRes();
     await noAgentHandler(req, mock.res, new URL(req.url, 'http://localhost'));
     expect(mock.status).toBe(503);
+  });
+
+  it('formatSwarmState includes turnHistory and voteStatus with timeRemaining', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const testAgent = makeMockAgent('coord-fmt-peer');
+    testAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-fmt' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'Fmt Swarm');
+
+    // Simulate two remote players joining via gossip
+    const handlers = testAgent._messageHandlers.get('dkg/paranet/test-fmt/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['remote-p2', 'P2'], ['remote-p3', 'P3']]) {
+      handle('dkg/paranet/test-fmt/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    const formatted = coordinator.formatSwarmState(swarm);
+    expect(formatted.leaderId).toBe('coord-fmt-peer');
+    expect(formatted.leaderName).toBe('Leader');
+    expect(formatted.turnHistory).toEqual([]);
+    expect(formatted.voteStatus).toBeNull();
+    expect(formatted.players.find((p: any) => p.isLeader)?.name).toBe('Leader');
+
+    await coordinator.launchExpedition(swarm.id);
+    const traveling = coordinator.formatSwarmState(swarm);
+    expect(traveling.voteStatus).not.toBeNull();
+    expect(traveling.voteStatus!.timeRemaining).toBeGreaterThan(0);
+    expect(traveling.voteStatus!.timeRemaining).toBeLessThanOrEqual(30_000);
+    expect(traveling.voteStatus!.allVoted).toBe(false);
+    expect(traveling.turnHistory).toEqual([]);
   });
 });
 

@@ -111,7 +111,7 @@ export function App() {
           </div>
           <div>
             <div className="logo-text">DKG Node</div>
-            <div className="logo-version mono">v9 TESTNET</div>
+            <div className="logo-version mono">{liveStatus?.name ?? '…'}</div>
           </div>
         </div>
 
@@ -143,7 +143,7 @@ export function App() {
             </span>
           </div>
           <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>
-            {liveStatus?.networkId ?? liveStatus?.chainId ?? 'unknown network'}{liveStatus?.syncing ? ' · syncing…' : ''}
+            {liveStatus?.networkName ?? liveStatus?.networkId ?? 'unknown network'}{liveStatus?.syncing ? ' · syncing…' : ''}
           </div>
         </div>
       </aside>
