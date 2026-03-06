@@ -8,7 +8,7 @@ export {
   computeKARoot,
   computeKCRoot,
 } from './merkle.js';
-export { validatePublishRequest, type ValidationResult } from './validation.js';
+export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
 export { generateKCMetadata, generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, type KCMetadata, type KAMetadata } from './metadata.js';
 export {
   DKGPublisher,
@@ -18,6 +18,7 @@ export {
 } from './dkg-publisher.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { WorkspaceHandler } from './workspace-handler.js';
+export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';

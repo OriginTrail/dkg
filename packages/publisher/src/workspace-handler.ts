@@ -19,14 +19,14 @@ export class WorkspaceHandler {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
   private readonly eventBus: EventBus;
-  /** Per-paranet set of rootEntities already in workspace (Rule 4). Shared with publisher when used by agent. */
-  private readonly workspaceOwnedEntities: Map<string, Set<string>> = new Map();
+  /** Per-paranet map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly log = new Logger('WorkspaceHandler');
 
   constructor(
     store: TripleStore,
     eventBus: EventBus,
-    options?: { workspaceOwnedEntities?: Map<string, Set<string>> },
+    options?: { workspaceOwnedEntities?: Map<string, Map<string, string>> },
   ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
@@ -59,8 +59,21 @@ export class WorkspaceHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const existing = this.workspaceOwnedEntities.get(paranetId) ?? new Set();
-      const validation = validatePublishRequest(quads, manifestForValidation, paranetId, existing);
+      const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
+      const existing = new Set<string>([...wsOwned.keys()]);
+
+      // Creator-only upsert: allow overwriting entities this writer created
+      const upsertable = new Set<string>();
+      for (const [entity, creator] of wsOwned) {
+        if (creator === publisherPeerId) {
+          upsertable.add(entity);
+        }
+      }
+
+      const validation = validatePublishRequest(
+        quads, manifestForValidation, paranetId, existing,
+        { allowUpsert: true, upsertableEntities: upsertable },
+      );
       if (!validation.valid) {
         this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
         return;
@@ -77,6 +90,13 @@ export class WorkspaceHandler {
 
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+
+      // Delete-then-insert for upserted entities
+      for (const m of manifestForValidation) {
+        if (wsOwned.has(m.rootEntity)) {
+          await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity);
+        }
+      }
 
       const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
       await this.store.insert(normalized);
@@ -95,10 +115,12 @@ export class WorkspaceHandler {
       await this.store.insert(metaQuads);
 
       if (!this.workspaceOwnedEntities.has(paranetId)) {
-        this.workspaceOwnedEntities.set(paranetId, new Set());
+        this.workspaceOwnedEntities.set(paranetId, new Map());
       }
       for (const r of rootEntities) {
-        this.workspaceOwnedEntities.get(paranetId)!.add(r);
+        if (!wsOwned.has(r)) {
+          this.workspaceOwnedEntities.get(paranetId)!.set(r, publisherPeerId);
+        }
       }
 
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);

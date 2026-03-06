@@ -47,3 +47,10 @@ export {
   encodeWorkspacePublishRequest,
   decodeWorkspacePublishRequest,
 } from './workspace.js';
+
+export {
+  type KAUpdateRequestMsg,
+  type KAUpdateManifestEntryMsg,
+  encodeKAUpdateRequest,
+  decodeKAUpdateRequest,
+} from './ka-update.js';

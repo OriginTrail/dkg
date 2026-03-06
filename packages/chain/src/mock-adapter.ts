@@ -248,9 +248,19 @@ export class MockChainAdapter implements ChainAdapter {
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
+      publisherAddress: this.signerAddress,
     });
 
     return this.txResult(true);
+  }
+
+  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<boolean> {
+    return this.events.some(
+      (e) =>
+        e.type === 'KnowledgeBatchUpdated' &&
+        e.data.batchId === batchId.toString() &&
+        e.data.publisherAddress === publisherAddress,
+    );
   }
 
   async extendStorage(params: ExtendStorageParams): Promise<TxResult> {

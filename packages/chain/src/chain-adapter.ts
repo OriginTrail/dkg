@@ -196,6 +196,13 @@ export interface ChainAdapter {
   // V9 knowledge updates
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;
 
+  /**
+   * Verify that a KnowledgeBatchUpdated event exists for the given batchId and txHash,
+   * and that the publisher address matches the original batch publisher.
+   * Used by receiving nodes to authenticate gossip-propagated KA updates.
+   */
+  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<boolean>;
+
   // V9 storage extension
   extendStorage(params: ExtendStorageParams): Promise<TxResult>;
 

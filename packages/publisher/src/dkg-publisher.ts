@@ -30,8 +30,8 @@ export interface DKGPublisherConfig {
    * If empty, only the primary publisherPrivateKey is used for self-signing.
    */
   additionalSignerKeys?: string[];
-  /** Shared map of workspace-owned rootEntities per paranet (Rule 4). Pass from agent so handler and publisher stay in sync. */
-  workspaceOwnedEntities?: Map<string, Set<string>>;
+  /** Shared map of workspace-owned rootEntities per paranet: entity → creatorPeerId. Pass from agent so handler and publisher stay in sync. */
+  workspaceOwnedEntities?: Map<string, Map<string, string>>;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -52,7 +52,7 @@ export class DKGPublisher implements Publisher {
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
-  private readonly workspaceOwnedEntities: Map<string, Set<string>>;
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -122,13 +122,23 @@ export class DKGPublisher implements Publisher {
     }));
 
     const dataOwned = this.ownedEntities.get(paranetId) ?? new Set();
-    const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Set();
-    const existing = new Set<string>([...dataOwned, ...wsOwned]);
+    const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
+    const existing = new Set<string>([...dataOwned, ...wsOwned.keys()]);
+
+    // Creator-only upsert: allow overwriting entities this writer created
+    const upsertable = new Set<string>();
+    for (const [entity, creator] of wsOwned) {
+      if (creator === options.publisherPeerId) {
+        upsertable.add(entity);
+      }
+    }
+
     const validation = validatePublishRequest(
       [...kaMap.values()].flat(),
       manifestForValidation,
       paranetId,
       existing,
+      { allowUpsert: true, upsertableEntities: upsertable },
     );
     if (!validation.valid) {
       throw new Error(`Workspace validation failed: ${validation.errors.join('; ')}`);
@@ -137,6 +147,13 @@ export class DKGPublisher implements Publisher {
     const workspaceOperationId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
     const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+
+    // Delete-then-insert for upserted entities (replace old triples)
+    for (const m of manifestEntries) {
+      if (wsOwned.has(m.rootEntity)) {
+        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity);
+      }
+    }
 
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
     await this.store.insert(normalized);
@@ -155,10 +172,12 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(metaQuads);
 
     if (!this.workspaceOwnedEntities.has(paranetId)) {
-      this.workspaceOwnedEntities.set(paranetId, new Set());
+      this.workspaceOwnedEntities.set(paranetId, new Map());
     }
     for (const r of rootEntities) {
-      this.workspaceOwnedEntities.get(paranetId)!.add(r);
+      if (!wsOwned.has(r)) {
+        this.workspaceOwnedEntities.get(paranetId)!.set(r, options.publisherPeerId);
+      }
     }
 
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
@@ -547,7 +566,7 @@ export class DKGPublisher implements Publisher {
     const kcMerkleRoot = computeKCRoot(kaRoots);
 
     const allSkolemizedQuads = [...kaMap.values()].flat();
-    await this.chain.updateKnowledgeAssets({
+    const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
       newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
@@ -560,6 +579,15 @@ export class DKGPublisher implements Publisher {
       kaManifest: manifestEntries,
       status: 'confirmed',
       publicQuads: allSkolemizedQuads,
+      onChainResult: {
+        batchId: kcId,
+        startKAId: 0n,
+        endKAId: 0n,
+        txHash: txResult.hash,
+        blockNumber: txResult.blockNumber,
+        blockTimestamp: Math.floor(Date.now() / 1000),
+        publisherAddress: this.publisherAddress,
+      },
     };
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);
