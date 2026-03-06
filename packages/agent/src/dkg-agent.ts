@@ -1271,7 +1271,9 @@ export class DKGAgent {
 
   private getOrCreateUpdateHandler(): UpdateHandler {
     if (!this.updateHandler) {
-      this.updateHandler = new UpdateHandler(this.store, this.chain, this.eventBus);
+      this.updateHandler = new UpdateHandler(this.store, this.chain, this.eventBus, {
+        knownBatchParanets: this.publisher.knownBatchParanets,
+      });
     }
     return this.updateHandler;
   }

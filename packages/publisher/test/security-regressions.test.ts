@@ -922,3 +922,149 @@ describe('Mock same-block txIndex ordering', () => {
     }
   });
 });
+
+// =====================================================================
+// 12. lookupBatchParanet typed literal match
+// =====================================================================
+
+describe('lookupBatchParanet typed-literal SPARQL', () => {
+  it('finds paranet binding from metadata stored with xsd:integer literal', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    const quads = [q('urn:typed-lit', 'http://schema.org/name', '"Typed"')];
+    const original = await publisher.publish({ paranetId: PARANET, quads });
+    expect(original.status).toBe('confirmed');
+
+    // UpdateHandler without pre-registered binding — should discover it via SPARQL lookup
+    const handler = new UpdateHandler(store, chain, eventBus);
+
+    const q2 = [q('urn:typed-lit', 'http://schema.org/name', '"Updated"')];
+    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    expect(update.status).toBe('confirmed');
+
+    const msg = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q2, DATA_GRAPH),
+      manifest: [{ rootEntity: 'urn:typed-lit', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update.onChainResult!.txHash,
+      blockNumber: BigInt(update.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q2, [{ rootEntity: 'urn:typed-lit' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:typed-lit> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Updated');
+    }
+  });
+
+  it('rejects cross-paranet attack when binding is discovered via SPARQL lookup', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    const quads = [q('urn:xpara-lookup', 'http://schema.org/name', '"Original"')];
+    const original = await publisher.publish({ paranetId: PARANET, quads });
+    expect(original.status).toBe('confirmed');
+
+    const evilParanet = 'evil-paranet';
+    const handler = new UpdateHandler(store, chain, eventBus);
+
+    const q2 = [q('urn:xpara-lookup', 'http://schema.org/name', '"Evil"')];
+    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    expect(update.status).toBe('confirmed');
+
+    const msg = encodeKAUpdateRequest({
+      paranetId: evilParanet,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q2, `did:dkg:paranet:${evilParanet}`),
+      manifest: [{ rootEntity: 'urn:xpara-lookup', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update.onChainResult!.txHash,
+      blockNumber: BigInt(update.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q2, [{ rootEntity: 'urn:xpara-lookup' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg, '12D3KooWPeer');
+
+    // Evil paranet graph should be empty — update was rejected
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <did:dkg:paranet:${evilParanet}> { <urn:xpara-lookup> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(0);
+    }
+  });
+});
+
+// =====================================================================
+// 13. Mock adapter case-insensitive address comparison
+// =====================================================================
+
+describe('MockChainAdapter address case normalization', () => {
+  it('verifyKAUpdate matches addresses case-insensitively', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const store = new OxigraphStore();
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    publisher.setIdentityId(1n);
+
+    const quads = [q('urn:addr-case', 'http://schema.org/name', '"CaseTest"')];
+    const original = await publisher.publish({ paranetId: PARANET, quads });
+    expect(original.status).toBe('confirmed');
+
+    const q2 = [q('urn:addr-case', 'http://schema.org/name', '"Updated"')];
+    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    expect(update.status).toBe('confirmed');
+
+    // Verify with address in all lowercase
+    const v1 = await chain.verifyKAUpdate(
+      update.onChainResult!.txHash,
+      original.kcId,
+      wallet.address.toLowerCase(),
+    );
+    expect(v1.verified).toBe(true);
+
+    // Verify with address in all uppercase (except 0x prefix)
+    const v2 = await chain.verifyKAUpdate(
+      update.onChainResult!.txHash,
+      original.kcId,
+      '0x' + wallet.address.slice(2).toUpperCase(),
+    );
+    expect(v2.verified).toBe(true);
+  });
+});

@@ -79,7 +79,7 @@ export class UpdateHandler {
       let knownParanet = this.knownBatchParanets.get(batchKey);
 
       if (!knownParanet) {
-        knownParanet = await this.lookupBatchParanet(batchId);
+        knownParanet = await this.lookupBatchParanet(BigInt(batchId));
         if (knownParanet) this.knownBatchParanets.set(batchKey, knownParanet);
       }
 
@@ -209,9 +209,10 @@ export class UpdateHandler {
    */
   private async lookupBatchParanet(batchId: bigint): Promise<string | undefined> {
     const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
     const result = await this.store.query(
       `SELECT ?g WHERE {
-        GRAPH ?g { ?ka <${DKG}batchId> "${batchId}" }
+        GRAPH ?g { ?ka <${DKG}batchId> "${batchId}"^^<${XSD}integer> }
       } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;

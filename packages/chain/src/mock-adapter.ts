@@ -251,7 +251,7 @@ export class MockChainAdapter implements ChainAdapter {
         e.type === 'KnowledgeBatchUpdated' &&
         e.data.txHash === txHash &&
         e.data.batchId === batchId.toString() &&
-        e.data.publisherAddress === publisherAddress,
+        String(e.data.publisherAddress).toLowerCase() === publisherAddress.toLowerCase(),
     );
     if (!match) return { verified: false };
     return {
