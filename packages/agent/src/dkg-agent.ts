@@ -316,12 +316,19 @@ export class DKGAgent {
         onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 
-          // Only record the hash for dedup — don't subscribe to gossip with the
-          // hash because topics are keyed by cleartext name, not the on-chain hash.
-          // The paranet will be fully subscribed once ontology sync or
+          // Store a placeholder keyed by on-chain hash for dedup across rescans.
+          // Don't subscribe to gossip — topics are keyed by cleartext name, not
+          // the hash. The paranet will be fully subscribed once ontology sync or
           // discoverParanetsFromChain resolves the cleartext name.
           const alreadyKnown = [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
           if (!alreadyKnown) {
+            const placeholder = `_unresolved:${paranetId.slice(0, 16)}`;
+            this.subscribedParanets.set(placeholder, {
+              name: undefined,
+              subscribed: false,
+              synced: false,
+              onChainId: paranetId,
+            });
             this.log.info(ctx, `Noted on-chain paranet ${paranetId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
           }
         },

@@ -730,22 +730,30 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
     if (!registry) return [];
-    const filter = registry.filters.ParanetCreated();
+    const eventFilter = registry.filters.ParanetCreated();
     const head = await this.provider.getBlockNumber();
-    const MAX_RANGE = 9_000;
-    const start = fromBlock ?? Math.max(0, head - MAX_RANGE);
-    const logs = await registry.queryFilter(filter, start, head);
-    return logs.map((log) => {
-      const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (!parsed || parsed.name !== 'ParanetCreated') return null;
-      return {
-        paranetId: String(parsed.args.paranetId),
-        creator: String(parsed.args.creator),
-        accessPolicy: Number(parsed.args.accessPolicy),
-        blockNumber: log.blockNumber,
-        metadataRevealed: false,
-      };
-    }).filter((x): x is ParanetOnChain => x !== null);
+    const PAGE = 9_000;
+    const start = fromBlock ?? 0;
+    const results: ParanetOnChain[] = [];
+
+    // Paginate in PAGE-sized chunks to stay within RPC range limits.
+    for (let lo = start; lo <= head; lo += PAGE + 1) {
+      const hi = Math.min(lo + PAGE, head);
+      const logs = await registry.queryFilter(eventFilter, lo, hi);
+      for (const log of logs) {
+        const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (!parsed || parsed.name !== 'ParanetCreated') continue;
+        results.push({
+          paranetId: String(parsed.args.paranetId),
+          creator: String(parsed.args.creator),
+          accessPolicy: Number(parsed.args.accessPolicy),
+          blockNumber: log.blockNumber,
+          metadataRevealed: false,
+        });
+      }
+    }
+
+    return results;
   }
 
   // =====================================================================

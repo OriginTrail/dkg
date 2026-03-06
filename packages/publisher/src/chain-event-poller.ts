@@ -104,19 +104,25 @@ export class ChainEventPoller {
     if (watchParanets) eventTypes.push('ParanetCreated');
 
     const fromBlock = this.lastBlock + 1;
+    let upperBound = fromBlock + ChainEventPoller.MAX_RANGE;
+
+    // Cap to the actual chain head so we know the true scanned range.
+    if (this.chain.getBlockNumber) {
+      try {
+        const head = await this.chain.getBlockNumber();
+        upperBound = Math.min(upperBound, head);
+      } catch { /* fall back to estimated upper bound */ }
+    }
+
+    if (fromBlock > upperBound) return;
+
     const filter: EventFilter = {
       eventTypes,
       fromBlock,
-      toBlock: fromBlock + ChainEventPoller.MAX_RANGE,
+      toBlock: upperBound,
     };
 
-    let maxBlock = this.lastBlock;
-
     for await (const event of this.chain.listenForEvents(filter)) {
-      if (event.blockNumber > maxBlock) {
-        maxBlock = event.blockNumber;
-      }
-
       if (event.type === 'KnowledgeBatchCreated') {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'ParanetCreated') {
@@ -124,9 +130,9 @@ export class ChainEventPoller {
       }
     }
 
-    if (maxBlock > this.lastBlock) {
-      this.lastBlock = maxBlock;
-    }
+    // Always advance cursor to the scanned upper bound, even if no events
+    // were found, so the window progresses toward the chain head.
+    this.lastBlock = upperBound;
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
