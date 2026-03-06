@@ -138,7 +138,7 @@ export class Canvas2DRenderer implements RendererBackend {
       .linkCanvasObjectMode(() => 'after')
       .linkCanvasObject((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
         // Skip expensive label rendering entirely when not zoomed in enough
-        if (globalScale < 6.0) return;
+        if (globalScale < 3.0) return;
 
         const fl = link as ForceLink;
         if (!fl._graphEdge) return;
@@ -146,9 +146,9 @@ export class Canvas2DRenderer implements RendererBackend {
         const label = fl._graphEdge.label;
         if (!label) return;
 
-        // Fade in between globalScale 6–8, fully invisible below 6 (requires deep zoom)
-        const fadeStart = 6.0;
-        const fadeFull = 8.0;
+        // Fade in between globalScale 3–4
+        const fadeStart = 3.0;
+        const fadeFull = 4.0;
         const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
 
         const fontSize = 12 / globalScale;
@@ -252,16 +252,41 @@ export class Canvas2DRenderer implements RendererBackend {
     this._hexPainter.setMaxDegree(maxDegree);
 
     // Build force-graph node array, preserving positions for existing nodes
-    // and assigning random initial positions for new nodes
+    // and assigning chronological x-positions for dated nodes
+    const dateNs = ['http://schema.org/dateCreated', 'https://schema.org/dateCreated'];
+    const nodeDates = new Map<string, number>();
+    for (const [id, gn] of nodes) {
+      for (const ns of dateNs) {
+        const vals = gn.properties?.get(ns);
+        if (vals && vals.length > 0) {
+          const d = new Date(vals[0].value);
+          if (!isNaN(d.getTime())) { nodeDates.set(id, d.getTime()); break; }
+        }
+      }
+    }
+    let xByDate: Map<string, number> | null = null;
+    if (nodeDates.size >= 2) {
+      const times = [...nodeDates.values()];
+      const minT = Math.min(...times);
+      const maxT = Math.max(...times);
+      const range = maxT - minT || 1;
+      const spread = Math.max(400, nodeDates.size * 120);
+      xByDate = new Map();
+      for (const [id, t] of nodeDates) {
+        xByDate.set(id, ((t - minT) / range - 0.5) * spread);
+      }
+    }
+
     const newNodes = new Map<string, ForceNode>();
     for (const [id, gn] of nodes) {
       if (collapsedNodeIds?.has(id)) continue;
 
       const existing = this._currentNodes.get(id);
+      const chronoX = xByDate?.get(id);
       newNodes.set(id, {
         id,
-        x: existing?.x ?? (Math.random() - 0.5) * 800,
-        y: existing?.y ?? (Math.random() - 0.5) * 800,
+        x: existing?.x ?? chronoX ?? (Math.random() - 0.5) * 800,
+        y: existing?.y ?? (Math.random() - 0.5) * 400,
         vx: existing?.vx,
         vy: existing?.vy,
         fx: existing?.fx,
@@ -300,6 +325,20 @@ export class Canvas2DRenderer implements RendererBackend {
       nodes: sortedNodes,
       links: newLinks,
     });
+
+    // Add a gentle x-force to maintain chronological left→right ordering
+    if (xByDate && xByDate.size >= 2) {
+      this._graph.d3Force('chronoX', (alpha: number) => {
+        for (const fn of sortedNodes) {
+          const targetX = xByDate!.get(fn.id);
+          if (targetX !== undefined && fn.fx === undefined) {
+            fn.vx = ((fn.vx ?? 0) + (targetX - (fn.x ?? 0)) * 0.05 * alpha);
+          }
+        }
+      });
+    } else {
+      this._graph.d3Force('chronoX', null);
+    }
   }
 
   /** Focus the camera on a specific node */

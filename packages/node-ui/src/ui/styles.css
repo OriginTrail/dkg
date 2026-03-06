@@ -101,9 +101,12 @@ input::placeholder{color:#475569}
 .chat-bubble.user{background:var(--green-dim);color:var(--green);border:1px solid rgba(74,222,128,.13)}
 .chat-bubble.assistant{background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border)}
 .chat-tool{font-size:10px;color:var(--amber);margin-bottom:4px;display:flex;align-items:center;gap:4px;padding:2px 8px;background:var(--amber-dim);border-radius:4px;width:fit-content}
-.chat-input-row{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px}
-.chat-input{flex:1;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;outline:none;font-family:inherit}
-.chat-send{padding:10px 20px;border-radius:8px;border:none;background:var(--green);color:var(--bg);font-weight:700;font-size:12px}
+.chat-input-row{padding:16px 20px;border-top:1px solid var(--border);display:flex;gap:12px;align-items:center}
+.chat-input{flex:1;padding:12px 16px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;outline:none;font-family:inherit;min-height:44px;box-sizing:border-box}
+.chat-input:focus{border-color:rgba(74,222,128,.4)}
+.chat-send{padding:12px 24px;border-radius:10px;border:none;background:var(--green);color:var(--bg);font-weight:700;font-size:13px;cursor:pointer;transition:opacity .15s ease;flex-shrink:0}
+.chat-send:hover:not(:disabled){opacity:.9}
+.chat-send:disabled{opacity:.5;cursor:not-allowed}
 
 /* Trail */
 .trail-hero{background:linear-gradient(135deg,#0a1a0a,#1a2a1a);border:1px solid rgba(74,222,128,.13);border-radius:16px;padding:32px 36px;margin-bottom:20px;position:relative;overflow:hidden}
@@ -233,7 +236,7 @@ input::placeholder{color:#475569}
 .chat-delivery.failed{color:#ff8a80}
 .chat-input-area{padding:12px 16px;border-top:1px solid var(--border)}
 .chat-send-error{padding:6px 10px;margin-bottom:8px;background:rgba(239,68,68,.15);color:#ef4444;border-radius:6px;font-size:12px}
-.chat-input-row{display:flex;gap:8px;align-items:center;padding:0}
+.chat-input-area .chat-input-row{display:flex;gap:8px;align-items:center;padding:0}
 .chat-layout .chat-input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;font-family:inherit;outline:none}
 .chat-layout .chat-input:focus{border-color:var(--green)}
 .chat-send-btn{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0}

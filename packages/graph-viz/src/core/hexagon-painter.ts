@@ -225,9 +225,9 @@ export class HexagonPainter {
       this._paintBadges(ctx, node, x, y, radius, globalScale);
     }
 
-    // Label below hexagon — fade in/out with zoom (requires deep zoom)
-    const fadeStart = 4.0;
-    const fadeFull = 6.0;
+    // Label below hexagon — fade in/out with zoom
+    const fadeStart = 1.5;
+    const fadeFull = 2.5;
     if (globalScale > fadeStart) {
       const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
       const fontSize = styleConfig.fontSize / globalScale;
@@ -237,7 +237,7 @@ export class HexagonPainter {
       ctx.globalAlpha = opacity;
       ctx.fillStyle = palette.textPrimary;
       ctx.fillText(
-        truncateLabel(node.label, 24),
+        truncateLabel(node.label, 40),
         x,
         y + radius + 2 / globalScale
       );

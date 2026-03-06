@@ -308,27 +308,25 @@ describe('Agent Hub merged with messages and private memories', () => {
     expect(app).toContain('Navigate to="/agent"');
   });
 
-  it('AgentHub has no mocked agents or tools', () => {
+  it('AgentHub has no mocked agents or canned responses', () => {
     expect(agentHub).not.toMatch(/AGENTS\s*=\s*\[/);
     expect(agentHub).not.toMatch(/CANNED\s*[:=]/);
-    expect(agentHub).not.toMatch(/AGENT_TOOLS\s*=\s*\[/);
     expect(agentHub).not.toMatch(/pickResponses/);
   });
 
-  it('AgentHub uses real APIs for agent and peers', () => {
-    expect(agentHub).toContain('fetchAgents');
+  it('AgentHub uses real APIs for chat and memory', () => {
     expect(agentHub).toContain('fetchMemorySessions');
+    expect(agentHub).toContain('fetchMemorySession');
     expect(agentHub).toContain('sendChatMessage');
-    expect(agentHub).toContain('sendPeerMessage');
-    expect(agentHub).toContain('sessionIdRef');
-    expect(agentHub).toContain('View Memories');
-    expect(agentHub).toContain('Previous conversations');
-    expect(agentHub).toContain('Visualize');
+    expect(agentHub).toContain('New Chat');
+    expect(agentHub).toContain('openSession');
+    expect(agentHub).toContain('visualizeSession');
   });
 
-  it('AgentHub has My agent and Other nodes modes', () => {
-    expect(agentHub).toContain("My agent");
-    expect(agentHub).toContain("Other nodes");
+  it('AgentHub has graph visualization and timeline slider', () => {
+    expect(agentHub).toContain('RdfGraph');
+    expect(agentHub).toContain('timelineCursor');
+    expect(agentHub).toContain('visualizeSession');
   });
 
   it('frontend api has memory sessions and sendChatMessage with sessionId', () => {

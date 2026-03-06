@@ -19,6 +19,7 @@ export { OperationTracker } from './operation-tracker.js';
 export { MetricsCollector } from './metrics-collector.js';
 export type { MetricsSource } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
+export type { LlmSettingsCallbacks } from './api.js';
 export { ChatAssistant } from './chat-assistant.js';
 export type { ChatRequest, ChatResponse, LlmConfig } from './chat-assistant.js';
 export { ChatMemoryManager } from './chat-memory.js';

@@ -25,9 +25,14 @@ type QueryFn = (sparql: string) => Promise<{ bindings: Array<Record<string, stri
 const HELP_REPLY = `I'm your node assistant. You can ask me about this node (uptime, peers, triples, operations, logs) or just chat. When you ask me to save or add information to the DKG, I can write it to the knowledge graph (workspace) and optionally finalize it on-chain. Our conversation is stored privately in your DKG.`;
 
 /** OpenAI function tool definition for LLM tool calling */
+interface ToolParam {
+  type: string;
+  description?: string;
+  items?: { type: string; properties?: Record<string, ToolParam>; required?: string[] };
+}
 interface OpenAITool {
   type: 'function';
-  function: { name: string; description: string; parameters: { type: 'object'; properties: Record<string, { type: string; description?: string }>; required?: string[] } };
+  function: { name: string; description: string; parameters: { type: 'object'; properties: Record<string, ToolParam>; required?: string[] } };
 }
 
 const DKG_TOOLS: OpenAITool[] = [
@@ -50,12 +55,25 @@ const DKG_TOOLS: OpenAITool[] = [
     type: 'function',
     function: {
       name: 'dkg_write_to_workspace',
-      description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. Pass quads as array of { subject, predicate, object, graph } (graph can be "").',
+      description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. For literal values use plain strings (e.g. "Tesla"). For URIs use full URIs (e.g. "http://example.org/Tesla").',
       parameters: {
         type: 'object',
         properties: {
           paranetId: { type: 'string', description: 'Paranet id (e.g. agent-memory)' },
-          quads: { type: 'string', description: 'JSON array of { subject, predicate, object, graph }' },
+          quads: {
+            type: 'array',
+            description: 'Array of RDF triples to write',
+            items: {
+              type: 'object',
+              properties: {
+                subject: { type: 'string', description: 'Subject URI' },
+                predicate: { type: 'string', description: 'Predicate URI' },
+                object: { type: 'string', description: 'Object URI or literal string value' },
+                graph: { type: 'string', description: 'Named graph (use empty string for default)' },
+              },
+              required: ['subject', 'predicate', 'object'],
+            },
+          },
         },
         required: ['paranetId', 'quads'],
       },
@@ -107,12 +125,28 @@ const DKG_TOOLS: OpenAITool[] = [
  * NL→SPARQL, and DKG API tools (query, write to workspace, list/create paranets, enshrine).
  */
 export class ChatAssistant {
+  private llmConfig?: LlmConfig;
+
   constructor(
     private readonly db: DashboardDB,
     private readonly queryFn: QueryFn,
-    private readonly llmConfig?: LlmConfig,
+    llmConfig?: LlmConfig,
     private readonly agentTools?: MemoryToolContext,
-  ) {}
+  ) {
+    this.llmConfig = llmConfig;
+  }
+
+  updateLlmConfig(llmConfig: LlmConfig | undefined): void {
+    this.llmConfig = llmConfig;
+  }
+
+  getLlmConfig(): { configured: boolean; model?: string; baseURL?: string } {
+    return {
+      configured: !!this.llmConfig?.apiKey,
+      model: this.llmConfig?.model,
+      baseURL: this.llmConfig?.baseURL,
+    };
+  }
 
   private systemPrompt(): string {
     let p = this.llmConfig?.systemPrompt ?? `You are a friendly DKG node assistant. Chat naturally and helpfully. The user's conversations with you are stored privately as memories in their DKG.
@@ -145,22 +179,21 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
         }
         case 'dkg_write_to_workspace': {
           const paranetId = String(args.paranetId ?? '');
-          let raw = args.quads;
+          let raw: unknown = args.quads;
           if (typeof raw === 'string') {
-            try {
-              raw = JSON.parse(raw) as any[];
-            } catch {
-              raw = [];
-            }
+            raw = parseQuadsJson(raw);
           }
           const quads = Array.isArray(raw) ? raw.map((q: any) => ({
             subject: String(q.subject ?? ''),
             predicate: String(q.predicate ?? ''),
             object: String(q.object ?? ''),
             graph: typeof q.graph === 'string' ? q.graph : '',
-          })) : [];
+          })).filter(q => q.subject && q.predicate && q.object) : [];
+          if (quads.length === 0) {
+            return { result: { error: 'No valid quads to write' }, summary: 'No valid quads could be parsed from the input.' };
+          }
           const { workspaceOperationId } = await this.agentTools.writeToWorkspace(paranetId, quads);
-          return { result: { workspaceOperationId }, summary: `Wrote ${quads.length} triple(s) to workspace (paranet: ${paranetId}).` };
+          return { result: { workspaceOperationId, tripleCount: quads.length }, summary: `Successfully wrote ${quads.length} triple(s) to workspace (paranet: ${paranetId}).` };
         }
         case 'dkg_list_paranets': {
           const list = await this.agentTools.listParanets();
@@ -186,7 +219,8 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
           return { result: null, summary: `Unknown tool: ${name}` };
       }
     } catch (err: any) {
-      return { result: null, summary: `Error: ${err?.message ?? String(err)}` };
+      const msg = err?.message ?? String(err);
+      return { result: { error: msg }, summary: `Error executing ${name}: ${msg}` };
     }
   }
 
@@ -280,8 +314,18 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
     return match ? match[1].trim() : null;
   }
 
+  private looksLikeAction(q: string): boolean {
+    return /\b(create|add|save|store|write|publish|remember|enshrine|finalize|make|build|generate|insert|update|delete|remove)\b/.test(q);
+  }
+
   async answer(req: ChatRequest): Promise<ChatResponse> {
     const q = req.message.toLowerCase().trim();
+
+    // If LLM + tools are available and the message looks like an action,
+    // skip rule-based handlers and let the LLM decide which tools to call.
+    if (this.llmConfig && this.agentTools && this.looksLikeAction(q)) {
+      return this.llmAnswer(req);
+    }
 
     // --- Uptime ---
     if (matches(q, ['uptime', 'how long', 'running for', 'up for'])) {
@@ -427,35 +471,59 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
 
     // --- Help or LLM ---
     if (this.llmConfig) {
-      try {
-        const toolCallsCollector: Array<{ name: string; args: Record<string, unknown>; result: unknown }> = [];
-        let reply = await this.callLlm(req.message, toolCallsCollector);
-        const sparql = this.extractSparql(reply);
-        if (sparql) {
-          try {
-            const result = await this.queryFn(sparql);
-            const count = result.bindings?.length ?? 0;
-            reply += `\n\n**Executed query** (${count} result(s)):`;
-            return { reply, data: result.bindings, sparql, toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined };
-          } catch (err: any) {
-            reply += `\n\nSPARQL execution failed: ${err.message}`;
-            return { reply, sparql };
-          }
-        }
-        return {
-          reply,
-          toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined,
-        };
-      } catch (err: any) {
-        return { reply: `LLM error: ${err.message}. ${HELP_REPLY}` };
-      }
+      return this.llmAnswer(req);
     }
     return { reply: HELP_REPLY };
+  }
+
+  private async llmAnswer(req: ChatRequest): Promise<ChatResponse> {
+    try {
+      const toolCallsCollector: Array<{ name: string; args: Record<string, unknown>; result: unknown }> = [];
+      let reply = await this.callLlm(req.message, toolCallsCollector);
+      const sparql = this.extractSparql(reply);
+      if (sparql) {
+        try {
+          const result = await this.queryFn(sparql);
+          const count = result.bindings?.length ?? 0;
+          reply += `\n\n**Executed query** (${count} result(s)):`;
+          return { reply, data: result.bindings, sparql, toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined };
+        } catch (err: any) {
+          reply += `\n\nSPARQL execution failed: ${err.message}`;
+          return { reply, sparql };
+        }
+      }
+      return {
+        reply,
+        toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined,
+      };
+    } catch (err: any) {
+      return { reply: `LLM error: ${err.message}. ${HELP_REPLY}` };
+    }
   }
 }
 
 function matches(input: string, keywords: string[]): boolean {
   return keywords.some(k => input.includes(k));
+}
+
+/** Robustly parse quads JSON from LLM output, handling common malformations. */
+function parseQuadsJson(raw: string): any[] {
+  // Try direct parse first
+  try { const r = JSON.parse(raw); if (Array.isArray(r)) return r; } catch {}
+  // LLMs sometimes produce values like ""Tesla"" — fix unescaped inner quotes
+  try {
+    const fixed = raw.replace(/""{1,2}([^"]+)""{1,2}/g, (match, inner) => {
+      if (match.startsWith('""') && match.endsWith('""')) return `"${inner}"`;
+      return match;
+    });
+    const r = JSON.parse(fixed); if (Array.isArray(r)) return r;
+  } catch {}
+  // Try stripping markdown fences
+  try {
+    const stripped = raw.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+    const r = JSON.parse(stripped); if (Array.isArray(r)) return r;
+  } catch {}
+  return [];
 }
 
 function formatSeconds(s: number): string {

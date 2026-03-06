@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchStatus } from '../api.js';
+import { fetchStatus, fetchLlmSettings, updateLlmSettings } from '../api.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -37,6 +37,176 @@ function Toggle({ label, desc, on }: { label: string; desc: string; on: boolean 
   );
 }
 
+function LlmSection() {
+  const { data: llm, refresh } = useFetch(fetchLlmSettings, []);
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState('');
+  const [baseURL, setBaseURL] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [showKey, setShowKey] = useState(false);
+
+  useEffect(() => {
+    if (llm) {
+      setModel(llm.model ?? '');
+      setBaseURL(llm.baseURL ?? '');
+    }
+  }, [llm]);
+
+  const save = useCallback(async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await updateLlmSettings({
+        apiKey: apiKey || '',
+        model: model || undefined,
+        baseURL: baseURL || undefined,
+      });
+      if (res.ok) {
+        setMessage({ type: 'ok', text: apiKey.trim() ? 'LLM configuration saved. Agent Hub now uses your API key.' : 'LLM configuration cleared.' });
+        setApiKey('');
+        refresh();
+      } else {
+        setMessage({ type: 'err', text: 'Failed to save' });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'err', text: err.message ?? 'Failed to save' });
+    } finally {
+      setSaving(false);
+    }
+  }, [apiKey, model, baseURL, refresh]);
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    padding: '8px 12px',
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+    background: 'var(--bg)',
+    color: 'var(--text)',
+    fontSize: 12,
+    fontFamily: 'JetBrains Mono, monospace',
+    outline: 'none',
+    boxSizing: 'border-box',
+  };
+
+  return (
+    <div className="settings-card">
+      <div className="settings-title">LLM Configuration</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
+        Connect an OpenAI-compatible LLM to power the Agent Hub with natural language understanding,
+        SPARQL generation, and DKG tool calling. Without an API key, the agent uses rule-based responses only.
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px', borderRadius: 8, background: llm?.configured ? 'var(--green-dim)' : 'rgba(255,255,255,.03)', border: `1px solid ${llm?.configured ? 'rgba(74,222,128,.2)' : 'var(--border)'}` }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: llm?.configured ? 'var(--green)' : 'var(--text-dim)', display: 'inline-block' }} />
+        <span style={{ fontSize: 11, fontWeight: 600, color: llm?.configured ? 'var(--green)' : 'var(--text-muted)' }}>
+          {llm?.configured ? 'LLM Connected' : 'Not Configured'}
+        </span>
+        {llm?.configured && llm.model && (
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>{llm.model}</span>
+        )}
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>API Key</label>
+        <div style={{ position: 'relative' }}>
+          <input
+            type={showKey ? 'text' : 'password'}
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder={llm?.configured ? '••••••••  (key saved — paste new to replace)' : 'sk-...'}
+            style={inputStyle}
+          />
+          <button
+            onClick={() => setShowKey(v => !v)}
+            style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 10, fontWeight: 600 }}
+          >
+            {showKey ? 'Hide' : 'Show'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Model</label>
+          <input
+            value={model}
+            onChange={e => setModel(e.target.value)}
+            placeholder="gpt-4o-mini"
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>Base URL</label>
+          <input
+            value={baseURL}
+            onChange={e => setBaseURL(e.target.value)}
+            placeholder="https://api.openai.com/v1"
+            style={inputStyle}
+          />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button
+          onClick={save}
+          disabled={saving}
+          style={{
+            padding: '8px 20px',
+            borderRadius: 8,
+            border: '1px solid rgba(74,222,128,.3)',
+            background: 'var(--green-dim)',
+            color: 'var(--green)',
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            opacity: saving ? 0.6 : 1,
+          }}
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {llm?.configured && (
+          <button
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await updateLlmSettings({ apiKey: '' });
+                setApiKey('');
+                setModel('');
+                setBaseURL('');
+                setMessage({ type: 'ok', text: 'LLM configuration cleared.' });
+                refresh();
+              } catch (err: any) {
+                setMessage({ type: 'err', text: err.message });
+              } finally {
+                setSaving(false);
+              }
+            }}
+            disabled={saving}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: '1px solid rgba(248,113,113,.2)',
+              background: 'rgba(248,113,113,.05)',
+              color: 'var(--red)',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: saving ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Disconnect
+          </button>
+        )}
+        {message && (
+          <span style={{ fontSize: 11, color: message.type === 'ok' ? 'var(--green)' : 'var(--red)', fontWeight: 600 }}>
+            {message.text}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { data: status } = useFetch(fetchStatus, [], 30_000);
   const s = status as any;
@@ -49,6 +219,9 @@ export function SettingsPage() {
       </div>
 
       <div className="settings-grid">
+        {/* LLM Configuration — first card */}
+        <LlmSection />
+
         {/* Node Identity */}
         <div className="settings-card">
           <div className="settings-title">Node Identity</div>

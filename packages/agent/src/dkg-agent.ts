@@ -991,20 +991,24 @@ export class DKGAgent {
   }
 
   /**
-   * Write quads to the paranet's workspace graph (no chain, no TRAC). Replicates via GossipSub workspace topic.
+   * Write quads to the paranet's workspace graph (no chain, no TRAC).
+   * When localOnly is false (default), replicates via GossipSub workspace topic.
+   * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[]): Promise<{ workspaceOperationId: string }> {
+  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean }): Promise<{ workspaceOperationId: string }> {
     const ctx = createOperationContext('workspace');
-    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
     });
-    const topic = paranetWorkspaceTopic(paranetId);
-    try {
-      await this.gossip.publish(topic, message);
-    } catch {
-      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    if (!opts?.localOnly) {
+      const topic = paranetWorkspaceTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
     }
     return { workspaceOperationId };
   }
@@ -1297,6 +1301,8 @@ export class DKGAgent {
     replicationPolicy?: string;
     accessPolicy?: number;
     revealOnChain?: boolean;
+    /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
+    private?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
@@ -1310,10 +1316,11 @@ export class DKGAgent {
     }
 
     // Register on chain if a real chain adapter is configured.
-    // The on-chain ID is keccak256(bytes(name)) — deterministic, so any node
-    // with the same name derives the same ID. First to register wins.
+    // Private paranets skip on-chain registration and gossip entirely.
     let onChainId: string | undefined;
-    if (this.chain.chainId !== 'none') {
+    if (opts.private) {
+      this.log.info(ctx, `Creating private paranet "${opts.id}" (local-only, no chain, no gossip)`);
+    } else if (this.chain.chainId !== 'none') {
       try {
         const result = await this.chain.createParanet({
           name: opts.id,
@@ -1375,34 +1382,36 @@ export class DKGAgent {
     // Create the actual named graphs for the paranet
     await gm.ensureParanet(opts.id);
 
-    // Auto-subscribe to the new paranet's GossipSub topic
-    this.subscribeToParanet(opts.id);
+    if (!opts.private) {
+      // Auto-subscribe to the new paranet's GossipSub topic
+      this.subscribeToParanet(opts.id);
 
-    // Broadcast via the ontology paranet so other nodes learn about it
-    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-    const nquads = quads.map(q => {
-      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
-    }).join('\n');
+      // Broadcast via the ontology paranet so other nodes learn about it
+      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const nquads = quads.map(q => {
+        const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+        return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
+      }).join('\n');
 
-    const msg = encodePublishRequest({
-      ual: `did:dkg:paranet:${opts.id}`,
-      nquads: new TextEncoder().encode(nquads),
-      paranetId: SYSTEM_PARANETS.ONTOLOGY,
-      kas: [],
-      publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: '',
-      startKAId: 0,
-      endKAId: 0,
-      chainId: '',
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
-    });
+      const msg = encodePublishRequest({
+        ual: `did:dkg:paranet:${opts.id}`,
+        nquads: new TextEncoder().encode(nquads),
+        paranetId: SYSTEM_PARANETS.ONTOLOGY,
+        kas: [],
+        publisherIdentity: this.wallet.keypair.publicKey,
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: '',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
 
-    try {
-      await this.gossip.publish(ontologyTopic, msg);
-    } catch {
-      // No peers subscribed — ok for now
+      try {
+        await this.gossip.publish(ontologyTopic, msg);
+      } catch {
+        // No peers subscribed — ok for now
+      }
     }
   }
 

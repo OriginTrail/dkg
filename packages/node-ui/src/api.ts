@@ -19,6 +19,11 @@ const MIME: Record<string, string> = {
   '.woff': 'font/woff',
 };
 
+export interface LlmSettingsCallbacks {
+  getLlm: () => { apiKey?: string; model?: string; baseURL?: string } | undefined;
+  setLlm: (llm: { apiKey: string; model?: string; baseURL?: string } | null) => Promise<void>;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/logs, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
@@ -33,6 +38,7 @@ export async function handleNodeUIRequest(
   metricsCollector?: MetricsCollector,
   authToken?: string,
   memoryManager?: ChatMemoryManager,
+  llmSettings?: LlmSettingsCallbacks,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -158,25 +164,30 @@ export async function handleNodeUIRequest(
     return json(res, 200, { ok: true });
   }
 
-  // --- Memory ---
+  // --- LLM settings ---
 
-  if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
-    const rawLimit = parseInt(url.searchParams.get('limit') ?? '20', 10);
-    const limit = Math.max(1, Math.min(isNaN(rawLimit) ? 20 : rawLimit, 100));
-    try {
-      const sessions = await memoryManager.getRecentChats(limit);
-      return json(res, 200, { sessions });
-    } catch (err: any) {
-      return json(res, 500, { error: err.message ?? 'Failed to fetch sessions' });
+  if (req.method === 'GET' && path === '/api/settings/llm') {
+    if (chatAssistant) {
+      const info = chatAssistant.getLlmConfig();
+      return json(res, 200, info);
     }
+    return json(res, 200, { configured: false });
   }
 
-  if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
+  if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
+    const body = await readBody(req);
+    const { apiKey, model, baseURL } = JSON.parse(body);
+    if (typeof apiKey !== 'string') return json(res, 400, { error: 'Missing "apiKey" string' });
+
+    const llm = apiKey.trim()
+      ? { apiKey: apiKey.trim(), model: model || undefined, baseURL: baseURL || undefined }
+      : null;
     try {
-      const stats = await memoryManager.getStats();
-      return json(res, 200, stats);
+      await llmSettings.setLlm(llm);
+      const info = chatAssistant?.getLlmConfig() ?? { configured: !!llm };
+      return json(res, 200, { ok: true, ...info });
     } catch (err: any) {
-      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 500, { error: err.message ?? 'Failed to save LLM config' });
     }
   }
 
@@ -202,23 +213,37 @@ export async function handleNodeUIRequest(
     }
   }
 
-  // --- Memory (private chat memories in DKG) ---
+  // --- Memory (chat history stored in DKG) ---
 
   if (req.method === 'GET' && path === '/api/memory/sessions' && memoryManager) {
+    const rawLimit = parseInt(url.searchParams.get('limit') ?? '20', 10);
+    const limit = Math.max(1, Math.min(isNaN(rawLimit) ? 20 : rawLimit, 100));
     try {
-      const limit = parseInt(String(url.searchParams.get('limit') || '20'), 10);
-      const sessions = await memoryManager.getRecentChats(Math.min(limit, 100));
+      const sessions = await memoryManager.getRecentChats(limit);
       return json(res, 200, { sessions });
     } catch (err: any) {
-      return json(res, 500, { error: err.message });
+      return json(res, 500, { error: err.message ?? 'Failed to fetch sessions' });
     }
   }
+
+  if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && memoryManager) {
+    const sessionId = decodeURIComponent(path.slice('/api/memory/sessions/'.length));
+    if (!sessionId) return json(res, 400, { error: 'Missing session ID' });
+    try {
+      const session = await memoryManager.getSession(sessionId);
+      if (!session) return json(res, 404, { error: 'Session not found' });
+      return json(res, 200, session);
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to fetch session' });
+    }
+  }
+
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
     try {
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 500, { error: err.message });
+      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 
