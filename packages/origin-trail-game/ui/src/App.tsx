@@ -2,6 +2,105 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { api } from './api.js';
 import './styles.css';
 
+function HeroBanner() {
+  return (
+    <div className="ot-hero">
+      <div className="ot-hero-glow" />
+      <div className="ot-hero-art">
+        <div className="ot-hero-scanlines" />
+        <svg viewBox="0 0 600 180" xmlns="http://www.w3.org/2000/svg">
+          <rect width="600" height="180" fill="#000" />
+          {/* Mountains */}
+          <polygon points="0,100 40,60 80,80 130,40 180,70 220,50 260,75 300,35 340,65 380,45 420,70 460,55 500,80 540,50 580,65 600,55 600,180 0,180" fill="#0a2a0a" opacity="0.8" />
+          <polygon points="0,120 60,90 100,100 160,75 200,95 260,70 300,85 340,65 400,90 440,75 500,95 540,80 600,90 600,180 0,180" fill="#0d3a0d" opacity="0.6" />
+          {/* Ground */}
+          <rect y="140" width="600" height="40" fill="#1a5a1a" opacity="0.3" />
+          <g opacity="0.4">
+            <rect x="0" y="142" width="600" height="2" fill="#2a7a2a" />
+            <rect x="0" y="148" width="600" height="1" fill="#1a5a1a" />
+            <rect x="0" y="154" width="600" height="2" fill="#2a7a2a" />
+            <rect x="0" y="160" width="600" height="1" fill="#1a5a1a" />
+            <rect x="0" y="166" width="600" height="2" fill="#2a7a2a" />
+          </g>
+          {/* Lead Agent (Orchestrator) */}
+          <g transform="translate(280,95)">
+            <rect x="0" y="0" width="4" height="4" fill="#4ade80" /><rect x="4" y="0" width="4" height="4" fill="#4ade80" /><rect x="8" y="0" width="4" height="4" fill="#4ade80" />
+            <rect x="-2" y="4" width="4" height="4" fill="#4ade80" /><rect x="2" y="4" width="4" height="4" fill="#4ade80" /><rect x="6" y="4" width="4" height="4" fill="#4ade80" /><rect x="10" y="4" width="4" height="4" fill="#4ade80" />
+            <rect x="0" y="8" width="4" height="4" fill="#4ade80" /><rect x="4" y="8" width="4" height="4" fill="#22c55e" /><rect x="8" y="8" width="4" height="4" fill="#4ade80" />
+            <rect x="0" y="12" width="4" height="4" fill="#4ade80" /><rect x="8" y="12" width="4" height="4" fill="#4ade80" />
+            <rect x="2" y="-4" width="4" height="4" fill="#4ade80" /><rect x="6" y="-4" width="4" height="4" fill="#4ade80" />
+            <rect x="2" y="-8" width="8" height="4" fill="#4ade80" />
+            <rect x="6" y="-6" width="2" height="2" fill="#000" />
+            <rect x="14" y="-2" width="4" height="2" fill="#4ade80" opacity="0.6" />
+            <rect x="20" y="-4" width="4" height="2" fill="#4ade80" opacity="0.3" />
+            <rect x="14" y="4" width="4" height="2" fill="#4ade80" opacity="0.4" />
+          </g>
+          {/* Agent 2 (Safety) */}
+          <g transform="translate(240,102)">
+            <rect x="0" y="0" width="4" height="4" fill="#60a5fa" /><rect x="4" y="0" width="4" height="4" fill="#60a5fa" />
+            <rect x="-2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="2" y="4" width="4" height="4" fill="#60a5fa" /><rect x="6" y="4" width="4" height="4" fill="#60a5fa" />
+            <rect x="0" y="8" width="4" height="4" fill="#60a5fa" /><rect x="4" y="8" width="4" height="4" fill="#60a5fa" />
+            <rect x="0" y="12" width="4" height="4" fill="#60a5fa" /><rect x="4" y="12" width="4" height="4" fill="#60a5fa" />
+            <rect x="0" y="-4" width="8" height="4" fill="#60a5fa" />
+            <rect x="4" y="-2" width="2" height="2" fill="#000" />
+          </g>
+          {/* Agent 3 (Infrastructure) */}
+          <g transform="translate(325,102)">
+            <rect x="0" y="0" width="4" height="4" fill="#a78bfa" /><rect x="4" y="0" width="4" height="4" fill="#a78bfa" />
+            <rect x="-2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="2" y="4" width="4" height="4" fill="#a78bfa" /><rect x="6" y="4" width="4" height="4" fill="#a78bfa" />
+            <rect x="0" y="8" width="4" height="4" fill="#a78bfa" /><rect x="4" y="8" width="4" height="4" fill="#a78bfa" />
+            <rect x="0" y="12" width="4" height="4" fill="#a78bfa" /><rect x="4" y="12" width="4" height="4" fill="#a78bfa" />
+            <rect x="0" y="-4" width="8" height="4" fill="#a78bfa" />
+            <rect x="4" y="-2" width="2" height="2" fill="#000" />
+          </g>
+          {/* Agent 4 (Data Curator) */}
+          <g transform="translate(218,112)">
+            <rect x="0" y="0" width="4" height="4" fill="#fbbf24" /><rect x="4" y="0" width="4" height="4" fill="#fbbf24" />
+            <rect x="0" y="4" width="4" height="4" fill="#fbbf24" /><rect x="4" y="4" width="4" height="4" fill="#fbbf24" />
+            <rect x="0" y="8" width="4" height="4" fill="#fbbf24" /><rect x="4" y="8" width="4" height="4" fill="#fbbf24" />
+            <rect x="0" y="-4" width="8" height="4" fill="#fbbf24" />
+            <rect x="4" y="-2" width="2" height="2" fill="#000" />
+          </g>
+          {/* Agent 5 (Retrieval) */}
+          <g transform="translate(348,112)">
+            <rect x="0" y="0" width="4" height="4" fill="#22d3ee" /><rect x="4" y="0" width="4" height="4" fill="#22d3ee" />
+            <rect x="0" y="4" width="4" height="4" fill="#22d3ee" /><rect x="4" y="4" width="4" height="4" fill="#22d3ee" />
+            <rect x="0" y="8" width="4" height="4" fill="#22d3ee" /><rect x="4" y="8" width="4" height="4" fill="#22d3ee" />
+            <rect x="0" y="-4" width="8" height="4" fill="#22d3ee" />
+            <rect x="4" y="-2" width="2" height="2" fill="#000" />
+          </g>
+          {/* Connection lines */}
+          <line x1="252" y1="106" x2="280" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
+          <line x1="333" y1="106" x2="310" y2="99" stroke="#4ade80" strokeWidth="1" opacity="0.3" strokeDasharray="2,3" />
+          <line x1="230" y1="116" x2="250" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
+          <line x1="356" y1="116" x2="337" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.2" strokeDasharray="2,3" />
+          <line x1="252" y1="108" x2="325" y2="108" stroke="#4ade80" strokeWidth="1" opacity="0.15" strokeDasharray="2,4" />
+          {/* Data particles */}
+          <circle cx="265" cy="102" r="1.5" fill="#4ade80" opacity="0.7">
+            <animate attributeName="cx" values="252;280;252" dur="2s" repeatCount="indefinite" />
+          </circle>
+          <circle cx="318" cy="102" r="1.5" fill="#a78bfa" opacity="0.7">
+            <animate attributeName="cx" values="310;333;310" dur="2.5s" repeatCount="indefinite" />
+          </circle>
+          <circle cx="290" cy="108" r="1" fill="#fbbf24" opacity="0.5">
+            <animate attributeName="cx" values="252;348;252" dur="4s" repeatCount="indefinite" />
+          </circle>
+        </svg>
+        <div className="ot-hero-title"><span>ORIGINTRAIL GAME</span></div>
+      </div>
+      <div className="ot-hero-body">
+        <div className="ot-hero-label">AI Frontier Journey on DKG v9</div>
+        <h3 className="ot-hero-heading">Lead your agent swarm to Singularity Harbor</h3>
+        <p className="ot-hero-desc">
+          2,000 epochs across the AI Frontier. Every decision is a Knowledge Asset.
+          Every outcome is verified by the <strong style={{ color: '#4ade80' }}>Context Oracle</strong>.
+        </p>
+        <p className="ot-hero-tagline">Your swarm will not die of dysentery. But it might die of hallucinations.</p>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [playerName, setName] = useState('');
   const [nodeInfo, setNodeInfo] = useState<any>(null);
@@ -39,6 +138,7 @@ export function App() {
   if (view === 'lobby') {
     return (
       <div className="ot-container">
+        <HeroBanner />
         <div className="ot-header">
           <h1>OriginTrail Game</h1>
           <span className="ot-player">Playing as: {playerName}</span>
@@ -83,6 +183,7 @@ export function App() {
   if (view === 'swarm' && swarm) {
     return (
       <div className="ot-container">
+        <HeroBanner />
         <div className="ot-header">
           <h1>{swarm.name}</h1>
           <button className="ot-secondary" onClick={() => setView('lobby')}>Back to Lobby</button>
