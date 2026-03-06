@@ -183,27 +183,44 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     }
   }
 
-  // Subscribe to configured paranets + network defaults
+  // Ensure configured paranets + network defaults are subscribed and available.
+  // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
+  // duplicate creator claims and to survive "already exists" gracefully.
   const paranetsToSubscribe = new Set([
     ...(config.paranets ?? []),
     ...(network?.defaultParanets ?? []),
   ]);
   for (const p of paranetsToSubscribe) {
-    const exists = await agent.paranetExists(p);
-    if (!exists) {
-      try {
-        await agent.createParanet({ id: p, name: p, description: `Default testnet paranet "${p}"` });
-        log(`Created paranet: ${p}`);
-      } catch {
-        log(`Paranet "${p}" not yet available (will receive via gossip)`);
-      }
+    try {
+      await agent.ensureParanetLocal({
+        id: p,
+        name: p,
+        description: `Default paranet: ${p}`,
+        revealOnChain: true,
+      });
+      log(`Ensured paranet: ${p}`);
+    } catch (err) {
+      log(`Paranet "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
+      agent.subscribeToParanet(p);
     }
-    agent.subscribeToParanet(p);
-    log(`Subscribed to paranet: ${p}`);
   }
 
-  // Profile is published once at startup (above). No periodic re-publish —
-  // peers discover us via the initial gossip broadcast + relay.
+  // Run an initial chain scan for paranets we might not know about,
+  // then repeat every 30 minutes as a fallback discovery mechanism.
+  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
+  setTimeout(async () => {
+    try {
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+    } catch { /* non-critical */ }
+  }, 15_000);
+  const chainScanTimer = setInterval(async () => {
+    try {
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+    } catch { /* non-critical */ }
+  }, CHAIN_SCAN_INTERVAL_MS);
+  if (chainScanTimer.unref) chainScanTimer.unref();
 
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
@@ -442,6 +459,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   async function shutdown() {
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
+    clearInterval(chainScanTimer);
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();

@@ -131,7 +131,8 @@ input::placeholder{color:#475569}
 .prov-panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;overflow:auto}
 .prov-field-label{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}
 .prov-field-value{font-size:11px;color:var(--text);background:rgba(255,255,255,.03);padding:6px 10px;border-radius:6px;border:1px solid var(--border);word-break:break-all;margin-bottom:12px;font-family:'JetBrains Mono',monospace}
-.sparql-editor{padding:16px 18px;margin:0;font-size:12px;line-height:1.7;color:var(--text);background:#080d16;min-height:240px;overflow:auto;white-space:pre;font-family:'JetBrains Mono',monospace}
+.sparql-editor{padding:16px 18px;margin:0;font-size:12px;line-height:1.7;color:var(--text);background:#080d16;min-height:240px;overflow:auto;white-space:pre;font-family:'JetBrains Mono',monospace;border:1px solid var(--border);border-radius:10px;resize:vertical;outline:none;width:100%;box-sizing:border-box;transition:border-color .15s}
+.sparql-editor:focus{border-color:rgba(74,222,128,.4)}
 
 /* Floating ChatPanel (Node Assistant) */
 .chat-fab{position:fixed;bottom:24px;right:24px;width:52px;height:52px;border-radius:50%;background:var(--green);color:var(--bg);border:none;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(74,222,128,.3);z-index:1000}
@@ -242,6 +243,94 @@ input::placeholder{color:#475569}
 .chat-send-btn{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:0}
 @keyframes spin{to{transform:rotate(360deg)}}
 .chat-spinner{animation:spin .8s linear infinite}
+
+/* ── Page title ── */
+.page-title{font-size:20px;font-weight:700;margin-bottom:16px;letter-spacing:-.02em}
+
+/* ── Form controls ── */
+.input,select.input{
+  appearance:none;-webkit-appearance:none;
+  background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);font-size:12px;font-weight:500;font-family:inherit;
+  padding:8px 12px;outline:none;transition:border-color .15s ease;
+  background-image:url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;background-size:10px;
+  padding-right:28px;cursor:pointer
+}
+.input:focus,select.input:focus{border-color:rgba(74,222,128,.4)}
+.input:hover,select.input:hover{border-color:var(--border-light)}
+.input option,select.input option{background:var(--surface);color:var(--text)}
+
+/* Checkbox */
+.checkbox-label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none;white-space:nowrap}
+.checkbox-label input[type="checkbox"]{
+  appearance:none;-webkit-appearance:none;width:16px;height:16px;
+  border:1px solid var(--border);border-radius:4px;background:var(--bg);
+  cursor:pointer;position:relative;flex-shrink:0;transition:all .15s ease
+}
+.checkbox-label input[type="checkbox"]:checked{background:var(--green);border-color:var(--green)}
+.checkbox-label input[type="checkbox"]:checked::after{
+  content:'';position:absolute;top:2px;left:5px;width:4px;height:8px;
+  border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)
+}
+.checkbox-label input[type="checkbox"]:hover{border-color:rgba(74,222,128,.4)}
+
+/* ── Toolbar (SPARQL tab) ── */
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:12px;flex-wrap:wrap}
+
+/* ── Result tabs ── */
+.result-tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:0}
+.result-tab{padding:8px 18px;font-size:12px;font-weight:600;color:var(--text-muted);cursor:pointer;
+  border:none;border-bottom:2px solid transparent;background:none;font-family:inherit;transition:all .15s}
+.result-tab:hover{color:var(--text)}
+.result-tab.active{color:var(--green);border-bottom-color:var(--green)}
+
+/* ── Data table ── */
+.data-table{width:100%;border-collapse:collapse;font-size:12px}
+.data-table th{
+  padding:10px 14px;text-align:left;font-size:10px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);
+  background:var(--surface-alt);border-bottom:1px solid var(--border);
+  position:sticky;top:0;font-family:'JetBrains Mono',monospace
+}
+.data-table td{padding:8px 14px;border-bottom:1px solid var(--border);color:var(--text);vertical-align:top}
+.data-table tr:hover td{background:rgba(74,222,128,.03)}
+.data-table tr:last-child td{border-bottom:none}
+
+/* ── JSON view ── */
+.json-view{
+  background:#080d16;border:1px solid var(--border);border-radius:10px;
+  padding:16px 18px;font-family:'JetBrains Mono',monospace;font-size:11px;
+  line-height:1.7;color:var(--text-muted);overflow:auto;max-height:600px;white-space:pre-wrap;word-break:break-all
+}
+
+/* ── Paranet cards ── */
+.paranet-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.paranet-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:18px 20px;cursor:pointer;transition:all .15s ease;position:relative;overflow:hidden
+}
+.paranet-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--green);opacity:0;transition:opacity .15s}
+.paranet-card:hover{border-color:rgba(74,222,128,.3);background:var(--surface-hover)}
+.paranet-card:hover::before{opacity:1}
+.paranet-card h3{font-size:14px;font-weight:700;margin-bottom:6px;color:var(--text)}
+.paranet-card p{font-size:12px;color:var(--text-muted);line-height:1.5;margin:0}
+
+/* ── Empty & loading states ── */
+.empty-state{display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:13px;padding:48px 24px;text-align:center}
+.loading{display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:13px;padding:48px 24px}
+
+/* ── Graph viewport ── */
+.graph-viewport{background:#060a12;position:relative}
+
+/* ── Triples details ── */
+.graph-details-triples{display:flex;flex-direction:column;gap:4px}
+.graph-details-triple{display:flex;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px solid rgba(30,42,58,.5)}
+.graph-details-triple:last-child{border-bottom:none}
+.graph-details-triple .predicate{color:var(--cyan);font-family:'JetBrains Mono',monospace;font-size:11px;flex-shrink:0}
+.graph-details-triple .subject{color:var(--blue);font-family:'JetBrains Mono',monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.graph-details-triple .object{color:var(--text-muted);font-family:'JetBrains Mono',monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.graph-details-more{font-size:11px;color:var(--text-dim);padding:4px 0}
 
 @media(max-width:900px){
   .sidebar{width:60px}

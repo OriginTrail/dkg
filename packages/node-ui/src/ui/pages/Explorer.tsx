@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
-import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams } from 'react-router-dom';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
@@ -261,7 +261,9 @@ function GraphTab() {
   const [paranetLegend, setParanetLegend] = useState<ParanetLegendEntry[]>([]);
   const [realTripleCount, setRealTripleCount] = useState(0);
 
-  const [paranetFilter, setParanetFilter] = useState('');
+  const location = useLocation();
+  const initialParanet = useRef(new URLSearchParams(location.search).get('paranet') ?? '');
+  const [paranetFilter, setParanetFilter] = useState(initialParanet.current);
   const [showLiterals, setShowLiterals] = useState(true);
   const [selectedNode, setSelectedNode] = useState<NodeDetails | null>(null);
 

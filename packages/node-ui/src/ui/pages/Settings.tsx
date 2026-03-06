@@ -274,9 +274,6 @@ export function SettingsPage() {
               </span>
             </div>
           ))}
-          <div style={{ marginTop: 12, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,255,255,.02)', border: '1px dashed var(--border)', textAlign: 'center', cursor: 'pointer' }}>
-            <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>+ Browse ClawhHub for more apps</span>
-          </div>
         </div>
 
         {/* Danger zone */}
