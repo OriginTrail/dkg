@@ -638,7 +638,7 @@ export class DKGPublisher implements Publisher {
    * preserving metadata for other roots written in the same operation.
    */
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
-    const DKG = 'urn:dkg:';
+    const DKG = 'http://dkg.io/ontology/';
     const result = await this.store.query(
       `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
     );
