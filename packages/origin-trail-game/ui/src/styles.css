@@ -1,0 +1,158 @@
+:root {
+  --bg: #0e1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --green: #3fb950;
+  --red: #f85149;
+  --orange: #d29922;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.ot-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+h1 { font-size: 1.75rem; font-weight: 700; }
+h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 0.75rem; }
+h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
+h4 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 0.5rem; }
+
+.ot-subtitle { color: var(--muted); margin-bottom: 2rem; }
+
+.ot-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.ot-player { color: var(--muted); font-size: 0.9rem; }
+
+.ot-section { margin-bottom: 2rem; }
+
+.ot-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.ot-card.ot-clickable { cursor: pointer; transition: border-color 0.15s; }
+.ot-card.ot-clickable:hover { border-color: var(--accent); }
+
+.ot-card label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.25rem; }
+
+.ot-card input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.95rem;
+  margin-bottom: 0.75rem;
+}
+.ot-card input:focus { outline: none; border-color: var(--accent); }
+
+button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+button:hover { opacity: 0.85; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.ot-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+
+.ot-error {
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid var(--red);
+  color: var(--red);
+  padding: 0.75rem;
+  border-radius: 6px;
+  margin-top: 1rem;
+  font-size: 0.9rem;
+}
+
+.ot-muted { color: var(--muted); font-size: 0.9rem; }
+
+.ot-status-bar {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.ot-game-state { margin-bottom: 1rem; }
+
+.ot-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+}
+.ot-stats > div { display: flex; flex-direction: column; }
+.ot-stats label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.ot-stats span { font-size: 1.1rem; font-weight: 600; }
+
+.ot-trail-bar {
+  height: 8px;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+.ot-trail-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--green), var(--accent));
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.ot-party { padding: 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+
+.ot-member { padding: 0.25rem 0; font-size: 0.9rem; }
+.ot-member.ot-dead { color: var(--red); text-decoration: line-through; }
+.ot-member.ot-sick { color: var(--orange); }
+
+.ot-vote-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.ot-vote-status { margin-top: 1rem; font-size: 0.9rem; }
+.ot-vote-status > div { padding: 0.2rem 0; }
+
+ul { list-style: none; }
+ul li { padding: 0.2rem 0; }

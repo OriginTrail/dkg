@@ -1,4 +1,3 @@
 packages:
   - "packages/*"
   - "demo"
-  - "../oregon-trail-dkg"
