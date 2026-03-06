@@ -11,6 +11,7 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { join, dirname, resolve, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 
@@ -69,7 +70,7 @@ export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: st
       const handlerPath = join(pkgDir, manifest.apiHandler);
       const staticDir = join(pkgDir, manifest.staticDir);
 
-      const handlerModule = await import(handlerPath);
+      const handlerModule = await import(pathToFileURL(handlerPath).href);
       const createHandler = handlerModule.default ?? handlerModule.createHandler;
       if (typeof createHandler !== 'function') {
         log?.(`App ${manifest.id}: handler does not export a default function, skipping`);

@@ -120,8 +120,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     relayPeers = network.relays;
     log(`Using relay(s) from network config (${network.networkName})`);
   }
-  if (!relayPeers?.length && config.relay !== 'none') {
-    log('No relay configured. Set "relay" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
+  if (!relayPeers?.length && !config.bootstrapPeers?.length && config.relay !== 'none') {
+    log('No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
   }
 
   const agent = await DKGAgent.create({

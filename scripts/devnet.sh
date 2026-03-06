@@ -312,7 +312,7 @@ create_node_config() {
   "nodeRole": "${node_role}",
   ${relay_value}
   ${store_block}
-  "paranets": ["devnet-test"],
+  "paranets": ["devnet-test", "origin-trail-game"],
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
@@ -458,6 +458,9 @@ cmd_start() {
     chmod 600 "$nd/auth.token"
   done
   log "All node configs created. Starting nodes..."
+
+  # Ensure we're in repo root so node processes inherit cwd for app loader
+  cd "$REPO_ROOT" || true
 
   # Start node 1 (relay) first, then the rest
   start_node 1
