@@ -134,32 +134,24 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.kaCount,
     });
 
-    const blockNumber = this.nextBlock++;
-    const blockTimestamp = Math.floor(Date.now() / 1000);
-    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}`;
-
-    this.events.push({
-      type: 'KnowledgeBatchCreated',
-      blockNumber,
-      data: {
-        batchId: batchId.toString(),
-        publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
-        publisherAddress: this.signerAddress,
-        merkleRoot: toHex(params.merkleRoot),
-        startKAId: startId.toString(),
-        endKAId: endId.toString(),
-        kaCount: params.kaCount,
-        txHash,
-      },
+    this.pushEvent('KnowledgeBatchCreated', {
+      batchId: batchId.toString(),
+      publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      kaCount: params.kaCount,
     });
 
+    const result = this.txResult(true);
     return {
       batchId,
       startKAId: startId,
       endKAId: endId,
-      txHash,
-      blockNumber,
-      blockTimestamp,
+      txHash: result.hash,
+      blockNumber: result.blockNumber,
+      blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: this.signerAddress,
     };
   }
@@ -177,32 +169,24 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.kaCount,
     });
 
-    const blockNumber = this.nextBlock++;
-    const blockTimestamp = Math.floor(Date.now() / 1000);
-    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}`;
-
-    this.events.push({
-      type: 'KnowledgeBatchCreated',
-      blockNumber,
-      data: {
-        batchId: batchId.toString(),
-        publisherAddress: this.signerAddress,
-        merkleRoot: toHex(params.merkleRoot),
-        startKAId: startId.toString(),
-        endKAId: endId.toString(),
-        kaCount: params.kaCount,
-        isPermanent: true,
-        txHash,
-      },
+    this.pushEvent('KnowledgeBatchCreated', {
+      batchId: batchId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      kaCount: params.kaCount,
+      isPermanent: true,
     });
 
+    const result = this.txResult(true);
     return {
       batchId,
       startKAId: startId,
       endKAId: endId,
-      txHash,
-      blockNumber,
-      blockTimestamp,
+      txHash: result.hash,
+      blockNumber: result.blockNumber,
+      blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress: this.signerAddress,
     };
   }
@@ -247,8 +231,9 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
-    const txHash = `0x${this.nextBlock.toString(16).padStart(64, '0')}`;
-    const txIndex = this.txIndexInBlock++;
+    const txIndex = this.txIndexInBlock;
+    const blockNumber = this.nextBlock;
+    const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
@@ -562,18 +547,36 @@ export class MockChainAdapter implements ChainAdapter {
     return this.namespaceOwner.get(address);
   }
 
+  /**
+   * Record an event in the current block. Block advancement happens in
+   * advanceBlock() (called by txResult). When autoMine is true (default),
+   * each txResult call advances the block. When false, multiple events
+   * share a block until advanceBlock() is called explicitly.
+   */
   private pushEvent(type: string, data: Record<string, unknown>): void {
-    this.events.push({ type, blockNumber: this.nextBlock++, data });
-    this.txIndexInBlock = 0;
+    this.events.push({ type, blockNumber: this.nextBlock, data });
   }
 
   private txResult(success: boolean): TxResult {
-    return {
-      hash: `0x${(this.nextBlock - 1).toString(16).padStart(64, '0')}`,
-      blockNumber: this.nextBlock - 1,
-      success,
-    };
+    const blockNumber = this.nextBlock;
+    const txIndex = this.txIndexInBlock++;
+    const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
+
+    if (this.autoMine) this.advanceBlock();
+    return { hash, blockNumber, success };
   }
+
+  /** Advance to next block, resetting the tx index counter. */
+  advanceBlock(): void {
+    this.nextBlock++;
+    this.txIndexInBlock = 0;
+  }
+
+  /**
+   * When true (default), each txResult automatically advances the block.
+   * Set to false to group multiple transactions in the same block for testing.
+   */
+  autoMine = true;
 }
 
 function toHex(bytes: Uint8Array): string {

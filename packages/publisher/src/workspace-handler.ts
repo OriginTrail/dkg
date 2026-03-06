@@ -47,6 +47,11 @@ export class WorkspaceHandler {
       const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 
+      if (publisherPeerId !== fromPeerId) {
+        this.log.warn(ctx, `Workspace write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
+        return;
+      }
+
       await this.graphManager.ensureParanet(paranetId);
 
       const nquadsStr = new TextDecoder().decode(nquads);

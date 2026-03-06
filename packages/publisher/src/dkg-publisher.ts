@@ -32,6 +32,8 @@ export interface DKGPublisherConfig {
   additionalSignerKeys?: string[];
   /** Shared map of workspace-owned rootEntities per paranet: entity → creatorPeerId. Pass from agent so handler and publisher stay in sync. */
   workspaceOwnedEntities?: Map<string, Map<string, string>>;
+  /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
+  knownBatchParanets?: Map<string, string>;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -53,6 +55,7 @@ export class DKGPublisher implements Publisher {
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  readonly knownBatchParanets: Map<string, string>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -87,6 +90,7 @@ export class DKGPublisher implements Publisher {
     this.graphManager = new GraphManager(config.store);
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
+    this.knownBatchParanets = config.knownBatchParanets ?? new Map();
   }
 
   /**
@@ -504,14 +508,15 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Stored as tentative: UAL=${ual}`);
     }
 
-    // Track owned entities only on confirmed publishes
-    if (status === 'confirmed') {
+    // Track owned entities and batch→paranet binding on confirmed publishes
+    if (status === 'confirmed' && onChainResult) {
       if (!this.ownedEntities.has(paranetId)) {
         this.ownedEntities.set(paranetId, new Set());
       }
       for (const e of manifestEntries) {
         this.ownedEntities.get(paranetId)!.add(e.rootEntity);
       }
+      this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
     }
 
     onPhase?.('chain', 'end');

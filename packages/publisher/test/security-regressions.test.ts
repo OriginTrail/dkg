@@ -668,3 +668,257 @@ describe('MockChainAdapter.verifyKAUpdate txIndex', () => {
     expect(typeof verification.txIndex).toBe('number');
   });
 });
+
+// =====================================================================
+// 8. Workspace gossip peerId spoofing prevention
+// =====================================================================
+
+describe('Workspace peerId spoofing', () => {
+  let store: OxigraphStore;
+  let handler: WorkspaceHandler;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const owned = new Map<string, Map<string, string>>();
+    handler = new WorkspaceHandler(store, new TypedEventBus(), { workspaceOwnedEntities: owned });
+  });
+
+  it('rejects message where publisherPeerId does not match fromPeerId', async () => {
+    const victimPeerId = '12D3KooWVictim';
+    const attackerPeerId = '12D3KooWAttacker';
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
+      publisherPeerId: victimPeerId,
+      workspaceOperationId: 'ws-spoof-1',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, attackerPeerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <urn:spoof> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') {
+      expect(result.value).toBe(false);
+    }
+  });
+
+  it('accepts message where publisherPeerId matches fromPeerId', async () => {
+    const peerId = '12D3KooWLegit';
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-legit-1',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <urn:legit> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Legit');
+    }
+  });
+});
+
+// =====================================================================
+// 9. Cross-paranet binding from trusted source
+// =====================================================================
+
+describe('Cross-paranet binding (trusted source)', () => {
+  it('rejects update when publisher has pre-registered batch→paranet binding', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+    const knownBatchParanets = new Map<string, string>();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+      knownBatchParanets,
+    });
+    const handler = new UpdateHandler(store, chain, eventBus, { knownBatchParanets });
+
+    // Publish on the correct paranet — binding is registered automatically
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:trusted:bind', 'http://schema.org/name', '"Original"')],
+    });
+    expect(knownBatchParanets.get(String(original.kcId))).toBe(PARANET);
+
+    // Attacker tries to replay the same batchId on a different paranet
+    const updateQuads = [q('urn:trusted:bind', 'http://schema.org/name', '"Hacked"')];
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: updateQuads,
+    });
+
+    const attackMsg = encodeKAUpdateRequest({
+      paranetId: 'attacker-paranet',
+      batchId: original.kcId,
+      nquads: quadsToNQuads(updateQuads, 'did:dkg:paranet:attacker-paranet'),
+      manifest: [{ rootEntity: 'urn:trusted:bind', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWAttacker',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(updateQuads, [{ rootEntity: 'urn:trusted:bind' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await handler.handle(attackMsg, '12D3KooWAttacker');
+
+    // Verify the attacker's paranet graph is empty
+    const gm = new GraphManager(store);
+    await gm.ensureParanet('attacker-paranet');
+    const result = await store.query(
+      `ASK { GRAPH <${gm.dataGraphUri('attacker-paranet')}> { <urn:trusted:bind> ?p ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') {
+      expect(result.value).toBe(false);
+    }
+  });
+});
+
+// =====================================================================
+// 10. Mock same-block txIndex ordering
+// =====================================================================
+
+describe('Mock same-block txIndex ordering', () => {
+  it('assigns distinct txIndex values when autoMine is off', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await chain.publishKnowledgeAssets({
+      kaCount: 1,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      publicByteSize: 100n, epochs: 1, tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    // Disable auto-mine so multiple updates share a block
+    chain.autoMine = false;
+
+    const update1 = await chain.updateKnowledgeAssets({
+      batchId: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0xAA),
+      newPublicByteSize: 200n,
+    });
+
+    const update2 = await chain.updateKnowledgeAssets({
+      batchId: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0xBB),
+      newPublicByteSize: 300n,
+    });
+
+    // Both should be in the same block
+    expect(update1.blockNumber).toBe(update2.blockNumber);
+    // But different tx hashes
+    expect(update1.hash).not.toBe(update2.hash);
+
+    // Verify txIndex differs
+    const v1 = await chain.verifyKAUpdate(update1.hash, 1n, wallet.address);
+    const v2 = await chain.verifyKAUpdate(update2.hash, 1n, wallet.address);
+    expect(v1.verified).toBe(true);
+    expect(v2.verified).toBe(true);
+    expect(v1.txIndex).toBe(0);
+    expect(v2.txIndex).toBe(1);
+    expect(v1.blockNumber).toBe(v2.blockNumber);
+  });
+
+  it('handler applies higher txIndex and rejects lower within same block', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+    const publisher = new DKGPublisher({
+      store, chain, eventBus, keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q('urn:txidx', 'http://schema.org/name', '"Original"')],
+    });
+
+    // Disable auto-mine for same-block updates
+    chain.autoMine = false;
+
+    const q1 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=0"')];
+    const update1 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q1 });
+
+    const q2 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=1"')];
+    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+
+    chain.autoMine = true;
+    chain.advanceBlock();
+
+    expect(update1.onChainResult!.blockNumber).toBe(update2.onChainResult!.blockNumber);
+
+    const handler = new UpdateHandler(store, chain, eventBus);
+
+    // Apply update2 (txIndex=1) first
+    const msg2 = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q2, DATA_GRAPH),
+      manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update2.onChainResult!.txHash,
+      blockNumber: BigInt(update2.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q2, [{ rootEntity: 'urn:txidx' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg2, '12D3KooWPeer');
+
+    // Now try update1 (txIndex=0, same block) — should be rejected (lower txIndex)
+    const msg1 = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(q1, DATA_GRAPH),
+      manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      publisherAddress: wallet.address,
+      txHash: update1.onChainResult!.txHash,
+      blockNumber: BigInt(update1.onChainResult!.blockNumber),
+      newMerkleRoot: computeGossipMerkleRoot(q1, [{ rootEntity: 'urn:txidx' }]),
+      timestampMs: BigInt(Date.now()),
+    });
+    await handler.handle(msg1, '12D3KooWPeer');
+
+    // Should still have update2's data (txIndex=1 wins)
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${DATA_GRAPH}> { <urn:txidx> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Update txIdx=1');
+    }
+  });
+});

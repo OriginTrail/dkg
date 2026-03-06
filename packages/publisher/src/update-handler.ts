@@ -36,14 +36,24 @@ export class UpdateHandler {
    */
   private readonly appliedUpdates = new Map<string, AppliedUpdate>();
 
-  /** Batch-to-paranet binding: once a batch is seen on a paranet, reject cross-paranet replays. */
-  private readonly batchParanet = new Map<string, string>();
+  /**
+   * Batch-to-paranet binding from trusted sources (local publish, metadata store).
+   * Shared with the publisher so bindings established at publish time are immediately
+   * available, preventing first-message-wins attacks from gossip.
+   */
+  private readonly knownBatchParanets: Map<string, string>;
 
-  constructor(store: TripleStore, chain: ChainAdapter, eventBus: EventBus) {
+  constructor(
+    store: TripleStore,
+    chain: ChainAdapter,
+    eventBus: EventBus,
+    options?: { knownBatchParanets?: Map<string, string> },
+  ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
     this.chain = chain;
     this.eventBus = eventBus;
+    this.knownBatchParanets = options?.knownBatchParanets ?? new Map();
   }
 
   async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
@@ -64,9 +74,15 @@ export class UpdateHandler {
         `KA update from ${fromPeerId} for paranet ${paranetId} batchId=${batchId} tx=${txHash}`,
       );
 
-      // Paranet binding: once a batch is associated with a paranet, reject cross-paranet replays.
+      // Paranet binding: check trusted sources first (local publish, store metadata).
       const batchKey = String(batchId);
-      const knownParanet = this.batchParanet.get(batchKey);
+      let knownParanet = this.knownBatchParanets.get(batchKey);
+
+      if (!knownParanet) {
+        knownParanet = await this.lookupBatchParanet(batchId);
+        if (knownParanet) this.knownBatchParanets.set(batchKey, knownParanet);
+      }
+
       if (knownParanet && knownParanet !== paranetId) {
         this.log.warn(ctx, `KA update rejected: batchId=${batchId} is bound to paranet "${knownParanet}", not "${paranetId}"`);
         return;
@@ -166,7 +182,9 @@ export class UpdateHandler {
           txIndex: verifiedTxIndex ?? 0,
         });
       }
-      this.batchParanet.set(batchKey, paranetId);
+      if (!this.knownBatchParanets.has(batchKey)) {
+        this.knownBatchParanets.set(batchKey, paranetId);
+      }
 
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 
@@ -183,6 +201,29 @@ export class UpdateHandler {
         `KA update handle failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Look up the paranet a batch was originally published on by querying local
+   * KC metadata. Returns undefined if the batch is unknown to this node.
+   */
+  private async lookupBatchParanet(batchId: bigint): Promise<string | undefined> {
+    const DKG = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?g WHERE {
+        GRAPH ?g { ?ka <${DKG}batchId> "${batchId}" }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    const graphUri = result.bindings[0]['g'];
+    if (!graphUri) return undefined;
+    const metaSuffix = '/_meta';
+    if (graphUri.endsWith(metaSuffix)) {
+      const base = graphUri.slice(0, -metaSuffix.length);
+      const prefix = 'did:dkg:paranet:';
+      if (base.startsWith(prefix)) return base.slice(prefix.length);
+    }
+    return undefined;
   }
 
   /**
