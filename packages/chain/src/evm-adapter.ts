@@ -15,6 +15,7 @@ import type {
   ParanetOnChain,
   PublishParams,
   OnChainPublishResult,
+  KAUpdateVerification,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -478,6 +479,51 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       success: receipt.status === 1,
     };
+  }
+
+  // =====================================================================
+  // V9: Update Verification (for gossip receivers)
+  // =====================================================================
+
+  async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetsStorage) return { verified: false };
+
+    try {
+      const receipt = await this.provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) return { verified: false };
+
+      const storage = this.contracts.knowledgeAssetsStorage;
+      const storageAddress = (await storage.getAddress()).toLowerCase();
+
+      let onChainMerkleRoot: Uint8Array | undefined;
+      for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== storageAddress) continue;
+        try {
+          const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed?.name === 'KnowledgeBatchUpdated' && BigInt(parsed.args.batchId) === batchId) {
+            onChainMerkleRoot = ethers.getBytes(parsed.args.newMerkleRoot);
+            break;
+          }
+        } catch { /* parse failure — skip */ }
+      }
+
+      if (!onChainMerkleRoot) return { verified: false };
+
+      const onChainPublisher: string = await storage.getBatchPublisher(batchId);
+      if (onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
+        return { verified: false };
+      }
+
+      return {
+        verified: true,
+        onChainMerkleRoot,
+        blockNumber: receipt.blockNumber,
+        txIndex: receipt.index,
+      };
+    } catch {
+      return { verified: false };
+    }
   }
 
   // =====================================================================

@@ -1,9 +1,10 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest, decodePublishRequest,
+  encodeKAUpdateRequest,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, MerkleTree, withRetry,
   type DKGNodeConfig, type OperationContext,
@@ -11,7 +12,7 @@ import {
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
 import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  DKGPublisher, PublishHandler, WorkspaceHandler, ChainEventPoller, AccessHandler, AccessClient,
+  DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   type PublishResult, type PhaseCallback, type KAMetadata,
@@ -104,8 +105,8 @@ export class DKGAgent {
   router!: ProtocolRouter;
   readonly eventBus: TypedEventBus;
   private readonly chain: ChainAdapter;
-  /** Shared workspace-owned root entities per paranet (Rule 4). Used by publisher and workspace handler. */
-  private readonly workspaceOwnedEntities: Map<string, Set<string>>;
+  /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   private workspaceHandler?: WorkspaceHandler;
   private readonly log = new Logger('DKGAgent');
 
@@ -124,7 +125,7 @@ export class DKGAgent {
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,
     chain: ChainAdapter,
-    workspaceOwnedEntities: Map<string, Set<string>>,
+    workspaceOwnedEntities: Map<string, Map<string, string>>,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -205,7 +206,7 @@ export class DKGAgent {
     };
 
     const node = new DKGNode(nodeConfig);
-    const workspaceOwnedEntities = new Map<string, Set<string>>();
+    const workspaceOwnedEntities = new Map<string, Map<string, string>>();
     const publisher = new DKGPublisher({
       store,
       chain,
@@ -690,13 +691,33 @@ export class DKGAgent {
           totalSynced += wsMetaQuads.length;
         }
 
-        // Update workspaceOwnedEntities only from validated meta (rootEntity); never from workspace subjects.
-        if (!this.workspaceOwnedEntities.has(pid)) {
-          this.workspaceOwnedEntities.set(pid, new Set());
+        // Update workspaceOwnedEntities only from validated meta (rootEntity + creator peerId).
+        const PROV_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
+        const opCreators = new Map<string, string>();
+        for (const q of wsMetaQuads) {
+          if (q.predicate === PROV_ATTRIBUTED_TO && validOps.has(q.subject)) {
+            opCreators.set(q.subject, q.object.startsWith('"') ? stripLiteral(q.object) : q.object);
+          }
         }
-        const ownedSet = this.workspaceOwnedEntities.get(pid)!;
-        for (const root of allowedRoots) {
-          ownedSet.add(root);
+        const entityCreators = new Map<string, string>();
+        for (const q of wsMetaQuads) {
+          if (q.predicate === DKG_ROOT_ENTITY && validOps.has(q.subject)) {
+            const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
+            const creator = opCreators.get(q.subject);
+            if (creator && !entityCreators.has(entity)) {
+              entityCreators.set(entity, creator);
+            }
+          }
+        }
+
+        if (!this.workspaceOwnedEntities.has(pid)) {
+          this.workspaceOwnedEntities.set(pid, new Map());
+        }
+        const ownedMap = this.workspaceOwnedEntities.get(pid)!;
+        for (const [entity, creator] of entityCreators) {
+          if (!ownedMap.has(entity)) {
+            ownedMap.set(entity, creator);
+          }
         }
 
         this.log.info(ctx, `Workspace sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
@@ -934,6 +955,38 @@ export class DKGAgent {
     this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
     const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx });
     this.log.info(ctx, `Update complete — status=${result.status}`);
+
+    if (result.onChainResult && result.publicQuads) {
+      try {
+        const dataGraph = `did:dkg:paranet:${paranetId}`;
+        const nquadsStr = result.publicQuads
+          .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
+          .join('\n');
+        const nquadsBytes = new TextEncoder().encode(nquadsStr);
+        const message = encodeKAUpdateRequest({
+          paranetId,
+          batchId: kcId,
+          nquads: nquadsBytes,
+          manifest: result.kaManifest.map((m) => ({
+            rootEntity: m.rootEntity,
+            privateMerkleRoot: m.privateMerkleRoot,
+            privateTripleCount: m.privateTripleCount ?? 0,
+          })),
+          publisherPeerId: this.node.peerId.toString(),
+          publisherAddress: result.onChainResult.publisherAddress,
+          txHash: result.onChainResult.txHash,
+          blockNumber: result.onChainResult.blockNumber,
+          newMerkleRoot: result.merkleRoot,
+          timestampMs: Date.now(),
+        });
+        const topic = paranetUpdateTopic(paranetId);
+        await this.gossip.publish(topic, message);
+        this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
+      } catch (err) {
+        this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     return result;
   }
 
@@ -1196,6 +1249,13 @@ export class DKGAgent {
       const wh = this.getOrCreateWorkspaceHandler();
       await wh.handle(data, from);
     });
+
+    const updateTopic = paranetUpdateTopic(paranetId);
+    this.gossip.subscribe(updateTopic);
+    this.gossip.onMessage(updateTopic, async (_topic, data, from) => {
+      const uh = this.getOrCreateUpdateHandler();
+      await uh.handle(data, from);
+    });
   }
 
   private getOrCreateWorkspaceHandler(): WorkspaceHandler {
@@ -1205,6 +1265,17 @@ export class DKGAgent {
       });
     }
     return this.workspaceHandler;
+  }
+
+  private updateHandler?: UpdateHandler;
+
+  private getOrCreateUpdateHandler(): UpdateHandler {
+    if (!this.updateHandler) {
+      this.updateHandler = new UpdateHandler(this.store, this.chain, this.eventBus, {
+        knownBatchParanets: this.publisher.knownBatchParanets,
+      });
+    }
+    return this.updateHandler;
   }
 
   /**

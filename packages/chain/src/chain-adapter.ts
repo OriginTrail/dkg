@@ -37,8 +37,10 @@ export interface PublishParams {
 
 export interface OnChainPublishResult {
   batchId: bigint;
-  startKAId: bigint;
-  endKAId: bigint;
+  /** Absent for updates (no new KAs minted). */
+  startKAId?: bigint;
+  /** Absent for updates (no new KAs minted). */
+  endKAId?: bigint;
   txHash: string;
   blockNumber: number;
   blockTimestamp: number;
@@ -67,6 +69,16 @@ export interface TxResult {
   success: boolean;
   /** Set by createParanet when V9 registry is used (on-chain paranetId as hex). */
   paranetId?: string;
+}
+
+export interface KAUpdateVerification {
+  verified: boolean;
+  /** The merkle root stored on-chain for this batch (from KnowledgeBatchUpdated event). */
+  onChainMerkleRoot?: Uint8Array;
+  /** The block number of the on-chain update transaction. */
+  blockNumber?: number;
+  /** The transaction index within the block (for deterministic same-block ordering). */
+  txIndex?: number;
 }
 
 export interface ChainEvent {
@@ -195,6 +207,14 @@ export interface ChainAdapter {
 
   // V9 knowledge updates
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;
+
+  /**
+   * Verify that a KnowledgeBatchUpdated event exists for the given batchId and txHash,
+   * and that the publisher address matches the original batch publisher.
+   * Returns chain-verified merkle root and block number so the caller can bind
+   * the gossip payload to on-chain state (instead of trusting gossip-supplied values).
+   */
+  verifyKAUpdate?(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification>;
 
   // V9 storage extension
   extendStorage(params: ExtendStorageParams): Promise<TxResult>;

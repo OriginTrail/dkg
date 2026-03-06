@@ -34,7 +34,7 @@ export interface PublishResult {
   ual: string;
   merkleRoot: Uint8Array;
   kaManifest: KAManifestEntry[];
-  status: 'tentative' | 'confirmed';
+  status: 'tentative' | 'confirmed' | 'failed';
   onChainResult?: OnChainPublishResult;
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];

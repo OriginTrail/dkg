@@ -19,14 +19,14 @@ export class WorkspaceHandler {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
   private readonly eventBus: EventBus;
-  /** Per-paranet set of rootEntities already in workspace (Rule 4). Shared with publisher when used by agent. */
-  private readonly workspaceOwnedEntities: Map<string, Set<string>> = new Map();
+  /** Per-paranet map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly log = new Logger('WorkspaceHandler');
 
   constructor(
     store: TripleStore,
     eventBus: EventBus,
-    options?: { workspaceOwnedEntities?: Map<string, Set<string>> },
+    options?: { workspaceOwnedEntities?: Map<string, Map<string, string>> },
   ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
@@ -47,6 +47,11 @@ export class WorkspaceHandler {
       const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 
+      if (publisherPeerId !== fromPeerId) {
+        this.log.warn(ctx, `Workspace write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
+        return;
+      }
+
       await this.graphManager.ensureParanet(paranetId);
 
       const nquadsStr = new TextDecoder().decode(nquads);
@@ -59,8 +64,21 @@ export class WorkspaceHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const existing = this.workspaceOwnedEntities.get(paranetId) ?? new Set();
-      const validation = validatePublishRequest(quads, manifestForValidation, paranetId, existing);
+      const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
+      const existing = new Set<string>([...wsOwned.keys()]);
+
+      // Creator-only upsert: allow overwriting entities this writer created
+      const upsertable = new Set<string>();
+      for (const [entity, creator] of wsOwned) {
+        if (creator === publisherPeerId) {
+          upsertable.add(entity);
+        }
+      }
+
+      const validation = validatePublishRequest(
+        quads, manifestForValidation, paranetId, existing,
+        { allowUpsert: true, upsertableEntities: upsertable },
+      );
       if (!validation.valid) {
         this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
         return;
@@ -77,6 +95,17 @@ export class WorkspaceHandler {
 
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+
+      // Delete-then-insert for upserted entities.
+      // Delete exact root + skolemized children only to avoid prefix collisions.
+      // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
+      for (const m of manifestForValidation) {
+        if (wsOwned.has(m.rootEntity)) {
+          await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+          await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+          await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
+        }
+      }
 
       const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
       await this.store.insert(normalized);
@@ -95,10 +124,12 @@ export class WorkspaceHandler {
       await this.store.insert(metaQuads);
 
       if (!this.workspaceOwnedEntities.has(paranetId)) {
-        this.workspaceOwnedEntities.set(paranetId, new Set());
+        this.workspaceOwnedEntities.set(paranetId, new Map());
       }
       for (const r of rootEntities) {
-        this.workspaceOwnedEntities.get(paranetId)!.add(r);
+        if (!wsOwned.has(r)) {
+          this.workspaceOwnedEntities.get(paranetId)!.set(r, publisherPeerId);
+        }
       }
 
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
@@ -106,4 +137,41 @@ export class WorkspaceHandler {
       this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  /**
+   * Remove the workspace_meta link for a specific rootEntity.
+   * Only deletes the entire operation subject when no rootEntity links remain,
+   * preserving metadata for other roots written in the same operation.
+   */
+  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+    );
+    if (result.type !== 'bindings') return;
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (!op) continue;
+
+      await this.store.delete([{
+        subject: op, predicate: `${DKG}rootEntity`, object: rootEntity, graph: metaGraph,
+      }]);
+
+      const remaining = await this.store.query(
+        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
+      );
+      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      const countVal = parseCountLiteral(rawCount);
+      if (countVal === 0) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+      }
+    }
+  }
+}
+
+function parseCountLiteral(val: string | false | undefined): number {
+  if (!val) return NaN;
+  const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+  const n = Number(stripped);
+  return Number.isFinite(n) ? n : NaN;
 }

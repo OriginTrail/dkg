@@ -30,8 +30,10 @@ export interface DKGPublisherConfig {
    * If empty, only the primary publisherPrivateKey is used for self-signing.
    */
   additionalSignerKeys?: string[];
-  /** Shared map of workspace-owned rootEntities per paranet (Rule 4). Pass from agent so handler and publisher stay in sync. */
-  workspaceOwnedEntities?: Map<string, Set<string>>;
+  /** Shared map of workspace-owned rootEntities per paranet: entity → creatorPeerId. Pass from agent so handler and publisher stay in sync. */
+  workspaceOwnedEntities?: Map<string, Map<string, string>>;
+  /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
+  knownBatchParanets?: Map<string, string>;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -52,7 +54,8 @@ export class DKGPublisher implements Publisher {
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
-  private readonly workspaceOwnedEntities: Map<string, Set<string>>;
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  readonly knownBatchParanets: Map<string, string>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -87,6 +90,7 @@ export class DKGPublisher implements Publisher {
     this.graphManager = new GraphManager(config.store);
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
+    this.knownBatchParanets = config.knownBatchParanets ?? new Map();
   }
 
   /**
@@ -122,13 +126,23 @@ export class DKGPublisher implements Publisher {
     }));
 
     const dataOwned = this.ownedEntities.get(paranetId) ?? new Set();
-    const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Set();
-    const existing = new Set<string>([...dataOwned, ...wsOwned]);
+    const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
+    const existing = new Set<string>([...dataOwned, ...wsOwned.keys()]);
+
+    // Creator-only upsert: allow overwriting entities this writer created
+    const upsertable = new Set<string>();
+    for (const [entity, creator] of wsOwned) {
+      if (creator === options.publisherPeerId) {
+        upsertable.add(entity);
+      }
+    }
+
     const validation = validatePublishRequest(
       [...kaMap.values()].flat(),
       manifestForValidation,
       paranetId,
       existing,
+      { allowUpsert: true, upsertableEntities: upsertable },
     );
     if (!validation.valid) {
       throw new Error(`Workspace validation failed: ${validation.errors.join('; ')}`);
@@ -137,6 +151,17 @@ export class DKGPublisher implements Publisher {
     const workspaceOperationId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
     const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
+
+    // Delete-then-insert for upserted entities (replace old triples).
+    // Delete exact root + skolemized children only to avoid prefix collisions.
+    // Also remove prior workspace_meta ops referencing these roots.
+    for (const m of manifestEntries) {
+      if (wsOwned.has(m.rootEntity)) {
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+        await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
+      }
+    }
 
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
     await this.store.insert(normalized);
@@ -155,10 +180,12 @@ export class DKGPublisher implements Publisher {
     await this.store.insert(metaQuads);
 
     if (!this.workspaceOwnedEntities.has(paranetId)) {
-      this.workspaceOwnedEntities.set(paranetId, new Set());
+      this.workspaceOwnedEntities.set(paranetId, new Map());
     }
     for (const r of rootEntities) {
-      this.workspaceOwnedEntities.get(paranetId)!.add(r);
+      if (!wsOwned.has(r)) {
+        this.workspaceOwnedEntities.get(paranetId)!.set(r, options.publisherPeerId);
+      }
     }
 
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
@@ -227,7 +254,8 @@ export class DKGPublisher implements Publisher {
     if (options?.clearWorkspaceAfter) {
       const kaMap = autoPartition(quads);
       for (const rootEntity of kaMap.keys()) {
-        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity);
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
       }
     }
@@ -480,14 +508,15 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Stored as tentative: UAL=${ual}`);
     }
 
-    // Track owned entities only on confirmed publishes
-    if (status === 'confirmed') {
+    // Track owned entities and batch→paranet binding on confirmed publishes
+    if (status === 'confirmed' && onChainResult) {
       if (!this.ownedEntities.has(paranetId)) {
         this.ownedEntities.set(paranetId, new Set());
       }
       for (const e of manifestEntries) {
         this.ownedEntities.get(paranetId)!.add(e.rootEntity);
       }
+      this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
     }
 
     onPhase?.('chain', 'end');
@@ -512,18 +541,18 @@ export class DKGPublisher implements Publisher {
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
 
+    // Phase 1: compute merkle roots and manifest without mutating the store
     const kaMap = autoPartition(quads);
     const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
+    const entityPrivateMap = new Map<string, Quad[]>();
 
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
-      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity);
-      await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
-
       const entityPrivateQuads = privateQuads.filter(
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
+      entityPrivateMap.set(rootEntity, entityPrivateQuads);
 
       const pubRoot = computePublicRoot(publicQuads);
       const privRoot = entityPrivateQuads.length > 0 ? computePrivateRoot(entityPrivateQuads) : undefined;
@@ -535,23 +564,43 @@ export class DKGPublisher implements Publisher {
         privateMerkleRoot: privRoot,
         privateTripleCount: entityPrivateQuads.length,
       });
-
-      const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
-      await this.store.insert(normalized);
-
-      if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
-      }
     }
 
     const kcMerkleRoot = computeKCRoot(kaRoots);
-
     const allSkolemizedQuads = [...kaMap.values()].flat();
-    await this.chain.updateKnowledgeAssets({
+
+    // Phase 2: submit chain tx — local store is still untouched
+    const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
       newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
     });
+
+    if (!txResult.success) {
+      return {
+        kcId,
+        ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+        merkleRoot: kcMerkleRoot,
+        kaManifest: manifestEntries,
+        status: 'failed',
+        publicQuads: allSkolemizedQuads,
+      };
+    }
+
+    // Phase 3: chain succeeded — now apply local mutations
+    for (const [rootEntity, publicQuads] of kaMap) {
+      await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+      await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
+
+      const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
+      await this.store.insert(normalized);
+
+      const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
+      if (entityPrivateQuads.length > 0) {
+        await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
+      }
+    }
 
     const result: PublishResult = {
       kcId,
@@ -560,6 +609,13 @@ export class DKGPublisher implements Publisher {
       kaManifest: manifestEntries,
       status: 'confirmed',
       publicQuads: allSkolemizedQuads,
+      onChainResult: {
+        batchId: kcId,
+        txHash: txResult.hash,
+        blockNumber: txResult.blockNumber,
+        blockTimestamp: Math.floor(Date.now() / 1000),
+        publisherAddress: this.publisherAddress,
+      },
     };
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);
@@ -586,4 +642,46 @@ export class DKGPublisher implements Publisher {
   skolemize(rootEntity: string, quads: Quad[]): Quad[] {
     return skolemize(rootEntity, quads);
   }
+
+  /**
+   * Remove the workspace_meta link for a specific rootEntity.
+   * Only deletes the entire operation subject when no rootEntity links remain,
+   * preserving metadata for other roots written in the same operation.
+   */
+  private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const result = await this.store.query(
+      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+    );
+    if (result.type !== 'bindings') return;
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (!op) continue;
+
+      await this.store.delete([{
+        subject: op, predicate: `${DKG}rootEntity`, object: rootEntity, graph: metaGraph,
+      }]);
+
+      const remaining = await this.store.query(
+        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
+      );
+      const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
+      const countVal = parseCountLiteral(rawCount);
+      if (countVal === 0) {
+        await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+      }
+    }
+  }
+}
+
+/**
+ * Parse a SPARQL COUNT result that may be a bare number string, a quoted
+ * string, or a typed literal (e.g. `"0"^^<xsd:integer>`, `"0"^^<xsd:long>`).
+ * Returns the numeric value, or NaN if unparseable.
+ */
+function parseCountLiteral(val: string | false | undefined): number {
+  if (!val) return NaN;
+  const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+  const n = Number(stripped);
+  return Number.isFinite(n) ? n : NaN;
 }

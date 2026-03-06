@@ -13,6 +13,7 @@ import {
   computeKCRoot,
   validatePublishRequest,
 } from '../src/index.js';
+import type { ValidationOptions } from '../src/validation.js';
 
 const PARANET = 'agent-registry';
 const GRAPH = `did:dkg:paranet:${PARANET}`;
@@ -166,6 +167,57 @@ describe('validatePublishRequest', () => {
     const result = validatePublishRequest(quads, manifest, PARANET, existing);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
+  });
+
+  it('Rule 4 passes with allowUpsert when entity is in upsertableEntities', () => {
+    const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
+    const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
+    const existing = new Set([ENTITY]);
+    const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ENTITY]) };
+    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    expect(result.valid).toBe(true);
+  });
+
+  it('Rule 4 still fails with allowUpsert when entity is NOT in upsertableEntities', () => {
+    const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
+    const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
+    const existing = new Set([ENTITY]);
+    const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set() };
+    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('Rule 4');
+  });
+
+  it('Rule 4 still fails when allowUpsert is false even with upsertableEntities set', () => {
+    const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
+    const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
+    const existing = new Set([ENTITY]);
+    const opts: ValidationOptions = { allowUpsert: false, upsertableEntities: new Set([ENTITY]) };
+    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('Rule 4');
+  });
+
+  it('Rule 4 mixed batch: some upsertable, some new, some foreign', () => {
+    const ownedEntity = 'urn:test:owned';
+    const newEntity = 'urn:test:new';
+    const foreignEntity = 'urn:test:foreign';
+    const quads = [
+      q(ownedEntity, 'http://ex.org/p', '"a"'),
+      q(newEntity, 'http://ex.org/p', '"b"'),
+      q(foreignEntity, 'http://ex.org/p', '"c"'),
+    ];
+    const manifest = [
+      { tokenId: 1n, rootEntity: ownedEntity },
+      { tokenId: 2n, rootEntity: newEntity },
+      { tokenId: 3n, rootEntity: foreignEntity },
+    ];
+    const existing = new Set([ownedEntity, foreignEntity]);
+    const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ownedEntity]) };
+    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    expect(result.valid).toBe(false);
+    expect(result.errors.length).toBe(1);
+    expect(result.errors[0]).toContain('foreign');
   });
 
   it('fails Rule 5: blank node subject', () => {

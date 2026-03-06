@@ -7,6 +7,13 @@ export interface ValidationResult {
   errors: string[];
 }
 
+export interface ValidationOptions {
+  /** When true, skip Rule 4 for entities the current writer owns (listed in upsertableEntities). */
+  allowUpsert?: boolean;
+  /** Root entities the current writer is allowed to upsert (creator-only). */
+  upsertableEntities?: Set<string>;
+}
+
 /**
  * Validates a publish request against the 8 rules from the spec.
  */
@@ -15,6 +22,7 @@ export function validatePublishRequest(
   manifest: KAManifestEntry[],
   paranetId: string,
   existingEntities: Set<string>,
+  options?: ValidationOptions,
 ): ValidationResult {
   const errors: string[] = [];
   const paranetGraph = `did:dkg:paranet:${paranetId}`;
@@ -62,8 +70,12 @@ export function validatePublishRequest(
   }
 
   // Rule 4: Entity exclusivity — no rootEntity may already exist in this paranet.
+  // With allowUpsert, the original creator can overwrite their own workspace entities.
   for (const m of manifest) {
     if (existingEntities.has(m.rootEntity)) {
+      if (options?.allowUpsert && options.upsertableEntities?.has(m.rootEntity)) {
+        continue;
+      }
       errors.push(
         `Rule 4: rootEntity "${m.rootEntity}" already exists in paranet "${paranetId}"`,
       );
