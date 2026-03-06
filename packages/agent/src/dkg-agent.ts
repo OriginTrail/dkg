@@ -370,14 +370,14 @@ export class DKGAgent {
         }
 
         if (offset === 0) {
-          // Only send meta for non-expired operations
-          const metaQuery = wsTtl > 0
+          // Only send meta for non-expired operations; reuse same cutoff as data query to avoid boundary skew
+          const metaQuery = cutoff != null
             ? `SELECT ?s ?p ?o WHERE {
                 GRAPH <${wsMetaGraph}> { ?s ?p ?o }
                 FILTER EXISTS {
                   GRAPH <${wsMetaGraph}> {
                     ?s <http://dkg.io/ontology/publishedAt> ?ts .
-                    FILTER(?ts >= "${new Date(Date.now() - wsTtl).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+                    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
                   }
                 }
               } ORDER BY ?s ?p ?o`
@@ -640,11 +640,24 @@ export class DKGAgent {
         const wsQuads = allQuads.filter(q => q.graph === wsGraph);
         const wsMetaQuads = allQuads.filter(q => q.graph === wsMetaGraph);
 
-        // Build allowed root set from meta only (do not trust workspace subject URIs from remote).
+        // Only accept roots from meta subjects that are valid workspace operations (type + publishedAt).
+        // Rejects fake rootEntity from malicious peers that would poison workspaceOwnedEntities.
         const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
+        const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+        const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
+        const DKG_PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
+
+        const opsWithType = new Set<string>();
+        const opsWithPublishedAt = new Set<string>();
+        for (const q of wsMetaQuads) {
+          if (q.predicate === RDF_TYPE && q.object === DKG_WORKSPACE_OP) opsWithType.add(q.subject);
+          if (q.predicate === DKG_PUBLISHED_AT) opsWithPublishedAt.add(q.subject);
+        }
+        const validOps = new Set<string>([...opsWithType].filter(s => opsWithPublishedAt.has(s)));
+
         const allowedRoots = new Set<string>();
         for (const q of wsMetaQuads) {
-          if (q.predicate === DKG_ROOT_ENTITY) {
+          if (q.predicate === DKG_ROOT_ENTITY && validOps.has(q.subject)) {
             const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
             allowedRoots.add(entity);
           }
