@@ -18,21 +18,23 @@ The DKG solves this by providing:
 
 ## Getting Started
 
+**Quick start (no clone):**
+
 ```bash
-git clone https://github.com/OriginTrail/dkg-v9.git
-cd dkg-v9
-pnpm install && pnpm build
-pnpm dkg init      # Interactive setup — pick a name, paste an EVM key
-pnpm dkg start -f  # Start your node (foreground)
+npm install -g @dkg/cli
+dkg init      # Interactive setup — pick a name, paste an EVM key
+dkg start -f  # Start your node (foreground)
 ```
 
 In another terminal:
 
 ```bash
-pnpm dkg status    # Check your node
-pnpm dkg peers     # See who's online
-pnpm dkg send <name> "hello from the DKG"
+dkg status    # Check your node
+dkg peers     # See who's online
+dkg send <name> "hello from the DKG"
 ```
+
+**From source** (contributors): clone the repo, then `pnpm install && pnpm build` and use `pnpm dkg` in place of `dkg`.
 
 For the full walkthrough (testnet ETH, publishing knowledge, querying, framework integrations), see **[Join the Testnet](docs/setup/JOIN_TESTNET.md)**.
 
@@ -40,7 +42,7 @@ For the full walkthrough (testnet ETH, publishing knowledge, querying, framework
 
 | Guide | For |
 |---|---|
-| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | Quick start — clone, init, start, message, publish |
+| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | Quick start — install, init, start, message, publish |
 | [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw agents with the DKG plugin |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS agents with the DKG plugin |
 | [Custom Project](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |
@@ -58,7 +60,7 @@ Fifteen packages in a pnpm monorepo, built with Turborepo:
 @dkg/agent             Agent identity, discovery, messaging, persistent keys
 @dkg/cli               CLI daemon — node management, publishing, querying, chat
 @dkg/evm-module        Solidity contracts, Hardhat deploy, Base Sepolia
-@dkg/node-ui           Web dashboard — monitoring, Explorer, SPARQL editor, chat
+@dkg/node-ui           Web dashboard — Agent Hub (chat, View Memories), Explorer, SPARQL editor
 @dkg/graph-viz         Interactive RDF graph visualization (force-directed)
 @dkg/network-sim       Network simulator — multi-node devnet orchestration
 @dkg/attested-assets   AKA protocol — multi-party attested knowledge sessions
@@ -113,20 +115,20 @@ Fifteen packages in a pnpm monorepo, built with Turborepo:
 ## CLI
 
 ```bash
-pnpm dkg init                    # Interactive node setup
-pnpm dkg start [-f]              # Start daemon (or foreground with -f)
-pnpm dkg stop                    # Stop the daemon
-pnpm dkg status                  # Node info, role, network
-pnpm dkg peers                   # List discovered agents
-pnpm dkg send <name> <msg>       # Send encrypted message
-pnpm dkg chat <name>             # Interactive chat session
-pnpm dkg publish <paranet> -f x  # Publish RDF data (.nt, .nq, .ttl, .trig, .jsonld)
-pnpm dkg query [paranet] -q ...  # SPARQL query
-pnpm dkg paranet create <id>     # Create a new paranet
-pnpm dkg paranet list            # List all paranets
-pnpm dkg auth show               # Display API auth token
-pnpm dkg auth rotate             # Generate a new token
-pnpm dkg logs                    # View daemon logs
+dkg init                    # Interactive node setup
+dkg start [-f]              # Start daemon (or foreground with -f)
+dkg stop                    # Stop the daemon
+dkg status                  # Node info, role, network
+dkg peers                   # List discovered agents
+dkg send <name> <msg>       # Send encrypted message
+dkg chat <name>             # Interactive chat session
+dkg publish <paranet> -f x  # Publish RDF data (.nt, .nq, .ttl, .trig, .jsonld)
+dkg query [paranet] -q ...  # SPARQL query
+dkg paranet create <id>     # Create a new paranet
+dkg paranet list            # List all paranets
+dkg auth show               # Display API auth token
+dkg auth rotate             # Generate a new token
+dkg logs                    # View daemon logs
 ```
 
 ## Development
@@ -144,7 +146,7 @@ pnpm test:coverage      # Run tests with coverage
 All API endpoints are protected by bearer token auth (enabled by default). A token is auto-generated on first start and saved to `~/.dkg/auth.token`. The Node UI receives the token automatically.
 
 ```bash
-TOKEN=$(pnpm dkg auth show)
+TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 ```
 
@@ -187,7 +189,7 @@ On-chain publishing is live on Base Sepolia. The core protocol (P2P networking, 
 | Knowledge publishing (merkle trees, on-chain finalization) | Done |
 | Private triples + access protocol | Done |
 | Agent discovery + encrypted messaging | Done |
-| Node UI (dashboard, Explorer, SPARQL, chat) | Done |
+| Node UI (Agent Hub, View Memories, Explorer, SPARQL) | Done |
 | CLI (full node management) | Done |
 | DKG Apps (installable node applications) | Done |
 | Attested Knowledge Assets (multi-party consensus) | Done |

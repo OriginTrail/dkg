@@ -5,4 +5,5 @@ tsconfig.tsbuildinfo
 *.tgz
 .env
 .play-nodes/
+.test-nodes/
 .DS_Store
