@@ -1,0 +1,42 @@
+{
+  "name": "dkg-app-origin-trail-game",
+  "version": "0.1.0",
+  "description": "OriginTrail Game — a multiplayer game on the DKG. Installable DKG app.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dkgApp": {
+    "id": "origin-trail-game",
+    "label": "OriginTrail Game",
+    "apiHandler": "./dist/api/handler.js",
+    "staticDir": "./dist-ui"
+  },
+  "scripts": {
+    "build": "tsc && pnpm build:ui",
+    "build:api": "tsc",
+    "build:ui": "vite build",
+    "dev:ui": "vite",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "clean": "rm -rf dist dist-ui tsconfig.tsbuildinfo"
+  },
+  "peerDependencies": {
+    "@dkg/agent": "workspace:*",
+    "@dkg/core": "workspace:*",
+    "@dkg/storage": "workspace:*"
+  },
+  "dependencies": {
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/uuid": "^9",
+    "@vitejs/plugin-react": "^4",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-router-dom": "^7",
+    "typescript": "^5.7",
+    "vite": "^6",
+    "vitest": "^3"
+  }
+}
