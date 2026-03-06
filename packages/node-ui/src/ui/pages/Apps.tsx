@@ -184,6 +184,7 @@ function GameTab() {
         <InfoPill label="Turn" value={swarm.currentTurn} />
         <InfoPill label="Players" value={`${swarm.playerCount}/${swarm.maxPlayers}`} />
         <InfoPill label="Signatures" value={`${swarm.signatureThreshold} needed`} />
+        <InfoPill label="Leader" value={swarm.leaderName ?? '—'} />
         <InfoPill label="Status" value={swarm.status} />
       </div>
 
@@ -198,6 +199,7 @@ function GameTab() {
         <TravelingView swarm={swarm} loading={loading} playerName={trimmedName}
           onVote={(action, params) => act(() => gameApi.vote(swarm.id, action, params))}
           onForceResolve={() => act(() => gameApi.forceResolve(swarm.id))}
+          onLeave={() => act(async () => { await gameApi.leave(swarm.id); setView('lobby'); refreshLobby(); return null; })}
         />
       )}
 
@@ -448,8 +450,9 @@ function RecruitingView({ swarm, loading, playerName, onStart, onLeave }: { swar
         {swarm.players?.map((p: any) => (
           <div key={p.id} style={{ padding: '10px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: p.isLeader ? 'var(--amber)' : 'var(--green)', display: 'inline-block' }} />
-            <span style={{ fontWeight: p.isLeader ? 700 : 400 }}>{p.name}</span>
-            {p.isLeader && <span className="mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--amber-dim)', color: 'var(--amber)', fontWeight: 700 }}>LEADER</span>}
+            <span style={{ fontWeight: p.isLeader ? 700 : 400 }}>
+              {p.name}{p.isLeader ? ' (game master)' : ''}
+            </span>
           </div>
         ))}
         <div style={{ padding: '12px 18px', display: 'flex', gap: 8 }}>
@@ -480,15 +483,20 @@ function RecruitingView({ swarm, loading, playerName, onStart, onLeave }: { swar
   );
 }
 
-function TravelingView({ swarm, loading, playerName, onVote, onForceResolve }: {
+function TravelingView({ swarm, loading, playerName, onVote, onForceResolve, onLeave }: {
   swarm: any; loading: boolean; playerName: string;
   onVote: (action: string, params?: Record<string, any>) => void;
   onForceResolve: () => void;
+  onLeave: () => void;
 }) {
   const gs = swarm.gameState;
   const vs = swarm.voteStatus;
   const myVote = vs?.votes?.find((v: any) => v.player === playerName);
   const hasVoted = myVote?.hasVoted;
+  const myPlayer = swarm.players?.find((p: any) => p.name === playerName);
+  const isLeader = myPlayer?.isLeader === true;
+  const deadlinePassed = vs && vs.timeRemaining <= 0;
+  const canResolve = vs?.allVoted || (isLeader && deadlinePassed);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -498,10 +506,23 @@ function TravelingView({ swarm, loading, playerName, onVote, onForceResolve }: {
       {/* Vote panel */}
       <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
         <div className="card-header">
-          <span style={{ fontSize: 13, fontWeight: 700 }}>Vote — Turn {swarm.currentTurn}</span>
-          {vs && <span className="mono" style={{ fontSize: 10, color: vs.allVoted ? 'var(--green)' : 'var(--text-muted)' }}>
-            {vs.allVoted ? 'ALL VOTED' : `${vs.votes.filter((v: any) => v.hasVoted).length}/${vs.votes.length}`}
-          </span>}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 13, fontWeight: 700 }}>Vote — Turn {swarm.currentTurn}</span>
+            {isLeader && <span className="mono" style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'var(--amber-dim)', color: 'var(--amber)', fontWeight: 700 }}>YOU ARE GM</span>}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {vs && !vs.allVoted && vs.timeRemaining > 0 && (
+              <span className="mono" style={{ fontSize: 10, color: vs.timeRemaining < 10000 ? 'var(--amber)' : 'var(--text-dim)' }}>
+                {Math.ceil(vs.timeRemaining / 1000)}s
+              </span>
+            )}
+            {vs && !vs.allVoted && deadlinePassed && (
+              <span className="mono" style={{ fontSize: 10, color: 'var(--amber)', fontWeight: 700 }}>OVERTIME</span>
+            )}
+            {vs && <span className="mono" style={{ fontSize: 10, color: vs.allVoted ? 'var(--green)' : 'var(--text-muted)' }}>
+              {vs.allVoted ? 'ALL VOTED' : `${vs.votes.filter((v: any) => v.hasVoted).length}/${vs.votes.length}`}
+            </span>}
+          </div>
         </div>
         <div style={{ padding: '14px 18px' }}>
           {!hasVoted ? (
@@ -525,22 +546,33 @@ function TravelingView({ swarm, loading, playerName, onVote, onForceResolve }: {
           {/* Vote status */}
           {vs && (
             <div style={{ marginTop: 14, display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-              {vs.votes.map((v: any) => (
-                <div key={v.player} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: v.hasVoted ? 'var(--green)' : 'var(--text-dim)', display: 'inline-block' }} />
-                  <span style={{ color: v.hasVoted ? 'var(--text)' : 'var(--text-dim)' }}>{v.player}</span>
-                  <span className="mono" style={{ fontSize: 10, color: v.hasVoted ? 'var(--green)' : 'var(--text-dim)' }}>
-                    {v.hasVoted ? v.action ?? 'voted' : 'waiting...'}
-                  </span>
-                </div>
-              ))}
+              {vs.votes.map((v: any) => {
+                const playerEntry = swarm.players?.find((p: any) => p.name === v.player);
+                const isVoteLeader = playerEntry?.isLeader === true;
+                return (
+                  <div key={v.player} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: v.hasVoted ? 'var(--green)' : 'var(--text-dim)', display: 'inline-block' }} />
+                    <span style={{ color: v.hasVoted ? 'var(--text)' : 'var(--text-dim)' }}>
+                      {v.player}{isVoteLeader ? ' (game master)' : ''}
+                    </span>
+                    <span className="mono" style={{ fontSize: 10, color: v.hasVoted ? 'var(--green)' : 'var(--text-dim)' }}>
+                      {v.hasVoted ? v.action ?? 'voted' : 'waiting...'}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
 
-          {vs?.allVoted && (
+          {canResolve && (
             <button disabled={loading} onClick={onForceResolve} style={{ marginTop: 12, padding: '8px 24px', borderRadius: 8, border: '1px solid rgba(74,222,128,.25)', background: 'var(--green-dim)', color: 'var(--green)', fontSize: 12, fontWeight: 700 }}>
               Resolve Turn
             </button>
+          )}
+          {!canResolve && isLeader && !vs?.allVoted && vs?.timeRemaining > 0 && (
+            <div className="mono" style={{ marginTop: 10, fontSize: 10, color: 'var(--text-dim)' }}>
+              You can force-resolve in {Math.ceil(vs.timeRemaining / 1000)}s if not all votes are in
+            </div>
           )}
         </div>
 
@@ -552,16 +584,39 @@ function TravelingView({ swarm, loading, playerName, onVote, onForceResolve }: {
         )}
       </div>
 
-      {/* Last turn */}
-      {swarm.lastTurn && (
-        <div className="card" style={{ padding: '14px 18px' }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>Last Turn Summary</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-            Action: <span style={{ color: 'var(--green)', fontWeight: 600 }}>{swarm.lastTurn.winningAction}</span>
-            {swarm.lastTurn.result?.message && <span> — {swarm.lastTurn.result.message}</span>}
+      {/* Turn event log */}
+      {swarm.turnHistory?.length > 0 && (
+        <div className="card">
+          <div className="card-header">
+            <span style={{ fontSize: 13, fontWeight: 700 }}>Journey Log</span>
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{swarm.turnHistory.length} TURNS</span>
+          </div>
+          <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+            {[...swarm.turnHistory].reverse().map((t: any, i: number) => (
+              <div key={t.turn} style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', background: i === 0 ? 'rgba(74,222,128,.04)' : 'transparent' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: i === 0 ? 'var(--green)' : 'var(--text-dim)' }}>Turn {t.turn}</span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: '#4ade80' }}>{t.winningAction}</span>
+                  {t.approvers?.length > 0 && (
+                    <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', marginLeft: 'auto' }}>
+                      {t.approvers.length} approved
+                    </span>
+                  )}
+                </div>
+                {t.resultMessage && (
+                  <div style={{ fontSize: 13, color: '#4ade80', lineHeight: 1.6 }}>{t.resultMessage}</div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button disabled={loading} onClick={onLeave} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>
+          Leave Swarm
+        </button>
+      </div>
     </div>
   );
 }
@@ -631,7 +686,7 @@ function GameStateCard({ gs }: { gs: any }) {
 
       {/* Last event */}
       {gs.lastEvent && (
-        <div style={{ marginTop: 12, padding: '8px 12px', borderRadius: 8, background: 'var(--bg)', border: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)' }}>
+        <div style={{ marginTop: 12, padding: '12px 16px', borderRadius: 8, background: 'rgba(74,222,128,.06)', border: '1px solid rgba(74,222,128,.15)', fontSize: 22, color: '#4ade80', fontWeight: 600, lineHeight: 1.5 }}>
           {gs.lastEvent.description || gs.lastEvent.type}
         </div>
       )}

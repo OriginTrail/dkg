@@ -94,7 +94,10 @@ export function leaveSwarm(swarmId: string, playerId: string): Swarm | null {
   const playerIndex = swarm.players.findIndex(p => p.playerId === playerId);
   if (playerIndex === -1) throw new Error('You are not in this swarm');
   if (swarm.players[playerIndex].isLeader && swarm.status === 'recruiting') { swarms.delete(swarmId); return null; }
-  if (swarm.status === 'traveling') throw new Error('Cannot leave swarm during expedition.');
+  if (swarm.status === 'traveling') {
+    swarm.status = 'finished';
+    if (swarm.gameState) swarm.gameState.status = 'lost';
+  }
   swarm.players.splice(playerIndex, 1);
   return swarm;
 }
@@ -111,7 +114,7 @@ export function startExpedition(swarmId: string, playerId: string): Swarm {
   swarm.status = 'traveling';
   swarm.currentTurn = 1;
   swarm.votes = [];
-  swarm.turnDeadline = Date.now() + 120_000;
+  swarm.turnDeadline = Date.now() + 30_000;
   return swarm;
 }
 
@@ -204,7 +207,7 @@ function resolveTurn(swarm: Swarm): void {
   } else {
     swarm.currentTurn++;
     swarm.votes = [];
-    swarm.turnDeadline = Date.now() + 120_000;
+    swarm.turnDeadline = Date.now() + 30_000;
   }
 }
 

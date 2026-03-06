@@ -359,13 +359,18 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
     if (!swarm.players.some(p => p.peerId === this.myPeerId)) throw new Error('You are not in this swarm');
-    if (swarm.status === 'traveling') throw new Error('Cannot leave swarm during journey');
 
     if (swarm.leaderPeerId === this.myPeerId && swarm.status === 'recruiting') {
       this.swarms.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
+    }
+
+    if (swarm.status === 'traveling') {
+      swarm.status = 'finished';
+      if (swarm.gameState) swarm.gameState.status = 'lost';
+      this.log(`Player left during journey — swarm ${swarmId} ended`);
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
@@ -388,7 +393,7 @@ export class OriginTrailGameCoordinator {
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
-    swarm.turnDeadline = Date.now() + 120_000;
+    swarm.turnDeadline = Date.now() + 30_000;
 
     const msg: proto.ExpeditionLaunchedMsg = {
       app: proto.APP_ID,
@@ -551,7 +556,7 @@ export class OriginTrailGameCoordinator {
     } else {
       swarm.currentTurn++;
       swarm.votes = [];
-      swarm.turnDeadline = Date.now() + 120_000;
+      swarm.turnDeadline = Date.now() + 30_000;
     }
 
     if (swarm.leaderPeerId === this.myPeerId) {
@@ -762,7 +767,7 @@ export class OriginTrailGameCoordinator {
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
-    swarm.turnDeadline = Date.now() + 120_000;
+    swarm.turnDeadline = Date.now() + 30_000;
     this.log(`Journey started for ${msg.swarmId} (remote)`);
   }
 
@@ -885,7 +890,7 @@ export class OriginTrailGameCoordinator {
       } else {
         swarm.currentTurn++;
         swarm.votes = [];
-        swarm.turnDeadline = Date.now() + 120_000;
+        swarm.turnDeadline = Date.now() + 30_000;
       }
       this.log(`Applied resolved turn ${proposal.turn} for ${swarm.id} (via turn:resolved)`);
     }
@@ -952,6 +957,7 @@ export class OriginTrailGameCoordinator {
         threshold: signatureThreshold(swarm.players.length),
       } : null,
       lastTurn: swarm.turnHistory[swarm.turnHistory.length - 1] ?? null,
+      turnHistory: swarm.turnHistory,
     };
   }
 

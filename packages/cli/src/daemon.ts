@@ -452,6 +452,7 @@ async function handleRequest(
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
+      networkName: network?.networkName ?? null,
       storeBackend: config.store?.backend ?? 'oxigraph-worker',
       uptimeMs: Date.now() - startedAt,
       connectedPeers: uniquePeers.size,
