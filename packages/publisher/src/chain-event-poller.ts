@@ -129,14 +129,11 @@ export class ChainEventPoller {
       }
     }
 
-    // Advance cursor: prefer chain-head-anchored upper bound; fall back to
-    // max observed event block so the window still progresses when
-    // getBlockNumber is temporarily unavailable.
-    if (head != null) {
-      this.lastBlock = upperBound;
-    } else if (maxEventBlock > this.lastBlock) {
-      this.lastBlock = maxEventBlock;
-    }
+    // Always advance cursor to upperBound. When head is known, upperBound
+    // is capped to it. When head is unknown, upperBound is an estimate — but
+    // the RPC successfully returned results (or empty) for this range, so
+    // those blocks have been scanned and we must progress past them.
+    this.lastBlock = upperBound;
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
