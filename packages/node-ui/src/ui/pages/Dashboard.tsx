@@ -634,6 +634,8 @@ export function DashboardPage() {
 
   const peerCount = status?.connectedPeers ?? (status as any)?.peerCount ?? null;
   const totalAssets = (metrics as any)?.total_triples ?? null;
+  const confirmedKCs = (metrics as any)?.confirmed_kcs ?? null;
+  const tentativeKCs = (metrics as any)?.tentative_kcs ?? null;
   const agentCount = agentData?.agents != null ? agentData.agents.length : null;
 
   return (
@@ -659,11 +661,20 @@ export function DashboardPage() {
 
       {/* Stat cards */}
       <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
-        {[
-          { label: 'Knowledge Assets', value: totalAssets != null ? Number(totalAssets).toLocaleString() : '—', sub: totalAssets != null ? 'from node metrics' : 'loading…', color: 'var(--green)' },
+        {([
+          {
+            label: 'Knowledge Assets',
+            value: totalAssets != null ? Number(totalAssets).toLocaleString() : '—',
+            sub: totalAssets != null
+              ? (confirmedKCs != null || tentativeKCs != null
+                ? <><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs ?? 0).toLocaleString()} confirmed</span>{' · '}<span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs ?? 0).toLocaleString()} tentative</span></>
+                : 'from node metrics')
+              : 'loading…',
+            color: 'var(--green)',
+          },
           { label: 'Connected Peers', value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
           { label: 'Agents Discovered', value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
-        ].map(s => (
+        ] as Array<{ label: string; value: string; sub: React.ReactNode; color: string }>).map(s => (
           <div className="stat-card" key={s.label}>
             <div className="accent" style={{ background: `linear-gradient(90deg,${s.color}44,transparent)` }} />
             <div className="stat-label">{s.label}</div>
