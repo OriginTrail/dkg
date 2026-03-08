@@ -3,9 +3,9 @@ import { StyleEngine } from './style-engine.js';
 import { PrefixManager } from './prefix-manager.js';
 
 const DEFAULT_HEXAGON: Required<HexagonConfig> = {
-  baseSize: 24,
-  minSize: 16,
-  maxSize: 48,
+  baseSize: 36,
+  minSize: 24,
+  maxSize: 72,
   scaleWithDegree: true,
   imagePredicates: [
     'https://schema.org/image',
