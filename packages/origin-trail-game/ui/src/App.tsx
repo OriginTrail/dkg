@@ -534,7 +534,25 @@ export function App() {
       <div className={isPlaying ? 'ot-container ot-container--wide' : 'ot-container'}>
         <div className="ot-header">
           <h1>{swarm.name}</h1>
-          <button className="ot-secondary" onClick={() => setView('lobby')}>Back to Lobby</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {swarm.status === 'traveling' && (
+              <button className="ot-danger" onClick={async () => {
+                if (!confirm('Leave this swarm? The game is in progress — it will end for everyone.')) return;
+                try {
+                  await api.leave(swarm.id);
+                  setSwarm(null);
+                  setView('lobby');
+                } catch (e: any) { setError(e.message); }
+              }}>Leave Swarm</button>
+            )}
+            <button className="ot-secondary" onClick={async () => {
+              try {
+                if (swarm.status === 'recruiting') await api.leave(swarm.id);
+              } catch {}
+              setSwarm(null);
+              setView('lobby');
+            }}>Back to Lobby</button>
+          </div>
         </div>
 
         <div className="ot-status-bar">

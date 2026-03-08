@@ -52,7 +52,7 @@ export function AppsPage() {
       ref={iframeRef}
       src="/apps/origin-trail-game/"
       onLoad={sendNonce}
-      sandbox="allow-scripts allow-forms allow-popups"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       allow="clipboard-write"
       style={{
         width: '100%',

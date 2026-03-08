@@ -85,7 +85,7 @@ function makeTravelingSwarm(turnCount = 0) {
     leaderName: 'Alice',
     maxPlayers: 3,
     playerCount: 3,
-    minPlayers: 3,
+    minPlayers: 1,
     signatureThreshold: 2,
     players: [
       { id: 'peer-aaa111', name: 'Alice', isLeader: true },
@@ -136,7 +136,7 @@ function makeRecruitingSwarm() {
     leaderName: 'Alice',
     maxPlayers: 3,
     playerCount: 1,
-    minPlayers: 3,
+    minPlayers: 1,
     signatureThreshold: 1,
     players: [{ id: 'peer-aaa111', name: 'Alice', isLeader: true }],
     status: 'recruiting',

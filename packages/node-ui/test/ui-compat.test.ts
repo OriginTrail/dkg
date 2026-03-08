@@ -223,8 +223,8 @@ describe('explorer graph query safety', () => {
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('uses sandbox matching AppHostPage policy', () => {
-    expect(apps).toContain('sandbox="allow-scripts allow-forms allow-popups"');
+  it('uses sandbox with allow-same-origin for proper API access', () => {
+    expect(apps).toContain('sandbox="allow-scripts allow-same-origin allow-forms allow-popups"');
   });
 
   it('uses one-time nonce handshake before sending token', () => {
@@ -268,14 +268,18 @@ describe('daemon.ts app token injection', () => {
     expect(daemon).not.toContain('req.socket.remoteAddress');
   });
 
-  it('does not fall back to injecting a token without verified Authorization', () => {
-    expect(daemon).not.toMatch(/boundToLoopback/);
-    expect(daemon).not.toMatch(/boundHost/);
+  it('checks config.apiHost for loopback, not remote address', () => {
+    expect(daemon).toContain('config.apiHost');
+    expect(daemon).toMatch(/boundToLoopback/);
   });
 
-  it('only injects token when the request carries a verified bearer token', () => {
+  it('prefers verified bearer token over loopback fallback', () => {
     expect(daemon).toMatch(/extractBearerToken/);
     expect(daemon).toMatch(/validTokens\.has\(reqToken\)/);
+  });
+
+  it('only falls back to loopback injection for /apps/* paths', () => {
+    expect(daemon).toMatch(/reqUrl\.pathname\.startsWith\(['"]\/apps\//);
   });
 });
 

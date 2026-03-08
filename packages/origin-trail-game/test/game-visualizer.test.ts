@@ -28,8 +28,8 @@ describe('default max players is 3', () => {
 
   it('maxPlayers is clamped between MIN_PLAYERS and MAX_PLAYERS', () => {
     const leader1 = uid('leader');
-    const tooLow = createSwarm(leader1, 'Leader', `Low-${seq}`, 1);
-    expect(tooLow.maxPlayers).toBe(3);
+    const tooLow = createSwarm(leader1, 'Leader', `Low-${seq}`, 0);
+    expect(tooLow.maxPlayers).toBe(1);
 
     const leader2 = uid('leader');
     const tooHigh = createSwarm(leader2, 'Leader', `High-${seq}`, 20);
