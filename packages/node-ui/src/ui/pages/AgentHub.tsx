@@ -1,6 +1,23 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { sendChatMessage, fetchMemorySessions, fetchMemorySession, executeQuery, fetchAgents, sendPeerMessage, fetchMessages, type MemorySession } from '../api.js';
-import { RdfGraph } from '@dkg/graph-viz/react';
+import {
+  streamChatMessage,
+  streamChatPersistenceEvents,
+  fetchChatPersistenceHealth,
+  fetchMemorySessions,
+  fetchMemorySession,
+  fetchMemorySessionGraphDelta,
+  fetchMemorySessionPublication,
+  publishMemorySession,
+  executeQuery,
+  fetchAgents,
+  sendPeerMessage,
+  fetchMessages,
+  type MemorySession,
+  type MemorySessionPublicationStatus,
+  type ChatLlmDiagnostics,
+  type ChatPersistenceStatusEvent,
+} from '../api.js';
+import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
 
 type Triple = { subject: string; predicate: string; object: string };
 
@@ -11,6 +28,20 @@ interface Message {
   ts: string;
   data?: unknown;
   sparql?: string;
+  turnId?: string;
+  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'enshrined' | 'failed' | 'skipped';
+  persistError?: string;
+  persistAttempts?: number;
+  persistMaxAttempts?: number;
+  timings?: { llm_ms: number; store_ms: number; total_ms: number };
+  responseMode?: 'streaming' | 'blocking' | 'rule-based';
+  llmDiagnostics?: ChatLlmDiagnostics;
+  graphDiff?: {
+    addedNodeCount: number;
+    addedEdgeCount: number;
+    sampleNodes: string[];
+    sampleEdges: string[];
+  };
 }
 
 interface SessionSummary {
@@ -20,13 +51,286 @@ interface SessionSummary {
   lastTs: string;
 }
 
+interface DeltaPerfStats {
+  sampleCount: number;
+  deltaApplied: number;
+  fallbackCount: number;
+  medianMs: number | null;
+  p95Ms: number | null;
+  lastMode: 'delta' | 'fallback' | null;
+  lastReason: string | null;
+}
+
+interface GraphFocusRequest {
+  nodeId: string;
+  requestId: number;
+  zoomLevel?: number;
+}
+
 function stripTypedLiteral(value: string): string {
   if (!value) return value;
   const match = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   return match ? match[1] : value;
 }
 
+function normalizeTextKey(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizePersistStatus(
+  value: string | undefined,
+): Message['persistStatus'] | undefined {
+  if (!value) return undefined;
+  if (
+    value === 'pending'
+    || value === 'in_progress'
+    || value === 'stored'
+    || value === 'enshrined'
+    || value === 'failed'
+    || value === 'skipped'
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
 const DATE_CREATED = 'http://schema.org/dateCreated';
+const SCHEMA_TEXT = 'http://schema.org/text';
+const SCHEMA_NAME = 'http://schema.org/name';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_CHAT_TURN = 'http://dkg.io/ontology/ChatTurn';
+const DKG_TURN_ID = 'http://dkg.io/ontology/turnId';
+const CLUSTER_TYPE = 'http://dkg.io/ontology/GraphCluster';
+const CLUSTER_LINK = 'http://dkg.io/ontology/clusterLinksTo';
+const CLUSTER_LITERAL_COUNT = 'http://dkg.io/ontology/literalCount';
+
+function isNodeIri(value: string): boolean {
+  return value.startsWith('urn:') || value.startsWith('http://') || value.startsWith('https://') || value.startsWith('did:') || value.startsWith('_:');
+}
+
+function edgeKey(t: Triple): string {
+  return `${t.subject}\u0000${t.predicate}\u0000${t.object}`;
+}
+
+function collectNodeIds(triples: Triple[]): Set<string> {
+  const ids = new Set<string>();
+  for (const t of triples) {
+    ids.add(t.subject);
+    if (isNodeIri(t.object)) ids.add(t.object);
+  }
+  return ids;
+}
+
+function collectRenderableEdgeKeys(triples: Triple[]): Set<string> {
+  const keys = new Set<string>();
+  for (const t of triples) {
+    if (!isNodeIri(t.object)) continue;
+    keys.add(edgeKey(t));
+  }
+  return keys;
+}
+
+function buildTurnGraphDiff(prevTriples: Triple[], nextTriples: Triple[]) {
+  const prevNodes = collectNodeIds(prevTriples);
+  const nextNodes = collectNodeIds(nextTriples);
+  const addedNodes = [...nextNodes].filter((id) => !prevNodes.has(id));
+
+  const prevEdges = collectRenderableEdgeKeys(prevTriples);
+  const nextEdges = collectRenderableEdgeKeys(nextTriples);
+  const addedEdges = [...nextEdges].filter((id) => !prevEdges.has(id));
+
+  return {
+    addedNodeCount: addedNodes.length,
+    addedEdgeCount: addedEdges.length,
+    sampleNodes: addedNodes.slice(0, 4),
+    sampleEdges: addedEdges.slice(0, 3),
+  };
+}
+
+function markStoredMessagesEnshrined(prevMsgs: Message[]): Message[] {
+  let changed = false;
+  const next = prevMsgs.map((m) => {
+    if (m.role !== 'assistant' || m.persistStatus !== 'stored') return m;
+    changed = true;
+    return { ...m, persistStatus: 'enshrined' };
+  });
+  return changed ? next : prevMsgs;
+}
+
+function mergeUniqueTriples(base: Triple[], delta: Triple[]): Triple[] {
+  if (delta.length === 0) return base;
+  const seen = new Set(base.map(edgeKey));
+  const merged = [...base];
+  for (const triple of delta) {
+    const k = edgeKey(triple);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    merged.push(triple);
+  }
+  return merged;
+}
+
+function deriveLatestTurnWatermark(triples: Triple[]): string | null {
+  if (triples.length === 0) return null;
+  const turnSubjects = new Set<string>();
+  const turnIds = new Map<string, string>();
+  const createdAt = new Map<string, number>();
+  for (const t of triples) {
+    if (t.predicate === RDF_TYPE && t.object === DKG_CHAT_TURN) {
+      turnSubjects.add(t.subject);
+      continue;
+    }
+    if (t.predicate === DKG_TURN_ID) {
+      turnIds.set(t.subject, stripTypedLiteral(t.object));
+      continue;
+    }
+    if (t.predicate === DATE_CREATED) {
+      const parsed = Date.parse(stripTypedLiteral(t.object));
+      if (!Number.isNaN(parsed)) createdAt.set(t.subject, parsed);
+    }
+  }
+
+  const orderedTurns = [...turnSubjects]
+    .map((subject) => ({
+      subject,
+      turnId: turnIds.get(subject),
+      ts: createdAt.get(subject) ?? 0,
+    }))
+    .filter((row) => !!row.turnId)
+    .sort((a, b) => (a.ts - b.ts) || String(a.turnId).localeCompare(String(b.turnId)));
+  if (orderedTurns.length === 0) return null;
+  return orderedTurns[orderedTurns.length - 1]!.turnId ?? null;
+}
+
+function quantileMs(values: number[], q: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * q) - 1));
+  return sorted[index] ?? null;
+}
+
+function clusterKindForNode(nodeId: string, nodeType?: string): string {
+  if (nodeType?.includes('Conversation')) return 'Conversation';
+  if (nodeType?.includes('Message')) return 'Message';
+  if (nodeType?.includes('ToolInvocation')) return 'ToolInvocation';
+  if (nodeType?.includes('ChatTurn')) return 'ChatTurn';
+  if (nodeId.includes(':session:')) return 'Conversation';
+  if (nodeId.includes(':msg:')) return 'Message';
+  if (nodeId.includes(':tool:')) return 'ToolInvocation';
+  if (nodeId.includes(':turn:')) return 'ChatTurn';
+  if (nodeId.startsWith('urn:dkg:entity:')) return 'Entity';
+  if (nodeId.startsWith('did:dkg:')) return 'Paranet';
+  if (nodeId.startsWith('http://schema.org/')) return 'SchemaNode';
+  if (nodeId.startsWith('urn:')) return 'URN';
+  if (nodeId.startsWith('http://') || nodeId.startsWith('https://')) return 'IRI';
+  return 'Other';
+}
+
+function buildClusterTriples(triples: Triple[]): Triple[] {
+  if (triples.length === 0) return [];
+  const nodeType = new Map<string, string>();
+  for (const t of triples) {
+    if (t.predicate === RDF_TYPE && isNodeIri(t.object)) {
+      nodeType.set(t.subject, t.object);
+    }
+  }
+
+  const nodeKinds = new Map<string, string>();
+  const clusterNodeMembers = new Map<string, Set<string>>();
+  const literalCounts = new Map<string, number>();
+  const edgeCounts = new Map<string, number>();
+
+  const ensureKind = (nodeId: string): string => {
+    const existing = nodeKinds.get(nodeId);
+    if (existing) return existing;
+    const kind = clusterKindForNode(nodeId, nodeType.get(nodeId));
+    nodeKinds.set(nodeId, kind);
+    if (!clusterNodeMembers.has(kind)) clusterNodeMembers.set(kind, new Set());
+    clusterNodeMembers.get(kind)!.add(nodeId);
+    return kind;
+  };
+
+  for (const t of triples) {
+    const sourceKind = ensureKind(t.subject);
+    if (isNodeIri(t.object)) {
+      const targetKind = ensureKind(t.object);
+      const edgeKey = `${sourceKind}\u0000${targetKind}`;
+      edgeCounts.set(edgeKey, (edgeCounts.get(edgeKey) ?? 0) + 1);
+    } else {
+      literalCounts.set(sourceKind, (literalCounts.get(sourceKind) ?? 0) + 1);
+    }
+  }
+
+  const out: Triple[] = [];
+  for (const [kind, members] of clusterNodeMembers) {
+    const clusterNode = `urn:dkg:cluster:${kind.toLowerCase()}`;
+    out.push(
+      { subject: clusterNode, predicate: RDF_TYPE, object: CLUSTER_TYPE },
+      { subject: clusterNode, predicate: SCHEMA_NAME, object: JSON.stringify(`${kind} (${members.size})`) },
+    );
+    const literals = literalCounts.get(kind) ?? 0;
+    if (literals > 0) {
+      out.push({
+        subject: clusterNode,
+        predicate: CLUSTER_LITERAL_COUNT,
+        object: JSON.stringify(String(literals)),
+      });
+    }
+  }
+
+  for (const [edgeKey, count] of edgeCounts) {
+    const [sourceKind, targetKind] = edgeKey.split('\u0000');
+    const sourceNode = `urn:dkg:cluster:${sourceKind.toLowerCase()}`;
+    const targetNode = `urn:dkg:cluster:${targetKind.toLowerCase()}`;
+    out.push({
+      subject: sourceNode,
+      predicate: CLUSTER_LINK,
+      object: targetNode,
+    });
+    out.push({
+      subject: sourceNode,
+      predicate: `http://dkg.io/ontology/clusterEdgeCount:${targetKind}`,
+      object: JSON.stringify(String(count)),
+    });
+  }
+
+  return out;
+}
+
+function shortUri(uri: string): string {
+  if (!uri) return uri;
+  const trimmed = uri.replace(/[<>]/g, '');
+  if (trimmed.length <= 42) return trimmed;
+  return `${trimmed.slice(0, 24)}...${trimmed.slice(-14)}`;
+}
+
+function GraphHighlighter(
+  { nodeIds, focusRequest }: {
+    nodeIds: string[];
+    focusRequest: { nodeId: string; requestId: number; zoomLevel?: number } | null;
+  },
+) {
+  const { viz } = useRdfGraph();
+  const key = useMemo(() => [...nodeIds].sort().join('\u0000'), [nodeIds]);
+  useEffect(() => {
+    if (!viz) return;
+    if (nodeIds.length > 0) viz.highlightNodes(nodeIds);
+    else viz.clearHighlight();
+    return () => {
+      viz.clearHighlight();
+    };
+  }, [viz, key, nodeIds]);
+
+  useEffect(() => {
+    if (!viz || !focusRequest?.nodeId) return;
+    viz.centerOnNode(focusRequest.nodeId, {
+      durationMs: 300,
+      zoomLevel: focusRequest.zoomLevel ?? 2.1,
+    });
+  }, [viz, focusRequest?.requestId, focusRequest?.nodeId, focusRequest?.zoomLevel]);
+
+  return null;
+}
 
 function extractTimeline(triples: Triple[]): { subjectDates: Map<string, number>; timestamps: number[] } {
   const subjectDates = new Map<string, number>();
@@ -72,17 +376,50 @@ function welcomeMessage(): Message {
 }
 
 function sessionSummariesFromApi(sessions: MemorySession[]): SessionSummary[] {
-  return sessions.map(s => {
+  const byId = new Map<string, SessionSummary>();
+  for (const s of sessions) {
+    if (!s?.session) continue;
     const first = s.messages.find(m => m.author === 'user');
     const preview = first?.text?.slice(0, 60) || 'New conversation';
     const lastMsg = s.messages[s.messages.length - 1];
-    return {
+    const candidate: SessionSummary = {
       id: s.session,
       preview,
       messageCount: s.messages.length,
       lastTs: lastMsg?.ts ?? '',
     };
+    const existing = byId.get(candidate.id);
+    if (!existing) {
+      byId.set(candidate.id, candidate);
+      continue;
+    }
+    const existingTime = Date.parse(existing.lastTs);
+    const candidateTime = Date.parse(candidate.lastTs);
+    const candidateIsNewer = (
+      Number.isFinite(candidateTime) && Number.isFinite(existingTime)
+        ? candidateTime >= existingTime
+        : candidate.lastTs >= existing.lastTs
+    );
+    if (candidateIsNewer) byId.set(candidate.id, candidate);
+  }
+  return [...byId.values()].sort((a, b) => {
+    const aTime = Date.parse(a.lastTs);
+    const bTime = Date.parse(b.lastTs);
+    if (Number.isFinite(aTime) && Number.isFinite(bTime)) return bTime - aTime;
+    return b.lastTs.localeCompare(a.lastTs);
   });
+}
+
+function emptyDeltaPerfStats(): DeltaPerfStats {
+  return {
+    sampleCount: 0,
+    deltaApplied: 0,
+    fallbackCount: 0,
+    medianMs: null,
+    p95Ms: null,
+    lastMode: null,
+    lastReason: null,
+  };
 }
 
 interface PeerInfo {
@@ -327,11 +664,157 @@ export function AgentHubPage() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const [showGraph, setShowGraph] = useState(false);
+  const [graphTriples, setGraphTriples] = useState<Triple[] | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphSessionId, setGraphSessionId] = useState<string | null>(null);
+  const [graphLoadLimit, setGraphLoadLimit] = useState(1500);
+  const [graphHasMore, setGraphHasMore] = useState(false);
+  const [graphViewMode, setGraphViewMode] = useState<'raw' | 'clustered'>('raw');
+  const [sessionPublicationById, setSessionPublicationById] = useState<Record<string, MemorySessionPublicationStatus>>({});
+  const [publishingSessionId, setPublishingSessionId] = useState<string | null>(null);
+  const [publishNotice, setPublishNotice] = useState<{ sessionId: string; text: string } | null>(null);
+  const [graphFullScreen, setGraphFullScreen] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [timelineCursor, setTimelineCursor] = useState<number | null>(null);
+  const [timelineMode, setTimelineMode] = useState<'timestamp' | 'turn'>('timestamp');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [graphSearch, setGraphSearch] = useState('');
+  const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
+  const [selectedGraphNodeId, setSelectedGraphNodeId] = useState<string | null>(null);
+  const [graphFocusRequest, setGraphFocusRequest] = useState<GraphFocusRequest | null>(null);
+  const [isNarrowLayout, setIsNarrowLayout] = useState<boolean>(
+    typeof window !== 'undefined' ? window.innerWidth < 1180 : false,
+  );
+  const [persistenceHealth, setPersistenceHealth] = useState<{
+    pending: number;
+    inProgress: number;
+    stored: number;
+    failed: number;
+    overduePending: number;
+    oldestPendingAgeMs: number | null;
+  } | null>(null);
+  const [, setDeltaPerfStats] = useState<DeltaPerfStats>(() => emptyDeltaPerfStats());
+
+  const chatAreaRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const messageRefs = useRef<Map<number, HTMLDivElement | null>>(new Map());
+  const graphTriplesRef = useRef<Triple[] | null>(null);
+  const graphFetchSeqRef = useRef(0);
+  const openSessionSeqRef = useRef(0);
+  const showGraphRef = useRef(showGraph);
+  const graphSessionIdRef = useRef<string | null>(graphSessionId);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  const sessionIdRef = useRef<string | null>(sessionId);
+  const loadingRef = useRef(loading);
+  const graphHasMoreRef = useRef(graphHasMore);
+  const graphFocusRequestSeqRef = useRef(0);
+  const sessionMessagesCacheRef = useRef<Map<string, Message[]>>(new Map());
+  const messageTurnIndexRef = useRef<Map<string, number>>(new Map());
+  const bufferedPersistEventsRef = useRef<Map<string, ChatPersistenceStatusEvent>>(new Map());
+  const graphWatermarkRef = useRef<Map<string, string | null>>(new Map());
+  const deltaLatencySamplesRef = useRef<number[]>([]);
+  const applyStoredTurnGraphUpdateRef = useRef<(
+    sid: string,
+    turnId: string,
+    opts?: { linkedMessageId?: number; linkedTurnId?: string },
+  ) => Promise<void>>(async () => {});
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    showGraphRef.current = showGraph;
+  }, [showGraph]);
+
+  useEffect(() => {
+    graphSessionIdRef.current = graphSessionId;
+  }, [graphSessionId]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
+
+  useEffect(() => {
+    graphHasMoreRef.current = graphHasMore;
+  }, [graphHasMore]);
+
+  useEffect(() => {
+    graphTriplesRef.current = graphTriples;
+  }, [graphTriples]);
+
+  useEffect(() => {
+    const onResize = () => setIsNarrowLayout(window.innerWidth < 1180);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    const el = chatAreaRef.current;
+    if (!el) return;
+    if (!stickToBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, loading]);
+
+  const handleChatScroll = useCallback(() => {
+    const el = chatAreaRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 80;
+  }, []);
+
+  useEffect(() => {
+    const index = new Map<string, number>();
+    for (const m of messages) {
+      if (m.turnId) index.set(m.turnId, m.id);
+    }
+    messageTurnIndexRef.current = index;
+  }, [messages]);
+
+  useEffect(() => {
+    const sid = activeSessionId ?? sessionId;
+    if (!sid) return;
+    sessionMessagesCacheRef.current.set(
+      sid,
+      messages.map((m) => ({ ...m })),
+    );
+  }, [messages, activeSessionId, sessionId]);
+
+  const resetDeltaPerfStats = useCallback(() => {
+    deltaLatencySamplesRef.current = [];
+    setDeltaPerfStats(emptyDeltaPerfStats());
+  }, []);
+
+  const recordDeltaPerf = useCallback((
+    mode: 'delta' | 'fallback',
+    elapsedMs: number,
+    reason?: string,
+  ) => {
+    const latency = Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs : 0);
+    const samples = deltaLatencySamplesRef.current;
+    samples.push(latency);
+    if (samples.length > 128) {
+      samples.splice(0, samples.length - 128);
+    }
+    const medianMs = quantileMs(samples, 0.5);
+    const p95Ms = quantileMs(samples, 0.95);
+    setDeltaPerfStats((prev) => ({
+      sampleCount: samples.length,
+      deltaApplied: prev.deltaApplied + (mode === 'delta' ? 1 : 0),
+      fallbackCount: prev.fallbackCount + (mode === 'fallback' ? 1 : 0),
+      medianMs,
+      p95Ms,
+      lastMode: mode,
+      lastReason: mode === 'fallback' ? (reason ?? null) : null,
+    }));
+  }, []);
 
   const loadSessions = useCallback(async () => {
     setSessionsLoading(true);
@@ -347,89 +830,506 @@ export function AgentHubPage() {
 
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
+  const refreshSessionPublication = useCallback(async (sid: string) => {
+    try {
+      const publication = await fetchMemorySessionPublication(sid);
+      setSessionPublicationById((prev) => ({ ...prev, [sid]: publication }));
+      const activeSid = activeSessionIdRef.current ?? sessionIdRef.current;
+      if (activeSid === sid && publication.scope === 'enshrined') {
+        setMessages((prevMsgs) => markStoredMessagesEnshrined(prevMsgs));
+      }
+    } catch {
+      /* preserve last known publication state */
+    }
+  }, []);
+
+  const applyPersistenceStatus = useCallback((event: ChatPersistenceStatusEvent) => {
+    const indexedMessageId = messageTurnIndexRef.current.get(event.turnId);
+    const activeSid = activeSessionIdRef.current ?? sessionIdRef.current;
+    setMessages((prev) => {
+      let found = false;
+      const next = prev.map((m) => {
+        if (m.turnId !== event.turnId) return m;
+        found = true;
+        const nextStoreMs = event.storeMs ?? m.timings?.store_ms ?? 0;
+        const nextLlmMs = m.timings?.llm_ms ?? 0;
+        const nextTotalMs = nextLlmMs + nextStoreMs;
+        return {
+          ...m,
+          persistStatus: (m.persistStatus === 'enshrined' && event.status === 'stored')
+            ? 'enshrined'
+            : event.status,
+          persistError: event.error,
+          persistAttempts: event.attempts,
+          persistMaxAttempts: event.maxAttempts,
+          timings: m.timings
+            ? { ...m.timings, store_ms: nextStoreMs, total_ms: nextTotalMs }
+            : m.timings,
+        };
+      });
+      if (!found) {
+        // Buffer only if this event can still attach to the active/in-flight turn.
+        const shouldBuffer =
+          loadingRef.current ||
+          (!!activeSid && event.sessionId === activeSid);
+        if (shouldBuffer) {
+          bufferedPersistEventsRef.current.set(event.turnId, event);
+          // Keep buffer bounded for long sessions and reconnect churn.
+          if (bufferedPersistEventsRef.current.size > 128) {
+            const oldest = bufferedPersistEventsRef.current.keys().next().value;
+            if (oldest) bufferedPersistEventsRef.current.delete(oldest);
+          }
+        }
+        return prev;
+      }
+      bufferedPersistEventsRef.current.delete(event.turnId);
+      return next;
+    });
+
+    if (event.status === 'stored' && showGraphRef.current && event.sessionId) {
+      void applyStoredTurnGraphUpdateRef.current(event.sessionId, event.turnId, {
+        linkedMessageId: indexedMessageId,
+        linkedTurnId: indexedMessageId == null ? event.turnId : undefined,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let activeAbort: AbortController | null = null;
+
+    const refreshHealth = async () => {
+      try {
+        const health = await fetchChatPersistenceHealth();
+        if (!disposed) setPersistenceHealth(health);
+      } catch {
+        if (!disposed) setPersistenceHealth(null);
+      }
+    };
+
+    const connect = async () => {
+      while (!disposed) {
+        activeAbort = new AbortController();
+        try {
+          await streamChatPersistenceEvents({
+            signal: activeAbort.signal,
+            onEvent: (event) => {
+              if (disposed) return;
+              if (event.type === 'persist_health') {
+                setPersistenceHealth({
+                  pending: event.pending,
+                  inProgress: event.inProgress,
+                  stored: event.stored,
+                  failed: event.failed,
+                  overduePending: event.overduePending,
+                  oldestPendingAgeMs: event.oldestPendingAgeMs,
+                });
+                return;
+              }
+              applyPersistenceStatus(event);
+            },
+          });
+        } catch {
+          if (disposed || activeAbort.signal.aborted) break;
+        }
+        if (disposed) break;
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+    };
+
+    void refreshHealth();
+    void connect();
+    const healthPoll = setInterval(() => {
+      void refreshHealth();
+    }, 20_000);
+
+    return () => {
+      disposed = true;
+      if (activeAbort) activeAbort.abort();
+      clearInterval(healthPoll);
+    };
+  }, [applyPersistenceStatus]);
+
+  const annotateTurnGraphDiff = useCallback((linkedMessageId: number, graphDiff: Message['graphDiff']) => {
+    setMessages((prevMsgs) => prevMsgs.map((m) => (
+      m.id === linkedMessageId
+        ? {
+            ...m,
+            graphDiff,
+          }
+        : m
+    )));
+  }, []);
+
+  const fetchSessionGraph = useCallback(async (
+    sid: string,
+    opts?: { limitOverride?: number },
+  ) => {
+    const fetchSeq = ++graphFetchSeqRef.current;
+    setGraphLoading(true);
+    setGraphSessionId(sid);
+    try {
+      const sessionUri = `urn:dkg:chat:session:${sid}`;
+      const requestedLimit = Math.max(500, Math.min(opts?.limitOverride ?? graphLoadLimit, 15_000));
+      const queryLimit = requestedLimit + 1;
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        {
+          SELECT ?s ?p ?o WHERE {
+            { <${sessionUri}> ?p ?o . BIND(<${sessionUri}> AS ?s) }
+            UNION
+            { ?s <http://schema.org/isPartOf> <${sessionUri}> . ?s ?p ?o }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
+              ?msg <http://dkg.io/ontology/usedTool> ?tool .
+              ?tool ?p ?o . BIND(?tool AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
+              ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?entity ?p ?o . BIND(?entity AS ?s) }
+            UNION
+            { ?memory <http://dkg.io/ontology/extractedFrom> <${sessionUri}> .
+              ?memory ?p ?o . BIND(?memory AS ?s) }
+          }
+          ORDER BY ?s ?p ?o
+          LIMIT ${queryLimit}
+        }
+      }`;
+      const res = await executeQuery(sparql, 'agent-memory', true);
+      const quads = Array.isArray(res?.result?.quads) ? res.result.quads : [];
+      const triplesAll: Triple[] = quads.map((q: any) => ({
+        subject: q.subject,
+        predicate: q.predicate,
+        object: stripTypedLiteral(q.object),
+      }));
+      const hasMore = triplesAll.length > requestedLimit;
+      const triples = hasMore ? triplesAll.slice(0, requestedLimit) : triplesAll;
+      if (graphFetchSeqRef.current !== fetchSeq) return;
+      setGraphLoadLimit(requestedLimit);
+      setGraphHasMore(hasMore);
+      const nodeIds = collectNodeIds(triples);
+      setSelectedGraphNodeId((prevSelected) => (
+        prevSelected && nodeIds.has(prevSelected) ? prevSelected : null
+      ));
+      graphWatermarkRef.current.set(sid, deriveLatestTurnWatermark(triples));
+      setGraphTriples(triples);
+    } catch {
+      if (graphFetchSeqRef.current !== fetchSeq) return;
+      graphWatermarkRef.current.set(sid, null);
+      setGraphHasMore(false);
+      setGraphTriples([]);
+    } finally {
+      if (graphFetchSeqRef.current === fetchSeq) {
+        setGraphLoading(false);
+      }
+    }
+  }, [graphLoadLimit]);
+
+  const applyStoredTurnGraphUpdate = useCallback(async (
+    sid: string,
+    turnId: string,
+    opts?: { linkedMessageId?: number; linkedTurnId?: string },
+  ) => {
+    const startedAt = performance.now();
+    const complete = (mode: 'delta' | 'fallback', reason?: string) => {
+      recordDeltaPerf(mode, performance.now() - startedAt, reason);
+    };
+    const visibleGraphSession = graphSessionIdRef.current;
+    const visibleChatSession = activeSessionIdRef.current ?? sessionIdRef.current;
+    const targetSession = visibleGraphSession ?? visibleChatSession;
+    if (targetSession !== sid) return;
+
+    const currentTriples = graphTriplesRef.current;
+    if (!currentTriples || graphHasMoreRef.current) {
+      await fetchSessionGraph(sid);
+      complete('fallback', !currentTriples ? 'missing_graph_snapshot' : 'partial_graph_snapshot');
+      return;
+    }
+
+    const fetchSeq = graphFetchSeqRef.current;
+    const baseTurnId = graphWatermarkRef.current.get(sid) ?? null;
+    try {
+      const delta = await fetchMemorySessionGraphDelta(sid, turnId, { baseTurnId });
+      if (graphFetchSeqRef.current !== fetchSeq) return;
+      if (graphSessionIdRef.current && graphSessionIdRef.current !== sid) return;
+      if (delta.mode !== 'delta') {
+        await fetchSessionGraph(sid);
+        complete('fallback', delta.reason ?? 'full_refresh_required');
+        return;
+      }
+
+      const deltaTriples: Triple[] = (delta.triples ?? []).map((t) => ({
+        subject: t.subject,
+        predicate: t.predicate,
+        object: stripTypedLiteral(t.object),
+      }));
+      const latestTriples = graphTriplesRef.current ?? [];
+      const merged = mergeUniqueTriples(latestTriples, deltaTriples);
+
+      let linkedMessageId = opts?.linkedMessageId;
+      if (linkedMessageId == null && opts?.linkedTurnId) {
+        linkedMessageId = messageTurnIndexRef.current.get(opts.linkedTurnId);
+      }
+      if (linkedMessageId != null) {
+        annotateTurnGraphDiff(linkedMessageId, buildTurnGraphDiff(latestTriples, merged));
+      }
+
+      graphWatermarkRef.current.set(
+        sid,
+        delta.watermark.appliedTurnId ?? delta.watermark.latestTurnId ?? turnId,
+      );
+      setGraphSessionId(sid);
+      setGraphHasMore(false);
+      setGraphTriples(merged);
+      complete('delta');
+    } catch {
+      await fetchSessionGraph(sid);
+      complete('fallback', 'delta_request_error');
+    }
+  }, [annotateTurnGraphDiff, fetchSessionGraph, recordDeltaPerf]);
+  applyStoredTurnGraphUpdateRef.current = applyStoredTurnGraphUpdate;
+
+  const visualizeSession = useCallback(async (sid: string) => {
+    setShowGraph(true);
+    setGraphFullScreen(false);
+    setTimelineCursor(null);
+    setIsPlaying(false);
+    setGraphViewMode('raw');
+    setGraphLoadLimit(1500);
+    setPublishNotice(null);
+    resetDeltaPerfStats();
+    await Promise.all([
+      fetchSessionGraph(sid, { limitOverride: 1500 }),
+      refreshSessionPublication(sid),
+    ]);
+  }, [fetchSessionGraph, refreshSessionPublication, resetDeltaPerfStats]);
+
+  const toggleGraphPane = useCallback(() => {
+    if (showGraph) {
+      graphFetchSeqRef.current += 1;
+      setShowGraph(false);
+      setGraphFullScreen(false);
+      setGraphLoading(false);
+      setIsPlaying(false);
+      setPublishNotice(null);
+      setGraphHasMore(false);
+      setGraphFocusRequest(null);
+      return;
+    }
+    const sid = activeSessionId ?? sessionId;
+    if (!sid) {
+      resetDeltaPerfStats();
+      setShowGraph(true);
+      setGraphFullScreen(false);
+      setGraphTriples([]);
+      setGraphSessionId(null);
+      setGraphLoading(false);
+      setGraphHasMore(false);
+      setGraphFocusRequest(null);
+      return;
+    }
+    void visualizeSession(sid);
+  }, [showGraph, activeSessionId, sessionId, visualizeSession, resetDeltaPerfStats]);
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || loading) return;
     setInput('');
     const userMsg: Message = { id: _mid++, role: 'user', content: text, ts: new Date().toLocaleTimeString() };
-    setMessages(prev => [...prev, userMsg]);
+    const assistantId = _mid++;
+    const assistantTs = new Date().toLocaleTimeString();
+    setMessages(prev => [...prev, userMsg, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      ts: assistantTs,
+      responseMode: 'streaming',
+    }]);
     setLoading(true);
+    stickToBottomRef.current = true;
 
     try {
-      const res = await sendChatMessage(text, sessionId ?? undefined);
-      if (res.sessionId && !sessionId) {
+      const res = await streamChatMessage(text, {
+        sessionId: sessionId ?? undefined,
+        onEvent: (event) => {
+          if (event.type === 'text_delta') {
+            setMessages(prev => prev.map((m) => (
+              m.id === assistantId
+                ? { ...m, content: `${m.content}${event.delta}` }
+                : m
+            )));
+            return;
+          }
+          if (event.type === 'final') {
+            setMessages(prev => prev.map((m) => (
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content: event.reply || m.content,
+                    data: event.data,
+                    sparql: event.sparql,
+                    turnId: event.turnId,
+                    persistStatus: event.persistStatus,
+                    persistError: event.persistError,
+                    timings: event.timings,
+                    responseMode: event.responseMode,
+                    llmDiagnostics: event.llmDiagnostics,
+                  }
+                : m
+            )));
+            if (event.turnId) {
+              const buffered = bufferedPersistEventsRef.current.get(event.turnId);
+              if (buffered) {
+                bufferedPersistEventsRef.current.delete(event.turnId);
+                applyPersistenceStatus(buffered);
+              }
+            }
+            if (showGraphRef.current && event.sessionId && event.persistStatus === 'stored' && event.turnId) {
+              void applyStoredTurnGraphUpdate(event.sessionId, event.turnId, { linkedMessageId: assistantId });
+            }
+          }
+        },
+      });
+      if (res.sessionId) {
         setSessionId(res.sessionId);
         setActiveSessionId(res.sessionId);
       }
-      setMessages(prev => [...prev, {
-        id: _mid++,
-        role: 'assistant',
-        content: res.reply,
-        ts: new Date().toLocaleTimeString(),
-        data: res.data,
-        sparql: res.sparql,
-      }]);
       loadSessions();
     } catch (err: any) {
-      setMessages(prev => [...prev, {
-        id: _mid++,
-        role: 'assistant',
-        content: `Error: ${err.message}`,
-        ts: new Date().toLocaleTimeString(),
-      }]);
+      setMessages(prev => prev.map((m) => (
+        m.id === assistantId
+          ? {
+              ...m,
+              content: `Error: ${err.message}`,
+              responseMode: 'blocking',
+            }
+          : m
+      )));
     } finally {
       setLoading(false);
     }
-  }, [input, loading, sessionId, loadSessions]);
+  }, [input, loading, sessionId, loadSessions, applyPersistenceStatus, applyStoredTurnGraphUpdate]);
 
   const startNewChat = useCallback(() => {
+    if (loading) return;
+    openSessionSeqRef.current += 1;
+    graphFetchSeqRef.current += 1;
+    bufferedPersistEventsRef.current.clear();
+    graphWatermarkRef.current.clear();
+    resetDeltaPerfStats();
     setSessionId(null);
     setActiveSessionId(null);
     setMessages([welcomeMessage()]);
     setInput('');
-    setShowGraph(false);
     setGraphTriples(null);
+    setGraphSessionId(null);
+    setGraphLoading(false);
+    setGraphLoadLimit(1500);
+    setGraphHasMore(false);
+    setGraphViewMode('raw');
+    setGraphFullScreen(false);
+    setPublishNotice(null);
+    setSelectedMessageId(null);
+    setSelectedGraphNodeId(null);
+    setGraphFocusRequest(null);
+    setGraphSearch('');
     setTimelineCursor(null);
     setIsPlaying(false);
-  }, []);
+    setGraphFullScreen(false);
+    stickToBottomRef.current = true;
+  }, [loading, resetDeltaPerfStats]);
 
   const openSession = useCallback(async (sid: string) => {
+    if (loading) return;
     if (sid === activeSessionId) return;
+    const openSeq = ++openSessionSeqRef.current;
+    bufferedPersistEventsRef.current.clear();
+    resetDeltaPerfStats();
     setSessionsLoading(true);
-    setShowGraph(false);
-    setGraphTriples(null);
     setTimelineCursor(null);
     setIsPlaying(false);
+    stickToBottomRef.current = true;
+    setSelectedMessageId(null);
+    setSelectedGraphNodeId(null);
+    setGraphFocusRequest(null);
+    setGraphSearch('');
     try {
       const session = await fetchMemorySession(sid);
+      if (openSessionSeqRef.current !== openSeq) return;
       if (!session?.messages?.length) return;
-      const restored: Message[] = session.messages.map((m) => ({
-        id: _mid++,
-        role: m.author === 'user' ? 'user' as const : 'assistant' as const,
-        content: m.text,
-        ts: m.ts ? formatDate(m.ts) || new Date(m.ts).toLocaleTimeString() : '',
-      }));
-      setMessages(restored);
+      const cached = sessionMessagesCacheRef.current.get(sid) ?? [];
+      const cachedByTurnId = new Map<string, Message>();
+      for (const row of cached) {
+        if (!row.turnId) continue;
+        cachedByTurnId.set(row.turnId, row);
+      }
+      const restored: Message[] = session.messages.map((m) => {
+        const role = m.author === 'user' ? 'user' as const : 'assistant' as const;
+        const turnId = m.turnId?.trim() || undefined;
+        const cachedMatch = turnId ? cachedByTurnId.get(turnId) : undefined;
+        let persistStatus = normalizePersistStatus(m.persistStatus);
+        if (cachedMatch?.persistStatus === 'enshrined') {
+          persistStatus = 'enshrined';
+        }
+        if (!persistStatus && role === 'assistant' && turnId) {
+          persistStatus = 'stored';
+        }
+        return {
+          id: _mid++,
+          role,
+          content: m.text,
+          ts: m.ts ? formatDate(m.ts) || new Date(m.ts).toLocaleTimeString() : '',
+          turnId,
+          persistStatus,
+          graphDiff: cachedMatch?.graphDiff,
+          llmDiagnostics: cachedMatch?.llmDiagnostics,
+        };
+      });
+      const knownPublication = sessionPublicationById[sid];
+      setMessages(
+        knownPublication?.scope === 'enshrined'
+          ? markStoredMessagesEnshrined(restored)
+          : restored,
+      );
       setSessionId(sid);
       setActiveSessionId(sid);
+      if (showGraph) {
+        setGraphViewMode('raw');
+        setGraphLoadLimit(1500);
+        await Promise.all([
+          fetchSessionGraph(sid, { limitOverride: 1500 }),
+          refreshSessionPublication(sid),
+        ]);
+      } else {
+        graphFetchSeqRef.current += 1;
+        setGraphTriples(null);
+        setGraphSessionId(null);
+        setGraphLoading(false);
+        setGraphHasMore(false);
+      }
     } catch {
       /* ignore load errors */
     } finally {
-      setSessionsLoading(false);
+      if (openSessionSeqRef.current === openSeq) {
+        setSessionsLoading(false);
+      }
     }
-  }, [activeSessionId]);
-
-  const [showGraph, setShowGraph] = useState(false);
-  const [graphTriples, setGraphTriples] = useState<Triple[] | null>(null);
-  const [graphLoading, setGraphLoading] = useState(false);
-  const [timelineCursor, setTimelineCursor] = useState<number | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  }, [loading, activeSessionId, showGraph, fetchSessionGraph, refreshSessionPublication, resetDeltaPerfStats, sessionPublicationById]);
 
   const timeline = useMemo(() => {
     if (!graphTriples || graphTriples.length === 0) return null;
     return extractTimeline(graphTriples);
   }, [graphTriples]);
+
+  const timelineIndex = useMemo(() => {
+    if (!timeline || timeline.timestamps.length === 0) return 0;
+    const at = timelineCursor ?? timeline.timestamps[timeline.timestamps.length - 1];
+    let idx = 0;
+    for (let i = 0; i < timeline.timestamps.length; i += 1) {
+      if (timeline.timestamps[i] <= at) idx = i;
+      else break;
+    }
+    return idx;
+  }, [timeline, timelineCursor]);
 
   const visibleTriples = useMemo(() => {
     if (!graphTriples || !timeline || timelineCursor === null) return graphTriples;
@@ -458,6 +1358,121 @@ export function AgentHubPage() {
     return () => { if (playRef.current) clearInterval(playRef.current); };
   }, [isPlaying, timeline]);
 
+  const graphTextSubjectIndex = useMemo(() => {
+    const textToSubjects = new Map<string, Set<string>>();
+    if (!graphTriples || graphTriples.length === 0) return textToSubjects;
+    for (const t of graphTriples) {
+      if (t.predicate !== SCHEMA_TEXT) continue;
+      const key = normalizeTextKey(stripTypedLiteral(t.object));
+      if (!key) continue;
+      if (!textToSubjects.has(key)) textToSubjects.set(key, new Set());
+      textToSubjects.get(key)!.add(t.subject);
+    }
+    return textToSubjects;
+  }, [graphTriples]);
+
+  const messageNodeIndex = useMemo(() => {
+    const map = new Map<number, string[]>();
+    if (graphTextSubjectIndex.size === 0) return map;
+    for (const m of messages) {
+      const key = normalizeTextKey(m.content);
+      if (!key) continue;
+      const subjects = graphTextSubjectIndex.get(key);
+      if (subjects && subjects.size > 0) map.set(m.id, [...subjects]);
+    }
+    return map;
+  }, [messages, graphTextSubjectIndex]);
+
+  const nodeMessageIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const [mid, nodes] of messageNodeIndex) {
+      for (const nodeId of nodes) {
+        map.set(nodeId, mid);
+      }
+    }
+    return map;
+  }, [messageNodeIndex]);
+
+  const graphRenderTriples = useMemo(() => {
+    const triples = visibleTriples ?? graphTriples;
+    if (!triples) return triples;
+    return graphViewMode === 'clustered' ? buildClusterTriples(triples) : triples;
+  }, [visibleTriples, graphTriples, graphViewMode]);
+
+  const renderedClusterCount = useMemo(() => {
+    if (graphViewMode !== 'clustered' || !graphRenderTriples) return 0;
+    const ids = new Set<string>();
+    for (const t of graphRenderTriples) {
+      if (t.predicate === RDF_TYPE && t.object === CLUSTER_TYPE) {
+        ids.add(t.subject);
+      }
+    }
+    return ids.size;
+  }, [graphViewMode, graphRenderTriples]);
+
+  const searchMatchedNodeIds = useMemo(() => {
+    const term = graphSearch.trim().toLowerCase();
+    const sourceTriples = graphRenderTriples;
+    if (!term || !sourceTriples) return [] as string[];
+    const out = new Set<string>();
+    for (const t of sourceTriples) {
+      if (
+        t.subject.toLowerCase().includes(term) ||
+        t.predicate.toLowerCase().includes(term) ||
+        t.object.toLowerCase().includes(term)
+      ) {
+        out.add(t.subject);
+        if (isNodeIri(t.object)) out.add(t.object);
+      }
+    }
+    return [...out];
+  }, [graphRenderTriples, graphSearch]);
+
+  const highlightedNodeIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (selectedMessageId != null) {
+      for (const nodeId of messageNodeIndex.get(selectedMessageId) ?? []) ids.add(nodeId);
+    }
+    for (const nodeId of searchMatchedNodeIds) ids.add(nodeId);
+    if (selectedGraphNodeId) ids.add(selectedGraphNodeId);
+    return [...ids];
+  }, [selectedMessageId, messageNodeIndex, searchMatchedNodeIds, selectedGraphNodeId]);
+
+  const latestGraphDiff = useMemo(() => {
+    return [...messages].reverse().find((m) => m.role === 'assistant' && m.graphDiff);
+  }, [messages]);
+
+  const selectedGraphDiff = useMemo(() => {
+    if (selectedMessageId != null) {
+      const selected = messages.find((m) => m.id === selectedMessageId && m.role === 'assistant' && m.graphDiff);
+      if (selected?.graphDiff) return selected;
+    }
+    return latestGraphDiff ?? null;
+  }, [messages, selectedMessageId, latestGraphDiff]);
+
+  const jumpToMessage = useCallback((mid: number) => {
+    const el = messageRefs.current.get(mid);
+    if (!el) return;
+    stickToBottomRef.current = false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, []);
+
+  const requestGraphNodeFocus = useCallback((nodeId: string, zoomLevel = 2.1) => {
+    graphFocusRequestSeqRef.current += 1;
+    setGraphFocusRequest({
+      nodeId,
+      requestId: graphFocusRequestSeqRef.current,
+      zoomLevel,
+    });
+  }, []);
+
+  const handleGraphNodeClick = useCallback((node: { id: string }) => {
+    setSelectedGraphNodeId(node.id);
+    const mid = nodeMessageIndex.get(node.id);
+    if (mid == null) return;
+    setSelectedMessageId(mid);
+  }, [nodeMessageIndex]);
+
   const graphViewConfig = useMemo(() => ({
     name: 'Conversation',
     palette: 'dark' as const,
@@ -467,39 +1482,519 @@ export function AgentHubPage() {
     },
   }), []);
 
-  const visualizeSession = useCallback(async (sid: string) => {
-    if (showGraph && graphTriples) {
-      setShowGraph(false);
-      return;
-    }
-    setShowGraph(true);
-    setGraphLoading(true);
-    setTimelineCursor(null);
-    setIsPlaying(false);
+  const rawGraphNodeIds = useMemo(() => {
+    if (!graphTriples || graphTriples.length === 0) return new Set<string>();
+    return collectNodeIds(graphTriples);
+  }, [graphTriples]);
+
+  const activeGraphSessionId = activeSessionId ?? sessionId ?? graphSessionId;
+  const sessionPublication = activeGraphSessionId
+    ? (sessionPublicationById[activeGraphSessionId] ?? null)
+    : null;
+
+  const scopeBadgeLabel = useMemo(() => {
+    if (!sessionPublication) return activeGraphSessionId ? 'checking...' : 'no session';
+    if (sessionPublication.scope === 'enshrined') return 'enshrined';
+    if (sessionPublication.scope === 'enshrined_with_pending') return 'enshrined + pending';
+    if (sessionPublication.scope === 'workspace_only') return 'workspace only';
+    return 'empty';
+  }, [activeGraphSessionId, sessionPublication]);
+  const isPublishingActiveGraphSession = (
+    !!publishingSessionId
+    && !!activeGraphSessionId
+    && publishingSessionId === activeGraphSessionId
+  );
+  const isPublishingDifferentSession = (
+    !!publishingSessionId
+    && !!activeGraphSessionId
+    && publishingSessionId !== activeGraphSessionId
+  );
+  const publishButtonDisabled = !graphSessionId || isPublishingActiveGraphSession || isPublishingDifferentSession;
+  const visiblePublishNotice = (
+    publishNotice && activeGraphSessionId && publishNotice.sessionId === activeGraphSessionId
+      ? publishNotice.text
+      : null
+  );
+
+  useEffect(() => {
+    if (graphViewMode !== 'raw') return;
+    if (!selectedGraphNodeId) return;
+    if (rawGraphNodeIds.has(selectedGraphNodeId)) return;
+    setSelectedGraphNodeId(null);
+  }, [graphViewMode, rawGraphNodeIds, selectedGraphNodeId]);
+
+  const loadMoreGraph = useCallback(() => {
+    const sid = graphSessionIdRef.current;
+    if (!sid || graphLoading) return;
+    const nextLimit = Math.min(graphLoadLimit + 1500, 15_000);
+    void fetchSessionGraph(sid, { limitOverride: nextLimit });
+  }, [fetchSessionGraph, graphLoadLimit, graphLoading]);
+
+  const publishSessionGraph = useCallback(async () => {
+    const sid = graphSessionIdRef.current ?? activeSessionIdRef.current ?? sessionIdRef.current;
+    if (!sid || publishingSessionId != null) return;
+    setPublishingSessionId(sid);
+    setPublishNotice(null);
     try {
-      const sessionUri = `urn:dkg:chat:session:${sid}`;
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        { <${sessionUri}> ?p ?o . BIND(<${sessionUri}> AS ?s) }
-        UNION
-        { ?s <http://schema.org/isPartOf> <${sessionUri}> . ?s ?p ?o }
-        UNION
-        { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
-          ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
-          ?entity ?p ?o . BIND(?entity AS ?s) }
-      } LIMIT 5000`;
-      const res = await executeQuery(sparql, 'agent-memory', false, '_workspace');
-      const quads = Array.isArray(res?.result?.quads) ? res.result.quads : [];
-      setGraphTriples(quads.map((q: any) => ({
-        subject: q.subject,
-        predicate: q.predicate,
-        object: stripTypedLiteral(q.object),
-      })));
-    } catch {
-      setGraphTriples([]);
+      const result = await Promise.race([
+        publishMemorySession(sid, { clearAfter: false }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Publishing timed out. Please retry.')), 45_000);
+        }),
+      ]);
+      setSessionPublicationById((prev) => ({ ...prev, [sid]: result.publication }));
+      const activeSid = activeSessionIdRef.current ?? sessionIdRef.current;
+      if (activeSid === sid && result.publication.scope === 'enshrined') {
+        setMessages((prevMsgs) => markStoredMessagesEnshrined(prevMsgs));
+      }
+      setPublishNotice({
+        sessionId: sid,
+        text: `Published ${result.rootEntityCount} root entities (${result.status})`,
+      });
+      if (showGraphRef.current && graphSessionIdRef.current === sid) {
+        await fetchSessionGraph(sid);
+      }
+      await loadSessions();
+    } catch (err: any) {
+      setPublishNotice({
+        sessionId: sid,
+        text: `Publish failed: ${err?.message ?? 'Unknown error'}`,
+      });
     } finally {
-      setGraphLoading(false);
+      setPublishingSessionId((current) => (current === sid ? null : current));
     }
-  }, [showGraph, graphTriples]);
+  }, [fetchSessionGraph, publishingSessionId, loadSessions]);
+
+  const graphPane = (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg)' }}>
+      <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', display: 'grid', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-muted)' }}>
+          <span>
+            {graphViewMode === 'clustered'
+              ? `${renderedClusterCount} clusters`
+              : `${graphRenderTriples?.length ?? 0} triples`}
+          </span>
+          {searchMatchedNodeIds.length > 0 && (
+            <>
+              <span style={{ color: 'var(--text-dim)' }}>.</span>
+              <span>{searchMatchedNodeIds.length} highlighted nodes</span>
+            </>
+          )}
+          <span style={{ color: 'var(--text-dim)' }}>.</span>
+          <span
+            className="mono"
+            style={{
+              borderRadius: 999,
+              border: sessionPublication?.scope === 'enshrined'
+                ? '1px solid rgba(74,222,128,.3)'
+                : sessionPublication?.scope === 'enshrined_with_pending'
+                  ? '1px solid rgba(245,158,11,.35)'
+                : '1px solid var(--border)',
+              background: sessionPublication?.scope === 'enshrined'
+                ? 'rgba(74,222,128,.1)'
+                : sessionPublication?.scope === 'enshrined_with_pending'
+                  ? 'rgba(245,158,11,.12)'
+                : 'var(--surface)',
+              color: sessionPublication?.scope === 'enshrined'
+                ? 'var(--green)'
+                : sessionPublication?.scope === 'enshrined_with_pending'
+                  ? '#f59e0b'
+                : 'var(--text-dim)',
+              padding: '2px 8px',
+              fontSize: 10,
+            }}
+            title={`workspace triples: ${sessionPublication?.workspaceTripleCount ?? 0}, data triples: ${sessionPublication?.dataTripleCount ?? 0}`}
+          >
+            {scopeBadgeLabel}
+          </span>
+          {graphSessionId && (
+            <>
+              <span style={{ color: 'var(--text-dim)' }}>.</span>
+              <span className="mono" title={graphSessionId}>session {graphSessionId.slice(0, 10)}</span>
+            </>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            value={graphSearch}
+            onChange={(e) => setGraphSearch(e.target.value)}
+            placeholder="Search graph nodes, predicates, values"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              borderRadius: 8,
+              border: '1px solid var(--border)',
+              background: 'var(--surface)',
+              color: 'var(--text)',
+              padding: '7px 10px',
+              fontSize: 11,
+            }}
+          />
+          {graphSearch && (
+            <button
+              onClick={() => setGraphSearch('')}
+              style={{
+                borderRadius: 7,
+                border: '1px solid var(--border)',
+                background: 'var(--surface)',
+                color: 'var(--text-muted)',
+                padding: '6px 8px',
+                fontSize: 10,
+                cursor: 'pointer',
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setGraphViewMode('raw')}
+            style={{
+              borderRadius: 7,
+              border: graphViewMode === 'raw' ? '1px solid rgba(34,211,238,.35)' : '1px solid var(--border)',
+              background: graphViewMode === 'raw' ? 'rgba(34,211,238,.1)' : 'var(--surface)',
+              color: graphViewMode === 'raw' ? '#22d3ee' : 'var(--text-muted)',
+              padding: '5px 9px',
+              fontSize: 10,
+              cursor: 'pointer',
+            }}
+          >
+            Raw
+          </button>
+          <button
+            onClick={() => setGraphViewMode('clustered')}
+            style={{
+              borderRadius: 7,
+              border: graphViewMode === 'clustered' ? '1px solid rgba(34,211,238,.35)' : '1px solid var(--border)',
+              background: graphViewMode === 'clustered' ? 'rgba(34,211,238,.1)' : 'var(--surface)',
+              color: graphViewMode === 'clustered' ? '#22d3ee' : 'var(--text-muted)',
+              padding: '5px 9px',
+              fontSize: 10,
+              cursor: 'pointer',
+            }}
+          >
+            Clustered
+          </button>
+
+          <button
+            onClick={loadMoreGraph}
+            disabled={!graphHasMore || graphLoading}
+            style={{
+              borderRadius: 7,
+              border: '1px solid var(--border)',
+              background: 'var(--surface)',
+              color: graphHasMore ? 'var(--text-muted)' : 'var(--text-dim)',
+              padding: '5px 9px',
+              fontSize: 10,
+              cursor: graphHasMore ? 'pointer' : 'not-allowed',
+              opacity: graphHasMore ? 1 : 0.65,
+            }}
+            title={graphHasMore ? `Load more triples (current limit ${graphLoadLimit})` : 'All currently loaded triples are shown'}
+          >
+            {graphHasMore ? 'Load more' : 'Fully loaded'}
+          </button>
+
+          <button
+            onClick={() => { void publishSessionGraph(); }}
+            disabled={publishButtonDisabled}
+            title={isPublishingDifferentSession ? 'Another session is currently publishing' : undefined}
+            style={{
+              marginLeft: 'auto',
+              borderRadius: 7,
+              border: '1px solid rgba(74,222,128,.35)',
+              background: 'rgba(74,222,128,.1)',
+              color: 'var(--green)',
+              padding: '5px 9px',
+              fontSize: 10,
+              cursor: publishButtonDisabled ? 'not-allowed' : 'pointer',
+              opacity: publishButtonDisabled ? 0.65 : 1,
+            }}
+          >
+            {isPublishingActiveGraphSession ? 'Publishing...' : 'Publish session'}
+          </button>
+        </div>
+
+        {visiblePublishNotice && (
+          <div
+            className="mono"
+            style={{
+              fontSize: 10,
+              color: visiblePublishNotice.toLowerCase().includes('failed') ? 'var(--red)' : 'var(--green)',
+            }}
+          >
+            {visiblePublishNotice}
+          </div>
+        )}
+        <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          Publish session enshrines the full conversation graph currently in view. New turns remain in workspace until you publish again.
+        </div>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        {graphLoading && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)' }}>
+            Loading graph...
+          </div>
+        )}
+
+        {!graphLoading && graphTriples == null && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12, textAlign: 'center', padding: 20 }}>
+            Open a conversation graph to see node growth while you chat.
+          </div>
+        )}
+
+        {!graphLoading && graphTriples && graphTriples.length === 0 && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
+            No triples found for this conversation.
+          </div>
+        )}
+
+        {!graphLoading && graphTriples && graphTriples.length > 0 && (
+          <RdfGraph
+            data={graphRenderTriples ?? graphTriples}
+            format="triples"
+            options={{
+              labelMode: 'humanized',
+              renderer: '2d',
+              labels: {
+                predicates: [
+                  'http://schema.org/text',
+                  'http://schema.org/name',
+                  'http://www.w3.org/2000/01/rdf-schema#label',
+                  'http://dkg.io/ontology/sessionId',
+                  'http://dkg.io/ontology/toolName',
+                ],
+              },
+              style: {
+                classColors: {
+                  'http://schema.org/Conversation': '#4ade80',
+                  'http://schema.org/Message': '#22d3ee',
+                  'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
+                  'http://dkg.io/ontology/GraphCluster': '#a78bfa',
+                },
+                defaultNodeColor: '#94a3b8',
+                defaultEdgeColor: '#5f8598',
+                edgeWidth: 0.9,
+              },
+              hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+              focus: { maxNodes: 5000, hops: 999 },
+            }}
+            viewConfig={graphViewConfig}
+            style={{ width: '100%', height: '100%' }}
+            onNodeClick={handleGraphNodeClick}
+          >
+            <GraphHighlighter nodeIds={highlightedNodeIds} focusRequest={graphFocusRequest} />
+          </RdfGraph>
+        )}
+      </div>
+
+      {timeline && timeline.timestamps.length > 1 && (
+        <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border)', display: 'grid', gap: 8, background: 'var(--bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={() => {
+                if (isPlaying) {
+                  setIsPlaying(false);
+                } else {
+                  if (timelineCursor !== null && timelineCursor >= timeline.timestamps[timeline.timestamps.length - 1]) {
+                    setTimelineCursor(timeline.timestamps[0]);
+                  }
+                  setIsPlaying(true);
+                }
+              }}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: '50%',
+                border: '1px solid rgba(34,211,238,.3)',
+                background: isPlaying ? 'rgba(34,211,238,.15)' : 'var(--surface)',
+                color: '#22d3ee',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 12,
+                flexShrink: 0,
+              }}
+              title={isPlaying ? 'Pause timeline' : 'Play timeline'}
+            >
+              {isPlaying ? '||' : '>'}
+            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button
+                onClick={() => setTimelineMode('timestamp')}
+                style={{
+                  borderRadius: 6,
+                  border: timelineMode === 'timestamp' ? '1px solid rgba(34,211,238,.35)' : '1px solid var(--border)',
+                  background: timelineMode === 'timestamp' ? 'rgba(34,211,238,.12)' : 'var(--surface)',
+                  color: timelineMode === 'timestamp' ? '#22d3ee' : 'var(--text-muted)',
+                  padding: '5px 8px',
+                  fontSize: 10,
+                  cursor: 'pointer',
+                }}
+              >
+                Timestamp
+              </button>
+              <button
+                onClick={() => setTimelineMode('turn')}
+                style={{
+                  borderRadius: 6,
+                  border: timelineMode === 'turn' ? '1px solid rgba(34,211,238,.35)' : '1px solid var(--border)',
+                  background: timelineMode === 'turn' ? 'rgba(34,211,238,.12)' : 'var(--surface)',
+                  color: timelineMode === 'turn' ? '#22d3ee' : 'var(--text-muted)',
+                  padding: '5px 8px',
+                  fontSize: 10,
+                  cursor: 'pointer',
+                }}
+              >
+                Turn
+              </button>
+            </div>
+            <div className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-dim)' }}>
+              {timelineMode === 'turn'
+                ? `Turn ${timelineIndex + 1}/${timeline.timestamps.length}`
+                : `At ${new Date(timelineCursor ?? timeline.timestamps[timeline.timestamps.length - 1]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 56 }}>
+              {timelineMode === 'turn'
+                ? 'Turn 1'
+                : new Date(timeline.timestamps[0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </div>
+            <input
+              type="range"
+              min={timelineMode === 'turn' ? 0 : timeline.timestamps[0]}
+              max={timelineMode === 'turn' ? timeline.timestamps.length - 1 : timeline.timestamps[timeline.timestamps.length - 1]}
+              step={timelineMode === 'turn' ? 1 : undefined}
+              value={timelineMode === 'turn' ? timelineIndex : (timelineCursor ?? timeline.timestamps[timeline.timestamps.length - 1])}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                setIsPlaying(false);
+                if (timelineMode === 'turn') {
+                  const idx = Math.max(0, Math.min(timeline.timestamps.length - 1, value));
+                  setTimelineCursor(timeline.timestamps[idx]);
+                  return;
+                }
+                setTimelineCursor(value);
+              }}
+              style={{ flex: 1, accentColor: '#22d3ee', cursor: 'pointer' }}
+            />
+            <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 66, textAlign: 'right' }}>
+              {timelineMode === 'turn'
+                ? `Turn ${timeline.timestamps.length}`
+                : new Date(timeline.timestamps[timeline.timestamps.length - 1]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(selectedGraphNodeId || selectedGraphDiff?.graphDiff) && (
+        <div style={{ padding: '10px 12px', borderTop: '1px solid var(--border)', background: 'var(--surface)', display: 'grid', gap: 8 }}>
+          {selectedGraphNodeId && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <span style={{ fontSize: 10, color: 'var(--text-dim)', flexShrink: 0 }}>Selected node</span>
+              <code style={{ fontSize: 10, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={selectedGraphNodeId}>
+                {shortUri(selectedGraphNodeId)}
+              </code>
+              {nodeMessageIndex.has(selectedGraphNodeId) && (
+                <button
+                  onClick={() => jumpToMessage(nodeMessageIndex.get(selectedGraphNodeId)!)}
+                  style={{
+                    marginLeft: 'auto',
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'var(--bg)',
+                    color: 'var(--text-muted)',
+                    padding: '4px 8px',
+                    fontSize: 10,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Jump to message
+                </button>
+              )}
+            </div>
+          )}
+
+          {selectedGraphDiff?.graphDiff && (
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text)' }}>What changed</span>
+                <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                  {selectedMessageId === selectedGraphDiff.id ? 'selected turn' : 'latest persisted turn'}
+                </span>
+                <button
+                  onClick={() => {
+                    setSelectedMessageId(selectedGraphDiff.id);
+                    jumpToMessage(selectedGraphDiff.id);
+                  }}
+                  style={{
+                    marginLeft: 'auto',
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'var(--bg)',
+                    color: 'var(--text-muted)',
+                    padding: '4px 8px',
+                    fontSize: 10,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Go to turn
+                </button>
+              </div>
+              <div className="mono" style={{ fontSize: 10, color: '#22d3ee' }}>
+                +{selectedGraphDiff.graphDiff.addedNodeCount} nodes . +{selectedGraphDiff.graphDiff.addedEdgeCount} edges
+              </div>
+              {selectedGraphDiff.graphDiff.sampleNodes.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {selectedGraphDiff.graphDiff.sampleNodes.map((id) => (
+                    <button
+                      key={id}
+                      onClick={() => {
+                        setSelectedGraphNodeId(id);
+                        requestGraphNodeFocus(id);
+                      }}
+                      title={id}
+                      style={{
+                        borderRadius: 999,
+                        border: '1px solid rgba(34,211,238,.25)',
+                        background: 'rgba(34,211,238,.08)',
+                        color: '#22d3ee',
+                        padding: '3px 8px',
+                        fontSize: 10,
+                        cursor: 'pointer',
+                        maxWidth: 220,
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {shortUri(id)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const splitGraphMode = showGraph && !graphFullScreen;
+  const showChatColumn = !(showGraph && graphFullScreen);
+  const chatGraphGridStyle = splitGraphMode
+    ? (
+      isNarrowLayout
+        ? { gridTemplateColumns: '1fr', gridTemplateRows: 'minmax(260px, .95fr) minmax(260px, 1.05fr)' }
+        : { gridTemplateColumns: 'minmax(340px, 1fr) minmax(360px, .95fr)', gridTemplateRows: '1fr' }
+    )
+    : { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' };
 
   return (
     <div className="page-section" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 0 }}>
@@ -531,34 +2026,62 @@ export function AgentHubPage() {
           <PeerChatView />
         </div>
       ) : (
-      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', flex: 1, overflow: 'hidden' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: historyCollapsed ? '44px 1fr' : '260px 1fr', flex: 1, overflow: 'hidden' }}>
 
         {/* Left sidebar: chat history */}
         <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
-          <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ padding: historyCollapsed ? '10px 8px' : '16px 14px 12px', borderBottom: '1px solid var(--border)', display: 'grid', gap: 8 }}>
             <button
-              onClick={startNewChat}
+              onClick={() => setHistoryCollapsed((prev) => !prev)}
+              title={historyCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
               style={{
                 width: '100%',
-                padding: '10px 14px',
+                padding: historyCollapsed ? '8px 6px' : '8px 10px',
+                borderRadius: 8,
+                border: '1px solid var(--border)',
+                background: 'var(--surface)',
+                color: 'var(--text-muted)',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                {historyCollapsed
+                  ? <path d="M9 18l6-6-6-6" />
+                  : <path d="M15 18l-6-6 6-6" />}
+              </svg>
+            </button>
+            <button
+              onClick={startNewChat}
+              disabled={loading}
+              title="Start a new chat session"
+              style={{
+                width: '100%',
+                padding: historyCollapsed ? '8px 6px' : '10px 14px',
                 borderRadius: 10,
                 border: '1px solid rgba(74,222,128,.3)',
                 background: 'var(--green-dim)',
                 color: 'var(--green)',
                 fontSize: 12,
                 fontWeight: 700,
-                cursor: 'pointer',
+                cursor: loading ? 'not-allowed' : 'pointer',
+                opacity: loading ? 0.6 : 1,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: 8,
+                gap: historyCollapsed ? 0 : 8,
               }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              New Chat
+              {!historyCollapsed && 'New Chat'}
             </button>
           </div>
 
+          {!historyCollapsed && (
           <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
             {sessionsLoading && sessions.length === 0 && (
               <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading conversations…</div>
@@ -574,18 +2097,19 @@ export function AgentHubPage() {
               return (
                 <div
                   key={s.id}
-                  onClick={() => openSession(s.id)}
+                  onClick={() => { if (!loading) void openSession(s.id); }}
                   style={{
                     padding: '10px 12px',
                     borderRadius: 8,
                     marginBottom: 4,
-                    cursor: 'pointer',
+                    cursor: loading ? 'not-allowed' : 'pointer',
+                    opacity: loading ? 0.75 : 1,
                     background: isActive ? 'var(--surface)' : 'transparent',
                     border: isActive ? '1px solid var(--border)' : '1px solid transparent',
                     transition: 'all .15s ease',
                   }}
-                  onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface)'; }}
-                  onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+                  onMouseEnter={e => { if (!isActive && !loading) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface)'; }}
+                  onMouseLeave={e => { if (!isActive && !loading) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
                 >
                   <div style={{
                     fontSize: 12,
@@ -604,7 +2128,16 @@ export function AgentHubPage() {
                     </span>
                     {isActive && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); visualizeSession(s.id); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (loading) return;
+                          if (showGraph && graphSessionId === s.id) {
+                            toggleGraphPane();
+                          } else {
+                            void visualizeSession(s.id);
+                          }
+                        }}
+                        disabled={loading}
                         title="Visualize conversation graph"
                         style={{
                           marginLeft: 'auto',
@@ -615,10 +2148,11 @@ export function AgentHubPage() {
                           border: '1px solid rgba(34,211,238,.3)',
                           background: 'rgba(34,211,238,.08)',
                           color: '#22d3ee',
-                          cursor: 'pointer',
+                          cursor: loading ? 'not-allowed' : 'pointer',
+                          opacity: loading ? 0.7 : 1,
                         }}
                       >
-                        Graph
+                        {showGraph && graphSessionId === s.id ? 'Hide' : 'Graph'}
                       </button>
                     )}
                   </div>
@@ -626,19 +2160,22 @@ export function AgentHubPage() {
               );
             })}
           </div>
+          )}
 
+          {!historyCollapsed && (
           <div style={{ padding: '10px 14px', borderTop: '1px solid var(--border)', fontSize: 10, color: 'var(--text-dim)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
               Conversations stored in your private DKG
             </div>
           </div>
+          )}
         </div>
 
         {/* Right: active chat */}
-        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ padding: '16px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--green-dim)', border: '1px solid rgba(74,222,128,.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>🤖</div>
+        <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--green-dim)', border: '1px solid rgba(74,222,128,.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>AI</div>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>DKG Agent</div>
               <div style={{ fontSize: 11, color: 'var(--green)', display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -646,163 +2183,229 @@ export function AgentHubPage() {
                 Connected
               </div>
             </div>
-            {activeSessionId && (
-              <button
-                onClick={() => visualizeSession(activeSessionId)}
+            {showGraph && (
+              <span
                 style={{
-                  marginLeft: 'auto',
-                  padding: '5px 12px',
-                  fontSize: 11,
-                  fontWeight: 600,
-                  borderRadius: 6,
-                  border: showGraph ? '1px solid rgba(34,211,238,.5)' : '1px solid var(--border)',
-                  background: showGraph ? 'rgba(34,211,238,.1)' : 'var(--surface)',
-                  color: showGraph ? '#22d3ee' : 'var(--text-muted)',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  transition: 'all .15s ease',
+                  marginLeft: 8,
+                  fontSize: 10,
+                  color: '#22d3ee',
+                  background: 'rgba(34,211,238,.1)',
+                  border: '1px solid rgba(34,211,238,.28)',
+                  borderRadius: 999,
+                  padding: '3px 8px',
                 }}
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
-                  <line x1="8.5" y1="7.5" x2="10.5" y2="16"/><line x1="15.5" y1="7.5" x2="13.5" y2="16"/>
-                </svg>
-                {showGraph ? 'Chat' : 'Graph'}
+                {graphFullScreen ? 'Graph-only view' : 'Split graph view'}
+              </span>
+            )}
+            {persistenceHealth && (
+              <span
+                className="mono"
+                title={`Pending: ${persistenceHealth.pending}, In progress: ${persistenceHealth.inProgress}, Failed: ${persistenceHealth.failed}, Overdue: ${persistenceHealth.overduePending}`}
+                style={{
+                  marginLeft: 8,
+                  fontSize: 10,
+                  color: persistenceHealth.failed > 0 || persistenceHealth.overduePending > 0 ? 'var(--red)' : 'var(--text-dim)',
+                  background: persistenceHealth.failed > 0 || persistenceHealth.overduePending > 0 ? 'rgba(248,113,113,.08)' : 'var(--surface)',
+                  border: persistenceHealth.failed > 0 || persistenceHealth.overduePending > 0 ? '1px solid rgba(248,113,113,.3)' : '1px solid var(--border)',
+                  borderRadius: 999,
+                  padding: '3px 8px',
+                }}
+              >
+                Queue {persistenceHealth.pending}
+                {persistenceHealth.failed > 0 ? ` . fail ${persistenceHealth.failed}` : ''}
+                {persistenceHealth.overduePending > 0 ? ` . overdue ${persistenceHealth.overduePending}` : ''}
+              </span>
+            )}
+            {showGraph && (
+              <button
+                onClick={() => setGraphFullScreen((prev) => !prev)}
+                style={{
+                  marginLeft: 8,
+                  padding: '5px 10px',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  borderRadius: 6,
+                  border: graphFullScreen ? '1px solid rgba(34,211,238,.5)' : '1px solid var(--border)',
+                  background: graphFullScreen ? 'rgba(34,211,238,.1)' : 'var(--surface)',
+                  color: graphFullScreen ? '#22d3ee' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                }}
+                title={graphFullScreen ? 'Exit graph-only mode' : 'Focus on graph only'}
+              >
+                {graphFullScreen ? 'Exit graph-only' : 'Graph only'}
               </button>
             )}
+            <button
+              onClick={toggleGraphPane}
+              style={{
+                marginLeft: 'auto',
+                padding: '5px 12px',
+                fontSize: 11,
+                fontWeight: 600,
+                borderRadius: 6,
+                border: showGraph ? '1px solid rgba(34,211,238,.5)' : '1px solid var(--border)',
+                background: showGraph ? 'rgba(34,211,238,.1)' : 'var(--surface)',
+                color: showGraph ? '#22d3ee' : 'var(--text-muted)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                transition: 'all .15s ease',
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
+                <line x1="8.5" y1="7.5" x2="10.5" y2="16"/><line x1="15.5" y1="7.5" x2="13.5" y2="16"/>
+              </svg>
+              {showGraph ? 'Hide Graph' : 'Show Graph'}
+            </button>
           </div>
 
-          {showGraph ? (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              {graphLoading && (
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)' }}>
-                  Loading graph…
-                </div>
-              )}
-              {!graphLoading && graphTriples && graphTriples.length === 0 && (
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 13 }}>
-                  No triples found for this conversation.
-                </div>
-              )}
-              {!graphLoading && graphTriples && graphTriples.length > 0 && (
-                <>
-                  <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2">
-                      <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
-                      <line x1="8.5" y1="7.5" x2="10.5" y2="16"/><line x1="15.5" y1="7.5" x2="13.5" y2="16"/>
-                    </svg>
-                    <span>{visibleTriples?.length ?? graphTriples.length} / {graphTriples.length} triples</span>
-                    <span style={{ color: 'var(--text-dim)' }}>·</span>
-                    <span>Conversation stored as RDF in your private <code style={{ fontSize: 10, background: 'var(--surface)', padding: '1px 4px', borderRadius: 3 }}>agent-memory</code> paranet</span>
-                  </div>
-                  <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-                    <RdfGraph
-                      data={visibleTriples ?? graphTriples}
-                      format="triples"
-                      options={{
-                        labelMode: 'humanized',
-                        renderer: '2d',
-                        labels: {
-                          predicates: [
-                            'http://schema.org/text',
-                            'http://schema.org/name',
-                            'http://www.w3.org/2000/01/rdf-schema#label',
-                            'http://dkg.io/ontology/sessionId',
-                            'http://dkg.io/ontology/toolName',
-                          ],
-                        },
-                        style: {
-                          classColors: {
-                            'http://schema.org/Conversation': '#4ade80',
-                            'http://schema.org/Message': '#22d3ee',
-                            'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
-                          },
-                          defaultNodeColor: '#94a3b8',
-                          defaultEdgeColor: '#5f8598',
-                          edgeWidth: 0.9,
-                        },
-                        hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
-                        focus: { maxNodes: 5000, hops: 999 },
+          <div style={{ flex: 1, minHeight: 0, display: 'grid', ...chatGraphGridStyle }}>
+            {showChatColumn && (
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                minWidth: 0,
+                minHeight: 0,
+                borderRight: splitGraphMode && !isNarrowLayout ? '1px solid var(--border)' : 'none',
+                borderBottom: splitGraphMode && isNarrowLayout ? '1px solid var(--border)' : 'none',
+              }}
+            >
+              <div
+                ref={chatAreaRef}
+                onScroll={handleChatScroll}
+                className="chat-area"
+                style={{ flex: 1, overflowY: 'scroll', padding: '20px 24px' }}
+              >
+                {messages.map((m) => {
+                  const isSelected = selectedMessageId === m.id;
+                  const linkedNodes = messageNodeIndex.get(m.id) ?? [];
+                  const showPersistAttemptCounter = (
+                    m.persistStatus !== 'stored'
+                    && m.persistStatus !== 'enshrined'
+                    && m.persistStatus !== 'skipped'
+                    && m.persistAttempts != null
+                    && m.persistMaxAttempts != null
+                  );
+                  return (
+                    <div
+                      key={m.id}
+                      ref={(el) => {
+                        if (el) messageRefs.current.set(m.id, el);
+                        else messageRefs.current.delete(m.id);
                       }}
-                      viewConfig={graphViewConfig}
-                      style={{ width: '100%', height: '100%' }}
-                    />
-                  </div>
-                  {timeline && timeline.timestamps.length > 1 && (
-                    <div style={{
-                      padding: '10px 16px',
-                      borderTop: '1px solid var(--border)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      background: 'var(--bg)',
-                    }}>
-                      <button
-                        onClick={() => {
-                          if (isPlaying) {
-                            setIsPlaying(false);
-                          } else {
-                            if (timelineCursor !== null && timelineCursor >= timeline.timestamps[timeline.timestamps.length - 1]) {
-                              setTimelineCursor(timeline.timestamps[0]);
-                            }
-                            setIsPlaying(true);
-                          }
-                        }}
-                        style={{
-                          width: 28, height: 28, borderRadius: '50%',
-                          border: '1px solid rgba(34,211,238,.3)',
-                          background: isPlaying ? 'rgba(34,211,238,.15)' : 'var(--surface)',
-                          color: '#22d3ee', cursor: 'pointer',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          fontSize: 12, flexShrink: 0,
-                        }}
-                        title={isPlaying ? 'Pause' : 'Play timeline'}
+                      className={`chat-msg ${m.role}`}
+                      onClick={() => {
+                        setSelectedMessageId(m.id);
+                        if (!showGraph) return;
+                        const linkedNodeId = linkedNodes[0] ?? null;
+                        setSelectedGraphNodeId(linkedNodeId);
+                        if (linkedNodeId) {
+                          requestGraphNodeFocus(linkedNodeId);
+                        }
+                      }}
+                      style={{ cursor: showGraph ? 'pointer' : 'default' }}
+                    >
+                      <div
+                        className={`chat-bubble ${m.role}`}
+                        style={isSelected ? { boxShadow: '0 0 0 1px rgba(34,211,238,.55)' } : undefined}
                       >
-                        {isPlaying ? '⏸' : '▶'}
-                      </button>
-                      <div style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 55, fontFamily: 'JetBrains Mono, monospace' }}>
-                        {timelineCursor ? new Date(timeline.timestamps[0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
+                        {m.content}
                       </div>
-                      <input
-                        type="range"
-                        min={timeline.timestamps[0]}
-                        max={timeline.timestamps[timeline.timestamps.length - 1]}
-                        value={timelineCursor ?? timeline.timestamps[timeline.timestamps.length - 1]}
-                        onChange={e => { setIsPlaying(false); setTimelineCursor(Number(e.target.value)); }}
-                        style={{ flex: 1, accentColor: '#22d3ee', cursor: 'pointer' }}
-                      />
-                      <div style={{ fontSize: 10, color: 'var(--text-dim)', minWidth: 55, fontFamily: 'JetBrains Mono, monospace', textAlign: 'right' }}>
-                        {timelineCursor ? new Date(timelineCursor).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
-                      </div>
-                      <div style={{
-                        padding: '2px 8px', borderRadius: 10,
-                        background: 'var(--surface)', border: '1px solid var(--border)',
-                        color: '#22d3ee', fontSize: 11, fontWeight: 600, minWidth: 30, textAlign: 'center',
-                      }}>
-                        {visibleTriples ? Math.round((visibleTriples.length / graphTriples.length) * 100) : 100}%
-                      </div>
+
+                      {m.role === 'assistant' && (m.persistStatus || m.llmDiagnostics || m.graphDiff) && (
+                        <div style={{ marginTop: 5, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          {m.persistStatus && (
+                            <span
+                              className="mono"
+                              style={{
+                                fontSize: 10,
+                                color:
+                                  m.persistStatus === 'enshrined' ? '#22d3ee' :
+                                  m.persistStatus === 'stored' ? 'var(--green)' :
+                                  m.persistStatus === 'failed' ? 'var(--red)' :
+                                  m.persistStatus === 'skipped' ? 'var(--text-dim)' : '#f59e0b',
+                                background:
+                                  m.persistStatus === 'enshrined' ? 'rgba(34,211,238,.1)' :
+                                  m.persistStatus === 'stored' ? 'rgba(74,222,128,.1)' :
+                                  m.persistStatus === 'failed' ? 'rgba(248,113,113,.08)' :
+                                  m.persistStatus === 'skipped' ? 'var(--surface)' : 'rgba(245,158,11,.1)',
+                                border:
+                                  m.persistStatus === 'enshrined' ? '1px solid rgba(34,211,238,.3)' :
+                                  m.persistStatus === 'stored' ? '1px solid rgba(74,222,128,.3)' :
+                                  m.persistStatus === 'failed' ? '1px solid rgba(248,113,113,.3)' :
+                                  m.persistStatus === 'skipped' ? '1px solid var(--border)' : '1px solid rgba(245,158,11,.35)',
+                                borderRadius: 5,
+                                padding: '2px 6px',
+                              }}
+                            >
+                              Memory: {m.persistStatus === 'in_progress' ? 'pending' : m.persistStatus}
+                              {showPersistAttemptCounter
+                                ? ` (${m.persistAttempts}/${m.persistMaxAttempts})`
+                                : ''}
+                            </span>
+                          )}
+                          {m.graphDiff && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                color: '#22d3ee',
+                                background: 'rgba(34,211,238,.1)',
+                                border: '1px solid rgba(34,211,238,.28)',
+                                borderRadius: 5,
+                                padding: '2px 6px',
+                              }}
+                            >
+                              Added to graph: +{m.graphDiff.addedNodeCount} nodes, +{m.graphDiff.addedEdgeCount} edges
+                            </span>
+                          )}
+                          {m.persistStatus === 'failed' && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                color: 'var(--red)',
+                                background: 'rgba(248,113,113,.08)',
+                                border: '1px solid rgba(248,113,113,.3)',
+                                borderRadius: 5,
+                                padding: '2px 6px',
+                              }}
+                            >
+                              Memory save failed: {m.persistError ?? 'Unknown error'}
+                            </span>
+                          )}
+                          {m.llmDiagnostics && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                color: '#f59e0b',
+                                background: 'rgba(245,158,11,.1)',
+                                border: '1px solid rgba(245,158,11,.35)',
+                                borderRadius: 5,
+                                padding: '2px 6px',
+                              }}
+                              title={m.llmDiagnostics.message}
+                            >
+                              LLM compatibility issue{m.llmDiagnostics.compatibilityHint ? `: ${m.llmDiagnostics.compatibilityHint}` : ''}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {m.sparql && (
+                        <details style={{ marginTop: 4 }}>
+                          <summary style={{ fontSize: 10, color: 'var(--text-dim)', cursor: 'pointer' }}>SPARQL used</summary>
+                          <pre className="mono" style={{ fontSize: 10, color: 'var(--text-muted)', padding: '6px 8px', background: 'var(--surface)', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{m.sparql}</pre>
+                        </details>
+                      )}
+
+                      <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, fontFamily: 'JetBrains Mono, monospace' }}>{m.ts}</div>
                     </div>
-                  )}
-                </>
-              )}
-            </div>
-          ) : (
-            <>
-              <div className="chat-area" style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
-                {messages.map(m => (
-                  <div key={m.id} className={`chat-msg ${m.role}`}>
-                    <div className={`chat-bubble ${m.role}`}>{m.content}</div>
-                    {m.sparql && (
-                      <details style={{ marginTop: 4 }}>
-                        <summary style={{ fontSize: 10, color: 'var(--text-dim)', cursor: 'pointer' }}>SPARQL used</summary>
-                        <pre className="mono" style={{ fontSize: 10, color: 'var(--text-muted)', padding: '6px 8px', background: 'var(--surface)', borderRadius: 4, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{m.sparql}</pre>
-                      </details>
-                    )}
-                    <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, fontFamily: 'JetBrains Mono, monospace' }}>{m.ts}</div>
-                  </div>
-                ))}
+                  );
+                })}
+
                 {loading && (
                   <div className="chat-msg assistant">
                     <div className="chat-bubble assistant" style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '12px 16px' }}>
@@ -812,7 +2415,6 @@ export function AgentHubPage() {
                     </div>
                   </div>
                 )}
-                <div ref={bottomRef} />
               </div>
 
               <div className="chat-input-row">
@@ -821,11 +2423,24 @@ export function AgentHubPage() {
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), send())}
-                  placeholder="Query the graph, recall memories, publish knowledge…"
+                  placeholder="Query the graph, recall memories, publish knowledge..."
                 />
                 <button className="chat-send" onClick={send} disabled={loading}>Send</button>
               </div>
-            </>
+            </div>
+            )}
+
+            {showGraph && !isNarrowLayout && (
+              <div style={{ display: 'flex', minWidth: 0, overflow: 'hidden' }}>
+                {graphPane}
+              </div>
+            )}
+          </div>
+
+          {showGraph && isNarrowLayout && (
+            <div style={{ borderTop: '1px solid var(--border)', height: '43%', minHeight: 260, maxHeight: '70%', display: 'flex', overflow: 'hidden' }}>
+              {graphPane}
+            </div>
           )}
         </div>
       </div>

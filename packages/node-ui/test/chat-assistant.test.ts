@@ -75,6 +75,157 @@ afterEach(() => {
 });
 
 describe('ChatAssistant', () => {
+  describe('LLM compatibility payload guards', () => {
+    it('omits max_tokens for gpt-5 models', async () => {
+      const llmAssistant = new ChatAssistant(
+        db,
+        mockQuery,
+        { apiKey: 'test-key', model: 'gpt-5-mini', baseURL: 'https://api.openai.com/v1' },
+      );
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          choices: [{ message: { content: 'Hello from gpt-5-mini' } }],
+        }), { status: 200 }),
+      );
+
+      const res = await llmAssistant.answer({ message: 'Tell me something interesting' });
+      expect(res.reply).toContain('Hello from gpt-5-mini');
+
+      const reqInit = fetchSpy.mock.calls[0]?.[1] as RequestInit | undefined;
+      const payload = JSON.parse(String(reqInit?.body ?? '{}'));
+      expect(payload.max_tokens).toBeUndefined();
+
+      fetchSpy.mockRestore();
+    });
+  });
+
+  describe('streaming responses', () => {
+    it('streams text deltas and final response for non-rule chat turns', async () => {
+      const llmAssistant = new ChatAssistant(
+        db,
+        mockQuery,
+        { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' },
+      );
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n'));
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"lo"}}]}\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+
+      const events: any[] = [];
+      for await (const ev of llmAssistant.answerStream({ message: 'Tell me a joke' })) {
+        events.push(ev);
+      }
+
+      expect(events.some(e => e.type === 'text_delta' && e.delta === 'Hel')).toBe(true);
+      const final = events.find(e => e.type === 'final');
+      expect(final?.responseMode).toBe('streaming');
+      expect(final?.response.reply).toBe('Hello');
+      fetchSpy.mockRestore();
+    });
+
+    it('uses rule-based final mode for deterministic node metrics answers', async () => {
+      seedMetrics();
+      const llmAssistant = new ChatAssistant(
+        db,
+        mockQuery,
+        { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' },
+      );
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const events: any[] = [];
+      for await (const ev of llmAssistant.answerStream({ message: 'What is the uptime?' })) {
+        events.push(ev);
+      }
+
+      const final = events.find(e => e.type === 'final');
+      expect(final?.responseMode).toBe('rule-based');
+      expect(final?.response.reply).toContain('1h 1m');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
+    it('returns compatibility diagnostics when provider rejects stream request', async () => {
+      const llmAssistant = new ChatAssistant(
+        db,
+        mockQuery,
+        { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' },
+      );
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'Unsupported parameter: temperature' } }), { status: 400 }),
+      );
+
+      const events: any[] = [];
+      for await (const ev of llmAssistant.answerStream({ message: 'Tell me a story' })) {
+        events.push(ev);
+      }
+
+      const final = events.find(e => e.type === 'final');
+      expect(final?.response.llmDiagnostics).toBeTruthy();
+      expect(final?.response.llmDiagnostics?.status).toBe(400);
+      expect(final?.response.llmDiagnostics?.compatibilityHint).toMatch(/temperature/i);
+      fetchSpy.mockRestore();
+    });
+
+    it('falls back to blocking tool loop when streamed response requests tool calls', async () => {
+      const mockTools: MemoryToolContext = {
+        query: vi.fn().mockResolvedValue({ bindings: [] }),
+        writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
+        enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
+        createParanet: vi.fn().mockResolvedValue(undefined),
+        listParanets: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
+      };
+      const toolAssistant = new ChatAssistant(
+        db,
+        mockQuery,
+        { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' },
+        mockTools,
+      );
+      const toolCallResponse = {
+        choices: [{
+          message: {
+            content: null,
+            tool_calls: [{
+              id: 'c1',
+              type: 'function',
+              function: { name: 'dkg_list_paranets', arguments: '{}' },
+            }],
+          },
+        }],
+      };
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        // Stream attempt response (JSON fallback with tool call)
+        .mockResolvedValueOnce(new Response(JSON.stringify(toolCallResponse), { status: 200 }))
+        // Blocking tool loop first round response (tool call)
+        .mockResolvedValueOnce(new Response(JSON.stringify(toolCallResponse), { status: 200 }))
+        // Blocking tool loop second round response (final text)
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          choices: [{ message: { content: 'Found 1 paranet: Testing.' } }],
+        }), { status: 200 }));
+
+      const events: any[] = [];
+      for await (const ev of toolAssistant.answerStream({ message: 'Please inspect my available knowledge spaces' })) {
+        events.push(ev);
+      }
+
+      expect(mockTools.listParanets).toHaveBeenCalledTimes(1);
+      const final = events.find(e => e.type === 'final');
+      expect(final?.response.reply).toContain('Found 1 paranet');
+      expect(final?.responseMode).toBe('blocking');
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      fetchSpy.mockRestore();
+    });
+  });
+
   describe('uptime', () => {
     it('reports uptime when metrics exist', async () => {
       seedMetrics();

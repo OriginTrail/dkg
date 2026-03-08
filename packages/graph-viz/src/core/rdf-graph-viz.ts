@@ -236,11 +236,16 @@ export class RdfGraphViz {
       });
     }
     this._renderCurrent();
-    this._renderer?.centerOnNode(nodeId);
+    this._renderer?.centerOnNode(nodeId, 500, 2);
     this._events.emit('focus:change', {
       focalNode: nodeId,
       visibleNodes: this._focusFilter.visibleNodeIds.size,
     });
+  }
+
+  /** Recenter camera on a node without changing focus filter state. */
+  centerOnNode(nodeId: string, opts?: { durationMs?: number; zoomLevel?: number }): void {
+    this._renderer?.centerOnNode(nodeId, opts?.durationMs, opts?.zoomLevel);
   }
 
   /** Expand a boundary node's neighborhood */
@@ -399,13 +404,14 @@ export class RdfGraphViz {
 
         // Apply highlight emphasis
         node.isHighRisk = true;
-        if (!node.sizeMultiplier || node.sizeMultiplier < 1.5) {
-          node.sizeMultiplier = 1.5;
+        if (!node.sizeMultiplier || node.sizeMultiplier < 2.0) {
+          node.sizeMultiplier = 2.0;
         }
       }
     }
 
-    this._renderCurrent();
+    if (this._renderer?.refresh) this._renderer.refresh();
+    else this._renderCurrent();
   }
 
   /** Revert all highlighted nodes to their original visual state */
@@ -422,7 +428,8 @@ export class RdfGraphViz {
     }
 
     this._highlightState.clear();
-    this._renderCurrent();
+    if (this._renderer?.refresh) this._renderer.refresh();
+    else this._renderCurrent();
   }
 
   // --- Export ---

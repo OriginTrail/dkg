@@ -5,6 +5,7 @@ declare global {
 }
 
 function authHeaders(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
   const token = window.__DKG_TOKEN__;
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
@@ -44,7 +45,11 @@ async function put<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -64,7 +69,7 @@ export interface LlmSettingsResponse {
   baseURL?: string;
 }
 export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
-export const updateLlmSettings = (data: { apiKey: string; model?: string; baseURL?: string }) =>
+export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseURL?: string; clear?: boolean }) =>
   put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
@@ -122,18 +127,306 @@ export const deleteSavedQuery = (id: number) =>
   del<{ ok: boolean }>(`/api/saved-queries/${id}`);
 
 // --- Chat assistant ---
+export interface ChatLlmDiagnostics {
+  message: string;
+  status?: number;
+  provider?: string;
+  model?: string;
+  compatibilityHint?: string;
+}
+
+export interface ChatAssistantTurnResponse {
+  reply: string;
+  data?: unknown;
+  sparql?: string;
+  sessionId?: string;
+  turnId?: string;
+  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+  persistError?: string;
+  timings?: { llm_ms: number; store_ms: number; total_ms: number };
+  responseMode?: 'streaming' | 'blocking' | 'rule-based';
+  llmDiagnostics?: ChatLlmDiagnostics;
+}
+
+export type ChatAssistantStreamEvent =
+  | { type: 'meta'; sessionId: string }
+  | { type: 'text_delta'; delta: string }
+  | ({ type: 'final' } & ChatAssistantTurnResponse)
+  | { type: 'error'; error: string; llmDiagnostics?: ChatLlmDiagnostics };
+
+export interface ChatPersistenceStatusEvent {
+  type: 'persist_status';
+  turnId: string;
+  sessionId: string;
+  status: 'pending' | 'in_progress' | 'stored' | 'failed';
+  attempts: number;
+  maxAttempts: number;
+  queuedAt: number;
+  updatedAt: number;
+  nextAttemptAt?: number;
+  storeMs?: number;
+  error?: string;
+}
+
+export interface ChatPersistenceHealthEvent {
+  type: 'persist_health';
+  ts: number;
+  pending: number;
+  inProgress: number;
+  stored: number;
+  failed: number;
+  overduePending: number;
+  oldestPendingAgeMs: number | null;
+}
+
+export type ChatPersistenceStreamEvent = ChatPersistenceStatusEvent | ChatPersistenceHealthEvent;
+
 export const sendChatMessage = (message: string, sessionId?: string) =>
-  post<{ reply: string; data?: unknown; sparql?: string; sessionId?: string }>('/api/chat-assistant', { message, sessionId });
+  post<ChatAssistantTurnResponse>('/api/chat-assistant', { message, sessionId });
+
+export async function streamChatMessage(
+  message: string,
+  opts: {
+    sessionId?: string;
+    signal?: AbortSignal;
+    onEvent?: (event: ChatAssistantStreamEvent) => void;
+  } = {},
+): Promise<ChatAssistantTurnResponse> {
+  const res = await fetch(`${BASE}/api/chat-assistant`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...authHeaders(),
+    },
+    body: JSON.stringify({ message, sessionId: opts.sessionId, stream: true }),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    const data = await res.json() as ChatAssistantTurnResponse;
+    opts.onEvent?.({ type: 'final', ...data });
+    return data;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalPayload: ChatAssistantTurnResponse | undefined;
+  let streamError: Error | undefined;
+
+  const handleEvent = (event: ChatAssistantStreamEvent): void => {
+    opts.onEvent?.(event);
+    if (event.type === 'error') {
+      streamError = new Error(event.error || 'Chat stream failed');
+      return;
+    }
+    if (event.type === 'final') {
+      const { type: _ignored, ...payload } = event;
+      finalPayload = payload;
+    }
+  };
+
+  const processBufferLines = (finalFlush: boolean): void => {
+    let lineEnd = buffer.indexOf('\n');
+    while (lineEnd !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const dataLine = line.slice(5).trim();
+      if (!dataLine) continue;
+      try {
+        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
+        handleEvent(parsed);
+      } catch {
+        /* ignore malformed stream frames */
+      }
+      if (streamError) return;
+    }
+
+    if (finalFlush && buffer.trim().startsWith('data:')) {
+      const dataLine = buffer.trim().slice(5).trim();
+      if (!dataLine) return;
+      try {
+        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
+        handleEvent(parsed);
+      } catch {
+        /* ignore malformed stream frames */
+      }
+      buffer = '';
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    processBufferLines(false);
+    if (streamError) break;
+  }
+  buffer += decoder.decode();
+  processBufferLines(true);
+
+  if (streamError) throw streamError;
+  if (!finalPayload) throw new Error('Chat stream ended without final payload');
+  return finalPayload;
+}
+
+export const fetchChatPersistenceHealth = () =>
+  get<{
+    ts: number;
+    pending: number;
+    inProgress: number;
+    stored: number;
+    failed: number;
+    overduePending: number;
+    oldestPendingAgeMs: number | null;
+  }>('/api/chat-assistant/persistence/health');
+
+export async function streamChatPersistenceEvents(
+  opts: {
+    signal?: AbortSignal;
+    onEvent: (event: ChatPersistenceStreamEvent) => void;
+  },
+): Promise<void> {
+  const res = await fetch(`${BASE}/api/chat-assistant/persistence/events`, {
+    method: 'GET',
+    headers: {
+      'Accept': 'text/event-stream',
+      ...authHeaders(),
+    },
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    throw new Error('Persistence event endpoint did not return SSE stream');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const processBuffer = (finalFlush: boolean): void => {
+    let lineEnd = buffer.indexOf('\n');
+    while (lineEnd !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const dataLine = line.slice(5).trim();
+      if (!dataLine) continue;
+      try {
+        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
+        opts.onEvent(parsed);
+      } catch {
+        /* ignore malformed frames */
+      }
+    }
+
+    if (finalFlush && buffer.trim().startsWith('data:')) {
+      const dataLine = buffer.trim().slice(5).trim();
+      if (!dataLine) return;
+      try {
+        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
+        opts.onEvent(parsed);
+      } catch {
+        /* ignore malformed frames */
+      }
+      buffer = '';
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    processBuffer(false);
+  }
+
+  buffer += decoder.decode();
+  processBuffer(true);
+}
 
 // --- Memory (private chat memories in DKG) ---
 export interface MemorySession {
   session: string;
-  messages: Array<{ author: string; text: string; ts: string }>;
+  messages: Array<{
+    author: string;
+    text: string;
+    ts: string;
+    turnId?: string;
+    persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+  }>;
+}
+export interface MemorySessionPublicationStatus {
+  sessionId: string;
+  workspaceTripleCount: number;
+  dataTripleCount: number;
+  scope: 'workspace_only' | 'enshrined' | 'enshrined_with_pending' | 'empty';
+  rootEntityCount: number;
+}
+export interface MemorySessionPublishResult {
+  sessionId: string;
+  rootEntityCount: number;
+  status: string;
+  tripleCount: number;
+  ual?: string;
+  publication: MemorySessionPublicationStatus;
+}
+export interface MemorySessionGraphDeltaWatermark {
+  baseTurnId: string | null;
+  previousTurnId: string | null;
+  appliedTurnId: string | null;
+  latestTurnId: string | null;
+  turnIndex: number;
+  turnCount: number;
+}
+export interface MemorySessionGraphDelta {
+  mode: 'delta' | 'full_refresh_required';
+  reason?: 'session_empty' | 'turn_not_found' | 'missing_watermark' | 'watermark_mismatch';
+  sessionId: string;
+  turnId: string;
+  watermark: MemorySessionGraphDeltaWatermark;
+  triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 export const fetchMemorySessions = (limit = 20) =>
   get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
 export const fetchMemorySession = (sessionId: string) =>
   get<MemorySession>(`/api/memory/sessions/${encodeURIComponent(sessionId)}`);
+export const fetchMemorySessionGraphDelta = (
+  sessionId: string,
+  turnId: string,
+  opts: { baseTurnId?: string | null } = {},
+) => {
+  const params = new URLSearchParams();
+  params.set('turnId', turnId);
+  if (opts.baseTurnId) params.set('baseTurnId', opts.baseTurnId);
+  return get<MemorySessionGraphDelta>(
+    `/api/memory/sessions/${encodeURIComponent(sessionId)}/graph-delta?${params.toString()}`,
+  );
+};
+export const fetchMemorySessionPublication = (sessionId: string) =>
+  get<MemorySessionPublicationStatus>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/publication`);
+export const publishMemorySession = (
+  sessionId: string,
+  opts: { rootEntities?: string[]; clearAfter?: boolean } = {},
+) =>
+  post<MemorySessionPublishResult>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/publish`, opts);
 export const fetchMemoryStats = () =>
   get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 

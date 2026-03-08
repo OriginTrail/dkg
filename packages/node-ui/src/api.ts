@@ -3,9 +3,10 @@ import { join } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
-import type { ChatAssistant } from './chat-assistant.js';
+import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
 import type { ChatMemoryManager } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
+import { ChatPersistenceQueue, type TurnPersistenceJobInput } from './chat-persistence-queue.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -18,6 +19,29 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
 };
+
+const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
+const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function getChatPersistenceQueue(db: DashboardDB, memoryManager: ChatMemoryManager): ChatPersistenceQueue {
+  let queue = chatPersistenceQueues.get(db);
+  if (!queue) {
+    queue = new ChatPersistenceQueue(db, memoryManager);
+    chatPersistenceQueues.set(db, queue);
+  }
+  return queue;
+}
+
+function normalizeSessionId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  if (!value) return null;
+  return SESSION_ID_PATTERN.test(value) ? value : null;
+}
+
+function normalizeTurnId(raw: unknown): string | null {
+  return normalizeSessionId(raw);
+}
 
 export interface LlmSettingsCallbacks {
   getLlm: () => { apiKey?: string; model?: string; baseURL?: string } | undefined;
@@ -176,12 +200,41 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
     const body = await readBody(req);
-    const { apiKey, model, baseURL } = JSON.parse(body);
-    if (typeof apiKey !== 'string') return json(res, 400, { error: 'Missing "apiKey" string' });
+    const payload = JSON.parse(body ?? '{}') as {
+      apiKey?: unknown;
+      model?: unknown;
+      baseURL?: unknown;
+      clear?: unknown;
+    };
+    const incomingApiKey = typeof payload.apiKey === 'string' ? payload.apiKey : undefined;
+    const incomingModel = typeof payload.model === 'string' ? payload.model.trim() : undefined;
+    const incomingBaseURL = typeof payload.baseURL === 'string' ? payload.baseURL.trim() : undefined;
+    const clearRequested = payload.clear === true;
 
-    const llm = apiKey.trim()
-      ? { apiKey: apiKey.trim(), model: model || undefined, baseURL: baseURL || undefined }
-      : null;
+    // Backward compatibility: old clients send { apiKey: "" } to clear.
+    const legacyClearRequested =
+      incomingApiKey === '' &&
+      payload.model === undefined &&
+      payload.baseURL === undefined;
+
+    let llm: { apiKey: string; model?: string; baseURL?: string } | null;
+    if (clearRequested || legacyClearRequested) {
+      llm = null;
+    } else {
+      const current = llmSettings.getLlm();
+      const currentApiKey = current?.apiKey?.trim();
+      const nextApiKey = incomingApiKey?.trim() || currentApiKey;
+      if (!nextApiKey) {
+        return json(res, 400, {
+          error: 'Missing API key. Provide "apiKey" or clear the config explicitly.',
+        });
+      }
+      llm = {
+        apiKey: nextApiKey,
+        model: payload.model !== undefined ? (incomingModel || undefined) : current?.model,
+        baseURL: payload.baseURL !== undefined ? (incomingBaseURL || undefined) : current?.baseURL,
+      };
+    }
     try {
       await llmSettings.setLlm(llm);
       const info = chatAssistant?.getLlmConfig() ?? { configured: !!llm };
@@ -193,21 +246,150 @@ export async function handleNodeUIRequest(
 
   // --- Chat assistant ---
 
+  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/events' && memoryManager) {
+    const queue = getChatPersistenceQueue(db, memoryManager);
+    beginSse(res);
+    const now = Date.now();
+    sendSse(res, {
+      type: 'persist_health',
+      ts: now,
+      ...queue.getHealthSnapshot(now),
+    });
+
+    const unsubscribe = queue.subscribe((event) => {
+      sendSse(res, event);
+    });
+
+    const keepAlive = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      res.write(': ping\n\n');
+    }, 15_000);
+
+    const cleanup = () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+      if (!res.writableEnded) {
+        res.end();
+      }
+    };
+
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+    return true;
+  }
+
+  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/health' && memoryManager) {
+    const queue = getChatPersistenceQueue(db, memoryManager);
+    const now = Date.now();
+    return json(res, 200, {
+      ts: now,
+      ...queue.getHealthSnapshot(now),
+    });
+  }
+
   if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
     const body = await readBody(req);
-    const { message, sessionId: rawSessionId } = JSON.parse(body);
-    if (!message) return json(res, 400, { error: 'Missing "message"' });
+    let payload: { message?: unknown; sessionId?: unknown; stream?: unknown };
     try {
-      const reply = await chatAssistant.answer({ message });
-      const sessionId = typeof rawSessionId === 'string' && rawSessionId ? rawSessionId : crypto.randomUUID();
-      if (memoryManager) {
-        try {
-          await memoryManager.storeChatExchange(sessionId, message, reply.reply, reply.toolCalls);
-        } catch (storeErr: any) {
-          console.error('[chat-assistant] Failed to store conversation:', storeErr?.message ?? storeErr);
+      payload = JSON.parse(body ?? '{}');
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON payload' });
+    }
+    const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+    const rawSessionId = payload.sessionId;
+    const streamRequested = payload.stream === true || (req.headers.accept ?? '').includes('text/event-stream');
+    if (!message) return json(res, 400, { error: 'Missing "message"' });
+    const providedSessionId = rawSessionId === undefined ? null : normalizeSessionId(rawSessionId);
+    if (rawSessionId !== undefined && !providedSessionId) {
+      return json(res, 400, { error: 'Invalid "sessionId" format' });
+    }
+    const sessionId = providedSessionId ?? crypto.randomUUID();
+    const turnId = crypto.randomUUID();
+
+    if (streamRequested) {
+      beginSse(res);
+      sendSse(res, { type: 'meta', sessionId });
+      const startedAt = Date.now();
+      const llmStartedAt = Date.now();
+      let finalReply: ChatResponse | undefined;
+      try {
+        for await (const event of chatAssistant.answerStream({ message })) {
+          if (event.type === 'text_delta') {
+            sendSse(res, event);
+            continue;
+          }
+          if (event.type === 'final') {
+            finalReply = event.response;
+          }
         }
+        if (!finalReply) throw new Error('Chat stream ended without a final response');
+
+        const llmMs = Date.now() - llmStartedAt;
+        const persisted = enqueueTurnPersistence(db, memoryManager, {
+          turnId,
+          sessionId,
+          userMessage: message,
+          assistantReply: finalReply.reply,
+          toolCalls: finalReply.toolCalls,
+        });
+        const totalMs = Date.now() - startedAt;
+        const responseMode = finalReply.responseMode ?? 'rule-based';
+        sendSse(res, {
+          type: 'final',
+          ...finalReply,
+          responseMode,
+          sessionId,
+          turnId,
+          persistStatus: persisted.persistStatus,
+          persistError: persisted.persistError,
+          timings: {
+            llm_ms: llmMs,
+            store_ms: persisted.storeMs,
+            total_ms: totalMs,
+          },
+        });
+      } catch (err: unknown) {
+        const messageText = err instanceof Error ? err.message : String(err);
+        const diagnostics: ChatLlmDiagnostics | undefined = finalReply?.llmDiagnostics;
+        console.error('[chat-assistant] Streaming error:', messageText);
+        sendSse(res, {
+          type: 'error',
+          error: messageText,
+          llmDiagnostics: diagnostics,
+        });
+      } finally {
+        res.end();
       }
-      return json(res, 200, { ...reply, sessionId });
+      return true;
+    }
+
+    try {
+      const startedAt = Date.now();
+      const llmStartedAt = Date.now();
+      const reply = await chatAssistant.answer({ message });
+      const llmMs = Date.now() - llmStartedAt;
+      const persisted = enqueueTurnPersistence(db, memoryManager, {
+        turnId,
+        sessionId,
+        userMessage: message,
+        assistantReply: reply.reply,
+        toolCalls: reply.toolCalls,
+      });
+      const totalMs = Date.now() - startedAt;
+      const responseMode = reply.responseMode ?? 'rule-based';
+      return json(res, 200, {
+        ...reply,
+        responseMode,
+        sessionId,
+        turnId,
+        persistStatus: persisted.persistStatus,
+        persistError: persisted.persistError,
+        timings: {
+          llm_ms: llmMs,
+          store_ms: persisted.storeMs,
+          total_ms: totalMs,
+        },
+      });
     } catch (err: any) {
       return json(res, 500, { error: err.message });
     }
@@ -226,15 +408,86 @@ export async function handleNodeUIRequest(
     }
   }
 
-  if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && memoryManager) {
-    const sessionId = decodeURIComponent(path.slice('/api/memory/sessions/'.length));
-    if (!sessionId) return json(res, 400, { error: 'Missing session ID' });
+  if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && path.endsWith('/graph-delta') && memoryManager) {
+    const sessionId = normalizeSessionId(decodeURIComponent(
+      path.slice('/api/memory/sessions/'.length, -'/graph-delta'.length),
+    ));
+    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
+    const turnId = normalizeTurnId(url.searchParams.get('turnId'));
+    if (!turnId) return json(res, 400, { error: 'Missing or invalid "turnId"' });
+    const rawBaseTurnId = url.searchParams.get('baseTurnId');
+    const baseTurnId = rawBaseTurnId == null || rawBaseTurnId === ''
+      ? null
+      : normalizeTurnId(rawBaseTurnId);
+    if (rawBaseTurnId != null && rawBaseTurnId !== '' && !baseTurnId) {
+      return json(res, 400, { error: 'Invalid "baseTurnId" format' });
+    }
+    try {
+      const delta = await memoryManager.getSessionGraphDelta(sessionId, turnId, { baseTurnId });
+      return json(res, 200, delta);
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to fetch session graph delta' });
+    }
+  }
+
+  if (
+    req.method === 'GET' &&
+    path.startsWith('/api/memory/sessions/') &&
+    !path.endsWith('/graph-delta') &&
+    !path.endsWith('/publication') &&
+    !path.endsWith('/publish') &&
+    memoryManager
+  ) {
+    const sessionId = normalizeSessionId(decodeURIComponent(path.slice('/api/memory/sessions/'.length)));
+    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
     try {
       const session = await memoryManager.getSession(sessionId);
       if (!session) return json(res, 404, { error: 'Session not found' });
       return json(res, 200, session);
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to fetch session' });
+    }
+  }
+
+  if (req.method === 'GET' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publication') && memoryManager) {
+    const sessionId = normalizeSessionId(decodeURIComponent(
+      path.slice('/api/memory/sessions/'.length, -'/publication'.length),
+    ));
+    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
+    try {
+      const status = await memoryManager.getSessionPublicationStatus(sessionId);
+      return json(res, 200, status);
+    } catch (err: any) {
+      return json(res, 500, { error: err.message ?? 'Failed to fetch session publication status' });
+    }
+  }
+
+  if (req.method === 'POST' && path.startsWith('/api/memory/sessions/') && path.endsWith('/publish') && memoryManager) {
+    const sessionId = normalizeSessionId(decodeURIComponent(
+      path.slice('/api/memory/sessions/'.length, -'/publish'.length),
+    ));
+    if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
+    const body = await readBody(req);
+    let payload: { rootEntities?: unknown; clearAfter?: unknown };
+    try {
+      payload = JSON.parse(body || '{}');
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON payload' });
+    }
+    const rootEntities = Array.isArray(payload.rootEntities)
+      ? payload.rootEntities.filter((r): r is string => typeof r === 'string')
+      : undefined;
+    const clearWorkspaceAfter = payload.clearAfter === true;
+    try {
+      const result = await memoryManager.publishSession(sessionId, {
+        rootEntities,
+        clearWorkspaceAfter,
+      });
+      return json(res, 200, result);
+    } catch (err: any) {
+      const message = err?.message ?? 'Failed to publish session';
+      const status = /No workspace entities found|Selected root entities/.test(message) ? 400 : 500;
+      return json(res, status, { error: message });
     }
   }
 
@@ -254,6 +507,42 @@ export async function handleNodeUIRequest(
   }
 
   return false;
+}
+
+function enqueueTurnPersistence(
+  db: DashboardDB,
+  memoryManager: ChatMemoryManager | undefined,
+  job: TurnPersistenceJobInput,
+): {
+  persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+  persistError?: string;
+  storeMs: number;
+} {
+  if (!memoryManager) {
+    return { persistStatus: 'skipped', storeMs: 0 };
+  }
+  const queue = getChatPersistenceQueue(db, memoryManager);
+  const snapshot = queue.enqueue(job);
+  return {
+    persistStatus: snapshot.status,
+    persistError: snapshot.error,
+    storeMs: snapshot.storeMs ?? 0,
+  };
+}
+
+function beginSse(res: ServerResponse): void {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': '*',
+  });
+}
+
+function sendSse(res: ServerResponse, data: unknown): void {
+  if (res.writableEnded || res.destroyed) return;
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {

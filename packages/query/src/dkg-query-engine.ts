@@ -35,9 +35,7 @@ export class DKGQueryEngine implements QueryEngine {
         const workspaceSparql = wrapWithGraph(sparql, workspaceGraph);
         const dataResult = await this.store.query(dataSparql);
         const wsResult = await this.store.query(workspaceSparql);
-        const dataBindings = dataResult.type === 'bindings' ? dataResult.bindings : [];
-        const wsBindings = wsResult.type === 'bindings' ? wsResult.bindings : [];
-        return { bindings: [...dataBindings, ...wsBindings] };
+        return mergeWorkspaceAndDataResults(dataResult, wsResult);
       }
       if (options.graphSuffix === '_workspace') {
         effectiveSparql = wrapWithGraph(sparql, workspaceGraph);
@@ -159,5 +157,61 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   const after = sparql.slice(braceEnd);
 
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
+}
+
+function mergeWorkspaceAndDataResults(
+  dataResult: StoreQueryResult,
+  wsResult: StoreQueryResult,
+): QueryResult {
+  if (dataResult.type === 'quads' || wsResult.type === 'quads') {
+    const mergedQuads = dedupeQuads([
+      ...(dataResult.type === 'quads' ? dataResult.quads : []),
+      ...(wsResult.type === 'quads' ? wsResult.quads : []),
+    ]);
+    return { bindings: [], quads: mergedQuads };
+  }
+
+  if (dataResult.type === 'boolean' || wsResult.type === 'boolean') {
+    const value = (dataResult.type === 'boolean' ? dataResult.value : false)
+      || (wsResult.type === 'boolean' ? wsResult.value : false);
+    return { bindings: [{ result: String(value) }] };
+  }
+
+  const mergedBindings = dedupeBindings([
+    ...(dataResult.type === 'bindings' ? dataResult.bindings : []),
+    ...(wsResult.type === 'bindings' ? wsResult.bindings : []),
+  ]);
+  return { bindings: mergedBindings };
+}
+
+function dedupeBindings(
+  bindings: Array<Record<string, string>>,
+): Array<Record<string, string>> {
+  const seen = new Set<string>();
+  const out: Array<Record<string, string>> = [];
+  for (const row of bindings) {
+    const key = bindingKey(row);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
+function bindingKey(row: Record<string, string>): string {
+  const entries = Object.entries(row).sort(([a], [b]) => a.localeCompare(b));
+  return JSON.stringify(entries);
+}
+
+function dedupeQuads(quads: Quad[]): Quad[] {
+  const seen = new Set<string>();
+  const out: Quad[] = [];
+  for (const q of quads) {
+    const key = `${q.subject}\u0000${q.predicate}\u0000${q.object}\u0000${q.graph}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
 }
 

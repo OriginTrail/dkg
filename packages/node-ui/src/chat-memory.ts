@@ -1,4 +1,5 @@
-import type { LlmConfig } from './chat-assistant.js';
+import { LlmClient } from './llm/client.js';
+import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
   query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => Promise<any>;
@@ -37,6 +38,38 @@ export interface EnshrineResult {
   tripleCount: number;
 }
 
+export interface SessionPublicationStatus {
+  sessionId: string;
+  workspaceTripleCount: number;
+  dataTripleCount: number;
+  scope: 'workspace_only' | 'enshrined' | 'enshrined_with_pending' | 'empty';
+  rootEntityCount: number;
+}
+
+export interface SessionPublishResult extends EnshrineResult {
+  sessionId: string;
+  rootEntityCount: number;
+  publication: SessionPublicationStatus;
+}
+
+export interface SessionGraphDeltaWatermark {
+  baseTurnId: string | null;
+  previousTurnId: string | null;
+  appliedTurnId: string | null;
+  latestTurnId: string | null;
+  turnIndex: number;
+  turnCount: number;
+}
+
+export interface SessionGraphDeltaResult {
+  mode: 'delta' | 'full_refresh_required';
+  reason?: 'session_empty' | 'turn_not_found' | 'missing_watermark' | 'watermark_mismatch';
+  sessionId: string;
+  turnId: string;
+  watermark: SessionGraphDeltaWatermark;
+  triples: Array<{ subject: string; predicate: string; object: string }>;
+}
+
 const MEMORY_PARANET = 'agent-memory';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -64,6 +97,26 @@ function parseRdfInt(value: string): number {
 function sumBindingValues(bindings: Array<Record<string, string>> | undefined, key: string): number {
   if (!bindings?.length) return 0;
   return bindings.reduce((sum, b) => sum + parseRdfInt(b[key] ?? '0'), 0);
+}
+
+function isSafeIri(value: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(value);
+}
+
+function buildSessionRootPattern(sessionUri: string): string {
+  return `{
+    { <${sessionUri}> ?sessionP ?sessionO . BIND(<${sessionUri}> AS ?s) }
+    UNION { ?s <${SCHEMA}isPartOf> <${sessionUri}> }
+    UNION {
+      ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
+      ?msg <${DKG_ONT}usedTool> ?s .
+    }
+    UNION {
+      ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
+      ?s <${DKG_ONT}mentionedIn> ?msg .
+    }
+    UNION { ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }
+  }`;
 }
 
 const MENTION_EXTRACTION_PROMPT = `Extract named entities mentioned in the following text. Output ONLY a JSON array of objects with "name" and "type" fields.
@@ -120,6 +173,7 @@ Always include LIMIT (default 50). Use FILTER with regex or CONTAINS for text se
 export class ChatMemoryManager {
   private initialized = false;
   private knownSessions = new Set<string>();
+  private readonly llmClient = new LlmClient();
 
   constructor(
     private tools: MemoryToolContext,
@@ -174,6 +228,7 @@ export class ChatMemoryManager {
     userMessage: string,
     assistantReply: string,
     toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
+    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending' },
   ): Promise<void> {
     await this.ensureInitialized();
     const userTs = new Date();
@@ -183,6 +238,9 @@ export class ChatMemoryManager {
     const assistantMsgId = crypto.randomUUID().slice(0, 8);
     const userMsgUri = `${CHAT_NS}msg:${userMsgId}`;
     const assistantMsgUri = `${CHAT_NS}msg:${assistantMsgId}`;
+    const turnId = opts?.turnId?.trim();
+    const persistenceState = opts?.persistenceState ?? 'stored';
+    const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -208,7 +266,22 @@ export class ChatMemoryManager {
       { subject: assistantMsgUri, predicate: `${SCHEMA}author`, object: `${CHAT_NS}actor:agent`, graph: '' },
       { subject: assistantMsgUri, predicate: `${SCHEMA}dateCreated`, object: `"${agentTs.toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       { subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: JSON.stringify(assistantReply), graph: '' },
+      { subject: assistantMsgUri, predicate: `${DKG_ONT}replyTo`, object: userMsgUri, graph: '' },
     );
+
+    if (turnId && turnUri) {
+      quads.push(
+        { subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`, graph: '' },
+        { subject: turnUri, predicate: `${SCHEMA}isPartOf`, object: sessionUri, graph: '' },
+        { subject: turnUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
+        { subject: turnUri, predicate: `${SCHEMA}dateCreated`, object: `"${userTs.toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
+        { subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri, graph: '' },
+        { subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
+        { subject: turnUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+        { subject: userMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
+        { subject: assistantMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
+      );
+    }
 
     if (toolCalls?.length) {
       for (const tc of toolCalls) {
@@ -282,27 +355,21 @@ export class ChatMemoryManager {
   }
 
   private async callMentionExtraction(text: string): Promise<Array<{ name: string; type: string }>> {
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    if (!apiKey) return [];
-
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+    if (!this.llmConfig.apiKey) return [];
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
+      const completion = await this.llmClient.complete({
+        config: this.llmConfig,
+        request: {
           messages: [
             { role: 'system', content: MENTION_EXTRACTION_PROMPT },
             { role: 'user', content: text },
           ],
           temperature: 0,
-          max_tokens: 512,
-        }),
+          maxTokens: 512,
+          stream: false,
+        },
       });
-      if (!res.ok) return [];
-      const data = await res.json() as any;
-      let output = data.choices?.[0]?.message?.content?.trim() ?? '';
+      let output = completion.message.content?.trim() ?? '';
       output = output.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
       const parsed = JSON.parse(output);
       if (!Array.isArray(parsed)) return [];
@@ -319,26 +386,25 @@ export class ChatMemoryManager {
   ): Promise<number> {
     await this.ensureInitialized();
     const exchange = `User: ${userMessage}\nAssistant: ${assistantReply}`;
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: KG_EXTRACTION_PROMPT },
-          { role: 'user', content: exchange },
-        ],
-        temperature: 0.1,
-        max_tokens: 1024,
-      }),
-    });
-
-    if (!res.ok) return 0;
-    const data = await res.json() as any;
-    const output = data.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!this.llmConfig.apiKey) return 0;
+    let output = '';
+    try {
+      const completion = await this.llmClient.complete({
+        config: this.llmConfig,
+        request: {
+          messages: [
+            { role: 'system', content: KG_EXTRACTION_PROMPT },
+            { role: 'user', content: exchange },
+          ],
+          temperature: 0.1,
+          maxTokens: 1024,
+          stream: false,
+        },
+      });
+      output = completion.message.content?.trim() ?? '';
+    } catch {
+      return 0;
+    }
     if (!output || output === 'NONE') return 0;
 
     const triples = this.parseNTriples(output);
@@ -369,26 +435,20 @@ export class ChatMemoryManager {
   }
 
   async semanticRecall(question: string): Promise<{ sparql: string; result: any }> {
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
+    if (!this.llmConfig.apiKey) throw new Error('LLM not configured');
+    const completion = await this.llmClient.complete({
+      config: this.llmConfig,
+      request: {
         messages: [
           { role: 'system', content: SEMANTIC_RECALL_SYSTEM },
           { role: 'user', content: question },
         ],
         temperature: 0.1,
-        max_tokens: 512,
-      }),
+        maxTokens: 512,
+        stream: false,
+      },
     });
-
-    if (!res.ok) throw new Error(`LLM API ${res.status}`);
-    const data = await res.json() as any;
-    let sparql = data.choices?.[0]?.message?.content?.trim() ?? '';
+    let sparql = completion.message.content?.trim() ?? '';
     sparql = sparql.replace(/^```(?:sparql)?\n?/i, '').replace(/\n?```$/i, '').trim();
 
     const result = await this.recall(sparql);
@@ -482,16 +542,34 @@ export class ChatMemoryManager {
     }
   }
 
-  async getSession(sessionId: string): Promise<{ session: string; messages: Array<{ author: string; text: string; ts: string }> } | null> {
+  async getSession(
+    sessionId: string,
+  ): Promise<{
+    session: string;
+    messages: Array<{
+      author: string;
+      text: string;
+      ts: string;
+      turnId?: string;
+      persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+    }>;
+  } | null> {
     await this.ensureInitialized();
     try {
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?author ?text ?ts WHERE {
+        `SELECT ?author ?text ?ts ?turnId ?persistenceState WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
+          OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
+          OPTIONAL {
+            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+            ?turn <${DKG_ONT}turnId> ?turnId .
+            ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+          }
         } ORDER BY ?ts LIMIT 500`,
         { paranetId: MEMORY_PARANET, includeWorkspace: true },
       );
@@ -503,6 +581,14 @@ export class ChatMemoryManager {
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),
+          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+          persistStatus: (() => {
+            const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
+            if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
+              return status;
+            }
+            return undefined;
+          })(),
         })),
       };
     } catch {
@@ -513,39 +599,407 @@ export class ChatMemoryManager {
   async getRecentChats(limit = 20): Promise<Array<{ session: string; messages: Array<{ author: string; text: string; ts: string }> }>> {
     await this.ensureInitialized();
     try {
+      const expandedLimit = Math.max(limit, Math.min(limit * 4, 400));
       const sessionsResult = await this.tools.query(
         `SELECT ?s ?sid (MAX(?mts) AS ?latest) WHERE {
           ?s <${RDF_TYPE}> <${SCHEMA}Conversation> .
           ?s <${DKG_ONT}sessionId> ?sid .
           OPTIONAL { ?m <${SCHEMA}isPartOf> ?s . ?m <${SCHEMA}dateCreated> ?mts }
-        } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${limit}`,
+        } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${expandedLimit}`,
         { paranetId: MEMORY_PARANET, includeWorkspace: true },
       );
-      const chats: Array<{ session: string; messages: Array<{ author: string; text: string; ts: string }> }> = [];
-      for (const sb of sessionsResult.bindings ?? []) {
-        const msgsResult = await this.tools.query(
-          `SELECT ?author ?text ?ts WHERE {
-            ?m <${SCHEMA}isPartOf> <${sb.s}> .
-            ?m <${SCHEMA}author> ?author .
-            ?m <${SCHEMA}text> ?text .
-            ?m <${SCHEMA}dateCreated> ?ts
-          } ORDER BY ?ts LIMIT 100`,
-          { paranetId: MEMORY_PARANET, includeWorkspace: true },
-        );
-        const sessionId = stripRdfLiteral(sb.sid ?? sb.s);
-        chats.push({
-          session: sessionId,
-          messages: (msgsResult.bindings ?? []).map((mb: any) => ({
-            author: mb.author?.includes('user') ? 'user' : 'agent',
-            text: stripRdfLiteral(mb.text ?? ''),
-            ts: stripRdfLiteral(mb.ts ?? ''),
-          })),
+      const sessionBindings = sessionsResult.bindings ?? [];
+      if (sessionBindings.length === 0) return [];
+
+      const seenSessionIds = new Set<string>();
+      const sessionEntries: Array<{ sessionUri: string; sessionId: string }> = [];
+      for (const sb of sessionBindings) {
+        const sessionUri = String(sb.s ?? '').replace(/[<>]/g, '');
+        const sid = stripRdfLiteral(sb.sid ?? sb.s);
+        const sessionId = sid || sessionUri;
+        if (!sessionUri || !sessionId) continue;
+        if (!isSafeIri(sessionUri)) continue;
+        if (seenSessionIds.has(sessionId)) continue;
+        seenSessionIds.add(sessionId);
+        sessionEntries.push({ sessionUri, sessionId });
+        if (sessionEntries.length >= limit) break;
+      }
+
+      if (sessionEntries.length === 0) return [];
+
+      const values = sessionEntries
+        .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
+        .join(' ');
+
+      const allMsgs = await this.tools.query(
+        `SELECT ?session ?author ?text ?ts WHERE {
+          VALUES ?session { ${values} }
+          ?m <${SCHEMA}isPartOf> ?session .
+          ?m <${SCHEMA}author> ?author .
+          ?m <${SCHEMA}text> ?text .
+          ?m <${SCHEMA}dateCreated> ?ts
+        } ORDER BY ?session ?ts`,
+        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      );
+
+      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
+      for (const row of allMsgs.bindings ?? []) {
+        const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
+        if (!sessionUri) continue;
+        if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
+        const msgs = bySession.get(sessionUri)!;
+        if (msgs.length >= 100) continue;
+        msgs.push({
+          author: row.author?.includes('user') ? 'user' : 'agent',
+          text: stripRdfLiteral(row.text ?? ''),
+          ts: stripRdfLiteral(row.ts ?? ''),
         });
       }
-      return chats;
+
+      return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
+        session: entry.sessionId,
+        messages: bySession.get(entry.sessionUri) ?? [],
+      }));
     } catch {
       return [];
     }
+  }
+
+  async getSessionGraphDelta(
+    sessionId: string,
+    turnId: string,
+    opts?: { baseTurnId?: string | null },
+  ): Promise<SessionGraphDeltaResult> {
+    await this.ensureInitialized();
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const baseTurnId = opts?.baseTurnId?.trim() || null;
+    const countResult = await this.tools.query(
+      `SELECT (COUNT(*) AS ?c) WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+      }`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const turnCount = sumBindingValues(countResult.bindings, 'c');
+    if (turnCount === 0) {
+      return {
+        mode: 'full_refresh_required',
+        reason: 'session_empty',
+        sessionId,
+        turnId,
+        watermark: {
+          baseTurnId,
+          previousTurnId: null,
+          appliedTurnId: null,
+          latestTurnId: null,
+          turnIndex: 0,
+          turnCount: 0,
+        },
+        triples: [],
+      };
+    }
+
+    const turnUri = `${CHAT_NS}turn:${turnId}`;
+    const currentTurnResult = await this.tools.query(
+      `SELECT ?tid ?ts WHERE {
+        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
+        <${turnUri}> <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
+      } LIMIT 1`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const currentTurn = (currentTurnResult.bindings ?? [])[0];
+    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
+    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const latestTurnResult = await this.tools.query(
+      `SELECT ?latestTurnId ?latestTs WHERE {
+        ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?latestTurn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
+        OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
+      } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
+    if (!currentTurnId || currentTurnId !== turnId) {
+      return {
+        mode: 'full_refresh_required',
+        reason: 'turn_not_found',
+        sessionId,
+        turnId,
+        watermark: {
+          baseTurnId,
+          previousTurnId: latestTurnId,
+          appliedTurnId: null,
+          latestTurnId,
+          turnIndex: 0,
+          turnCount,
+        },
+        triples: [],
+      };
+    }
+
+    const currentTurnIdLiteral = JSON.stringify(currentTurnId);
+    const currentTsLiteral = currentTurnTs
+      ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
+      : null;
+    const previousTurnQuery = currentTsLiteral
+      ? `SELECT ?previousTurnId WHERE {
+          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          ?previousTurn <${SCHEMA}dateCreated> ?previousTs .
+          FILTER(
+            ?previousTs < ${currentTsLiteral}
+            || (?previousTs = ${currentTsLiteral} && ?previousTurnId < ${currentTurnIdLiteral})
+          )
+        } ORDER BY DESC(?previousTs) DESC(?previousTurnId) LIMIT 1`
+      : `SELECT ?previousTurnId WHERE {
+          ?previousTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?previousTurn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?previousTurn <${DKG_ONT}turnId> ?previousTurnId .
+          FILTER(?previousTurnId < ${currentTurnIdLiteral})
+        } ORDER BY DESC(?previousTurnId) LIMIT 1`;
+    const previousTurnResult = await this.tools.query(
+      previousTurnQuery,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
+    const turnIndexResult = currentTsLiteral
+      ? await this.tools.query(
+          `SELECT (COUNT(*) AS ?c) WHERE {
+            ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+            ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+            ?turn <${DKG_ONT}turnId> ?tid .
+            ?turn <${SCHEMA}dateCreated> ?ts .
+            FILTER(
+              ?ts < ${currentTsLiteral}
+              || (?ts = ${currentTsLiteral} && ?tid <= ${currentTurnIdLiteral})
+            )
+          }`,
+          { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        )
+      : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
+    const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
+
+    if (previousTurnId && !baseTurnId) {
+      return {
+        mode: 'full_refresh_required',
+        reason: 'missing_watermark',
+        sessionId,
+        turnId,
+        watermark: {
+          baseTurnId,
+          previousTurnId,
+          appliedTurnId: null,
+          latestTurnId,
+          turnIndex,
+          turnCount,
+        },
+        triples: [],
+      };
+    }
+    if (
+      (previousTurnId && baseTurnId !== previousTurnId)
+      || (!previousTurnId && baseTurnId != null)
+    ) {
+      return {
+        mode: 'full_refresh_required',
+        reason: 'watermark_mismatch',
+        sessionId,
+        turnId,
+        watermark: {
+          baseTurnId,
+          previousTurnId,
+          appliedTurnId: null,
+          latestTurnId,
+          turnIndex,
+          turnCount,
+        },
+        triples: [],
+      };
+    }
+
+    const turnMessagesResult = await this.tools.query(
+      `SELECT ?user ?assistant WHERE {
+        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
+        <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
+        <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
+      } LIMIT 1`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const turnMessages = (turnMessagesResult.bindings ?? [])[0];
+    const userMsgUri = String(turnMessages?.user ?? '').replace(/[<>]/g, '');
+    const assistantMsgUri = String(turnMessages?.assistant ?? '').replace(/[<>]/g, '');
+    if (!userMsgUri || !assistantMsgUri || !isSafeIri(userMsgUri) || !isSafeIri(assistantMsgUri)) {
+      return {
+        mode: 'full_refresh_required',
+        reason: 'turn_not_found',
+        sessionId,
+        turnId,
+        watermark: {
+          baseTurnId,
+          previousTurnId,
+          appliedTurnId: null,
+          latestTurnId,
+          turnIndex,
+          turnCount,
+        },
+        triples: [],
+      };
+    }
+
+    const relatedSubjectsResult = await this.tools.query(
+      `SELECT DISTINCT ?s WHERE {
+        VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
+        { BIND(<${sessionUri}> AS ?s) }
+        UNION { BIND(<${turnUri}> AS ?s) }
+        UNION { BIND(?msg AS ?s) }
+        UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
+        UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
+        UNION {
+          ?entity <${DKG_ONT}mentionedIn> ?msg .
+          ?s <${DKG_ONT}contains> ?entity .
+          ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
+        }
+      } LIMIT 5000`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+    const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
+    for (const b of relatedSubjectsResult.bindings ?? []) {
+      const iri = String(b.s ?? '').replace(/[<>]/g, '');
+      if (!iri || !isSafeIri(iri)) continue;
+      subjectSet.add(iri);
+    }
+    const values = [...subjectSet]
+      .map((iri) => `<${iri}>`)
+      .join(' ');
+    const deltaResult = await this.tools.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE {
+        VALUES ?s { ${values} }
+        ?s ?p ?o .
+      }`,
+      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+    );
+
+    const quads = Array.isArray(deltaResult?.quads) ? deltaResult.quads : [];
+    const triples = quads.map((q: any) => ({
+      subject: String(q.subject ?? ''),
+      predicate: String(q.predicate ?? ''),
+      object: stripRdfLiteral(String(q.object ?? '')),
+    }));
+
+    return {
+      mode: 'delta',
+      sessionId,
+      turnId,
+      watermark: {
+        baseTurnId,
+        previousTurnId,
+        appliedTurnId: turnId,
+        latestTurnId,
+        turnIndex,
+        turnCount,
+      },
+      triples,
+    };
+  }
+
+  async getSessionPublicationStatus(sessionId: string): Promise<SessionPublicationStatus> {
+    await this.ensureInitialized();
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const rootPattern = buildSessionRootPattern(sessionUri);
+    const countQuery = `SELECT (COUNT(*) AS ?c) WHERE {
+      {
+        SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000
+      }
+      ?s ?p ?o
+    }`;
+    const workspaceCountResult = await this.tools.query(countQuery, {
+      paranetId: MEMORY_PARANET,
+      graphSuffix: '_workspace',
+    });
+    const dataCountResult = await this.tools.query(countQuery, {
+      paranetId: MEMORY_PARANET,
+    });
+
+    const rootEntityResult = await this.tools.query(
+      `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
+      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+    );
+
+    const workspaceTripleCount = sumBindingValues(workspaceCountResult.bindings, 'c');
+    const dataTripleCount = sumBindingValues(dataCountResult.bindings, 'c');
+    const rootEntityCount = (rootEntityResult.bindings ?? []).length;
+    const scope: SessionPublicationStatus['scope'] =
+      dataTripleCount > 0
+        ? (
+          workspaceTripleCount > dataTripleCount
+            ? 'enshrined_with_pending'
+            : 'enshrined'
+        )
+        : workspaceTripleCount > 0
+          ? 'workspace_only'
+          : 'empty';
+
+    return {
+      sessionId,
+      workspaceTripleCount,
+      dataTripleCount,
+      scope,
+      rootEntityCount,
+    };
+  }
+
+  async getSessionRootEntities(sessionId: string): Promise<string[]> {
+    await this.ensureInitialized();
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const rootPattern = buildSessionRootPattern(sessionUri);
+    const result = await this.tools.query(
+      `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
+      { paranetId: MEMORY_PARANET, graphSuffix: '_workspace' },
+    );
+
+    const roots = new Set<string>();
+    for (const b of result.bindings ?? []) {
+      const iri = String(b.s ?? '').replace(/[<>]/g, '');
+      if (!iri || !isSafeIri(iri)) continue;
+      roots.add(iri);
+    }
+    return [...roots];
+  }
+
+  async publishSession(
+    sessionId: string,
+    opts?: { rootEntities?: string[]; clearWorkspaceAfter?: boolean },
+  ): Promise<SessionPublishResult> {
+    await this.ensureInitialized();
+    const sessionRoots = await this.getSessionRootEntities(sessionId);
+    if (sessionRoots.length === 0) {
+      throw new Error(`No workspace entities found for session ${sessionId}`);
+    }
+    const sessionRootSet = new Set(sessionRoots);
+    const requestedRoots = (opts?.rootEntities ?? [])
+      .map((r) => String(r).trim())
+      .filter((r) => isSafeIri(r));
+    const rootEntities = requestedRoots.length > 0
+      ? [...new Set(requestedRoots.filter((r) => sessionRootSet.has(r)))]
+      : sessionRoots;
+    if (rootEntities.length === 0) {
+      throw new Error(`Selected root entities are not part of session ${sessionId}`);
+    }
+    const enshrined = await this.enshrine(
+      { rootEntities },
+      { clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false },
+    );
+    const publication = await this.getSessionPublicationStatus(sessionId);
+    return {
+      ...enshrined,
+      sessionId,
+      rootEntityCount: rootEntities.length,
+      publication,
+    };
   }
 
   async enshrine(

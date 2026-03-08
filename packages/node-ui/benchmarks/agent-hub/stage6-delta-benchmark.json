@@ -1,0 +1,73 @@
+{
+  "generatedAt": "2026-03-08T09:03:10.283Z",
+  "runConfig": {
+    "runsFull": 8,
+    "warmupFull": 2,
+    "runsDelta": 10,
+    "warmupDelta": 2,
+    "targets": {
+      "medianMs": 300,
+      "p95Ms": 750
+    }
+  },
+  "results": [
+    {
+      "label": "5k-ish",
+      "turnCount": 250,
+      "tripleCount": 5002,
+      "fullRefresh": {
+        "medianMs": 94.40109999999981,
+        "p95Ms": 110.37610000000018,
+        "sampleCount": 6
+      },
+      "deltaUpdate": {
+        "medianMs": 19.522899999999936,
+        "p95Ms": 22.37869999999998,
+        "sampleCount": 8,
+        "deltaTripleCount": 22,
+        "mergedTripleCount": 5002
+      },
+      "improvement": {
+        "medianMs": 74.87819999999988,
+        "p95Ms": 87.9974000000002,
+        "medianPct": 79.31920284827191,
+        "p95Pct": 79.72504917278293
+      },
+      "slo": {
+        "targetMedianMs": 300,
+        "targetP95Ms": 750,
+        "passMedian": true,
+        "passP95": true
+      }
+    },
+    {
+      "label": "20k-ish",
+      "turnCount": 1000,
+      "tripleCount": 20002,
+      "fullRefresh": {
+        "medianMs": 1626.999099999999,
+        "p95Ms": 2867.4383000000007,
+        "sampleCount": 6
+      },
+      "deltaUpdate": {
+        "medianMs": 59.57719999999972,
+        "p95Ms": 95.59070000000065,
+        "sampleCount": 8,
+        "deltaTripleCount": 22,
+        "mergedTripleCount": 20002
+      },
+      "improvement": {
+        "medianMs": 1567.4218999999994,
+        "p95Ms": 2771.8476,
+        "medianPct": 96.33821555279289,
+        "p95Pct": 96.66633803419586
+      },
+      "slo": {
+        "targetMedianMs": 300,
+        "targetP95Ms": 750,
+        "passMedian": true,
+        "passP95": true
+      }
+    }
+  ]
+}

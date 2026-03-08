@@ -21,6 +21,14 @@ export class Canvas2DRenderer implements RendererBackend {
   private _styleEngine: StyleEngine;
   private _events: GraphEventEmitter;
   private _currentNodes = new Map<string, ForceNode>();
+  private _positionCache = new Map<string, {
+    x?: number;
+    y?: number;
+    vx?: number;
+    vy?: number;
+    fx?: number | null;
+    fy?: number | null;
+  }>();
   private _currentLinks: ForceLink[] = [];
   private _repaintPending = false;
 
@@ -193,6 +201,20 @@ export class Canvas2DRenderer implements RendererBackend {
           this._events.emit('node:click', fn._graphNode);
         }
       })
+      .onNodeDrag((_node: any) => {
+        try {
+          this._graph.d3ReheatSimulation();
+        } catch {
+          /* noop */
+        }
+      })
+      .onNodeDragEnd((_node: any) => {
+        try {
+          this._graph.d3ReheatSimulation();
+        } catch {
+          /* noop */
+        }
+      })
       .onNodeHover((node: any) => {
         const fn = node as ForceNode | null;
         if (fn?._graphNode) {
@@ -282,15 +304,20 @@ export class Canvas2DRenderer implements RendererBackend {
       if (collapsedNodeIds?.has(id)) continue;
 
       const existing = this._currentNodes.get(id);
+      const cached = this._positionCache.get(id);
       const chronoX = xByDate?.get(id);
       newNodes.set(id, {
         id,
-        x: existing?.x ?? chronoX ?? (Math.random() - 0.5) * 800,
-        y: existing?.y ?? (Math.random() - 0.5) * 400,
-        vx: existing?.vx,
-        vy: existing?.vy,
-        fx: existing?.fx,
-        fy: existing?.fy,
+        x: existing?.x ?? cached?.x ?? chronoX ?? (Math.random() - 0.5) * 800,
+        y: existing?.y ?? cached?.y ?? (Math.random() - 0.5) * 400,
+        vx: existing?.vx ?? cached?.vx,
+        vy: existing?.vy ?? cached?.vy,
+        fx: typeof existing?.fx === 'number'
+          ? existing.fx
+          : (typeof cached?.fx === 'number' ? cached.fx : undefined),
+        fy: typeof existing?.fy === 'number'
+          ? existing.fy
+          : (typeof cached?.fy === 'number' ? cached.fy : undefined),
         _graphNode: gn,
       });
     }
@@ -311,6 +338,16 @@ export class Canvas2DRenderer implements RendererBackend {
 
     this._currentNodes = newNodes;
     this._currentLinks = newLinks;
+    for (const [id, node] of newNodes) {
+      this._positionCache.set(id, {
+        x: node.x,
+        y: node.y,
+        vx: node.vx,
+        vy: node.vy,
+        fx: typeof node.fx === 'number' ? node.fx : undefined,
+        fy: typeof node.fy === 'number' ? node.fy : undefined,
+      });
+    }
 
     // Sort nodes so featured/high-risk nodes are last (painted on top)
     const sortedNodes = [...newNodes.values()].sort((a, b) => {
@@ -331,7 +368,7 @@ export class Canvas2DRenderer implements RendererBackend {
       this._graph.d3Force('chronoX', (alpha: number) => {
         for (const fn of sortedNodes) {
           const targetX = xByDate!.get(fn.id);
-          if (targetX !== undefined && fn.fx === undefined) {
+          if (targetX !== undefined && fn.fx == null) {
             fn.vx = ((fn.vx ?? 0) + (targetX - (fn.x ?? 0)) * 0.05 * alpha);
           }
         }
@@ -342,11 +379,13 @@ export class Canvas2DRenderer implements RendererBackend {
   }
 
   /** Focus the camera on a specific node */
-  centerOnNode(nodeId: string, durationMs = 500): void {
+  centerOnNode(nodeId: string, durationMs = 350, zoomLevel?: number): void {
     const fn = this._currentNodes.get(nodeId);
     if (fn && this._graph) {
       this._graph.centerAt(fn.x, fn.y, durationMs);
-      this._graph.zoom(2, durationMs);
+      if (zoomLevel != null) {
+        this._graph.zoom(zoomLevel, durationMs);
+      }
     }
   }
 
@@ -360,6 +399,17 @@ export class Canvas2DRenderer implements RendererBackend {
     if (!this._graph) return null;
     const canvas = this._container.querySelector('canvas');
     return canvas ?? null;
+  }
+
+  /** Repaint node/edge visuals without rebuilding graph data. */
+  refresh(): void {
+    if (!this._graph) return;
+    const maybeRefresh = this._graph.refresh;
+    if (typeof maybeRefresh === 'function') {
+      maybeRefresh.call(this._graph);
+      return;
+    }
+    this._scheduleRepaint();
   }
 
   /**
@@ -469,6 +519,7 @@ export class Canvas2DRenderer implements RendererBackend {
       this._graph = null;
     }
     this._currentNodes.clear();
+    this._positionCache.clear();
     this._currentLinks = [];
   }
 

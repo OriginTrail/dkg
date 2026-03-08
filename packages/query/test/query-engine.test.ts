@@ -127,6 +127,44 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.length).toBe(2);
   });
 
+  it('dedupes duplicate rows when includeWorkspace returns same binding from data and workspace', async () => {
+    const workspaceGraph = `did:dkg:paranet:${PARANET}/_workspace`;
+    await store.insert([
+      q('urn:dup:entity:1', 'http://schema.org/name', '"Duplicate"', GRAPH),
+      q('urn:dup:entity:1', 'http://schema.org/name', '"Duplicate"', workspaceGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { paranetId: PARANET, includeWorkspace: true },
+    );
+
+    const duplicates = result.bindings.filter((row) =>
+      row['s'] === 'urn:dup:entity:1' && String(row['name']).includes('Duplicate'),
+    );
+    expect(duplicates.length).toBe(1);
+  });
+
+  it('dedupes duplicate quads for includeWorkspace CONSTRUCT queries', async () => {
+    const workspaceGraph = `did:dkg:paranet:${PARANET}/_workspace`;
+    await store.insert([
+      q('urn:dup:quad:1', 'http://schema.org/name', '"QuadDup"', GRAPH),
+      q('urn:dup:quad:1', 'http://schema.org/name', '"QuadDup"', workspaceGraph),
+    ]);
+
+    const result = await engine.query(
+      'CONSTRUCT { ?s <http://schema.org/name> ?name } WHERE { ?s <http://schema.org/name> ?name }',
+      { paranetId: PARANET, includeWorkspace: true },
+    );
+
+    const matches = (result.quads ?? []).filter((row) =>
+      row.subject === 'urn:dup:quad:1'
+        && row.predicate === 'http://schema.org/name'
+        && String(row.object).includes('QuadDup'),
+    );
+    expect(matches.length).toBe(1);
+  });
+
   it('rejects INSERT queries', async () => {
     await expect(
       engine.query('INSERT DATA { <s> <p> <o> }'),

@@ -60,13 +60,19 @@ function LlmSection() {
     setSaving(true);
     setMessage(null);
     try {
-      const res = await updateLlmSettings({
-        apiKey: apiKey || '',
-        model: model || undefined,
-        baseURL: baseURL || undefined,
-      });
+      const payload: { apiKey?: string; model: string; baseURL: string } = {
+        model,
+        baseURL,
+      };
+      if (apiKey.trim()) payload.apiKey = apiKey.trim();
+      const res = await updateLlmSettings(payload);
       if (res.ok) {
-        setMessage({ type: 'ok', text: apiKey.trim() ? 'LLM configuration saved. Agent Hub now uses your API key.' : 'LLM configuration cleared.' });
+        setMessage({
+          type: 'ok',
+          text: apiKey.trim()
+            ? 'LLM configuration saved. Agent Hub now uses your API key.'
+            : 'LLM settings updated.',
+        });
         setApiKey('');
         refresh();
       } else {
@@ -173,7 +179,7 @@ function LlmSection() {
             onClick={async () => {
               setSaving(true);
               try {
-                await updateLlmSettings({ apiKey: '' });
+                await updateLlmSettings({ clear: true });
                 setApiKey('');
                 setModel('');
                 setBaseURL('');

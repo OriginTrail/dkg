@@ -27,6 +27,14 @@ export class WebGL3DRenderer implements RendererBackend {
   private _styleEngine: StyleEngine;
   private _events: GraphEventEmitter;
   private _currentNodes = new Map<string, ForceNode>();
+  private _positionCache = new Map<string, {
+    x?: number;
+    y?: number;
+    vx?: number;
+    vy?: number;
+    fx?: number | null;
+    fy?: number | null;
+  }>();
   private _ForceGraph3D: any = null;
   private _THREE: any = null;
 
@@ -127,6 +135,20 @@ export class WebGL3DRenderer implements RendererBackend {
           this._events.emit('node:click', fn._graphNode);
         }
       })
+      .onNodeDrag((_node: any) => {
+        try {
+          this._graph.d3ReheatSimulation();
+        } catch {
+          /* noop */
+        }
+      })
+      .onNodeDragEnd((_node: any) => {
+        try {
+          this._graph.d3ReheatSimulation();
+        } catch {
+          /* noop */
+        }
+      })
       .onNodeHover((node: any) => {
         const fn = node as ForceNode | null;
         if (fn?._graphNode) {
@@ -198,14 +220,19 @@ export class WebGL3DRenderer implements RendererBackend {
     for (const [id, gn] of nodes) {
       if (collapsedNodeIds?.has(id)) continue;
       const existing = this._currentNodes.get(id);
+      const cached = this._positionCache.get(id);
       newNodes.set(id, {
         id,
-        x: existing?.x ?? (Math.random() - 0.5) * 300,
-        y: existing?.y ?? (Math.random() - 0.5) * 300,
-        vx: existing?.vx,
-        vy: existing?.vy,
-        fx: existing?.fx,
-        fy: existing?.fy,
+        x: existing?.x ?? cached?.x ?? (Math.random() - 0.5) * 300,
+        y: existing?.y ?? cached?.y ?? (Math.random() - 0.5) * 300,
+        vx: existing?.vx ?? cached?.vx,
+        vy: existing?.vy ?? cached?.vy,
+        fx: typeof existing?.fx === 'number'
+          ? existing.fx
+          : (typeof cached?.fx === 'number' ? cached.fx : undefined),
+        fy: typeof existing?.fy === 'number'
+          ? existing.fy
+          : (typeof cached?.fy === 'number' ? cached.fy : undefined),
         _graphNode: gn,
       });
     }
@@ -223,6 +250,16 @@ export class WebGL3DRenderer implements RendererBackend {
     }
 
     this._currentNodes = newNodes;
+    for (const [id, node] of newNodes) {
+      this._positionCache.set(id, {
+        x: node.x,
+        y: node.y,
+        vx: node.vx,
+        vy: node.vy,
+        fx: typeof node.fx === 'number' ? node.fx : undefined,
+        fy: typeof node.fy === 'number' ? node.fy : undefined,
+      });
+    }
     this._labelSprites.clear();
 
     this._graph.graphData({
@@ -231,12 +268,16 @@ export class WebGL3DRenderer implements RendererBackend {
     });
   }
 
-  centerOnNode(nodeId: string, durationMs = 500): void {
+  centerOnNode(nodeId: string, durationMs = 350, zoomLevel?: number): void {
     const fn = this._currentNodes.get(nodeId);
     if (fn && this._graph) {
       const pos = { x: fn.x ?? 0, y: fn.y ?? 0, z: 0 };
+      const zoomFactor = zoomLevel != null && Number.isFinite(zoomLevel) && zoomLevel > 0
+        ? zoomLevel
+        : 1;
+      const distance = Math.max(60, 200 / zoomFactor);
       this._graph.cameraPosition(
-        { x: pos.x, y: pos.y, z: 200 },
+        { x: pos.x, y: pos.y, z: distance },
         pos,
         durationMs
       );
@@ -250,6 +291,14 @@ export class WebGL3DRenderer implements RendererBackend {
   getCanvas(): HTMLCanvasElement | null {
     if (!this._graph) return null;
     return this._container.querySelector('canvas') ?? null;
+  }
+
+  refresh(): void {
+    if (!this._graph) return;
+    const maybeRefresh = this._graph.refresh;
+    if (typeof maybeRefresh === 'function') {
+      maybeRefresh.call(this._graph);
+    }
   }
 
   resize(): void {
@@ -277,6 +326,7 @@ export class WebGL3DRenderer implements RendererBackend {
       this._graph = null;
     }
     this._currentNodes.clear();
+    this._positionCache.clear();
     this._labelSprites.clear();
     this._textureCache.clear();
   }

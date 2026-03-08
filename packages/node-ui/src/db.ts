@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -157,6 +157,30 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 4) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_persistence_jobs (
+          turn_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          user_message TEXT NOT NULL,
+          assistant_reply TEXT NOT NULL,
+          tool_calls_json TEXT,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          next_attempt_at INTEGER NOT NULL,
+          queued_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          store_ms INTEGER,
+          error_message TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_persist_status_next
+          ON chat_persistence_jobs(status, next_attempt_at);
+        CREATE INDEX IF NOT EXISTS idx_chat_persist_session
+          ON chat_persistence_jobs(session_id);
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -168,6 +192,7 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM logs WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM query_history WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
+    this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
   }
 
   // --- Prepared statements (lazy-initialized) ---
@@ -522,6 +547,136 @@ export class DashboardDB {
     return (this.db.prepare(sql).all(...params) as ChatMessageRow[]).reverse();
   }
 
+  // --- Chat persistence jobs ---
+
+  getChatPersistenceJob(turnId: string): ChatPersistenceJobRow | undefined {
+    return this.db.prepare(
+      'SELECT * FROM chat_persistence_jobs WHERE turn_id = ?',
+    ).get(turnId) as ChatPersistenceJobRow | undefined;
+  }
+
+  insertChatPersistenceJob(job: {
+    turn_id: string;
+    session_id: string;
+    user_message: string;
+    assistant_reply: string;
+    tool_calls_json?: string | null;
+    status: ChatPersistenceStatus;
+    attempts: number;
+    max_attempts: number;
+    next_attempt_at: number;
+    queued_at: number;
+    updated_at: number;
+    store_ms?: number | null;
+    error_message?: string | null;
+  }): void {
+    this.stmt('insertChatPersistenceJob', `
+      INSERT INTO chat_persistence_jobs (
+        turn_id, session_id, user_message, assistant_reply, tool_calls_json,
+        status, attempts, max_attempts, next_attempt_at, queued_at, updated_at,
+        store_ms, error_message
+      ) VALUES (
+        @turn_id, @session_id, @user_message, @assistant_reply, @tool_calls_json,
+        @status, @attempts, @max_attempts, @next_attempt_at, @queued_at, @updated_at,
+        @store_ms, @error_message
+      )
+    `).run({
+      ...job,
+      tool_calls_json: job.tool_calls_json ?? null,
+      store_ms: job.store_ms ?? null,
+      error_message: job.error_message ?? null,
+    });
+  }
+
+  markChatPersistenceInProgress(turnId: string, attempts: number, updatedAt: number): void {
+    this.stmt('markChatPersistenceInProgress', `
+      UPDATE chat_persistence_jobs
+      SET status = 'in_progress', attempts = ?, updated_at = ?, error_message = NULL
+      WHERE turn_id = ?
+    `).run(attempts, updatedAt, turnId);
+  }
+
+  markChatPersistenceStored(turnId: string, storeMs: number, updatedAt: number): void {
+    this.stmt('markChatPersistenceStored', `
+      UPDATE chat_persistence_jobs
+      SET status = 'stored', store_ms = ?, updated_at = ?, error_message = NULL
+      WHERE turn_id = ?
+    `).run(storeMs, updatedAt, turnId);
+  }
+
+  markChatPersistencePendingRetry(turnId: string, attempts: number, nextAttemptAt: number, updatedAt: number, errorMessage: string): void {
+    this.stmt('markChatPersistencePendingRetry', `
+      UPDATE chat_persistence_jobs
+      SET status = 'pending', attempts = ?, next_attempt_at = ?, updated_at = ?, error_message = ?
+      WHERE turn_id = ?
+    `).run(attempts, nextAttemptAt, updatedAt, errorMessage, turnId);
+  }
+
+  markChatPersistenceFailed(turnId: string, attempts: number, updatedAt: number, errorMessage: string): void {
+    this.stmt('markChatPersistenceFailed', `
+      UPDATE chat_persistence_jobs
+      SET status = 'failed', attempts = ?, updated_at = ?, error_message = ?
+      WHERE turn_id = ?
+    `).run(attempts, updatedAt, errorMessage, turnId);
+  }
+
+  recoverInProgressChatPersistenceJobs(now: number): void {
+    this.stmt('recoverInProgressChatPersistenceJobs', `
+      UPDATE chat_persistence_jobs
+      SET status = 'pending', next_attempt_at = ?, updated_at = ?
+      WHERE status = 'in_progress'
+    `).run(now, now);
+  }
+
+  getRunnableChatPersistenceJobs(now: number, limit = 10): ChatPersistenceJobRow[] {
+    return this.db.prepare(`
+      SELECT * FROM chat_persistence_jobs
+      WHERE status = 'pending' AND next_attempt_at <= ?
+      ORDER BY next_attempt_at ASC, queued_at ASC
+      LIMIT ?
+    `).all(now, limit) as ChatPersistenceJobRow[];
+  }
+
+  getNextPendingChatPersistenceAt(): number | null {
+    const row = this.db.prepare(
+      `SELECT MIN(next_attempt_at) AS next_at FROM chat_persistence_jobs WHERE status = 'pending'`,
+    ).get() as { next_at: number | null };
+    return row?.next_at ?? null;
+  }
+
+  getChatPersistenceHealth(now: number): ChatPersistenceHealthRow {
+    const counts = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress_count,
+        SUM(CASE WHEN status = 'stored' THEN 1 ELSE 0 END) AS stored_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN status = 'pending' AND next_attempt_at < ? THEN 1 ELSE 0 END) AS overdue_pending_count
+      FROM chat_persistence_jobs
+    `).get(now) as {
+      pending_count: number | null;
+      in_progress_count: number | null;
+      stored_count: number | null;
+      failed_count: number | null;
+      overdue_pending_count: number | null;
+    };
+
+    const oldest = this.db.prepare(`
+      SELECT MIN(queued_at) AS oldest_pending_queued_at
+      FROM chat_persistence_jobs
+      WHERE status = 'pending'
+    `).get() as { oldest_pending_queued_at: number | null };
+
+    return {
+      pending_count: counts?.pending_count ?? 0,
+      in_progress_count: counts?.in_progress_count ?? 0,
+      stored_count: counts?.stored_count ?? 0,
+      failed_count: counts?.failed_count ?? 0,
+      overdue_pending_count: counts?.overdue_pending_count ?? 0,
+      oldest_pending_queued_at: oldest?.oldest_pending_queued_at ?? null,
+    };
+  }
+
   // --- Logs ---
 
   insertLog(entry: {
@@ -787,6 +942,33 @@ export interface ChatMessageRow {
   peer_name: string | null;
   text: string;
   delivered: number | null;
+}
+
+export type ChatPersistenceStatus = 'pending' | 'in_progress' | 'stored' | 'failed';
+
+export interface ChatPersistenceJobRow {
+  turn_id: string;
+  session_id: string;
+  user_message: string;
+  assistant_reply: string;
+  tool_calls_json: string | null;
+  status: ChatPersistenceStatus;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: number;
+  queued_at: number;
+  updated_at: number;
+  store_ms: number | null;
+  error_message: string | null;
+}
+
+export interface ChatPersistenceHealthRow {
+  pending_count: number;
+  in_progress_count: number;
+  stored_count: number;
+  failed_count: number;
+  overdue_pending_count: number;
+  oldest_pending_queued_at: number | null;
 }
 
 export interface SpendingPeriod {

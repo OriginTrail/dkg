@@ -317,7 +317,7 @@ describe('Agent Hub merged with messages and private memories', () => {
   it('AgentHub uses real APIs for chat and memory', () => {
     expect(agentHub).toContain('fetchMemorySessions');
     expect(agentHub).toContain('fetchMemorySession');
-    expect(agentHub).toContain('sendChatMessage');
+    expect(agentHub).toMatch(/sendChatMessage|streamChatMessage/);
     expect(agentHub).toContain('New Chat');
     expect(agentHub).toContain('openSession');
     expect(agentHub).toContain('visualizeSession');
@@ -334,5 +334,22 @@ describe('Agent Hub merged with messages and private memories', () => {
     expect(api).toContain('sendChatMessage');
     expect(api).toContain('sessionId');
     expect(api).toContain('/api/memory/sessions');
+  });
+});
+
+describe('AgentHub initialization-order safety', () => {
+  const agentHub = readFile('pages/AgentHub.tsx');
+
+  it('declares graphRenderTriples before searchMatchedNodeIds', () => {
+    const renderIdx = agentHub.indexOf('const graphRenderTriples = useMemo');
+    const searchIdx = agentHub.indexOf('const searchMatchedNodeIds = useMemo');
+    expect(renderIdx).toBeGreaterThanOrEqual(0);
+    expect(searchIdx).toBeGreaterThanOrEqual(0);
+    expect(renderIdx).toBeLessThan(searchIdx);
+  });
+
+  it('uses ref dispatch for stored-turn graph updates to avoid TDZ callback deps', () => {
+    expect(agentHub).toContain('applyStoredTurnGraphUpdateRef.current(');
+    expect(agentHub).not.toContain('}, [applyStoredTurnGraphUpdate]);');
   });
 });

@@ -95,7 +95,7 @@ input::placeholder{color:#475569}
 .chat-msg{margin-bottom:14px;display:flex;flex-direction:column}
 .chat-msg.user{align-items:flex-end}
 .chat-msg.assistant{align-items:flex-start}
-.chat-bubble{padding:10px 14px;border-radius:10px;max-width:80%;font-size:13px;line-height:1.6}
+.chat-bubble{padding:10px 14px;border-radius:10px;max-width:80%;font-size:12px;line-height:1.55;word-break:break-word;overflow-wrap:anywhere}
 .chat-bubble.user{background:var(--green-dim);color:var(--green);border:1px solid rgba(74,222,128,.13)}
 .chat-bubble.assistant{background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--border)}
 .chat-tool{font-size:10px;color:var(--amber);margin-bottom:4px;display:flex;align-items:center;gap:4px;padding:2px 8px;background:var(--amber-dim);border-radius:4px;width:fit-content}

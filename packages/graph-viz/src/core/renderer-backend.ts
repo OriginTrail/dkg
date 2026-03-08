@@ -38,10 +38,13 @@ export interface RendererBackend {
   ): void;
 
   /** Focus the camera on a specific node */
-  centerOnNode(nodeId: string, durationMs?: number): void;
+  centerOnNode(nodeId: string, durationMs?: number, zoomLevel?: number): void;
 
   /** Fit all visible nodes in view */
   zoomToFit(padding?: number, durationMs?: number): void;
+
+  /** Repaint visuals without replacing graph data/layout state */
+  refresh?(): void;
 
   /** Resize to fit container dimensions */
   resize(): void;

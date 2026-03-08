@@ -1,5 +1,8 @@
 import type { DashboardDB } from './db.js';
 import type { MemoryToolContext } from './chat-memory.js';
+import { LlmClient, LlmRequestError } from './llm/client.js';
+import type { LlmChatMessage, LlmConfig, LlmToolCall } from './llm/types.js';
+export type { LlmConfig } from './llm/types.js';
 
 export interface ChatRequest {
   message: string;
@@ -10,16 +13,23 @@ export interface ChatResponse {
   data?: unknown;
   sparql?: string;
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+  responseMode?: 'streaming' | 'blocking' | 'rule-based';
+  llmDiagnostics?: ChatLlmDiagnostics;
 }
+
+export interface ChatLlmDiagnostics {
+  message: string;
+  status?: number;
+  provider?: string;
+  model?: string;
+  compatibilityHint?: string;
+}
+
+export type ChatStreamEvent =
+  | { type: 'text_delta'; delta: string }
+  | { type: 'final'; response: ChatResponse; responseMode: 'streaming' | 'blocking' | 'rule-based' };
 
 /** OpenAI-compatible LLM config for natural language answers and NL→SPARQL. */
-export interface LlmConfig {
-  apiKey: string;
-  model?: string;
-  baseURL?: string;
-  systemPrompt?: string;
-}
-
 type QueryFn = (sparql: string) => Promise<{ bindings: Array<Record<string, string>> }>;
 
 const HELP_REPLY = `I'm your node assistant. You can ask me about this node (uptime, peers, triples, operations, logs) or just chat. When you ask me to save or add information to the DKG, I can write it to the knowledge graph (workspace) and optionally finalize it on-chain. Our conversation is stored privately in your DKG.`;
@@ -126,6 +136,7 @@ const DKG_TOOLS: OpenAITool[] = [
  */
 export class ChatAssistant {
   private llmConfig?: LlmConfig;
+  private readonly llmClient = new LlmClient();
 
   constructor(
     private readonly db: DashboardDB,
@@ -226,11 +237,8 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
 
   private async callLlm(userMessage: string, toolCallsCollector?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>): Promise<string> {
     if (!this.llmConfig) throw new Error('LLM not configured');
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
-    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-
-    type Message = { role: 'system' | 'user' | 'assistant'; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string; function?: { name: string; arguments: string } };
-    const messages: Message[] = [
+    const caps = this.llmClient.resolveCapabilities(this.llmConfig);
+    const messages: LlmChatMessage[] = [
       { role: 'system', content: this.systemPrompt() },
       { role: 'user', content: userMessage },
     ];
@@ -240,37 +248,17 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
     let lastContent = '';
 
     while (round < maxToolRounds) {
-      const body: Record<string, unknown> = {
-        model,
-        messages,
-        max_tokens: 1024,
-      };
-      if (this.agentTools) {
-        body.tools = DKG_TOOLS;
-        body.tool_choice = 'auto';
-      }
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+      const completion = await this.llmClient.complete({
+        config: this.llmConfig,
+        request: {
+          messages,
+          tools: this.agentTools ? DKG_TOOLS : undefined,
+          toolChoice: this.agentTools ? 'auto' : undefined,
+          maxTokens: caps.supportsMaxTokens ? 1024 : undefined,
+          stream: false,
         },
-        body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`LLM API ${res.status}: ${err.slice(0, 200)}`);
-      }
-      const data = await res.json() as {
-        choices?: Array<{
-          message?: {
-            content?: string;
-            tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
-          };
-        }>;
-      };
-      const msg = data.choices?.[0]?.message;
+      const msg = completion.message;
       if (!msg) throw new Error('Empty LLM response');
 
       lastContent = (msg.content ?? '').trim();
@@ -301,7 +289,7 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
           role: 'tool',
           tool_call_id: tc.id,
           content: typeof summary === 'string' ? summary : JSON.stringify(result ?? summary),
-        } as any);
+        });
       }
       round++;
     }
@@ -316,6 +304,163 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
 
   private looksLikeAction(q: string): boolean {
     return /\b(create|add|save|store|write|publish|remember|enshrine|finalize|make|build|generate|insert|update|delete|remove)\b/.test(q);
+  }
+
+  private shouldUseRulePath(q: string): boolean {
+    return (
+      matches(q, ['uptime', 'how long', 'running for', 'up for']) ||
+      matches(q, ['how many peers', 'peer count', 'connected peers', 'connections']) ||
+      matches(q, ['how many triples', 'triple count', 'total triples', 'graph size']) ||
+      matches(q, ['cpu', 'memory', 'ram', 'resource', 'hardware', 'system health']) ||
+      matches(q, ['failed', 'errors', 'error rate', 'failures']) ||
+      matches(q, ['operations', 'how many operations', 'operation count', 'what did', 'processed']) ||
+      matches(q, ['paranet', 'which paranet', 'subscribed']) ||
+      matches(q, ['agent', 'who is', 'which agents', 'discovered agents', 'nodes on']) ||
+      (q.includes('kc') && (q.includes('testing') || q.includes('paranet'))) ||
+      matches(q, ['store', 'disk', 'storage', 'how big']) ||
+      matches(q, ['recent log', 'last log', 'show log', 'latest log']) ||
+      q.startsWith('select') ||
+      q.startsWith('ask') ||
+      q.startsWith('construct') ||
+      q.startsWith('describe')
+    );
+  }
+
+  private compatibilityHintFromError(message: string): string | undefined {
+    const lower = message.toLowerCase();
+    if (lower.includes('temperature')) {
+      return 'This model rejects "temperature". Leave it unset or pick a model that supports it.';
+    }
+    if (lower.includes('max_tokens') || lower.includes('max completion')) {
+      return 'This model rejects token-limit parameters. Leave token limit unset for this model.';
+    }
+    if (lower.includes('unsupported') || lower.includes('invalid_request_error') || lower.includes('unknown parameter')) {
+      return 'The provider rejected at least one request field. Check Base URL/model compatibility.';
+    }
+    return undefined;
+  }
+
+  private toLlmDiagnostics(err: unknown): ChatLlmDiagnostics {
+    const message = err instanceof Error ? err.message : String(err);
+    const diagnostics: ChatLlmDiagnostics = { message };
+    if (err instanceof LlmRequestError) {
+      diagnostics.status = err.status;
+      diagnostics.provider = err.provider;
+      diagnostics.model = err.model;
+    }
+    const hint = this.compatibilityHintFromError(message);
+    if (hint) diagnostics.compatibilityHint = hint;
+    return diagnostics;
+  }
+
+  async *answerStream(req: ChatRequest): AsyncGenerator<ChatStreamEvent, void, void> {
+    const q = req.message.toLowerCase().trim();
+
+    if (!this.llmConfig || (this.agentTools && this.looksLikeAction(q)) || this.shouldUseRulePath(q)) {
+      const response = await this.answer(req);
+      const responseMode = response.responseMode ?? 'rule-based';
+      yield {
+        type: 'final',
+        response: { ...response, responseMode },
+        responseMode,
+      };
+      return;
+    }
+
+    const caps = this.llmClient.resolveCapabilities(this.llmConfig);
+    const messages: LlmChatMessage[] = [
+      { role: 'system', content: this.systemPrompt() },
+      { role: 'user', content: req.message },
+    ];
+
+    try {
+      const stream = this.llmClient.stream({
+        config: this.llmConfig,
+        request: {
+          messages,
+          tools: this.agentTools ? DKG_TOOLS : undefined,
+          toolChoice: this.agentTools ? 'auto' : undefined,
+          maxTokens: caps.supportsMaxTokens ? 1024 : undefined,
+          stream: true,
+        },
+      });
+
+      let text = '';
+      let responseMode: 'streaming' | 'blocking' = 'blocking';
+      let finalToolCalls: LlmToolCall[] | undefined;
+
+      for await (const event of stream) {
+        if (event.type === 'text_delta' && event.delta) {
+          text += event.delta;
+          yield {
+            type: 'text_delta',
+            delta: event.delta,
+          };
+          continue;
+        }
+        if (event.type === 'final') {
+          responseMode = event.mode;
+          finalToolCalls = event.message.tool_calls;
+          const finalContent = (event.message.content ?? text).trim();
+          if (finalContent) text = finalContent;
+        }
+      }
+
+      if (finalToolCalls && finalToolCalls.length > 0) {
+        // Preserve tool semantics from the existing blocking tool loop.
+        const response = await this.llmAnswer(req);
+        const mode = response.responseMode ?? 'blocking';
+        yield {
+          type: 'final',
+          response: { ...response, responseMode: mode },
+          responseMode: mode,
+        };
+        return;
+      }
+
+      let reply = text.trim();
+      if (!reply) throw new Error('Empty LLM response');
+
+      const sparql = this.extractSparql(reply);
+      if (sparql) {
+        try {
+          const result = await this.queryFn(sparql);
+          const count = result.bindings?.length ?? 0;
+          reply += `\n\n**Executed query** (${count} result(s)):`; // keep parity with blocking path
+          const response: ChatResponse = {
+            reply,
+            data: result.bindings,
+            sparql,
+            responseMode,
+          };
+          yield { type: 'final', response, responseMode };
+          return;
+        } catch (err: any) {
+          reply += `\n\nSPARQL execution failed: ${err.message}`;
+          const response: ChatResponse = { reply, sparql, responseMode };
+          yield { type: 'final', response, responseMode };
+          return;
+        }
+      }
+
+      yield {
+        type: 'final',
+        response: { reply, responseMode },
+        responseMode,
+      };
+    } catch (err: unknown) {
+      const diagnostics = this.toLlmDiagnostics(err);
+      const response: ChatResponse = {
+        reply: `LLM error: ${diagnostics.message}. ${HELP_REPLY}`,
+        llmDiagnostics: diagnostics,
+        responseMode: 'blocking',
+      };
+      yield {
+        type: 'final',
+        response,
+        responseMode: 'blocking',
+      };
+    }
   }
 
   async answer(req: ChatRequest): Promise<ChatResponse> {
@@ -486,18 +631,30 @@ You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save tri
           const result = await this.queryFn(sparql);
           const count = result.bindings?.length ?? 0;
           reply += `\n\n**Executed query** (${count} result(s)):`;
-          return { reply, data: result.bindings, sparql, toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined };
+          return {
+            reply,
+            data: result.bindings,
+            sparql,
+            toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined,
+            responseMode: 'blocking',
+          };
         } catch (err: any) {
           reply += `\n\nSPARQL execution failed: ${err.message}`;
-          return { reply, sparql };
+          return { reply, sparql, responseMode: 'blocking' };
         }
       }
       return {
         reply,
         toolCalls: toolCallsCollector.length ? toolCallsCollector : undefined,
+        responseMode: 'blocking',
       };
-    } catch (err: any) {
-      return { reply: `LLM error: ${err.message}. ${HELP_REPLY}` };
+    } catch (err: unknown) {
+      const diagnostics = this.toLlmDiagnostics(err);
+      return {
+        reply: `LLM error: ${diagnostics.message}. ${HELP_REPLY}`,
+        llmDiagnostics: diagnostics,
+        responseMode: 'blocking',
+      };
     }
   }
 }

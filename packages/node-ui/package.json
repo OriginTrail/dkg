@@ -10,6 +10,8 @@
     "dev:ui": "vite",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "benchmark:stage5": "tsx scripts/stage5-scale-benchmark.mts",
+    "benchmark:stage6": "tsx scripts/stage6-delta-benchmark.mts",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
