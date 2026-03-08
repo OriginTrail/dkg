@@ -11,9 +11,12 @@ export function AppsPage() {
   const sendToken = useCallback(() => {
     const token = (window as any).__DKG_TOKEN__;
     if (token && iframeRef.current?.contentWindow) {
+      // targetOrigin must be '*' because the sandbox (without allow-same-origin)
+      // gives the iframe an opaque origin. The e.source guard on the message
+      // listener ensures we only respond to our own iframe.
       iframeRef.current.contentWindow.postMessage(
         { type: 'dkg-token', token, apiOrigin: window.location.origin },
-        window.location.origin,
+        '*',
       );
     }
   }, []);

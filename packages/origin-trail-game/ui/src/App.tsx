@@ -131,6 +131,10 @@ function lit(value: string | number): string {
   return `"${escapeLiteral(String(value))}"`;
 }
 
+function uriSegment(s: string): string {
+  return encodeURIComponent(s);
+}
+
 /**
  * Build rich RDF triples from the game's own ontology. Uses the same URIs
  * as rdf.ts so the graph is consistent with what the DKG stores.
@@ -149,7 +153,7 @@ function buildContextTriples(swarm: any): Triple[] {
 
   // Party members
   for (const m of gs.party ?? []) {
-    const agentUri = `${OT}agent/${m.name.replace(/\s+/g, '-')}`;
+    const agentUri = `${OT}agent/${uriSegment(m.name)}`;
     triples.push({ subject: swarmUri, predicate: `${OT}hasMember`, object: agentUri });
     triples.push({ subject: agentUri, predicate: RDF_TYPE, object: m.alive ? `${OT}Agent` : `${OT}DeadAgent` });
     triples.push({ subject: agentUri, predicate: SCHEMA_NAME, object: lit(m.name) });
@@ -193,10 +197,11 @@ function buildContextTriples(swarm: any): Triple[] {
     const resolution = turn.resolution ?? 'consensus';
     triples.push({ subject: turnUri, predicate: `${OT}resolution`, object: lit(resolution) });
 
-    // Per-player votes
+    // Per-player votes — use peerId as stable identifier, fall back to display name
     for (const v of turn.votes ?? []) {
-      const voterUri = `${OT}player/${(v.displayName ?? v.peerId?.slice(-8) ?? 'unknown').replace(/\s+/g, '-')}`;
-      const voteUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/vote/${(v.displayName ?? v.peerId?.slice(-8) ?? 'anon').replace(/\s+/g, '-')}`;
+      const voterId = v.peerId ?? uriSegment(v.displayName ?? 'unknown');
+      const voterUri = `${OT}player/${voterId}`;
+      const voteUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/vote/${voterId}`;
       triples.push({ subject: turnUri, predicate: `${OT}hasVote`, object: voteUri });
       triples.push({ subject: voteUri, predicate: RDF_TYPE, object: `${OT}Vote` });
       triples.push({ subject: voteUri, predicate: `${OT}voter`, object: voterUri });
@@ -209,8 +214,8 @@ function buildContextTriples(swarm: any): Triple[] {
     for (const d of turn.deaths ?? []) {
       const name = typeof d === 'string' ? d : d.name;
       const cause = typeof d === 'string' ? null : d.cause;
-      const deathUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/death/${name.replace(/\s+/g, '-')}`;
-      const agentUri = `${OT}agent/${name.replace(/\s+/g, '-')}`;
+      const deathUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/death/${uriSegment(name)}`;
+      const agentUri = `${OT}agent/${uriSegment(name)}`;
       triples.push({ subject: turnUri, predicate: `${OT}hasDeath`, object: deathUri });
       triples.push({ subject: deathUri, predicate: RDF_TYPE, object: `${OT}DeathEvent` });
       triples.push({ subject: deathUri, predicate: RDFS_LABEL, object: lit(`${name} perished`) });

@@ -724,6 +724,17 @@ export class OriginTrailGameCoordinator {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
     }
 
+    const resolvedMsg: proto.TurnResolvedMsg = {
+      app: proto.APP_ID,
+      type: 'turn:resolved',
+      swarmId: swarm.id,
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      turn: turnNumber,
+      proposalHash: hash,
+    };
+    await this.broadcast(resolvedMsg);
+
     this.log(`Force-resolve: turn ${turnNumber} resolved immediately for ${swarm.id}`);
     return swarm;
   }
@@ -921,6 +932,41 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    const resolution = msg.resolution ?? 'consensus';
+    const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
+    const deaths = msg.deaths ?? [];
+
+    // Force-resolved turns bypass quorum — the leader already applied the turn
+    // and published to the context graph, so receivers apply it directly.
+    if (resolution === 'force-resolved') {
+      const newState: GameState = JSON.parse(msg.newStateJson);
+      swarm.pendingProposal = null;
+      this.stopVoteHeartbeat(swarm.id);
+      swarm.gameState = newState;
+
+      swarm.turnHistory.push({
+        turn: msg.turn,
+        winningAction: msg.winningAction,
+        resultMessage: msg.resultMessage,
+        approvers: [msg.peerId],
+        votes,
+        resolution,
+        deaths,
+        event: msg.event,
+        timestamp: Date.now(),
+      });
+
+      if (newState.status !== 'active') {
+        swarm.status = 'finished';
+      } else {
+        swarm.currentTurn++;
+        swarm.votes = [];
+        swarm.turnDeadline = Date.now() + 30_000;
+      }
+      this.log(`Applied force-resolved turn ${msg.turn} for ${msg.swarmId}`);
+      return;
+    }
+
     swarm.pendingProposal = {
       turn: msg.turn,
       hash: msg.proposalHash,
@@ -928,9 +974,9 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
-      votes: msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action })),
-      resolution: msg.resolution ?? 'consensus',
-      deaths: msg.deaths ?? [],
+      votes,
+      resolution,
+      deaths,
       event: msg.event,
     };
 
