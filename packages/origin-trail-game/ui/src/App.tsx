@@ -548,9 +548,9 @@ export function App() {
             <button className="ot-secondary" onClick={async () => {
               try {
                 if (swarm.status === 'recruiting') await api.leave(swarm.id);
-              } catch {}
-              setSwarm(null);
-              setView('lobby');
+                setSwarm(null);
+                setView('lobby');
+              } catch (e: any) { setError(e.message); }
             }}>Back to Lobby</button>
           </div>
         </div>

@@ -232,6 +232,12 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toContain('isSeparateOrigin');
   });
 
+  it('uses onError fallback instead of CORS-blocked HEAD probe', () => {
+    expect(apps).toContain('onError={handleIframeError}');
+    expect(apps).toContain('triedStaticRef');
+    expect(apps).not.toMatch(/fetch\(.*staticUrl.*HEAD/);
+  });
+
   it('uses nonce handshake before sending token', () => {
     expect(apps).toContain('postMessage');
     expect(apps).toContain('dkg-nonce');

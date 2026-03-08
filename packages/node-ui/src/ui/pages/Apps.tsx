@@ -26,21 +26,23 @@ export function validateTokenRequest(
 export function AppsPage({ apps }: { apps?: InstalledApp[] }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const nonceRef = useRef<string | null>(null);
-  const [src, setSrc] = useState<string | null>(null);
-
   const app = apps?.find(a => a.id === GAME_APP_ID);
+  const [src, setSrc] = useState(app?.staticUrl || FALLBACK_PATH);
+  const triedStaticRef = useRef(false);
 
   useEffect(() => {
-    if (app?.staticUrl) {
-      fetch(app.staticUrl, { method: 'HEAD' })
-        .then(r => setSrc(r.ok ? app.staticUrl! : FALLBACK_PATH))
-        .catch(() => setSrc(FALLBACK_PATH));
-    } else {
+    triedStaticRef.current = false;
+    setSrc(app?.staticUrl || FALLBACK_PATH);
+  }, [app?.staticUrl]);
+
+  const handleIframeError = useCallback(() => {
+    if (app?.staticUrl && !triedStaticRef.current) {
+      triedStaticRef.current = true;
       setSrc(FALLBACK_PATH);
     }
   }, [app?.staticUrl]);
 
-  const isSeparateOrigin = src != null && src !== FALLBACK_PATH;
+  const isSeparateOrigin = src !== FALLBACK_PATH;
 
   const sendNonce = useCallback(() => {
     if (!iframeRef.current?.contentWindow) return;
@@ -70,13 +72,12 @@ export function AppsPage({ apps }: { apps?: InstalledApp[] }) {
     return () => window.removeEventListener('message', handler);
   }, []);
 
-  if (!src) return null;
-
   return (
     <iframe
       ref={iframeRef}
       src={src}
       onLoad={sendNonce}
+      onError={handleIframeError}
       sandbox={isSeparateOrigin
         ? 'allow-scripts allow-forms allow-popups'
         : 'allow-scripts allow-same-origin allow-forms allow-popups'}
