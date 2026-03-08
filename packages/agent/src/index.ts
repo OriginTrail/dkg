@@ -5,4 +5,5 @@ export { ProfileManager } from './profile-manager.js';
 export { DiscoveryClient, type DiscoveredAgent, type DiscoveredOffering, type SkillSearchOptions } from './discovery.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler } from './messaging.js';
+export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { DKGAgent, type DKGAgentConfig, type ParanetSub, type PeerHealth } from './dkg-agent.js';
