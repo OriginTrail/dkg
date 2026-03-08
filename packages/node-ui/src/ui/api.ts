@@ -151,8 +151,8 @@ export interface ImportMemoryResult {
   entityCount: number;
   quads: ImportMemoryQuad[];
 }
-export const importMemories = (text: string, source?: string) =>
-  post<ImportMemoryResult>('/api/memory/import', { text, source });
+export const importMemories = (text: string, source?: string, useLlm?: boolean) =>
+  post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>

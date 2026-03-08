@@ -315,6 +315,21 @@ describe('Import Memory — LLM-assisted parsing', () => {
     globalThis.fetch = originalFetch;
   });
 
+  it('does not send data to LLM when useLlm opt-in is not set', async () => {
+    globalThis.fetch = vi.fn();
+
+    const manager = new ChatMemoryManager(mocks.tools, {
+      apiKey: 'test-key',
+      model: 'gpt-4o-mini',
+      baseURL: 'https://api.openai.com/v1',
+    });
+    const result = await manager.importMemories('- Private thought', 'claude');
+
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(result.memoryCount).toBe(1);
+    expect(result.entityCount).toBe(0);
+  });
+
   it('uses LLM to parse memories when API key is configured', async () => {
     const llmResponse = JSON.stringify([
       { text: 'Prefers dark mode', category: 'preference' },
@@ -334,7 +349,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme', 'claude');
+    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
     // First call: parse memories, second call: knowledge extraction
@@ -356,7 +371,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('- Likes coffee\n- Has a cat', 'chatgpt');
+    const result = await manager.importMemories('- Likes coffee\n- Has a cat', 'chatgpt', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
     const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
@@ -385,7 +400,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude');
+    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
     const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
@@ -414,7 +429,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude');
+    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
     const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
@@ -440,7 +455,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('- Should still parse\n- Via heuristic fallback', 'claude');
+    const result = await manager.importMemories('- Should still parse\n- Via heuristic fallback', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
     expect(result.source).toBe('claude');
@@ -478,7 +493,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
       model: 'gpt-4o-mini',
       baseURL: 'https://api.openai.com/v1',
     });
-    const result = await manager.importMemories('Works at Acme Corp as an engineer', 'claude');
+    const result = await manager.importMemories('Works at Acme Corp as an engineer', 'claude', { useLlm: true });
 
     expect(result.entityCount).toBe(1);
     expect(mocks.mockWriteToWorkspace).toHaveBeenCalledTimes(2);
@@ -534,6 +549,42 @@ describe('POST /api/memory/import — route handler', () => {
     expect(handled).toBe(true);
     expect(res._status).toBe(400);
     expect(JSON.parse(res._body)).toEqual({ error: 'Invalid JSON body' });
+  });
+
+  it('returns 400 for non-object JSON body (null)', async () => {
+    const req = mockReq('POST', '/api/memory/import', 'null');
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Request body must be a JSON object' });
+  });
+
+  it('returns 400 for non-object JSON body (array)', async () => {
+    const req = mockReq('POST', '/api/memory/import', '[1, 2, 3]');
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Request body must be a JSON object' });
+  });
+
+  it('returns 400 for non-object JSON body (string)', async () => {
+    const req = mockReq('POST', '/api/memory/import', '"hello"');
+    const res = mockRes();
+    const url = new URL('http://localhost/api/memory/import');
+
+    const handled = await handleNodeUIRequest(req, res, url, {} as any, '', undefined, undefined, undefined, createMemoryManager());
+
+    expect(handled).toBe(true);
+    expect(res._status).toBe(400);
+    expect(JSON.parse(res._body)).toEqual({ error: 'Request body must be a JSON object' });
   });
 
   it('returns 400 for missing text field', async () => {

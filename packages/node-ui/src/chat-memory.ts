@@ -602,17 +602,23 @@ export class ChatMemoryManager {
     }
   }
 
-  async importMemories(rawText: string, source: ImportSource = 'other'): Promise<ImportResult> {
+  async importMemories(
+    rawText: string,
+    source: ImportSource = 'other',
+    opts: { useLlm?: boolean } = {},
+  ): Promise<ImportResult> {
     await this.ensureInitialized();
     const batchId = crypto.randomUUID().slice(0, 12);
     const batchUri = `${MEMORY_NS}import:${batchId}`;
     const now = new Date().toISOString();
 
-    let memories = this.llmConfig?.apiKey
+    const llmEnabled = opts.useLlm === true && !!this.llmConfig?.apiKey;
+
+    let memories = llmEnabled
       ? await this.parseMemoriesWithLlm(rawText)
       : this.parseMemoriesHeuristic(rawText);
 
-    if (memories.length === 0 && this.llmConfig?.apiKey) {
+    if (memories.length === 0 && llmEnabled) {
       memories = this.parseMemoriesHeuristic(rawText);
     }
 
@@ -645,7 +651,7 @@ export class ChatMemoryManager {
     await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
 
     let entityCount = 0;
-    if (this.llmConfig?.apiKey) {
+    if (llmEnabled) {
       try {
         entityCount = await this.extractKnowledgeFromImport(batchUri, memories);
       } catch { /* best-effort knowledge extraction */ }

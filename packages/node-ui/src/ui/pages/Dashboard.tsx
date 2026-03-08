@@ -169,6 +169,7 @@ function ImportResultView({
 function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [text, setText] = useState('');
   const [source, setSource] = useState<ImportSource>('claude');
+  const [useLlm, setUseLlm] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportMemoryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -176,6 +177,7 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
   const reset = useCallback(() => {
     setText('');
     setSource('claude');
+    setUseLlm(false);
     setImporting(false);
     setResult(null);
     setError(null);
@@ -193,14 +195,14 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
     setError(null);
     setResult(null);
     try {
-      const res = await importMemories(text.trim(), source);
+      const res = await importMemories(text.trim(), source, useLlm);
       setResult(res);
     } catch (err: any) {
       setError(err.message ?? 'Import failed');
     } finally {
       setImporting(false);
     }
-  }, [text, source, importing]);
+  }, [text, source, useLlm, importing]);
 
   if (!open) return null;
   return (
@@ -247,6 +249,11 @@ function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) 
                 </code>
               </div>
             </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={useLlm} onChange={e => setUseLlm(e.target.checked)} disabled={importing} />
+              <span>Use LLM-assisted parsing <span style={{ fontSize: 10, opacity: 0.7 }}>(sends memories to configured LLM for better categorisation &amp; entity extraction)</span></span>
+            </label>
 
             <textarea
               value={text}

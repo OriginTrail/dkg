@@ -246,14 +246,17 @@ export async function handleNodeUIRequest(
     } catch {
       return json(res, 400, { error: 'Invalid JSON body' });
     }
-    const { text, source } = parsed;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return json(res, 400, { error: 'Request body must be a JSON object' });
+    }
+    const { text, source, useLlm } = parsed;
     if (!text || typeof text !== 'string' || text.trim().length === 0) {
       return json(res, 400, { error: 'Missing or empty "text" field' });
     }
     const validSources = ['claude', 'chatgpt', 'gemini', 'other'];
     const importSource = validSources.includes(source) ? source : 'other';
     try {
-      const result = await memoryManager.importMemories(text.trim(), importSource);
+      const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
       return json(res, 200, result);
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to import memories' });
