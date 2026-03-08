@@ -988,6 +988,91 @@ describe('Network topology hints (V3)', () => {
     const handle = handlers![0];
     for (const [pid, name] of [['topo-p2', 'P2'], ['topo-p3', 'P3']]) {
       handle('dkg/paranet/topo-test/app', encode({
+
+describe('Workspace lineage quads', () => {
+  it('generates enshrined quads when publishedUal is present', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [{
+      workspaceOperationId: 'op-123',
+      rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-abc',
+      publishedUal: 'did:dkg:test-ual',
+      publishedTxHash: '0xabcdef',
+      publishedAt: 1700000000000,
+    }]);
+
+    expect(quads.length).toBe(7);
+    expect(quads[0].subject).toContain('lineage/op-123');
+    expect(quads[0].predicate).toContain('rdf-syntax-ns#type');
+    expect(quads[0].object).toContain('WorkspaceLineage');
+    expect(quads[0].graph).toBe('did:dkg:paranet:origin-trail-game');
+
+    const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
+    expect(statusQuad?.object).toContain('enshrined');
+
+    const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
+    expect(ualQuad?.object).toContain('did:dkg:test-ual');
+  });
+
+  it('generates workspace-only quads when no publishedUal', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [{
+      workspaceOperationId: 'op-456',
+      rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-def/vote/peer-1',
+    }]);
+
+    expect(quads.length).toBe(4);
+    const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
+    expect(statusQuad?.object).toContain('workspace-only');
+
+    const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
+    expect(ualQuad).toBeUndefined();
+  });
+
+  it('handles multiple entries with distinct subjects', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [
+      { workspaceOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1' },
+      { workspaceOperationId: 'op-b', rootEntity: 'https://example.com/e2' },
+    ]);
+
+    const subjects = new Set(quads.map((q: any) => q.subject));
+    expect(subjects.size).toBe(2);
+    expect([...subjects].some(s => s.includes('op-a'))).toBe(true);
+    expect([...subjects].some(s => s.includes('op-b'))).toBe(true);
+
+    const enshrined = quads.filter((q: any) => q.object?.includes?.('enshrined'));
+    const wsOnly = quads.filter((q: any) => q.object?.includes?.('workspace-only'));
+    expect(enshrined.length).toBe(1);
+    expect(wsOnly.length).toBe(1);
+  });
+});
+
+describe('Workspace lineage tracking', () => {
+  it('writes lineage quads after force-resolve turn publish', async () => {
+    const leaderPeerId = 'lineage-leader';
+    let opCounter = 0;
+    const lineageAgent = makeMockAgent(leaderPeerId);
+    lineageAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      lineageAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    lineageAgent.publish = async (_paranetId: string, quads: any[]) => {
+      lineageAgent._published.push(quads);
+      return { ual: 'did:dkg:published-ual', txHash: '0xabc123' };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(lineageAgent as any, { paranetId: 'lineage-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'Lineage Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = lineageAgent._messageHandlers.get('dkg/paranet/lineage-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [['lineage-p2', 'P2'], ['lineage-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1037,6 +1122,69 @@ describe('Network topology hints (V3)', () => {
 
     coordinator.destroy();
     // No error thrown, timer cleaned up
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    const writesBeforeForce = lineageAgent._workspaceWrites.length;
+
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageWrites = lineageAgent._workspaceWrites.slice(writesBeforeForce).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('enshrined'))).toBe(true);
+
+    const lineageLogs = logs.filter(l => l.includes('lineage'));
+    expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('lineage entries are workspace-only when publish returns no UAL', async () => {
+    const leaderPeerId = 'lineage-noul-leader';
+    let opCounter = 0;
+    const noUalAgent = makeMockAgent(leaderPeerId);
+    noUalAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      noUalAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    noUalAgent.publish = async (_paranetId: string, quads: any[]) => {
+      noUalAgent._published.push(quads);
+      return {};
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(noUalAgent as any, { paranetId: 'lineage-noul' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'No-UAL Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = noUalAgent._messageHandlers.get('dkg/paranet/lineage-noul/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [['noul-p2', 'P2'], ['noul-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-noul/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageWrites = noUalAgent._workspaceWrites.filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace-only'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
   });
 });
 

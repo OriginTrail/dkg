@@ -145,6 +145,7 @@ export class OriginTrailGameCoordinator {
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
+  private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntity: string }>>();
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -353,7 +354,8 @@ export class OriginTrailGameCoordinator {
       ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
       ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName),
     ];
-    await this.agent.writeToWorkspace(this.paranetId, quads);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, quads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, quads[0].subject);
 
     const msg: proto.SwarmCreatedMsg = {
       app: proto.APP_ID,
@@ -385,9 +387,9 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
     });
 
-    await this.agent.writeToWorkspace(this.paranetId, rdf.playerJoinedQuads(
-      this.paranetId, swarmId, this.myPeerId, playerName,
-    ));
+    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, joinQuads[0].subject);
 
     const msg: proto.SwarmJoinedMsg = {
       app: proto.APP_ID,
@@ -490,9 +492,9 @@ export class OriginTrailGameCoordinator {
     };
     swarm.votes.push(vote);
 
-    await this.agent.writeToWorkspace(this.paranetId, rdf.voteCastQuads(
-      this.paranetId, swarmId, swarm.currentTurn, this.myPeerId, action, params,
-    ));
+    const voteQuads = rdf.voteCastQuads(this.paranetId, swarmId, swarm.currentTurn, this.myPeerId, action, params);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, voteQuads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, voteQuads[0].subject);
 
     const msg: proto.VoteCastMsg = {
       app: proto.APP_ID,
@@ -659,7 +661,7 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.leaderPeerId === this.myPeerId) {
       try {
-        await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+        const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
           this.paranetId, swarm.id, proposal.turn,
           proposal.winningAction, proposal.newStateJson,
           [...proposal.approvals],
@@ -678,6 +680,7 @@ export class OriginTrailGameCoordinator {
             this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
           }
         }
+        await this.writeLineageForSwarm(swarm.id, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
       }
@@ -793,6 +796,7 @@ export class OriginTrailGameCoordinator {
           this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
         }
       }
+      await this.writeLineageForSwarm(swarm.id, publishResult);
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
     }
@@ -1201,6 +1205,36 @@ export class OriginTrailGameCoordinator {
         }),
       })),
     };
+  }
+
+  // ── Workspace lineage ────────────────────────────────────────────
+
+  private trackWorkspaceOp(swarmId: string, opId: string, rootEntity: string): void {
+    if (!this.workspaceOps.has(swarmId)) this.workspaceOps.set(swarmId, []);
+    this.workspaceOps.get(swarmId)!.push({ workspaceOperationId: opId, rootEntity });
+  }
+
+  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number }>): Promise<void> {
+    const quads = rdf.workspaceLineageQuads(paranetId, entries);
+    if (quads.length > 0) {
+      await this.agent.writeToWorkspace(paranetId, quads);
+      this.log(`Recorded workspace lineage for ${entries.length} operation(s)`);
+    }
+  }
+
+  private async writeLineageForSwarm(swarmId: string, publishResult: any): Promise<void> {
+    const ops = this.workspaceOps.get(swarmId);
+    if (!ops || ops.length === 0) return;
+    const now = Date.now();
+    const entries = ops.map(op => ({
+      workspaceOperationId: op.workspaceOperationId,
+      rootEntity: op.rootEntity,
+      publishedUal: publishResult?.ual as string | undefined,
+      publishedTxHash: publishResult?.txHash as string | undefined,
+      publishedAt: publishResult?.ual ? now : undefined,
+    }));
+    await this.recordWorkspaceLineage(this.paranetId, entries);
+    this.workspaceOps.delete(swarmId);
   }
 
   // ── Utilities ─────────────────────────────────────────────────────
