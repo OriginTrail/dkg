@@ -123,6 +123,14 @@ const RESOLUTION_LABELS: Record<string, { label: string; color: string }> = {
   'force-resolved': { label: 'Force Resolved', color: 'var(--red)' },
 };
 
+function escapeLiteral(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
+function lit(value: string | number): string {
+  return `"${escapeLiteral(String(value))}"`;
+}
+
 /**
  * Build rich RDF triples from the game's own ontology. Uses the same URIs
  * as rdf.ts so the graph is consistent with what the DKG stores.
@@ -135,27 +143,27 @@ function buildContextTriples(swarm: any): Triple[] {
   const swarmUri = `${OT}swarm/${swarm.id}`;
 
   triples.push({ subject: swarmUri, predicate: RDF_TYPE, object: `${OT}AgentSwarm` });
-  triples.push({ subject: swarmUri, predicate: SCHEMA_NAME, object: `"${swarm.name}"` });
-  triples.push({ subject: swarmUri, predicate: `${OT}status`, object: `"${gs.status}"` });
-  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: `"${gs.epochs}/2000"` });
+  triples.push({ subject: swarmUri, predicate: SCHEMA_NAME, object: lit(swarm.name) });
+  triples.push({ subject: swarmUri, predicate: `${OT}status`, object: lit(gs.status) });
+  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: lit(`${gs.epochs}/2000`) });
 
   // Party members
   for (const m of gs.party ?? []) {
     const agentUri = `${OT}agent/${m.name.replace(/\s+/g, '-')}`;
     triples.push({ subject: swarmUri, predicate: `${OT}hasMember`, object: agentUri });
     triples.push({ subject: agentUri, predicate: RDF_TYPE, object: m.alive ? `${OT}Agent` : `${OT}DeadAgent` });
-    triples.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${m.name}"` });
-    triples.push({ subject: agentUri, predicate: `${OT}health`, object: `"${m.health} HP"` });
+    triples.push({ subject: agentUri, predicate: SCHEMA_NAME, object: lit(m.name) });
+    triples.push({ subject: agentUri, predicate: `${OT}health`, object: lit(`${m.health} HP`) });
   }
 
   // Current resources
   const resUri = `${OT}swarm/${swarm.id}/resources`;
   triples.push({ subject: swarmUri, predicate: `${OT}resources`, object: resUri });
   triples.push({ subject: resUri, predicate: RDF_TYPE, object: `${OT}ResourceState` });
-  triples.push({ subject: resUri, predicate: `${OT}trainingTokens`, object: `"${gs.trainingTokens}"` });
-  triples.push({ subject: resUri, predicate: `${OT}apiCredits`, object: `"${gs.apiCredits}"` });
-  triples.push({ subject: resUri, predicate: `${OT}computeUnits`, object: `"${gs.computeUnits}"` });
-  triples.push({ subject: resUri, predicate: `${OT}trac`, object: `"${gs.trac}"` });
+  triples.push({ subject: resUri, predicate: `${OT}trainingTokens`, object: lit(gs.trainingTokens) });
+  triples.push({ subject: resUri, predicate: `${OT}apiCredits`, object: lit(gs.apiCredits) });
+  triples.push({ subject: resUri, predicate: `${OT}computeUnits`, object: lit(gs.computeUnits) });
+  triples.push({ subject: resUri, predicate: `${OT}trac`, object: lit(gs.trac) });
 
   // Turn history — decision trace as linked knowledge graph
   const history: any[] = swarm.turnHistory ?? [];
@@ -164,26 +172,26 @@ function buildContextTriples(swarm: any): Triple[] {
   for (const turn of history) {
     const turnUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}`;
     triples.push({ subject: turnUri, predicate: RDF_TYPE, object: `${OT}TurnResult` });
-    triples.push({ subject: turnUri, predicate: `${OT}turn`, object: `"Turn ${turn.turn}"` });
+    triples.push({ subject: turnUri, predicate: `${OT}turn`, object: lit(`Turn ${turn.turn}`) });
     triples.push({ subject: turnUri, predicate: `${OT}swarm`, object: swarmUri });
 
     // Action decided
     const actionUri = `${OT}action/${turn.winningAction}`;
     triples.push({ subject: turnUri, predicate: `${OT}winningAction`, object: actionUri });
     triples.push({ subject: actionUri, predicate: RDF_TYPE, object: `${OT}Action` });
-    triples.push({ subject: actionUri, predicate: RDFS_LABEL, object: `"${ACTION_LABELS[turn.winningAction] ?? turn.winningAction}"` });
+    triples.push({ subject: actionUri, predicate: RDFS_LABEL, object: lit(ACTION_LABELS[turn.winningAction] ?? turn.winningAction) });
 
     // Result
     if (turn.resultMessage) {
       const resultUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/result`;
       triples.push({ subject: turnUri, predicate: `${OT}result`, object: resultUri });
       triples.push({ subject: resultUri, predicate: RDF_TYPE, object: `${OT}Outcome` });
-      triples.push({ subject: resultUri, predicate: RDFS_LABEL, object: `"${turn.resultMessage}"` });
+      triples.push({ subject: resultUri, predicate: RDFS_LABEL, object: lit(turn.resultMessage) });
     }
 
     // Resolution method
     const resolution = turn.resolution ?? 'consensus';
-    triples.push({ subject: turnUri, predicate: `${OT}resolution`, object: `"${resolution}"` });
+    triples.push({ subject: turnUri, predicate: `${OT}resolution`, object: lit(resolution) });
 
     // Per-player votes
     for (const v of turn.votes ?? []) {
@@ -192,9 +200,9 @@ function buildContextTriples(swarm: any): Triple[] {
       triples.push({ subject: turnUri, predicate: `${OT}hasVote`, object: voteUri });
       triples.push({ subject: voteUri, predicate: RDF_TYPE, object: `${OT}Vote` });
       triples.push({ subject: voteUri, predicate: `${OT}voter`, object: voterUri });
-      triples.push({ subject: voteUri, predicate: `${OT}votedAction`, object: `"${ACTION_LABELS[v.action] ?? v.action}"` });
+      triples.push({ subject: voteUri, predicate: `${OT}votedAction`, object: lit(ACTION_LABELS[v.action] ?? v.action) });
       triples.push({ subject: voterUri, predicate: RDF_TYPE, object: `${OT}Player` });
-      triples.push({ subject: voterUri, predicate: SCHEMA_NAME, object: `"${v.displayName ?? v.peerId?.slice(-8) ?? 'Unknown'}"` });
+      triples.push({ subject: voterUri, predicate: SCHEMA_NAME, object: lit(v.displayName ?? v.peerId?.slice(-8) ?? 'Unknown') });
     }
 
     // Deaths
@@ -205,9 +213,9 @@ function buildContextTriples(swarm: any): Triple[] {
       const agentUri = `${OT}agent/${name.replace(/\s+/g, '-')}`;
       triples.push({ subject: turnUri, predicate: `${OT}hasDeath`, object: deathUri });
       triples.push({ subject: deathUri, predicate: RDF_TYPE, object: `${OT}DeathEvent` });
-      triples.push({ subject: deathUri, predicate: RDFS_LABEL, object: `"${name} perished"` });
+      triples.push({ subject: deathUri, predicate: RDFS_LABEL, object: lit(`${name} perished`) });
       triples.push({ subject: deathUri, predicate: `${OT}agent`, object: agentUri });
-      if (cause) triples.push({ subject: deathUri, predicate: `${OT}causeOfDeath`, object: `"${cause}"` });
+      if (cause) triples.push({ subject: deathUri, predicate: `${OT}causeOfDeath`, object: lit(cause) });
     }
 
     // Game event
@@ -215,7 +223,7 @@ function buildContextTriples(swarm: any): Triple[] {
       const eventUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/event`;
       triples.push({ subject: turnUri, predicate: `${OT}hasEvent`, object: eventUri });
       triples.push({ subject: eventUri, predicate: RDF_TYPE, object: `${OT}GameEvent` });
-      triples.push({ subject: eventUri, predicate: RDFS_LABEL, object: `"${turn.event.description}"` });
+      triples.push({ subject: eventUri, predicate: RDFS_LABEL, object: lit(turn.event.description) });
     }
 
     // Temporal chain

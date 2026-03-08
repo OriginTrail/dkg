@@ -667,24 +667,34 @@ export class OriginTrailGameCoordinator {
     const deaths = detectDeaths(swarm.gameState, result.newState, event);
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
-    // Force-resolve bypasses normal consensus — the caller is explicitly
-    // overriding the threshold (leader anytime, others after deadline).
-    // Add all players as approvers so the proposal clears immediately.
-    const allPeerIds = new Set(swarm.players.map(p => p.peerId));
-    allPeerIds.add(this.myPeerId);
+    // Force-resolve bypasses normal consensus — apply the turn directly
+    // without fabricating approvals. Only the actual force-resolver is recorded.
+    const turnNumber = swarm.currentTurn;
 
-    swarm.pendingProposal = {
-      turn: swarm.currentTurn,
-      hash,
+    swarm.pendingProposal = null;
+    this.stopVoteHeartbeat(swarm.id);
+
+    swarm.gameState = result.newState;
+
+    swarm.turnHistory.push({
+      turn: turnNumber,
       winningAction,
-      newStateJson,
       resultMessage: result.message,
-      approvals: allPeerIds,
+      approvers: [this.myPeerId],
       votes,
       resolution: 'force-resolved',
       deaths,
       event: turnEvent,
-    };
+      timestamp: Date.now(),
+    });
+
+    if (result.newState.status !== 'active') {
+      swarm.status = 'finished';
+    } else {
+      swarm.currentTurn++;
+      swarm.votes = [];
+      swarm.turnDeadline = Date.now() + 30_000;
+    }
 
     const msg: proto.TurnProposalMsg = {
       app: proto.APP_ID,
@@ -692,7 +702,7 @@ export class OriginTrailGameCoordinator {
       swarmId: swarm.id,
       peerId: this.myPeerId,
       timestamp: Date.now(),
-      turn: swarm.currentTurn,
+      turn: turnNumber,
       proposalHash: hash,
       winningAction,
       newStateJson,
@@ -703,9 +713,18 @@ export class OriginTrailGameCoordinator {
       event: turnEvent,
     };
     await this.broadcast(msg);
-    this.log(`Force-resolve: turn ${swarm.currentTurn} resolved immediately for ${swarm.id}`);
 
-    await this.checkProposalThreshold(swarm);
+    try {
+      await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+        this.paranetId, swarm.id, turnNumber,
+        winningAction, newStateJson, [this.myPeerId],
+      ));
+      this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
+    } catch (err: any) {
+      this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
+    }
+
+    this.log(`Force-resolve: turn ${turnNumber} resolved immediately for ${swarm.id}`);
     return swarm;
   }
 

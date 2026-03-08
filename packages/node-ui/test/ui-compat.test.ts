@@ -18,10 +18,10 @@ describe('lobby API type contract', () => {
     expect(api).not.toMatch(/myWagons/);
   });
 
-  it('Apps.tsx consumes openSwarms/mySwarms from lobby', () => {
+  it('Apps.tsx embeds the game via iframe (lobby logic moved to standalone app)', () => {
     const apps = readFile('pages/Apps.tsx');
-    expect(apps).toContain('openSwarms');
-    expect(apps).toContain('mySwarms');
+    expect(apps).toContain('iframe');
+    expect(apps).toContain('/apps/origin-trail-game/');
     expect(apps).not.toMatch(/openWagons/);
     expect(apps).not.toMatch(/myWagons/);
   });
@@ -219,49 +219,22 @@ describe('explorer graph query safety', () => {
   });
 });
 
-describe('Apps.tsx playerName handling', () => {
+describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('shows manual name input when API did not provide nodeName', () => {
-    expect(apps).toContain('placeholder="Enter your name"');
-    expect(apps).toContain('type="text"');
+  it('uses sandbox matching AppHostPage policy', () => {
+    expect(apps).toContain('sandbox="allow-scripts allow-forms allow-popups"');
   });
 
-  it('gates read-only display on info?.nodeName (input stays visible while typing)', () => {
-    expect(apps).toMatch(/info\?\.nodeName\s*\?/);
+  it('sends token via postMessage with strict origin', () => {
+    expect(apps).toContain('postMessage');
+    expect(apps).toContain('window.location.origin');
+    expect(apps).not.toMatch(/postMessage\([^)]+,\s*['"]\*['"]\s*\)/);
   });
 
-  it('does not trim playerName on every keystroke (allows spaces while typing)', () => {
-    expect(apps).not.toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\.trim\(\)\)/);
-    expect(apps).toMatch(/onChange=\{e\s*=>\s*setPlayerName\(e\.target\.value\)/);
-  });
-
-  it('derives trimmedName via useMemo for consistent normalization', () => {
-    expect(apps).toMatch(/trimmedName\s*=\s*useMemo\(\(\)\s*=>\s*playerName\.trim\(\)/);
-  });
-
-  it('uses trimmedName (not raw playerName) for API calls and comparisons', () => {
-    expect(apps).toMatch(/gameApi\.join\([^,]+,\s*trimmedName\)/);
-    expect(apps).toMatch(/gameApi\.create\(trimmedName/);
-    expect(apps).toMatch(/playerName=\{trimmedName\}/);
-  });
-
-  it('disables Join button when trimmedName is empty', () => {
-    expect(apps).toMatch(/disabled=\{.*!trimmedName/);
-  });
-
-  it('disables Launch Swarm button when playerName is empty', () => {
-    expect(apps).toMatch(/disabled=\{.*!playerName/);
-  });
-
-  it('auto-populates playerName from gameApi.info() response with null guard', () => {
-    expect(apps).toContain('data?.nodeName');
-    expect(apps).toContain('setPlayerName(data.nodeName)');
-  });
-
-  it('only marks app as not-installed on structured 404 status, not transient errors', () => {
-    expect(apps).toMatch(/err\?\.status\s*===\s*404/);
-    expect(apps).not.toMatch(/\/404\/\.test/);
+  it('listens for dkg-token-request from iframe', () => {
+    expect(apps).toContain('dkg-token-request');
+    expect(apps).toContain('addEventListener');
   });
 });
 

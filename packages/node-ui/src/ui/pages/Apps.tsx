@@ -13,7 +13,7 @@ export function AppsPage() {
     if (token && iframeRef.current?.contentWindow) {
       iframeRef.current.contentWindow.postMessage(
         { type: 'dkg-token', token, apiOrigin: window.location.origin },
-        '*',
+        window.location.origin,
       );
     }
   }, []);
