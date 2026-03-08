@@ -281,9 +281,11 @@ export class DKGAgent {
     const publishHandler = new PublishHandler(this.store, this.eventBus, { journal });
     this.router.register(PROTOCOL_PUBLISH, publishHandler.handler);
     if (journal) {
-      publishHandler.restorePendingPublishes().catch((err) => {
+      try {
+        await publishHandler.restorePendingPublishes();
+      } catch (err) {
         this.log.warn(ctx, `Journal restore failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      }
     }
 
     // Register cross-agent query handler (deny-by-default for security)

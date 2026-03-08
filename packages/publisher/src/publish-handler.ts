@@ -33,6 +33,7 @@ interface PendingPublish {
   expectedStartKAId: bigint;
   expectedEndKAId: bigint;
   expectedChainId: string;
+  createdAt: number;
 }
 
 /**
@@ -301,6 +302,7 @@ export class PublishHandler {
         expectedStartKAId: startKAId,
         expectedEndKAId: endKAId,
         expectedChainId: request.chainId ?? '',
+        createdAt: Date.now(),
       });
       this.persistJournal();
 
@@ -388,6 +390,8 @@ export class PublishHandler {
     }
   }
 
+  private journalWriteQueue: Promise<void> = Promise.resolve();
+
   private persistJournal(): void {
     if (!this.journal) return;
     const entries: JournalEntry[] = [];
@@ -400,15 +404,17 @@ export class PublishHandler {
         expectedStartKAId: p.expectedStartKAId.toString(),
         expectedEndKAId: p.expectedEndKAId.toString(),
         expectedChainId: p.expectedChainId,
-        createdAt: Date.now(),
+        createdAt: p.createdAt,
       });
     }
-    this.journal.save(entries).catch((err) => {
-      this.log.warn(
-        createOperationContext('publish'),
-        `Failed to persist journal: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    this.journalWriteQueue = this.journalWriteQueue
+      .then(() => this.journal!.save(entries))
+      .catch((err) => {
+        this.log.warn(
+          createOperationContext('publish'),
+          `Failed to persist journal: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   async restorePendingPublishes(): Promise<number> {
@@ -425,6 +431,7 @@ export class PublishHandler {
     if (entries.length === 0) return 0;
 
     let restored = 0;
+    let expired = 0;
     for (const entry of entries) {
       if (this.pendingPublishes.has(entry.ual)) continue;
 
@@ -432,6 +439,7 @@ export class PublishHandler {
       const remaining = PublishHandler.TENTATIVE_TIMEOUT_MS - elapsed;
       if (remaining <= 0) {
         this.log.info(ctx, `Journal entry expired, skipping: ${entry.ual}`);
+        expired++;
         continue;
       }
 
@@ -451,8 +459,13 @@ export class PublishHandler {
         expectedStartKAId: BigInt(entry.expectedStartKAId),
         expectedEndKAId: BigInt(entry.expectedEndKAId),
         expectedChainId: entry.expectedChainId,
+        createdAt: entry.createdAt,
       });
       restored++;
+    }
+
+    if (expired > 0) {
+      this.persistJournal();
     }
 
     if (restored > 0) {
@@ -461,11 +474,26 @@ export class PublishHandler {
     return restored;
   }
 
-  private expireRestoredPublish(ual: string): void {
+  private async expireRestoredPublish(ual: string): Promise<void> {
     const ctx = createOperationContext('publish');
+    const pending = this.pendingPublishes.get(ual);
     this.pendingPublishes.delete(ual);
     this.persistJournal();
-    this.log.info(ctx, `Restored tentative publish expired: ${ual}`);
+
+    if (pending) {
+      try {
+        const dataGraph = this.graphManager.dataGraphUri(pending.paranetId);
+        const metaGraph = this.graphManager.metaGraphUri(pending.paranetId);
+        await this.store.deleteBySubjectPrefix(dataGraph, ual);
+        await this.store.deleteBySubjectPrefix(metaGraph, ual);
+        await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
+        this.log.info(ctx, `Restored tentative publish expired, data removed by UAL: ${ual}`);
+      } catch (err) {
+        this.log.error(ctx, `Failed to clean up expired restored publish: ${ual} — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      this.log.info(ctx, `Restored tentative publish expired: ${ual}`);
+    }
   }
 
   private rejectAck(reason: string): Uint8Array {
