@@ -571,6 +571,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4
         version: 4.7.0(vite@6.4.1(@types/node@22.19.11)(tsx@4.21.0))
+      cross-env:
+        specifier: ^10.1.0
+        version: 10.1.0
       happy-dom:
         specifier: ^20.8.3
         version: 20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10)
