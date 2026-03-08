@@ -426,6 +426,7 @@ export class OriginTrailGameCoordinator {
       if (swarm.gameState) swarm.gameState.status = 'lost';
       this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
+      await this.publishStrategyPatterns(swarm);
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
@@ -1349,18 +1350,22 @@ export class OriginTrailGameCoordinator {
       }
     }
 
+    const allPeerIds = swarm.playerIndexMap.size > 0
+      ? [...swarm.playerIndexMap.keys()]
+      : [...new Set(swarm.turnHistory.flatMap(t => t.votes.map(v => v.peerId)))];
+
     const results: Array<{ peerId: string; stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number } }> = [];
-    for (const player of swarm.players) {
-      const entry = playerStats.get(player.peerId) ?? { totalVotes: 0, actionCounts: {} };
+    for (const peerId of allPeerIds) {
+      const entry = playerStats.get(peerId) ?? { totalVotes: 0, actionCounts: {} };
       const favoriteAction = Object.entries(entry.actionCounts)
-        .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'none';
-      const partyIndex = swarm.playerIndexMap.get(player.peerId);
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? 'none';
+      const partyIndex = swarm.playerIndexMap.get(peerId);
       const partyMember = partyIndex != null ? swarm.gameState?.party[partyIndex] : undefined;
       const turnsSurvived = partyMember && !partyMember.alive
         ? this.findDeathTurn(swarm, partyIndex)
         : swarm.turnHistory.length;
       results.push({
-        peerId: player.peerId,
+        peerId,
         stats: { totalVotes: entry.totalVotes, actionCounts: entry.actionCounts, favoriteAction, turnsSurvived },
       });
     }

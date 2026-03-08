@@ -2213,7 +2213,10 @@ describe('V5: Strategy patterns published when game finishes', () => {
     // Force-resolve turns until game ends — only leader votes + forceResolve
     let maxTurns = 300;
     while (swarm.status === 'traveling' && maxTurns-- > 0) {
-      await coordinator.castVote(swarm.id, 'advance');
+      const tokens = swarm.gameState?.trainingTokens ?? 0;
+      const alive = swarm.gameState?.party.filter(m => m.alive).length ?? 3;
+      const action = tokens >= alive * 5 ? 'advance' : 'syncMemory';
+      await coordinator.castVote(swarm.id, action);
       await new Promise(r => setTimeout(r, 5));
       if (swarm.status !== 'traveling') break;
       await coordinator.forceResolveTurn(swarm.id);
