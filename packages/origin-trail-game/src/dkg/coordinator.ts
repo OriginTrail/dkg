@@ -84,6 +84,7 @@ export interface SwarmState {
   pendingProposal: TurnProposal | null;
   turnHistory: ResolvedTurn[];
   createdAt: number;
+  playerIndexMap: Map<string, number>;
 }
 
 export interface ResolvedTurn {
@@ -286,6 +287,7 @@ export class OriginTrailGameCoordinator {
           pendingProposal: null,
           turnHistory: [],
           createdAt,
+          playerIndexMap: new Map(),
         };
         this.swarms.set(swarmId, swarm);
         this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
@@ -347,6 +349,7 @@ export class OriginTrailGameCoordinator {
       pendingProposal: null,
       turnHistory: [],
       createdAt: now,
+      playerIndexMap: new Map(),
     };
 
     this.swarms.set(swarmId, swarm);
@@ -455,6 +458,7 @@ export class OriginTrailGameCoordinator {
     }
 
     swarm.gameState = newGameState;
+    swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -960,6 +964,7 @@ export class OriginTrailGameCoordinator {
       pendingProposal: null,
       turnHistory: [],
       createdAt: msg.timestamp,
+      playerIndexMap: new Map(),
     };
     this.swarms.set(msg.swarmId, swarm);
     this.log(`Remote swarm discovered: ${msg.swarmName} (${msg.swarmId})`);
@@ -995,6 +1000,7 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
+    swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -1348,9 +1354,10 @@ export class OriginTrailGameCoordinator {
       const entry = playerStats.get(player.peerId) ?? { totalVotes: 0, actionCounts: {} };
       const favoriteAction = Object.entries(entry.actionCounts)
         .sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'none';
-      const partyMember = swarm.gameState?.party.find(m => m.name === player.displayName);
+      const partyIndex = swarm.playerIndexMap.get(player.peerId);
+      const partyMember = partyIndex != null ? swarm.gameState?.party[partyIndex] : undefined;
       const turnsSurvived = partyMember && !partyMember.alive
-        ? this.findDeathTurn(swarm, player.displayName)
+        ? this.findDeathTurn(swarm, partyIndex)
         : swarm.turnHistory.length;
       results.push({
         peerId: player.peerId,
@@ -1360,9 +1367,11 @@ export class OriginTrailGameCoordinator {
     return results;
   }
 
-  private findDeathTurn(swarm: SwarmState, displayName: string): number {
+  private findDeathTurn(swarm: SwarmState, partyIndex: number): number {
+    const memberName = swarm.gameState?.party[partyIndex]?.name;
+    if (!memberName) return swarm.turnHistory.length;
     for (const turn of swarm.turnHistory) {
-      if (turn.deaths.some(d => d.name === displayName)) return turn.turn;
+      if (turn.deaths.some(d => d.name === memberName)) return turn.turn;
     }
     return swarm.turnHistory.length;
   }

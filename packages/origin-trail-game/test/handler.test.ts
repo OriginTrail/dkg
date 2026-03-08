@@ -2085,12 +2085,20 @@ describe('V5: Strategy pattern RDF quads', () => {
     expect(quads.find(q => q.predicate.includes('favoriteAction'))?.object).toContain('advance');
     expect(quads.find(q => q.predicate.includes('turnsSurvived'))?.object).toContain('4');
 
-    expect(quads.find(q => q.predicate.includes('actionCount_advance'))?.object).toContain('3');
-    expect(quads.find(q => q.predicate.includes('actionCount_syncMemory'))?.object).toContain('1');
-    expect(quads.find(q => q.predicate.includes('actionCount_upgradeSkills'))?.object).toContain('1');
+    const hasActionCountQuads = quads.filter(q => q.predicate.includes('hasActionCount'));
+    expect(hasActionCountQuads.length).toBe(3);
 
-    // 6 base triples + 3 actionCount triples
-    expect(quads.length).toBe(9);
+    const advanceAcUri = hasActionCountQuads.find(q => q.object.includes('action/advance'))?.object;
+    expect(advanceAcUri).toBeDefined();
+    expect(quads.find(q => q.subject === advanceAcUri && q.predicate.endsWith('/action'))?.object).toContain('advance');
+    expect(quads.find(q => q.subject === advanceAcUri && q.predicate.endsWith('/count'))?.object).toContain('3');
+
+    const syncAcUri = hasActionCountQuads.find(q => q.object.includes('action/syncMemory'))?.object;
+    expect(syncAcUri).toBeDefined();
+    expect(quads.find(q => q.subject === syncAcUri && q.predicate.endsWith('/count'))?.object).toContain('1');
+
+    // 6 base triples + 3 actions * 3 triples each
+    expect(quads.length).toBe(15);
   });
 
   it('strategyPatternQuads handles empty actionCounts', async () => {

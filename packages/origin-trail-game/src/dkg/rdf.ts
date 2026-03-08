@@ -295,7 +295,10 @@ export function strategyPatternQuads(
     quad(s, otUri('turnsSurvived'), literal(stats.turnsSurvived), g),
   ];
   for (const [action, count] of Object.entries(stats.actionCounts)) {
-    quads.push(quad(s, otUri(`actionCount_${action}`), literal(count), g));
+    const acUri = otUri(`strategy/${swarmId}/${peerId}/action/${encodeURIComponent(action)}`);
+    quads.push(quad(s, otUri('hasActionCount'), acUri, g));
+    quads.push(quad(acUri, otUri('action'), literal(action), g));
+    quads.push(quad(acUri, otUri('count'), literal(count), g));
   }
   return quads;
 }
