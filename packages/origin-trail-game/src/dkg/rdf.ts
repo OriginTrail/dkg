@@ -188,7 +188,7 @@ export interface TopologyPeer {
 
 export function networkTopologyQuads(paranetId: string, peers: TopologyPeer[]): Quad[] {
   const g = workspaceGraph(paranetId);
-  const snapshotId = `snapshot-${Date.now().toString(36)}`;
+  const snapshotId = 'snapshot-latest';
   const s = otUri(`topology/${snapshotId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('NetworkSnapshot'), g),

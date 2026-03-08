@@ -1225,30 +1225,35 @@ export class OriginTrailGameCoordinator {
         this.log(`Topology snapshot failed: ${err.message}`),
       );
     }, 5 * 60_000);
+    this.topologyTimer.unref?.();
   }
 
   async publishNetworkTopology(): Promise<void> {
     const now = Date.now();
-    const peers: rdf.TopologyPeer[] = [];
+    const peerMap = new Map<string, rdf.TopologyPeer>();
 
     for (const swarm of this.swarms.values()) {
       for (const member of swarm.players) {
         if (member.peerId === this.myPeerId) continue;
-        if (peers.some(p => p.peerId === member.peerId)) continue;
 
         const lastVote = swarm.votes
           .filter(v => v.peerId === member.peerId)
           .sort((a, b) => b.timestamp - a.timestamp)[0];
 
-        peers.push({
+        const lastSeen = lastVote?.timestamp ?? member.joinedAt;
+        const existing = peerMap.get(member.peerId);
+        if (existing && existing.lastSeen >= lastSeen) continue;
+
+        peerMap.set(member.peerId, {
           peerId: member.peerId,
           connectionType: 'relay',
           latencyMs: lastVote ? now - lastVote.timestamp : 0,
-          lastSeen: lastVote?.timestamp ?? member.joinedAt,
+          lastSeen,
         });
       }
     }
 
+    const peers = [...peerMap.values()];
     if (peers.length === 0) return;
 
     const quads = rdf.networkTopologyQuads(this.paranetId, peers);

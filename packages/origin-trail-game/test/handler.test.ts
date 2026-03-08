@@ -923,7 +923,7 @@ describe('Network topology hints (V3)', () => {
 
     const snapshotQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type') && q.object.includes('NetworkSnapshot'));
     expect(snapshotQuad).toBeDefined();
-    expect(snapshotQuad!.subject).toContain('topology/snapshot-');
+    expect(snapshotQuad!.subject).toContain('topology/snapshot-latest');
     expect(snapshotQuad!.graph).toBe('did:dkg:paranet:test-paranet');
 
     const capturedAt = quads.find(q => q.predicate.includes('capturedAt'));
@@ -954,7 +954,7 @@ describe('Network topology hints (V3)', () => {
     expect(peerIdQuads.some(q => q.object.includes('peer-b'))).toBe(true);
   });
 
-  it('networkTopologyQuads returns empty array for no peers', async () => {
+  it('networkTopologyQuads returns only snapshot header quads when no peers given', async () => {
     const { networkTopologyQuads } = await import('../src/dkg/rdf.js');
     const quads = networkTopologyQuads('test-paranet', []);
     expect(quads).toHaveLength(2);
