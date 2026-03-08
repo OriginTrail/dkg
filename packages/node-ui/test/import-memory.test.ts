@@ -103,6 +103,17 @@ Last updated: 2026`;
     expect(items[2].text).toBe('3D printing is a hobby');
   });
 
+  it('does not strip bare numbers that are not list markers', () => {
+    const input = `2025 was the year we launched v2
+192.168.1.1 is the home router IP
+42 is the answer to everything`;
+
+    const items = manager.parseMemoriesHeuristic(input);
+    expect(items[0].text).toBe('2025 was the year we launched v2');
+    expect(items[1].text).toBe('192.168.1.1 is the home router IP');
+    expect(items[2].text).toBe('42 is the answer to everything');
+  });
+
   it('filters out code-fence markers', () => {
     const input = `\`\`\`
 - Prefers dark mode
@@ -218,6 +229,38 @@ describe('Import Memory — importMemories integration', () => {
   it('defaults source to "other" for unknown values', async () => {
     const result = await manager.importMemories('- A memory', 'other');
     expect(result.source).toBe('other');
+  });
+
+  it('returns quads array matching the written triples', async () => {
+    const result = await manager.importMemories('- Dark mode preference', 'claude');
+
+    expect(result.quads).toBeDefined();
+    expect(Array.isArray(result.quads)).toBe(true);
+    expect(result.quads.length).toBe(result.tripleCount);
+
+    const batchQuad = result.quads.find(
+      q => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' &&
+        q.object === 'http://dkg.io/ontology/MemoryImport',
+    );
+    expect(batchQuad).toBeDefined();
+
+    const memoryQuad = result.quads.find(
+      q => q.predicate === 'http://schema.org/text',
+    );
+    expect(memoryQuad).toBeDefined();
+    expect(memoryQuad!.object).toBe('"Dark mode preference"');
+
+    for (const q of result.quads) {
+      expect(q).toHaveProperty('subject');
+      expect(q).toHaveProperty('predicate');
+      expect(q).toHaveProperty('object');
+      expect(q).not.toHaveProperty('graph');
+    }
+  });
+
+  it('returns empty quads array when input is blank', async () => {
+    const result = await manager.importMemories('  \n  ', 'claude');
+    expect(result.quads).toEqual([]);
   });
 });
 
@@ -379,6 +422,29 @@ describe('Import Memory — LLM-assisted parsing', () => {
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
     expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
+  });
+
+  it('falls back to heuristic in importMemories when LLM returns empty array', async () => {
+    const llmResponse = '[]';
+
+    globalThis.fetch = vi.fn()
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: llmResponse } }],
+        }),
+      } as any);
+
+    const manager = new ChatMemoryManager(mocks.tools, {
+      apiKey: 'test-key',
+      model: 'gpt-4o-mini',
+      baseURL: 'https://api.openai.com/v1',
+    });
+    const result = await manager.importMemories('- Should still parse\n- Via heuristic fallback', 'claude');
+
+    expect(result.memoryCount).toBe(2);
+    expect(result.source).toBe('claude');
+    expect(mocks.mockWriteToWorkspace).toHaveBeenCalled();
   });
 
   it('extracts knowledge entities when LLM returns N-Triples', async () => {
