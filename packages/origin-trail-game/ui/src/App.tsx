@@ -651,6 +651,8 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
 function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: string; onVoted: (w: any) => void; onError: (e: string) => void }) {
   const myVoteEntry = swarm.voteStatus?.votes?.find((v: any) => v.peerId === peerId);
   const hasVoted = !!myVoteEntry?.hasVoted;
+  const isAlive = myVoteEntry?.isAlive !== false;
+  const aliveVoters = swarm.voteStatus?.votes?.filter((v: any) => v.isAlive !== false) ?? [];
 
   const doVote = async (action: string, params?: Record<string, any>) => {
     try { onVoted(await api.vote(swarm.id, action, params)); }
@@ -660,20 +662,27 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
   return (
     <div className="ot-card">
       <h3>Vote for Turn {swarm.currentTurn}</h3>
-      {hasVoted && <p className="ot-muted">You have voted. Waiting for others...</p>}
-      <div className="ot-vote-grid">
-        <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>→ Advance (Conservative)</button>
-        <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Advance (Standard)</button>
-        <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Advance (Max Throughput)</button>
-        <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>⬆ Upgrade Skills</button>
-        <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>♻ Sync Memory</button>
-        <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>⚡ Force Bottleneck</button>
-        <button onClick={() => doVote('payToll')} disabled={hasVoted}>💰 Pay Toll</button>
-      </div>
+      {!isAlive && (
+        <p style={{ color: 'var(--red)', fontWeight: 600 }}>Your agent has been eliminated. You can observe but cannot vote.</p>
+      )}
+      {isAlive && hasVoted && <p className="ot-muted">You have voted. Waiting for others...</p>}
+      {isAlive && (
+        <div className="ot-vote-grid">
+          <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>→ Advance (Conservative)</button>
+          <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Advance (Standard)</button>
+          <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Advance (Max Throughput)</button>
+          <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>⬆ Upgrade Skills</button>
+          <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>♻ Sync Memory</button>
+          <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>⚡ Force Bottleneck</button>
+          <button onClick={() => doVote('payToll')} disabled={hasVoted}>💰 Pay Toll</button>
+        </div>
+      )}
       <div className="ot-vote-status">
-        <h4>Votes ({swarm.voteStatus?.votes?.filter((v: any) => v.hasVoted).length}/{swarm.playerCount})</h4>
+        <h4>Votes ({aliveVoters.filter((v: any) => v.hasVoted).length}/{aliveVoters.length})</h4>
         {swarm.voteStatus?.votes?.map((v: any, i: number) => (
-          <div key={i}>{v.player}: {v.hasVoted ? (v.action || 'voted') : 'waiting...'}</div>
+          <div key={i} style={v.isAlive === false ? { opacity: 0.4, textDecoration: 'line-through' } : {}}>
+            {v.player}: {v.isAlive === false ? 'eliminated' : v.hasVoted ? (v.action || 'voted') : 'waiting...'}
+          </div>
         ))}
       </div>
       {swarm.leaderId === peerId && (
@@ -688,7 +697,7 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
 
 function CreateSwarmForm({ playerName, onCreated, onError }: { playerName: string; onCreated: (w: any) => void; onError: (e: string) => void }) {
   const [name, setName] = useState('');
-  const [maxPlayers, setMaxPlayers] = useState(3);
+  const [maxPlayers, setMaxPlayers] = useState(1);
   const [loading, setLoading] = useState(false);
 
   return (
@@ -701,7 +710,7 @@ function CreateSwarmForm({ playerName, onCreated, onError }: { playerName: strin
           onChange={e => setMaxPlayers(Number(e.target.value))}
           style={{ padding: '0.4rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: '0.9rem' }}
         >
-          {[3, 4, 5, 6, 7, 8].map(n => <option key={n} value={n}>{n}</option>)}
+          {[1, 2, 3, 4, 5, 6, 7, 8].map(n => <option key={n} value={n}>{n}</option>)}
         </select>
       </div>
       <button disabled={!name.trim() || loading} onClick={async () => {

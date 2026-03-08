@@ -223,13 +223,9 @@ describe('explorer graph query safety', () => {
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('omits allow-same-origin when separate-origin static server is used', () => {
-    expect(apps).toContain("'allow-scripts allow-forms allow-popups'");
-  });
-
-  it('falls back to allow-same-origin only for same-origin path', () => {
-    expect(apps).toContain("'allow-scripts allow-same-origin allow-forms allow-popups'");
-    expect(apps).toContain('isSeparateOrigin');
+  it('never uses allow-same-origin in sandbox policy', () => {
+    expect(apps).toContain('sandbox="allow-scripts allow-forms allow-popups"');
+    expect(apps).not.toMatch(/sandbox=.*allow-same-origin/);
   });
 
   it('uses onError fallback instead of CORS-blocked HEAD probe', () => {

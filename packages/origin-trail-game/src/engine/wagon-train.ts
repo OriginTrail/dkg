@@ -123,11 +123,18 @@ export function castVote(swarmId: string, playerId: string, action: string, para
   const swarm = swarms.get(swarmId);
   if (!swarm) throw new Error('Swarm not found');
   if (swarm.status !== 'traveling') throw new Error('Swarm is not on expedition');
-  if (!swarm.players.some(p => p.playerId === playerId)) throw new Error('You are not in this swarm');
+  const playerIdx = swarm.players.findIndex(p => p.playerId === playerId);
+  if (playerIdx === -1) throw new Error('You are not in this swarm');
+  if (swarm.gameState?.party[playerIdx] && !swarm.gameState.party[playerIdx].alive) {
+    throw new Error('Your agent has been eliminated and cannot vote');
+  }
   swarm.votes = swarm.votes.filter(v => v.playerId !== playerId);
   swarm.votes.push({ playerId, action, params, timestamp: Date.now() });
 
-  if (swarm.votes.length === swarm.players.length) resolveTurn(swarm);
+  const aliveCount = swarm.gameState
+    ? swarm.gameState.party.filter((m, i) => m.alive && i < swarm.players.length).length
+    : swarm.players.length;
+  if (swarm.votes.length >= aliveCount) resolveTurn(swarm);
   return swarm;
 }
 
@@ -238,11 +245,15 @@ export function findPlayerSwarm(playerId: string): Swarm | null {
 export function getVoteStatus(swarmId: string, requesterId?: string) {
   const swarm = swarms.get(swarmId);
   if (!swarm) throw new Error('Swarm not found');
-  const allVoted = swarm.votes.length === swarm.players.length;
-  const votes = swarm.players.map(p => {
+  const aliveCount = swarm.gameState
+    ? swarm.gameState.party.filter((m, i) => m.alive && i < swarm.players.length).length
+    : swarm.players.length;
+  const allVoted = swarm.votes.length >= aliveCount;
+  const votes = swarm.players.map((p, i) => {
     const vote = swarm.votes.find(v => v.playerId === p.playerId);
+    const isAlive = !swarm.gameState?.party[i] || swarm.gameState.party[i].alive;
     const canSee = allVoted || (requesterId === p.playerId);
-    return { player: p.displayName, action: canSee ? (vote?.action || null) : null, hasVoted: !!vote };
+    return { player: p.displayName, action: canSee ? (vote?.action || null) : null, hasVoted: !!vote, isAlive };
   });
   return { votes, timeRemaining: swarm.turnDeadline ? Math.max(0, swarm.turnDeadline - Date.now()) : 0, allVoted };
 }

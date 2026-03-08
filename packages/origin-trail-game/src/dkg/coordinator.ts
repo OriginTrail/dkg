@@ -453,7 +453,11 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
-    if (!swarm.players.some(p => p.peerId === this.myPeerId)) throw new Error('You are not in this swarm');
+    const playerIdx = swarm.players.findIndex(p => p.peerId === this.myPeerId);
+    if (playerIdx === -1) throw new Error('You are not in this swarm');
+    if (swarm.gameState?.party[playerIdx] && !swarm.gameState.party[playerIdx].alive) {
+      throw new Error('Your agent has been eliminated and cannot vote');
+    }
 
     swarm.votes = swarm.votes.filter(v => v.peerId !== this.myPeerId);
     const vote: Vote = {
@@ -484,11 +488,20 @@ export class OriginTrailGameCoordinator {
 
     this.startVoteHeartbeat(swarmId);
 
-    if (swarm.votes.length === swarm.players.length && swarm.leaderPeerId === this.myPeerId) {
+    if (this.allAliveVoted(swarm) && swarm.leaderPeerId === this.myPeerId) {
       await this.proposeTurnResolution(swarm);
     }
 
     return swarm;
+  }
+
+  private alivePlayerCount(swarm: SwarmState): number {
+    if (!swarm.gameState) return swarm.players.length;
+    return swarm.gameState.party.filter((m, i) => m.alive && i < swarm.players.length).length;
+  }
+
+  private allAliveVoted(swarm: SwarmState): boolean {
+    return swarm.votes.length >= this.alivePlayerCount(swarm);
   }
 
   private startVoteHeartbeat(swarmId: string): void {
@@ -497,7 +510,7 @@ export class OriginTrailGameCoordinator {
 
     const timer = setInterval(async () => {
       const swarm = this.swarms.get(swarmId);
-      if (!swarm || swarm.currentTurn !== turn || swarm.votes.length === swarm.players.length) {
+      if (!swarm || swarm.currentTurn !== turn || this.allAliveVoted(swarm)) {
         this.stopVoteHeartbeat(swarmId);
         return;
       }
@@ -888,7 +901,7 @@ export class OriginTrailGameCoordinator {
     });
     this.log(`Remote vote: ${msg.action} from ${msg.peerId.slice(0, 8)} on turn ${msg.turn}`);
 
-    if (swarm.votes.length === swarm.players.length && swarm.leaderPeerId === this.myPeerId) {
+    if (this.allAliveVoted(swarm) && swarm.leaderPeerId === this.myPeerId) {
       this.proposeTurnResolution(swarm).catch(err => this.log(`Propose error: ${err.message}`));
     }
   }
@@ -1077,12 +1090,13 @@ export class OriginTrailGameCoordinator {
   }
 
   formatSwarmState(swarm: SwarmState) {
-    const allVoted = swarm.votes.length === swarm.players.length;
+    const allVoted = this.allAliveVoted(swarm);
     const voteStatus = swarm.status === 'traveling' ? {
-      votes: swarm.players.map(p => {
+      votes: swarm.players.map((p, i) => {
         const vote = swarm.votes.find(v => v.peerId === p.peerId);
+        const isAlive = !swarm.gameState?.party[i] || swarm.gameState.party[i].alive;
         const canSee = allVoted || p.peerId === this.myPeerId;
-        return { player: p.displayName, peerId: p.peerId, action: canSee ? (vote?.action ?? null) : null, hasVoted: !!vote };
+        return { player: p.displayName, peerId: p.peerId, action: canSee ? (vote?.action ?? null) : null, hasVoted: !!vote, isAlive };
       }),
       timeRemaining: swarm.turnDeadline ? Math.max(0, swarm.turnDeadline - Date.now()) : 0,
       allVoted,

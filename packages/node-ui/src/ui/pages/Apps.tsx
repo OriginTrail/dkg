@@ -5,15 +5,13 @@ const GAME_APP_ID = 'origin-trail-game';
 const FALLBACK_PATH = '/apps/origin-trail-game/';
 
 /**
- * Hosts the OriginTrail Game in an iframe, matching the isolation model
- * used by AppHostPage: when a separate-origin static server is available,
- * the iframe loads from that origin so `allow-same-origin` can be omitted
- * and real cross-origin isolation is enforced. Falls back to the main
- * server path otherwise.
- *
- * Token + apiOrigin are delivered via a nonce-based postMessage handshake.
- * A fresh nonce is issued on every iframe load; only matching nonces
- * receive the token.
+ * Hosts the OriginTrail Game in an iframe with `allow-scripts` sandbox
+ * (no `allow-same-origin`), matching the AppHostPage isolation model.
+ * The iframe's effective origin is opaque (`null`), so it cannot access
+ * parent DOM or token globals. CORS (`Access-Control-Allow-Origin: *`)
+ * on the API server allows the iframe to make authenticated fetch calls
+ * using the token injected into its HTML by the daemon's loopback
+ * fallback, or delivered via the postMessage nonce handshake.
  */
 
 export function validateTokenRequest(
@@ -41,8 +39,6 @@ export function AppsPage({ apps }: { apps?: InstalledApp[] }) {
       setSrc(FALLBACK_PATH);
     }
   }, [app?.staticUrl]);
-
-  const isSeparateOrigin = src !== FALLBACK_PATH;
 
   const sendNonce = useCallback(() => {
     if (!iframeRef.current?.contentWindow) return;
@@ -78,9 +74,7 @@ export function AppsPage({ apps }: { apps?: InstalledApp[] }) {
       src={src}
       onLoad={sendNonce}
       onError={handleIframeError}
-      sandbox={isSeparateOrigin
-        ? 'allow-scripts allow-forms allow-popups'
-        : 'allow-scripts allow-same-origin allow-forms allow-popups'}
+      sandbox="allow-scripts allow-forms allow-popups"
       allow="clipboard-write"
       style={{
         width: '100%',
