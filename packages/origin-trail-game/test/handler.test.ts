@@ -990,7 +990,7 @@ describe('Network topology hints (V3)', () => {
       handle('dkg/paranet/topo-test/app', encode({
 
 describe('Workspace lineage quads', () => {
-  it('generates enshrined quads when publishedUal is present', async () => {
+  it('generates enshrined quads when confirmed is true', async () => {
     const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
     const quads = workspaceLineageQuads('origin-trail-game', [{
       workspaceOperationId: 'op-123',
@@ -998,9 +998,10 @@ describe('Workspace lineage quads', () => {
       publishedUal: 'did:dkg:test-ual',
       publishedTxHash: '0xabcdef',
       publishedAt: 1700000000000,
+      confirmed: true,
     }]);
 
-    expect(quads.length).toBe(7);
+    expect(quads.length).toBe(8);
     expect(quads[0].subject).toContain('lineage/op-123');
     expect(quads[0].predicate).toContain('rdf-syntax-ns#type');
     expect(quads[0].object).toContain('WorkspaceLineage');
@@ -1009,20 +1010,26 @@ describe('Workspace lineage quads', () => {
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
     expect(statusQuad?.object).toContain('enshrined');
 
+    const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
+    expect(confirmedQuad?.object).toContain('true');
+
     const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
     expect(ualQuad?.object).toContain('did:dkg:test-ual');
   });
 
-  it('generates workspace-only quads when no publishedUal', async () => {
+  it('generates workspace-only quads when not confirmed', async () => {
     const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
     const quads = workspaceLineageQuads('origin-trail-game', [{
       workspaceOperationId: 'op-456',
       rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-def/vote/peer-1',
     }]);
 
-    expect(quads.length).toBe(4);
+    expect(quads.length).toBe(5);
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
     expect(statusQuad?.object).toContain('workspace-only');
+
+    const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
+    expect(confirmedQuad?.object).toContain('false');
 
     const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
     expect(ualQuad).toBeUndefined();
@@ -1031,7 +1038,7 @@ describe('Workspace lineage quads', () => {
   it('handles multiple entries with distinct subjects', async () => {
     const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
     const quads = workspaceLineageQuads('origin-trail-game', [
-      { workspaceOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1' },
+      { workspaceOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1', confirmed: true },
       { workspaceOperationId: 'op-b', rootEntity: 'https://example.com/e2' },
     ]);
 
@@ -1137,6 +1144,81 @@ describe('Workspace lineage tracking', () => {
 
     const lineageQuads = lineageWrites[0];
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('enshrined'))).toBe(true);
+
+    const lineageLogs = logs.filter(l => l.includes('lineage'));
+    expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('writes lineage quads after normal consensus turn resolution', async () => {
+    const leaderPeerId = 'consensus-leader';
+    const p2 = 'consensus-p2';
+    const p3 = 'consensus-p3';
+    let opCounter = 0;
+    const consensusAgent = makeMockAgent(leaderPeerId);
+    consensusAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      consensusAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    consensusAgent.publish = async (_paranetId: string, quads: any[]) => {
+      consensusAgent._published.push(quads);
+      return { ual: 'did:dkg:consensus-ual', onChainResult: { txHash: '0xconsensus' } };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(consensusAgent as any, { paranetId: 'consensus-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'Consensus Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = consensusAgent._messageHandlers.get('dkg/paranet/consensus-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
+      handle('dkg/paranet/consensus-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Remote peers vote first
+    for (const pid of [p2, p3]) {
+      handle('dkg/paranet/consensus-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    const writesBeforeConsensus = consensusAgent._workspaceWrites.length;
+
+    // Leader votes last — triggers proposeTurnResolution (all 3 voted)
+    await coordinator.castVote(swarm.id, 'advance');
+    await new Promise(r => setTimeout(r, 50));
+
+    // Simulate remote peer approving the proposal to reach threshold
+    const pendingProposal = swarm.pendingProposal;
+    expect(pendingProposal).not.toBeNull();
+    handle('dkg/paranet/consensus-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: p2, timestamp: Date.now(), turn: 1,
+      proposalHash: pendingProposal!.hash,
+    }), p2);
+    await new Promise(r => setTimeout(r, 100));
+
+    const lineageWrites = consensusAgent._workspaceWrites.slice(writesBeforeConsensus).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.object?.includes?.('enshrined'))).toBe(true);
 
     const lineageLogs = logs.filter(l => l.includes('lineage'));

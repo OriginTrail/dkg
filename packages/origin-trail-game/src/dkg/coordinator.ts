@@ -1217,7 +1217,7 @@ export class OriginTrailGameCoordinator {
     this.workspaceOps.get(swarmId)!.push({ workspaceOperationId: opId, rootEntities });
   }
 
-  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number }>): Promise<void> {
+  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
     const quads = rdf.workspaceLineageQuads(paranetId, entries);
     if (quads.length > 0) {
       await this.agent.writeToWorkspace(paranetId, quads);
@@ -1237,13 +1237,12 @@ export class OriginTrailGameCoordinator {
       publishedUal: publishResult?.ual as string | undefined,
       publishedTxHash: publishResult?.onChainResult?.txHash as string | undefined,
       publishedAt: publishResult?.ual ? now : undefined,
+      confirmed: !!publishResult?.onChainResult?.txHash,
     })));
     try {
       await this.recordWorkspaceLineage(this.paranetId, entries);
     } catch (err: any) {
-      const existing = this.workspaceOps.get(swarmId) ?? [];
-      this.workspaceOps.set(swarmId, [...snapshot, ...existing]);
-      this.log(`Lineage write failed, re-queued ${snapshot.length} ops: ${err.message}`);
+      this.log(`Lineage write failed (dropped ${snapshot.length} ops): ${err.message}`);
     }
   }
 
