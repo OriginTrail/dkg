@@ -435,15 +435,13 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
       // Installable DKG apps (API handlers + static UI)
       // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
-      // Inject the auth token into app HTML so the app's JS can call the node API.
-      // Apps at /apps/* are public paths — they're installed on this node and need API access.
+      // Only inject the caller's own verified token — never substitute a stored token
+      // for unauthenticated requests, as that would leak credentials to any visitor.
       let appInjectToken: string | undefined;
       if (installedApps.length > 0 && authEnabled && validTokens.size > 0) {
         const reqToken = extractBearerToken(req.headers.authorization);
         if (reqToken && validTokens.has(reqToken)) {
           appInjectToken = reqToken;
-        } else if (reqUrl.pathname.startsWith('/apps/')) {
-          appInjectToken = validTokens.values().next().value as string;
         }
       }
       const appHandled = await handleAppRequest(req, res, reqUrl, installedApps, appInjectToken, appStaticPort);

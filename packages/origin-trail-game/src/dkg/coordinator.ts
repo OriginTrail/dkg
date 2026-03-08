@@ -207,12 +207,13 @@ export class OriginTrailGameCoordinator {
       this.log(`Graph sync: found ${playerCount} registered players`);
 
       const swarmsResult = await this.agent.query(
-        `SELECT ?swarm ?name ?status ?orchestrator ?createdAt WHERE {
+        `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
           ?swarm a <${rdf.SPARQL_PREFIXES.OT}AgentSwarm> ;
                  <${rdf.SPARQL_PREFIXES.OT}name> ?name ;
                  <${rdf.SPARQL_PREFIXES.OT}status> ?status .
           OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}orchestrator> ?orchestrator }
           OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
+          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
         }`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
@@ -235,6 +236,10 @@ export class OriginTrailGameCoordinator {
         const orchestratorId = orchestratorUri.replace(/.*player\//, '');
         const swarmName = stripQuotes(row['name'] ?? '');
         const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
+        const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
+        const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
+          ? graphMaxPlayers
+          : MAX_PLAYERS;
 
         const membersResult = await this.agent.query(
           `SELECT ?agent ?displayName WHERE {
@@ -261,7 +266,7 @@ export class OriginTrailGameCoordinator {
           id: swarmId,
           name: swarmName,
           leaderPeerId: orchestratorId,
-          maxPlayers: 3,
+          maxPlayers: restoredMaxPlayers,
           players,
           status: 'recruiting',
           gameState: null,
@@ -337,7 +342,7 @@ export class OriginTrailGameCoordinator {
     this.swarms.set(swarmId, swarm);
 
     const quads = [
-      ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now),
+      ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
       ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName),
     ];
     await this.agent.writeToWorkspace(this.paranetId, quads);
