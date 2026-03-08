@@ -1058,7 +1058,7 @@ describe('Workspace lineage tracking', () => {
     };
     lineageAgent.publish = async (_paranetId: string, quads: any[]) => {
       lineageAgent._published.push(quads);
-      return { ual: 'did:dkg:published-ual', txHash: '0xabc123' };
+      return { ual: 'did:dkg:published-ual', onChainResult: { txHash: '0xabc123' } };
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
