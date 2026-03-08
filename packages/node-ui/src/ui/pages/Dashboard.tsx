@@ -85,6 +85,15 @@ function ImportResultView({
         </div>
       </div>
 
+      {/* Warnings */}
+      {result.warnings && result.warnings.length > 0 && (
+        <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(250,204,21,.08)', border: '1px solid rgba(250,204,21,.25)' }}>
+          {result.warnings.map((w, i) => (
+            <div key={i} style={{ fontSize: 11, color: 'rgb(250,204,21)', lineHeight: 1.5 }}>⚠ {w}</div>
+          ))}
+        </div>
+      )}
+
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
         <button style={tabStyle(tab === 'graph')} onClick={() => setTab('graph')}>Graph</button>

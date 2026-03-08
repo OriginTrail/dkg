@@ -114,6 +114,17 @@ Last updated: 2026`;
     expect(items[2].text).toBe('42 is the answer to everything');
   });
 
+  it('preserves leading dash when not followed by whitespace', () => {
+    const input = `-42 is my lucky number
+-verbose is a CLI flag
+- actual bullet item`;
+
+    const items = manager.parseMemoriesHeuristic(input);
+    expect(items[0].text).toBe('-42 is my lucky number');
+    expect(items[1].text).toBe('-verbose is a CLI flag');
+    expect(items[2].text).toBe('actual bullet item');
+  });
+
   it('filters out code-fence markers', () => {
     const input = `\`\`\`
 - Prefers dark mode
@@ -230,6 +241,15 @@ describe('Import Memory — importMemories integration', () => {
   it('defaults source to "other" for unknown values', async () => {
     const result = await manager.importMemories('- A memory', 'other');
     expect(result.source).toBe('other');
+  });
+
+  it('truncates to 5000 items and adds a warning when input is very large', async () => {
+    const lines = Array.from({ length: 6000 }, (_, i) => `- Memory item number ${i + 1}`).join('\n');
+    const result = await manager.importMemories(lines, 'claude');
+    expect(result.memoryCount).toBe(5000);
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.length).toBe(1);
+    expect(result.warnings![0]).toContain('truncated to 5000');
   });
 
   it('returns quads array matching the written triples', async () => {

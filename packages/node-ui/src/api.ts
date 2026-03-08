@@ -243,7 +243,11 @@ export async function handleNodeUIRequest(
     try {
       body = await readBody(req, IMPORT_MAX_BYTES);
     } catch (err) {
-      if (err instanceof PayloadTooLargeError) return json(res, 413, { error: 'Payload too large' });
+      if (err instanceof PayloadTooLargeError) {
+        const handled = json(res, 413, { error: 'Payload too large' });
+        req.destroy();
+        return handled;
+      }
       throw err;
     }
     let parsed: any;
@@ -355,6 +359,7 @@ function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
       if (maxBytes != null && totalBytes > maxBytes) {
         rejected = true;
         reject(new PayloadTooLargeError());
+        req.resume();
         return;
       }
       chunks.push(c);

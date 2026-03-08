@@ -614,6 +614,7 @@ export class ChatMemoryManager {
     const now = new Date().toISOString();
 
     const llmEnabled = opts.useLlm === true && !!this.llmConfig?.apiKey;
+    const warnings: string[] = [];
 
     let memories = llmEnabled
       ? await this.parseMemoriesWithLlm(rawText)
@@ -625,6 +626,12 @@ export class ChatMemoryManager {
 
     if (memories.length === 0) {
       return { batchId: null, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
+    }
+
+    const MAX_MEMORY_ITEMS = 5000;
+    if (memories.length > MAX_MEMORY_ITEMS) {
+      warnings.push(`Input contained ${memories.length} items; truncated to ${MAX_MEMORY_ITEMS}`);
+      memories = memories.slice(0, MAX_MEMORY_ITEMS);
     }
 
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
@@ -654,7 +661,6 @@ export class ChatMemoryManager {
     let entityCount = 0;
     let extractionTripleCount = 0;
     const allQuads = quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
-    const warnings: string[] = [];
     if (llmEnabled) {
       try {
         const extraction = await this.extractKnowledgeFromImport(batchUri, memories);
@@ -730,7 +736,7 @@ export class ChatMemoryManager {
   parseMemoriesHeuristic(rawText: string): Array<{ text: string; category: string }> {
     const lines = rawText
       .split(/\n/)
-      .map(l => l.replace(/^\s*(?:[-•*]|\d+[.)]\s)\s*/, '').trim())
+      .map(l => l.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s)\s*/, '').trim())
       .filter(l =>
         l.length > 3 &&
         !l.match(/^(here are|last updated|memories|---)/i) &&
