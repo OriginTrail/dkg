@@ -57,6 +57,10 @@ export interface TurnProposal {
   newStateJson: string;
   resultMessage: string;
   approvals: Set<string>;
+  votes: Array<{ peerId: string; action: string }>;
+  resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+  deaths: Array<{ name: string; cause: string }>;
+  event?: { type: string; description: string };
 }
 
 export interface SwarmState {
@@ -80,11 +84,41 @@ export interface ResolvedTurn {
   winningAction: string;
   resultMessage: string;
   approvers: string[];
+  votes: Array<{ peerId: string; action: string }>;
+  resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+  deaths: Array<{ name: string; cause: string }>;
+  event?: { type: string; description: string };
   timestamp: number;
 }
 
 function hashProposal(swarmId: string, turn: number, stateJson: string): string {
   return createHash('sha256').update(`${swarmId}:${turn}:${stateJson}`).digest('hex');
+}
+
+function detectDeaths(
+  oldState: GameState | null,
+  newState: GameState,
+  event?: { type: string; description: string; affectedMember?: string },
+): Array<{ name: string; cause: string }> {
+  if (!oldState) return [];
+  return newState.party
+    .filter((m, i) => !m.alive && oldState.party[i]?.alive)
+    .map(m => {
+      if (event?.affectedMember === m.name) {
+        return { name: m.name, cause: event.description };
+      }
+      if (newState.trainingTokens <= 0) {
+        return { name: m.name, cause: 'Ran out of training tokens — starvation' };
+      }
+      if (event) {
+        return { name: m.name, cause: event.description };
+      }
+      const oldMember = oldState.party.find(p => p.name === m.name);
+      if (oldMember && oldMember.health > 0 && m.health <= 0) {
+        return { name: m.name, cause: 'Health depleted from sustained damage' };
+      }
+      return { name: m.name, cause: 'Succumbed to accumulated damage' };
+    });
 }
 
 function stripQuotes(s: string): string {
@@ -502,6 +536,11 @@ export class OriginTrailGameCoordinator {
 
     const newStateJson = JSON.stringify(result.newState);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
+    const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
+    const resolution = tieBreaker === 'leader' ? 'leader-tiebreak' as const : 'consensus' as const;
+    const event = result.event ? { type: result.event.type, description: result.event.description, affectedMember: result.event.affectedMember } : undefined;
+    const deaths = detectDeaths(swarm.gameState, result.newState, event);
+    const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
     swarm.pendingProposal = {
       turn: swarm.currentTurn,
@@ -510,6 +549,10 @@ export class OriginTrailGameCoordinator {
       newStateJson,
       resultMessage: result.message,
       approvals: new Set([this.myPeerId]),
+      votes,
+      resolution,
+      deaths,
+      event: turnEvent,
     };
 
     const msg: proto.TurnProposalMsg = {
@@ -523,6 +566,10 @@ export class OriginTrailGameCoordinator {
       winningAction,
       newStateJson,
       resultMessage: result.message,
+      votes,
+      resolution,
+      deaths,
+      event: turnEvent,
     };
     await this.broadcast(msg);
     this.log(`Turn ${swarm.currentTurn} proposal broadcast for ${swarm.id} (hash=${hash.slice(0, 8)})`);
@@ -548,6 +595,10 @@ export class OriginTrailGameCoordinator {
       winningAction: proposal.winningAction,
       resultMessage: proposal.resultMessage,
       approvers: [...proposal.approvals],
+      votes: proposal.votes,
+      resolution: proposal.resolution,
+      deaths: proposal.deaths,
+      event: proposal.event,
       timestamp: Date.now(),
     });
 
@@ -600,13 +651,22 @@ export class OriginTrailGameCoordinator {
       swarm.votes = [{ peerId: this.myPeerId, action: 'syncMemory', turn: swarm.currentTurn, timestamp: Date.now() }];
     }
 
-    // Any member may propose after deadline; leader may propose anytime
     if (!swarm.gameState) throw new Error('No active game state');
-    const { winningAction, params, tieBreaker } = this.tallyVotes(swarm);
+    const { winningAction, params } = this.tallyVotes(swarm);
     const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
 
     const newStateJson = JSON.stringify(result.newState);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
+    const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
+    const event = result.event ? { type: result.event.type, description: result.event.description, affectedMember: result.event.affectedMember } : undefined;
+    const deaths = detectDeaths(swarm.gameState, result.newState, event);
+    const turnEvent = event ? { type: event.type, description: event.description } : undefined;
+
+    // Force-resolve bypasses normal consensus — the caller is explicitly
+    // overriding the threshold (leader anytime, others after deadline).
+    // Add all players as approvers so the proposal clears immediately.
+    const allPeerIds = new Set(swarm.players.map(p => p.peerId));
+    allPeerIds.add(this.myPeerId);
 
     swarm.pendingProposal = {
       turn: swarm.currentTurn,
@@ -614,7 +674,11 @@ export class OriginTrailGameCoordinator {
       winningAction,
       newStateJson,
       resultMessage: result.message,
-      approvals: new Set([this.myPeerId]),
+      approvals: allPeerIds,
+      votes,
+      resolution: 'force-resolved',
+      deaths,
+      event: turnEvent,
     };
 
     const msg: proto.TurnProposalMsg = {
@@ -628,9 +692,13 @@ export class OriginTrailGameCoordinator {
       winningAction,
       newStateJson,
       resultMessage: result.message,
+      votes,
+      resolution: 'force-resolved',
+      deaths,
+      event: turnEvent,
     };
     await this.broadcast(msg);
-    this.log(`Force-resolve: turn ${swarm.currentTurn} proposal broadcast for ${swarm.id}`);
+    this.log(`Force-resolve: turn ${swarm.currentTurn} resolved immediately for ${swarm.id}`);
 
     await this.checkProposalThreshold(swarm);
     return swarm;
@@ -836,6 +904,10 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
+      votes: msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action })),
+      resolution: msg.resolution ?? 'consensus',
+      deaths: msg.deaths ?? [],
+      event: msg.event,
     };
 
     const approveMsg: proto.TurnApproveMsg = {
@@ -882,6 +954,10 @@ export class OriginTrailGameCoordinator {
         winningAction: proposal.winningAction,
         resultMessage: proposal.resultMessage,
         approvers: [...proposal.approvals],
+        votes: proposal.votes,
+        resolution: proposal.resolution,
+        deaths: proposal.deaths,
+        event: proposal.event,
         timestamp: Date.now(),
       });
 
@@ -957,7 +1033,13 @@ export class OriginTrailGameCoordinator {
         threshold: signatureThreshold(swarm.players.length),
       } : null,
       lastTurn: swarm.turnHistory[swarm.turnHistory.length - 1] ?? null,
-      turnHistory: swarm.turnHistory,
+      turnHistory: swarm.turnHistory.map(t => ({
+        ...t,
+        votes: (t.votes ?? []).map(v => {
+          const player = swarm.players.find(p => p.peerId === v.peerId);
+          return { ...v, displayName: player?.displayName ?? v.peerId.slice(-8) };
+        }),
+      })),
     };
   }
 

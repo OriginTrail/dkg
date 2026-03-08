@@ -117,6 +117,12 @@ const ACTION_ICONS: Record<string, string> = {
   trade: '🔄',
 };
 
+const RESOLUTION_LABELS: Record<string, { label: string; color: string }> = {
+  'consensus': { label: 'Consensus', color: 'var(--green)' },
+  'leader-tiebreak': { label: 'Leader Tiebreak', color: 'var(--orange)' },
+  'force-resolved': { label: 'Force Resolved', color: 'var(--red)' },
+};
+
 /**
  * Build rich RDF triples from the game's own ontology. Uses the same URIs
  * as rdf.ts so the graph is consistent with what the DKG stores.
@@ -175,12 +181,41 @@ function buildContextTriples(swarm: any): Triple[] {
       triples.push({ subject: resultUri, predicate: RDFS_LABEL, object: `"${turn.resultMessage}"` });
     }
 
-    // Approvers
-    for (const a of turn.approvers ?? []) {
-      const peerId = typeof a === 'string' ? a : String(a);
-      const peerUri = `${OT}player/${peerId.slice(-12)}`;
-      triples.push({ subject: turnUri, predicate: `${OT}approvedBy`, object: peerUri });
-      triples.push({ subject: peerUri, predicate: RDF_TYPE, object: `${OT}Player` });
+    // Resolution method
+    const resolution = turn.resolution ?? 'consensus';
+    triples.push({ subject: turnUri, predicate: `${OT}resolution`, object: `"${resolution}"` });
+
+    // Per-player votes
+    for (const v of turn.votes ?? []) {
+      const voterUri = `${OT}player/${(v.displayName ?? v.peerId?.slice(-8) ?? 'unknown').replace(/\s+/g, '-')}`;
+      const voteUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/vote/${(v.displayName ?? v.peerId?.slice(-8) ?? 'anon').replace(/\s+/g, '-')}`;
+      triples.push({ subject: turnUri, predicate: `${OT}hasVote`, object: voteUri });
+      triples.push({ subject: voteUri, predicate: RDF_TYPE, object: `${OT}Vote` });
+      triples.push({ subject: voteUri, predicate: `${OT}voter`, object: voterUri });
+      triples.push({ subject: voteUri, predicate: `${OT}votedAction`, object: `"${ACTION_LABELS[v.action] ?? v.action}"` });
+      triples.push({ subject: voterUri, predicate: RDF_TYPE, object: `${OT}Player` });
+      triples.push({ subject: voterUri, predicate: SCHEMA_NAME, object: `"${v.displayName ?? v.peerId?.slice(-8) ?? 'Unknown'}"` });
+    }
+
+    // Deaths
+    for (const d of turn.deaths ?? []) {
+      const name = typeof d === 'string' ? d : d.name;
+      const cause = typeof d === 'string' ? null : d.cause;
+      const deathUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/death/${name.replace(/\s+/g, '-')}`;
+      const agentUri = `${OT}agent/${name.replace(/\s+/g, '-')}`;
+      triples.push({ subject: turnUri, predicate: `${OT}hasDeath`, object: deathUri });
+      triples.push({ subject: deathUri, predicate: RDF_TYPE, object: `${OT}DeathEvent` });
+      triples.push({ subject: deathUri, predicate: RDFS_LABEL, object: `"${name} perished"` });
+      triples.push({ subject: deathUri, predicate: `${OT}agent`, object: agentUri });
+      if (cause) triples.push({ subject: deathUri, predicate: `${OT}causeOfDeath`, object: `"${cause}"` });
+    }
+
+    // Game event
+    if (turn.event) {
+      const eventUri = `${OT}swarm/${swarm.id}/turn/${turn.turn}/event`;
+      triples.push({ subject: turnUri, predicate: `${OT}hasEvent`, object: eventUri });
+      triples.push({ subject: eventUri, predicate: RDF_TYPE, object: `${OT}GameEvent` });
+      triples.push({ subject: eventUri, predicate: RDFS_LABEL, object: `"${turn.event.description}"` });
     }
 
     // Temporal chain
@@ -239,6 +274,8 @@ function ContextGraphPanel({ swarm }: { swarm: any }) {
             `${OT}turn`,
             `${OT}epochs`,
             `${OT}status`,
+            `${OT}votedAction`,
+            `${OT}resolution`,
           ],
         },
         style: {
@@ -251,6 +288,9 @@ function ContextGraphPanel({ swarm }: { swarm: any }) {
             [`${OT}Outcome`]: '#22d3ee',
             [`${OT}ResourceState`]: '#d29922',
             [`${OT}Player`]: '#8b949e',
+            [`${OT}Vote`]: '#f0883e',
+            [`${OT}DeathEvent`]: '#da3633',
+            [`${OT}GameEvent`]: '#d29922',
           },
         },
         physics: { enabled: true, solver: 'forceAtlas2', gravity: -25, springLength: 90 },
@@ -288,25 +328,76 @@ function DecisionTrace({ swarm }: { swarm: any }) {
 
   return (
     <div className="ot-trace-scroll" ref={scrollRef}>
-      {history.map((turn: any, idx: number) => (
-        <div key={turn.turn} className="ot-trace-entry">
-          <div className="ot-trace-dot" />
-          <div className="ot-trace-body">
-            <div className="ot-trace-header">
-              <span className="ot-trace-turn">Turn {turn.turn}</span>
-              <span className="ot-trace-action">
-                {ACTION_ICONS[turn.winningAction] ?? '?'}{' '}
-                {ACTION_LABELS[turn.winningAction] ?? turn.winningAction}
-              </span>
-            </div>
-            <div className="ot-trace-result">{turn.resultMessage}</div>
-            <div className="ot-trace-meta">
-              {turn.approvers?.length ?? 0} approvers
-              {turn.timestamp ? ` · ${new Date(turn.timestamp).toLocaleTimeString()}` : ''}
+      {history.map((turn: any) => {
+        const res = RESOLUTION_LABELS[turn.resolution] ?? RESOLUTION_LABELS['consensus'];
+        const votes: any[] = turn.votes ?? [];
+
+        const voteSummary = new Map<string, string[]>();
+        for (const v of votes) {
+          const action = ACTION_LABELS[v.action] ?? v.action;
+          const list = voteSummary.get(action) ?? [];
+          list.push(v.displayName ?? v.peerId?.slice(-8) ?? '?');
+          voteSummary.set(action, list);
+        }
+
+        return (
+          <div key={turn.turn} className="ot-trace-entry">
+            <div className="ot-trace-dot" />
+            <div className="ot-trace-body">
+              <div className="ot-trace-header">
+                <span className="ot-trace-turn">Turn {turn.turn}</span>
+                <span className="ot-trace-action">
+                  {ACTION_ICONS[turn.winningAction] ?? '?'}{' '}
+                  {ACTION_LABELS[turn.winningAction] ?? turn.winningAction}
+                </span>
+                <span className="ot-trace-resolution" style={{ color: res.color }}>{res.label}</span>
+              </div>
+              <div className="ot-trace-result">{turn.resultMessage}</div>
+              {votes.length > 0 && (
+                <div className="ot-trace-votes">
+                  {[...voteSummary.entries()].map(([action, players]) => (
+                    <div key={action} className="ot-trace-vote-group">
+                      <span className="ot-trace-vote-action">{action}</span>
+                      <span className="ot-trace-vote-players">
+                        {players.join(', ')}
+                        {action === (ACTION_LABELS[turn.winningAction] ?? turn.winningAction) && (
+                          <span className="ot-trace-winner-check"> ✓</span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {turn.event && (
+                <div className="ot-trace-event">
+                  <span className="ot-trace-event-icon">⚠</span>
+                  <span>{turn.event.description}</span>
+                </div>
+              )}
+              {(turn.deaths?.length ?? 0) > 0 && (
+                <div className="ot-trace-deaths">
+                  {turn.deaths.map((d: any) => {
+                    const name = typeof d === 'string' ? d : d.name;
+                    const cause = typeof d === 'string' ? null : d.cause;
+                    return (
+                      <div key={name} className="ot-trace-death-card">
+                        <span className="ot-trace-skull">💀</span>
+                        <div className="ot-trace-death-info">
+                          <span className="ot-trace-death-name">{name} perished</span>
+                          {cause && <span className="ot-trace-death-cause">{cause}</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="ot-trace-meta">
+                {turn.timestamp ? new Date(turn.timestamp).toLocaleTimeString() : ''}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -335,7 +426,7 @@ function JourneyPanel({ swarm }: { swarm: any }) {
       <div className="ot-journey-content">
         {tab === 'trace' && <DecisionTrace swarm={swarm} />}
         {tab === 'graph' && (
-          <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+          <div style={{ position: 'relative', flex: 1, minHeight: 0, height: '100%' }}>
             <ContextGraphPanel swarm={swarm} />
           </div>
         )}
@@ -437,7 +528,8 @@ export function App() {
           <span>Status: <strong>{swarm.status}</strong></span>
           <span>Turn: <strong>{swarm.currentTurn}</strong></span>
           <span>Players: <strong>{swarm.playerCount}</strong></span>
-          <span>Signatures needed: <strong>{swarm.signatureThreshold}</strong></span>
+          <span>Game Master: <strong style={{ color: 'var(--green)' }}>{swarm.leaderName ?? '—'}</strong></span>
+          <span>Signatures: <strong>{swarm.signatureThreshold}</strong></span>
         </div>
 
         {swarm.pendingProposal && (
@@ -449,7 +541,7 @@ export function App() {
         {swarm.status === 'recruiting' && (
           <div className="ot-card">
             <h3>Waiting for players ({swarm.playerCount}/{swarm.minPlayers} minimum)</h3>
-            <ul>{swarm.players.map((p: any) => <li key={p.id}>{p.name} {p.isLeader ? '(GM)' : ''}</li>)}</ul>
+            <ul>{swarm.players.map((p: any) => <li key={p.id}>{p.name} {p.isLeader && <span className="ot-gm-badge">GM</span>}</li>)}</ul>
             {swarm.leaderId === nodeInfo?.peerId && swarm.playerCount >= swarm.minPlayers && (
               <button onClick={async () => {
                 try { const res = await api.start(swarm.id); setSwarm(res); }
@@ -467,7 +559,7 @@ export function App() {
                   <h2>{swarm.gameState.status === 'won' ? 'AGI Achieved — Singularity Harbor!' : 'Your expedition has ended.'}</h2>
                 </div>
               )}
-              <GameStateDisplay state={swarm.gameState} />
+              <GameStateDisplay state={swarm.gameState} leaderName={swarm.leaderName} />
               {swarm.status === 'traveling' && (
                 <VotePanel swarm={swarm} peerId={nodeInfo?.peerId} onVoted={(w) => setSwarm(w)} onError={setError} />
               )}
@@ -476,7 +568,10 @@ export function App() {
                   <h3>Last Turn</h3>
                   <p><strong>Action:</strong> {ACTION_LABELS[swarm.lastTurn.winningAction] ?? swarm.lastTurn.winningAction}</p>
                   <p>{swarm.lastTurn.resultMessage}</p>
-                  <p className="ot-muted">Approved by {swarm.lastTurn.approvers?.length ?? 0} nodes</p>
+                  <p className="ot-muted" style={{ color: RESOLUTION_LABELS[swarm.lastTurn.resolution]?.color }}>
+                    {RESOLUTION_LABELS[swarm.lastTurn.resolution]?.label ?? 'Consensus'}
+                    {swarm.lastTurn.votes?.length > 0 && ` · ${swarm.lastTurn.votes.length} votes`}
+                  </p>
                 </div>
               )}
             </div>
@@ -494,7 +589,7 @@ export function App() {
   return null;
 }
 
-function GameStateDisplay({ state }: { state: any }) {
+function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: string }) {
   return (
     <div className="ot-game-state">
       <div className="ot-stats">
@@ -509,10 +604,12 @@ function GameStateDisplay({ state }: { state: any }) {
         <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / 2000) * 100)}%` }} />
       </div>
       <div className="ot-party">
-        <h4>Swarm</h4>
+        <h4>Swarm Members</h4>
         {state.party.map((m: any) => (
           <div key={m.id} className={`ot-member ${!m.alive ? 'ot-dead' : m.health < 40 ? 'ot-sick' : ''}`}>
-            {m.name} — {m.alive ? `${m.health} HP` : 'Deceased'}
+            {m.name}
+            {leaderName && m.name === leaderName && <span className="ot-gm-badge">GM</span>}
+            {' — '}{m.alive ? `${m.health} HP` : 'Deceased'}
           </div>
         ))}
       </div>
@@ -534,9 +631,9 @@ function VotePanel({ swarm, peerId, onVoted, onError }: { swarm: any; peerId?: s
       <h3>Vote for Turn {swarm.currentTurn}</h3>
       {hasVoted && <p className="ot-muted">You have voted. Waiting for others...</p>}
       <div className="ot-vote-grid">
-        <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>→ Conservative</button>
-        <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Standard</button>
-        <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Max Throughput</button>
+        <button onClick={() => doVote('advance', { intensity: 1 })} disabled={hasVoted}>→ Advance (Conservative)</button>
+        <button onClick={() => doVote('advance', { intensity: 2 })} disabled={hasVoted}>→ Advance (Standard)</button>
+        <button onClick={() => doVote('advance', { intensity: 3 })} disabled={hasVoted}>→ Advance (Max Throughput)</button>
         <button onClick={() => doVote('upgradeSkills')} disabled={hasVoted}>⬆ Upgrade Skills</button>
         <button onClick={() => doVote('syncMemory')} disabled={hasVoted}>♻ Sync Memory</button>
         <button onClick={() => doVote('forceBottleneck')} disabled={hasVoted}>⚡ Force Bottleneck</button>

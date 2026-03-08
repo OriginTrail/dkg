@@ -113,6 +113,28 @@ describe('buildGameTriples produces valid triple structure', () => {
           triples.push({ subject: turnNode, predicate: 'game:approvedBy', object: `peer:${short}` });
         }
       }
+      if (turn.resolution) {
+        triples.push({ subject: turnNode, predicate: 'game:resolution', object: `"${turn.resolution}"` });
+      }
+      for (const v of turn.votes ?? []) {
+        const voteNode = `vote:T${turn.turn}:${v.displayName ?? v.peerId}`;
+        triples.push({ subject: turnNode, predicate: 'game:hasVote', object: voteNode });
+        triples.push({ subject: voteNode, predicate: 'rdf:type', object: 'game:Vote' });
+      }
+      for (const d of turn.deaths ?? []) {
+        const name = typeof d === 'string' ? d : d.name;
+        const cause = typeof d === 'string' ? null : d.cause;
+        const deathNode = `death:T${turn.turn}:${name}`;
+        triples.push({ subject: turnNode, predicate: 'game:hasDeath', object: deathNode });
+        triples.push({ subject: deathNode, predicate: 'rdf:type', object: 'game:DeathEvent' });
+        if (cause) triples.push({ subject: deathNode, predicate: 'game:causeOfDeath', object: `"${cause}"` });
+      }
+      if (turn.event) {
+        const eventNode = `event:T${turn.turn}`;
+        triples.push({ subject: turnNode, predicate: 'game:hasEvent', object: eventNode });
+        triples.push({ subject: eventNode, predicate: 'rdf:type', object: 'game:GameEvent' });
+        triples.push({ subject: eventNode, predicate: 'rdfs:label', object: `"${turn.event.description}"` });
+      }
       if (prevTurnNode) {
         triples.push({ subject: prevTurnNode, predicate: 'game:nextTurn', object: turnNode });
       }
@@ -196,5 +218,89 @@ describe('buildGameTriples produces valid triple structure', () => {
 
     const aliveType = triples.find(t => t.subject === 'agent:Alive' && t.predicate === 'rdf:type');
     expect(aliveType?.object).toBe('game:Agent');
+  });
+
+  it('includes per-player votes in triples', () => {
+    const triples = buildGameTriples({
+      name: 'VoteTest',
+      gameState: gameEngine.createGame(['A']),
+      turnHistory: [
+        {
+          turn: 1, winningAction: 'advance', resultMessage: 'OK', approvers: [],
+          votes: [
+            { peerId: 'peer-111', action: 'advance', displayName: 'Alice' },
+            { peerId: 'peer-222', action: 'syncMemory', displayName: 'Bob' },
+          ],
+          resolution: 'consensus',
+          deaths: [],
+        },
+      ],
+    });
+
+    const voteTriples = triples.filter(t => t.predicate === 'game:hasVote');
+    expect(voteTriples.length).toBe(2);
+
+    const voteTypes = triples.filter(t => t.object === 'game:Vote');
+    expect(voteTypes.length).toBe(2);
+  });
+
+  it('includes resolution predicate on turns', () => {
+    const triples = buildGameTriples({
+      name: 'ResTest',
+      gameState: gameEngine.createGame(['A']),
+      turnHistory: [
+        {
+          turn: 1, winningAction: 'advance', resultMessage: 'OK', approvers: [],
+          votes: [], resolution: 'force-resolved', deaths: [],
+        },
+      ],
+    });
+
+    const resTriple = triples.find(t => t.predicate === 'game:resolution');
+    expect(resTriple?.object).toBe('"force-resolved"');
+  });
+
+  it('includes death events with cause in triples', () => {
+    const triples = buildGameTriples({
+      name: 'DeathEvtTest',
+      gameState: gameEngine.createGame(['A']),
+      turnHistory: [
+        {
+          turn: 1, winningAction: 'advance', resultMessage: 'OK', approvers: [],
+          votes: [], resolution: 'consensus',
+          deaths: [{ name: 'Bob', cause: 'hallucination cascade' }],
+        },
+      ],
+    });
+
+    const deathTriples = triples.filter(t => t.predicate === 'game:hasDeath');
+    expect(deathTriples.length).toBe(1);
+
+    const causeTriples = triples.filter(t => t.predicate === 'game:causeOfDeath');
+    expect(causeTriples.length).toBe(1);
+    expect(causeTriples[0].object).toBe('"hallucination cascade"');
+  });
+
+  it('includes game events in triples', () => {
+    const triples = buildGameTriples({
+      name: 'EventTest',
+      gameState: gameEngine.createGame(['A']),
+      turnHistory: [
+        {
+          turn: 1, winningAction: 'advance', resultMessage: 'OK', approvers: [],
+          votes: [], resolution: 'consensus', deaths: [],
+          event: { type: 'ai_failure', description: 'Model collapse imminent' },
+        },
+      ],
+    });
+
+    const eventTriples = triples.filter(t => t.predicate === 'game:hasEvent');
+    expect(eventTriples.length).toBe(1);
+
+    const eventTypes = triples.filter(t => t.object === 'game:GameEvent');
+    expect(eventTypes.length).toBe(1);
+
+    const labels = triples.filter(t => t.object === '"Model collapse imminent"');
+    expect(labels.length).toBe(1);
   });
 });

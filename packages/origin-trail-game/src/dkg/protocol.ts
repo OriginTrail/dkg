@@ -71,6 +71,10 @@ export interface TurnProposalMsg extends BaseMessage {
   winningAction: string;
   newStateJson: string;
   resultMessage: string;
+  votes: Array<{ peerId: string; action: string }>;
+  resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+  deaths: Array<{ name: string; cause: string }>;
+  event?: { type: string; description: string };
 }
 
 export interface TurnApproveMsg extends BaseMessage {

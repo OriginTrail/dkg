@@ -68,6 +68,12 @@ function makeTravelingSwarm(turnCount = 0) {
       winningAction: i % 2 === 1 ? 'advance' : 'syncMemory',
       resultMessage: i % 2 === 1 ? `Advanced 16 epochs.` : 'Synced memory to DKG.',
       approvers: ['peer-aaa111', 'peer-bbb222'],
+      votes: [
+        { peerId: 'peer-aaa111', action: i % 2 === 1 ? 'advance' : 'syncMemory', displayName: 'Alice' },
+        { peerId: 'peer-bbb222', action: i % 2 === 1 ? 'advance' : 'syncMemory', displayName: 'Bob' },
+      ],
+      resolution: 'consensus' as const,
+      deaths: [],
       timestamp: Date.now() - (turnCount - i) * 10000,
     });
   }
@@ -403,7 +409,7 @@ describe('Journey Panel visualization in play view', () => {
     });
   });
 
-  it('shows approver count and action labels in decision trace', async () => {
+  it('shows action labels and resolution badges in decision trace', async () => {
     const swarm = makeTravelingSwarm(2);
     mockApi.swarm.mockResolvedValue(swarm);
     mockApi.lobby.mockResolvedValue({
@@ -423,10 +429,11 @@ describe('Journey Panel visualization in play view', () => {
     expect(actionLabels[0].textContent).toContain('Advance');
     expect(actionLabels[1].textContent).toContain('Sync Memory');
 
-    // Approver metadata
-    const metas = container.querySelectorAll('.ot-trace-meta');
-    expect(metas[0].textContent).toContain('2 approvers');
-    expect(metas[1].textContent).toContain('2 approvers');
+    // Resolution badges
+    const resolutions = container.querySelectorAll('.ot-trace-resolution');
+    expect(resolutions.length).toBe(2);
+    expect(resolutions[0].textContent).toBe('Consensus');
+    expect(resolutions[1].textContent).toBe('Consensus');
   });
 
   it('graph includes dead agent nodes when a party member dies', async () => {
@@ -519,5 +526,185 @@ describe('Journey Panel visualization in play view', () => {
 
     // Win message visible
     expect(screen.getByText(/Singularity Harbor/)).toBeInTheDocument();
+  });
+
+  it('shows per-player votes grouped by action', async () => {
+    const swarm = makeTravelingSwarm(1);
+    swarm.turnHistory[0].votes = [
+      { peerId: 'peer-aaa111', action: 'advance', displayName: 'Alice' },
+      { peerId: 'peer-bbb222', action: 'upgradeSkills', displayName: 'Bob' },
+      { peerId: 'peer-ccc333', action: 'advance', displayName: 'Charlie' },
+    ];
+    swarm.turnHistory[0].winningAction = 'advance';
+    swarm.turnHistory[0].resolution = 'consensus';
+
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    const { container } = render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const voteGroups = container.querySelectorAll('.ot-trace-vote-group');
+    expect(voteGroups.length).toBe(2);
+
+    const actions = container.querySelectorAll('.ot-trace-vote-action');
+    const actionTexts = Array.from(actions).map(a => a.textContent);
+    expect(actionTexts).toContain('Advance');
+    expect(actionTexts).toContain('Upgrade Skills');
+
+    const players = container.querySelectorAll('.ot-trace-vote-players');
+    const aliceGroup = Array.from(players).find(p => p.textContent?.includes('Alice'));
+    expect(aliceGroup?.textContent).toContain('Charlie');
+    expect(aliceGroup?.textContent).toContain('✓');
+  });
+
+  it('shows force-resolved and leader-tiebreak resolution badges', async () => {
+    const swarm = makeTravelingSwarm(2);
+    swarm.turnHistory[0].resolution = 'force-resolved';
+    swarm.turnHistory[1].resolution = 'leader-tiebreak';
+
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    const { container } = render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const resolutions = container.querySelectorAll('.ot-trace-resolution');
+    expect(resolutions[0].textContent).toBe('Force Resolved');
+    expect(resolutions[1].textContent).toBe('Leader Tiebreak');
+  });
+
+  it('shows game events in the decision trace', async () => {
+    const swarm = makeTravelingSwarm(1);
+    swarm.turnHistory[0].event = {
+      type: 'ai_failure',
+      description: 'Alice is experiencing a hallucination cascade',
+    };
+
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    const { container } = render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const eventEl = container.querySelector('.ot-trace-event');
+    expect(eventEl).toBeInTheDocument();
+    expect(eventEl!.textContent).toContain('hallucination cascade');
+  });
+
+  it('shows death cards with skull and cause of death', async () => {
+    const swarm = makeTravelingSwarm(1);
+    swarm.turnHistory[0].deaths = [
+      { name: 'Bob', cause: 'Bob is suffering model collapse' },
+    ];
+    swarm.gameState.party[1].alive = false;
+    swarm.gameState.party[1].health = 0;
+
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    const { container } = render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const deathCards = container.querySelectorAll('.ot-trace-death-card');
+    expect(deathCards.length).toBe(1);
+
+    const skull = container.querySelector('.ot-trace-skull');
+    expect(skull).toBeInTheDocument();
+
+    const deathName = container.querySelector('.ot-trace-death-name');
+    expect(deathName!.textContent).toContain('Bob perished');
+
+    const deathCause = container.querySelector('.ot-trace-death-cause');
+    expect(deathCause!.textContent).toContain('model collapse');
+  });
+
+  it('shows Game Master badge in status bar and party list', async () => {
+    const swarm = makeTravelingSwarm(1);
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    const { container } = render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    // Status bar shows "Game Master: Alice"
+    const statusBar = container.querySelector('.ot-status-bar');
+    expect(statusBar!.textContent).toContain('Game Master');
+    expect(statusBar!.textContent).toContain('Alice');
+
+    // GM badge in party list
+    const gmBadge = container.querySelector('.ot-gm-badge');
+    expect(gmBadge).toBeInTheDocument();
+    expect(gmBadge!.textContent).toBe('GM');
+  });
+
+  it('graph includes death and event nodes when present', async () => {
+    const swarm = makeTravelingSwarm(1);
+    swarm.turnHistory[0].deaths = [
+      { name: 'Bob', cause: 'Bob is suffering model collapse' },
+    ];
+    swarm.turnHistory[0].event = {
+      type: 'ai_failure',
+      description: 'Bob is suffering model collapse',
+    };
+    swarm.gameState.party[1].alive = false;
+    swarm.gameState.party[1].health = 0;
+
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const graphTab = screen.getByText('Context Graph');
+    await act(async () => { fireEvent.click(graphTab); });
+
+    const triples: Array<{ subject: string; predicate: string; object: string }> = getCapturedRdfGraphProps().data;
+
+    const deathNodes = triples.filter(t => t.object === 'https://origintrail-game.dkg.io/DeathEvent');
+    expect(deathNodes.length).toBe(1);
+
+    const causeTriples = triples.filter(t => t.predicate === 'https://origintrail-game.dkg.io/causeOfDeath');
+    expect(causeTriples.length).toBe(1);
+    expect(causeTriples[0].object).toContain('model collapse');
+
+    const eventNodes = triples.filter(t => t.object === 'https://origintrail-game.dkg.io/GameEvent');
+    expect(eventNodes.length).toBe(1);
   });
 });

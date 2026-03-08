@@ -11,7 +11,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:9200',
+      '/api': {
+        target: 'http://127.0.0.1:19200',
+        headers: { Authorization: 'Bearer origin-trail-game-local-play' },
+      },
     },
   },
 });
