@@ -118,7 +118,11 @@ export class GossipPublishHandler {
           privateTripleCount: ka.privateTripleCount ?? 0,
         }));
 
-        const rootEntities = manifest.map(m => m.rootEntity);
+        const rootEntities = manifest.map(m => m.rootEntity).filter(isValidIri);
+        if (rootEntities.length === 0) {
+          this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: no valid root entities`);
+          return;
+        }
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } }`;
         const result = await this.store.query(sparql);
         const existingEntities = new Set<string>(
@@ -357,6 +361,11 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   if (typeof val === 'bigint') return val;
   if (typeof val === 'number') return BigInt(val);
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
+}
+
+function isValidIri(value: string): boolean {
+  if (!value || value.includes('>') || value.includes(' ')) return false;
+  return /^(https?:|did:|urn:)/i.test(value);
 }
 
 function stripLiteral(s: string): string {

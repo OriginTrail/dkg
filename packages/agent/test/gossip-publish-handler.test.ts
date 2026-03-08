@@ -52,13 +52,15 @@ describe('GossipPublishHandler', () => {
 
     await handler.handlePublishMessage(data, PARANET);
 
-    const results = await store.query(
-      `SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(?s = <http://example.org/s>) }`,
+    const result = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:paranet:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
     );
-    expect(results.length).toBeGreaterThan(0);
-    expect(results[0]['s']).toBe('http://example.org/s');
-    expect(results[0]['p']).toBe('http://example.org/p');
-    expect(results[0]['o']).toBe('http://example.org/o');
+    expect(result.type).toBe('bindings');
+    const bindings = result.type === 'bindings' ? result.bindings : [];
+    expect(bindings.length).toBeGreaterThan(0);
+    expect(bindings[0]['s']).toBe('http://example.org/s');
+    expect(bindings[0]['p']).toBe('http://example.org/p');
+    expect(bindings[0]['o']).toBe('http://example.org/o');
   });
 
   it('ignores empty broadcast with no UAL', async () => {
