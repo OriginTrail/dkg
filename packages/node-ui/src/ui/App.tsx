@@ -161,7 +161,7 @@ export function App() {
           <Route path="/explorer/*" element={<ExplorerPage />} />
           <Route path="/agent" element={<AgentHubPage />} />
           <Route path="/messages" element={<Navigate to="/agent" replace />} />
-          <Route path="/apps/*" element={<AppsPage />} />
+          <Route path="/apps/*" element={<AppsPage apps={installedApps} />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
           {/* Backward-compatible redirects for legacy routes */}

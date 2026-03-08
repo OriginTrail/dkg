@@ -1,52 +1,64 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
+import type { InstalledApp } from './AppHost.js';
 
-const TRUSTED_APP_PATH = '/apps/origin-trail-game/';
+const GAME_APP_ID = 'origin-trail-game';
+const FALLBACK_PATH = '/apps/origin-trail-game/';
 
 /**
- * Renders the OriginTrail Game inside the Node Dashboard by embedding
- * its standalone UI in an iframe.
+ * Hosts the OriginTrail Game in an iframe, matching the isolation model
+ * used by AppHostPage: when a separate-origin static server is available,
+ * the iframe loads from that origin so `allow-same-origin` can be omitted
+ * and real cross-origin isolation is enforced. Falls back to the main
+ * server path otherwise.
  *
- * Token handoff uses a nonce handshake: on iframe load the parent checks
- * that the iframe is still on the trusted app path, issues a random nonce,
- * and waits for the iframe to echo it back. Only matching nonces receive
- * the token. Re-auth is allowed on legitimate reloads of the trusted app
- * (the nonce changes each time so replayed requests are rejected).
- *
- * Security note: `allow-same-origin` is required because the app makes
- * fetch() calls to the node API on the same origin. The apps are
- * operator-installed trusted code served from loopback. The nonce
- * handshake provides defence-in-depth for token delivery.
+ * Token + apiOrigin are delivered via a nonce-based postMessage handshake.
+ * A fresh nonce is issued on every iframe load; only matching nonces
+ * receive the token.
  */
-export function AppsPage() {
+
+export function validateTokenRequest(
+  nonce: string | null,
+  requestNonce: unknown,
+): boolean {
+  return typeof requestNonce === 'string' && nonce !== null && requestNonce === nonce;
+}
+
+export function AppsPage({ apps }: { apps?: InstalledApp[] }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const nonceRef = useRef<string | null>(null);
+  const [src, setSrc] = useState<string | null>(null);
 
-  const isTrustedOrigin = useCallback(() => {
-    try {
-      const loc = iframeRef.current?.contentWindow?.location;
-      return loc?.pathname?.startsWith(TRUSTED_APP_PATH) ?? false;
-    } catch { return false; }
-  }, []);
+  const app = apps?.find(a => a.id === GAME_APP_ID);
+
+  useEffect(() => {
+    if (app?.staticUrl) {
+      fetch(app.staticUrl, { method: 'HEAD' })
+        .then(r => setSrc(r.ok ? app.staticUrl! : FALLBACK_PATH))
+        .catch(() => setSrc(FALLBACK_PATH));
+    } else {
+      setSrc(FALLBACK_PATH);
+    }
+  }, [app?.staticUrl]);
+
+  const isSeparateOrigin = src != null && src !== FALLBACK_PATH;
 
   const sendNonce = useCallback(() => {
     if (!iframeRef.current?.contentWindow) return;
-    if (!isTrustedOrigin()) return;
     const nonce = crypto.randomUUID();
     nonceRef.current = nonce;
     iframeRef.current.contentWindow.postMessage({ type: 'dkg-nonce', nonce }, '*');
-  }, [isTrustedOrigin]);
+  }, []);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (
         e.data?.type === 'dkg-token-request' &&
         iframeRef.current?.contentWindow === e.source &&
-        typeof e.data.nonce === 'string' &&
-        e.data.nonce === nonceRef.current
+        validateTokenRequest(nonceRef.current, e.data.nonce)
       ) {
         nonceRef.current = null;
         const token = (window as any).__DKG_TOKEN__;
-        if (token && isTrustedOrigin()) {
+        if (token) {
           iframeRef.current.contentWindow!.postMessage(
             { type: 'dkg-token', token, apiOrigin: window.location.origin },
             '*',
@@ -56,14 +68,18 @@ export function AppsPage() {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [isTrustedOrigin]);
+  }, []);
+
+  if (!src) return null;
 
   return (
     <iframe
       ref={iframeRef}
-      src={TRUSTED_APP_PATH}
+      src={src}
       onLoad={sendNonce}
-      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      sandbox={isSeparateOrigin
+        ? 'allow-scripts allow-forms allow-popups'
+        : 'allow-scripts allow-same-origin allow-forms allow-popups'}
       allow="clipboard-write"
       style={{
         width: '100%',

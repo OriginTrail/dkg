@@ -223,13 +223,13 @@ describe('explorer graph query safety', () => {
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
-  it('uses sandbox with allow-same-origin for proper API access', () => {
-    expect(apps).toContain('sandbox="allow-scripts allow-same-origin allow-forms allow-popups"');
+  it('omits allow-same-origin when separate-origin static server is used', () => {
+    expect(apps).toContain("'allow-scripts allow-forms allow-popups'");
   });
 
-  it('documents why allow-same-origin is required', () => {
-    expect(apps).toMatch(/allow-same-origin.*required/i);
-    expect(apps).toMatch(/loopback|trusted/i);
+  it('falls back to allow-same-origin only for same-origin path', () => {
+    expect(apps).toContain("'allow-scripts allow-same-origin allow-forms allow-popups'");
+    expect(apps).toContain('isSeparateOrigin');
   });
 
   it('uses nonce handshake before sending token', () => {
@@ -239,82 +239,58 @@ describe('Apps.tsx iframe embedding', () => {
     expect(apps).toMatch(/nonceRef\.current\s*=\s*null/);
   });
 
-  it('listens for dkg-token-request with nonce from iframe', () => {
+  it('listens for dkg-token-request and validates nonce', () => {
     expect(apps).toContain('dkg-token-request');
     expect(apps).toContain('addEventListener');
-    expect(apps).toMatch(/e\.data\.nonce.*===.*nonceRef/);
-  });
-
-  it('checks trusted origin before issuing nonce and delivering token', () => {
-    expect(apps).toContain('TRUSTED_APP_PATH');
-    expect(apps).toContain('isTrustedOrigin');
-    expect(apps).toMatch(/isTrustedOrigin\(\)/);
+    expect(apps).toContain('validateTokenRequest');
   });
 
   it('allows re-auth on legitimate reloads (no permanent handshake gate)', () => {
     expect(apps).not.toMatch(/handshakeCompleteRef/);
   });
+
+  it('exports validateTokenRequest as a testable pure function', () => {
+    expect(apps).toContain('export function validateTokenRequest');
+  });
 });
 
-describe('Apps.tsx behavioral postMessage handshake', () => {
-  it('first handshake delivers token when nonce matches', () => {
-    let postedMessages: any[] = [];
-    const fakeContentWindow = {
-      postMessage: (msg: any, _origin: string) => postedMessages.push(msg),
-      location: { pathname: '/apps/origin-trail-game/' },
-    };
-    const nonceRef = { current: null as string | null };
-    const fakeToken = 'test-token-abc';
+describe('validateTokenRequest (pure handshake logic)', () => {
+  // The function is exported from Apps.tsx. Since that file imports React/DOM
+  // which aren't available in this Node-only test, we extract and eval just
+  // the pure function from the source to test the real implementation.
+  let validateTokenRequest: (nonce: string | null, requestNonce: unknown) => boolean;
 
-    const nonce = 'nonce-123';
-    nonceRef.current = nonce;
-    fakeContentWindow.postMessage({ type: 'dkg-nonce', nonce }, '*');
+  const fnMatch = readFile('pages/Apps.tsx').match(
+    /export function validateTokenRequest\([^)]*\)[^{]*\{([^}]+)\}/,
+  );
+  if (fnMatch) {
+    validateTokenRequest = new Function('nonce', 'requestNonce', fnMatch[1]) as any;
+  } else {
+    throw new Error('Could not extract validateTokenRequest from Apps.tsx');
+  }
 
-    expect(postedMessages).toHaveLength(1);
-    expect(postedMessages[0].type).toBe('dkg-nonce');
-
-    const request = { type: 'dkg-token-request', nonce };
-    const nonceMatches = request.nonce === nonceRef.current;
-    expect(nonceMatches).toBe(true);
-
-    if (nonceMatches) {
-      nonceRef.current = null;
-      fakeContentWindow.postMessage(
-        { type: 'dkg-token', token: fakeToken, apiOrigin: 'http://localhost:9200' },
-        '*',
-      );
-    }
-
-    expect(postedMessages).toHaveLength(2);
-    expect(postedMessages[1]).toEqual({
-      type: 'dkg-token',
-      token: fakeToken,
-      apiOrigin: 'http://localhost:9200',
-    });
-    expect(nonceRef.current).toBeNull();
+  it('accepts matching nonce', () => {
+    expect(validateTokenRequest('abc-123', 'abc-123')).toBe(true);
   });
 
-  it('rejects token request with wrong nonce', () => {
-    const nonceRef = { current: 'correct-nonce' };
-    const request = { type: 'dkg-token-request', nonce: 'wrong-nonce' };
-    expect(request.nonce === nonceRef.current).toBe(false);
+  it('rejects wrong nonce', () => {
+    expect(validateTokenRequest('abc-123', 'wrong')).toBe(false);
   });
 
-  it('allows re-handshake after reload (new nonce issued each time)', () => {
-    const nonceRef = { current: null as string | null };
-    const delivered: string[] = [];
+  it('rejects when stored nonce is null (no pending handshake)', () => {
+    expect(validateTokenRequest(null, 'abc-123')).toBe(false);
+  });
 
-    for (let i = 0; i < 3; i++) {
-      const nonce = `nonce-${i}`;
-      nonceRef.current = nonce;
-      const request = { type: 'dkg-token-request', nonce };
-      if (request.nonce === nonceRef.current) {
-        nonceRef.current = null;
-        delivered.push(nonce);
-      }
-    }
+  it('rejects non-string request nonce', () => {
+    expect(validateTokenRequest('abc', 42)).toBe(false);
+    expect(validateTokenRequest('abc', undefined)).toBe(false);
+    expect(validateTokenRequest('abc', null)).toBe(false);
+  });
 
-    expect(delivered).toEqual(['nonce-0', 'nonce-1', 'nonce-2']);
+  it('allows successive handshakes (each with new nonce)', () => {
+    expect(validateTokenRequest('n1', 'n1')).toBe(true);
+    expect(validateTokenRequest('n2', 'n2')).toBe(true);
+    expect(validateTokenRequest('n3', 'n3')).toBe(true);
   });
 });
 
