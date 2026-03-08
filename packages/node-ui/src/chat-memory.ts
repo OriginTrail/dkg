@@ -37,6 +37,26 @@ export interface EnshrineResult {
   tripleCount: number;
 }
 
+export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+export type ImportSource = (typeof IMPORT_SOURCES)[number];
+
+export interface ImportResultQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+export interface ImportResult {
+  batchId: string | null;
+  source: ImportSource;
+  memoryCount: number;
+  tripleCount: number;
+  entityCount: number;
+  quads: ImportResultQuad[];
+  quadsTruncated?: boolean;
+  warnings?: string[];
+}
+
 const MEMORY_PARANET = 'agent-memory';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -97,6 +117,43 @@ Example output:
 <urn:dkg:entity:alice> <http://schema.org/worksFor> <urn:dkg:entity:acme-corp> .
 
 Conversation:`;
+
+const MEMORY_PARSE_PROMPT = `Parse the following exported AI memories into individual structured items. Each memory is a discrete fact, preference, or piece of context the user previously shared with an AI assistant.
+
+Output ONLY a valid JSON array. Each item should have:
+- "text": the memory content as a clear sentence
+- "category": one of "preference", "fact", "context", "instruction", "relationship"
+
+Rules:
+- Split compound memories into separate items when they contain distinct facts
+- Normalize formatting: remove bullet markers, numbering, markdown artifacts
+- Preserve the original meaning faithfully
+- Skip metadata lines like "Here are your memories:" or "Last updated:"
+- If no valid memories can be extracted, output: []
+- Do NOT wrap in markdown code fences
+
+Example input:
+"- Prefers dark mode in all apps
+- Works at Acme Corp as a senior engineer
+- Has a dog named Max"
+
+Example output:
+[{"text":"Prefers dark mode in all apps","category":"preference"},{"text":"Works at Acme Corp as a senior engineer","category":"fact"},{"text":"Has a dog named Max","category":"fact"}]
+
+Memories to parse:`;
+
+const MEMORY_KG_PROMPT = `Extract structured knowledge from the following personal memory items. These are facts/preferences a user previously stored with an AI assistant. Output ONLY valid N-Triples (one per line).
+
+Rules:
+- Subject URIs: use urn:dkg:entity:{slug} where slug is a lowercase-kebab-case identifier
+- Use schema.org predicates where possible (e.g. <http://schema.org/name>, <http://schema.org/description>, <http://schema.org/knows>)
+- Use <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> for types
+- String literals use "value" syntax
+- Each triple must end with " ."
+- Focus on extracting entities (people, organizations, tools, places) and their relationships
+- If no meaningful knowledge can be extracted, output exactly: NONE
+
+Memory items:`;
 
 const SEMANTIC_RECALL_SYSTEM = `You are a SPARQL query generator. Output ONLY a valid SPARQL SELECT query.
 
@@ -546,6 +603,198 @@ export class ChatMemoryManager {
     } catch {
       return [];
     }
+  }
+
+  async importMemories(
+    rawText: string,
+    source: ImportSource = 'other',
+    opts: { useLlm?: boolean } = {},
+  ): Promise<ImportResult> {
+    await this.ensureInitialized();
+    const batchId = crypto.randomUUID();
+    const batchUri = `${MEMORY_NS}import:${batchId}`;
+    const now = new Date().toISOString();
+
+    const llmEnabled = opts.useLlm === true && !!this.llmConfig?.apiKey;
+    const warnings: string[] = [];
+
+    let memories = llmEnabled
+      ? await this.parseMemoriesWithLlm(rawText)
+      : this.parseMemoriesHeuristic(rawText);
+
+    if (memories.length === 0 && llmEnabled) {
+      memories = this.parseMemoriesHeuristic(rawText);
+    }
+
+    if (memories.length === 0) {
+      return { batchId: null, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
+    }
+
+    const MAX_MEMORY_ITEMS = 5000;
+    if (memories.length > MAX_MEMORY_ITEMS) {
+      warnings.push(`Input contained ${memories.length} items; truncated to ${MAX_MEMORY_ITEMS}`);
+      memories = memories.slice(0, MAX_MEMORY_ITEMS);
+    }
+
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+
+    quads.push(
+      { subject: batchUri, predicate: RDF_TYPE, object: `${DKG_ONT}MemoryImport`, graph: '' },
+      { subject: batchUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
+      { subject: batchUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
+      { subject: batchUri, predicate: `${DKG_ONT}itemCount`, object: `"${memories.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: '' },
+    );
+
+    for (const mem of memories) {
+      const memUri = `${MEMORY_NS}item:${crypto.randomUUID()}`;
+      quads.push(
+        { subject: memUri, predicate: RDF_TYPE, object: `${DKG_ONT}ImportedMemory`, graph: '' },
+        { subject: memUri, predicate: `${SCHEMA}text`, object: JSON.stringify(mem.text), graph: '' },
+        { subject: memUri, predicate: `${DKG_ONT}category`, object: `"${mem.category}"`, graph: '' },
+        { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
+        { subject: memUri, predicate: `${DKG_ONT}importBatch`, object: batchUri, graph: '' },
+        { subject: memUri, predicate: `${DKG_ONT}importSource`, object: `"${source}"`, graph: '' },
+      );
+    }
+
+    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+
+    let entityCount = 0;
+    let extractionTripleCount = 0;
+    const allQuads = quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
+    if (llmEnabled) {
+      try {
+        const extraction = await this.extractKnowledgeFromImport(batchUri, memories);
+        entityCount = extraction.entityCount;
+        extractionTripleCount = extraction.tripleCount;
+        allQuads.push(...extraction.quads);
+      } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        console.warn(`[ChatMemoryManager] Knowledge extraction failed for batch ${batchId}: ${msg}`);
+        warnings.push(`Knowledge extraction failed: ${msg}`);
+      }
+    }
+
+    const QUAD_PREVIEW_LIMIT = 500;
+    const result: ImportResult = {
+      batchId,
+      source,
+      memoryCount: memories.length,
+      tripleCount: quads.length + extractionTripleCount,
+      entityCount,
+      quads: allQuads.slice(0, QUAD_PREVIEW_LIMIT),
+      quadsTruncated: allQuads.length > QUAD_PREVIEW_LIMIT,
+    };
+    if (warnings.length > 0) result.warnings = warnings;
+    return result;
+  }
+
+  private async parseMemoriesWithLlm(
+    rawText: string,
+  ): Promise<Array<{ text: string; category: string }>> {
+    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    if (!apiKey) return this.parseMemoriesHeuristic(rawText);
+
+    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: MEMORY_PARSE_PROMPT },
+            { role: 'user', content: rawText },
+          ],
+          temperature: 0,
+          max_tokens: 4096,
+        }),
+      });
+      if (!res.ok) return this.parseMemoriesHeuristic(rawText);
+      const data = (await res.json()) as any;
+      let output = data.choices?.[0]?.message?.content?.trim() ?? '';
+      output = output.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
+      const parsed = JSON.parse(output);
+      if (!Array.isArray(parsed)) return this.parseMemoriesHeuristic(rawText);
+      const extractText = (m: any): string =>
+        (typeof m.text === 'string' && m.text.trim()) ||
+        (typeof m.memory === 'string' && m.memory.trim()) ||
+        (typeof m.content === 'string' && m.content.trim()) ||
+        '';
+      const results = parsed
+        .filter((m: any) => extractText(m).length > 0)
+        .map((m: any) => ({
+          text: extractText(m),
+          category: ['preference', 'fact', 'context', 'instruction', 'relationship'].includes(m.category)
+            ? m.category
+            : 'fact',
+        }));
+      if (results.length === 0) return this.parseMemoriesHeuristic(rawText);
+      return results;
+    } catch {
+      return this.parseMemoriesHeuristic(rawText);
+    }
+  }
+
+  parseMemoriesHeuristic(rawText: string): Array<{ text: string; category: string }> {
+    const lines = rawText
+      .split(/\n/)
+      .map(l => l.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s)\s*/, '').trim())
+      .filter(l =>
+        l.length > 3 &&
+        !l.match(/^(here are|last updated|memories|---)/i) &&
+        !l.match(/^```/),
+      );
+    return lines.map(text => ({ text, category: 'fact' }));
+  }
+
+  private async extractKnowledgeFromImport(
+    batchUri: string,
+    memories: Array<{ text: string; category: string }>,
+  ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
+    const empty = { entityCount: 0, tripleCount: 0, quads: [] };
+    const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
+    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: MEMORY_KG_PROMPT },
+          { role: 'user', content: combined },
+        ],
+        temperature: 0.1,
+        max_tokens: 2048,
+      }),
+    });
+
+    if (!res.ok) return empty;
+    const data = (await res.json()) as any;
+    const output = data.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!output || output === 'NONE') return empty;
+
+    const triples = this.parseNTriples(output);
+    if (triples.length === 0) return empty;
+
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+    for (const t of triples) {
+      quads.push({ ...t, graph: '' });
+    }
+    const rootEntities = new Set(triples.map(t => t.subject));
+    for (const entity of rootEntities) {
+      quads.push(
+        { subject: entity, predicate: `${DKG_ONT}extractedFrom`, object: batchUri, graph: '' },
+      );
+    }
+    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    return {
+      entityCount: rootEntities.size,
+      tripleCount: quads.length,
+      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
+    };
   }
 
   async enshrine(

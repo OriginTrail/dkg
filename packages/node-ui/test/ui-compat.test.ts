@@ -165,8 +165,9 @@ describe('dashboard uses runtime data', () => {
     expect(dashboard).toContain('DEMO');
   });
 
-  it('publish CTA is disabled with coming-soon state', () => {
-    expect(dashboard).toMatch(/coming soon/i);
+  it('Import Memories modal is functional (no longer coming-soon)', () => {
+    expect(dashboard).toMatch(/importMemories/);
+    expect(dashboard).toMatch(/Import as Private Knowledge/);
   });
 
   it('paranet list uses id as React key, not name', () => {

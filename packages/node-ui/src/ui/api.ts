@@ -137,6 +137,28 @@ export const fetchMemorySession = (sessionId: string) =>
 export const fetchMemoryStats = () =>
   get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
+export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+export type ImportSource = (typeof IMPORT_SOURCES)[number];
+
+export interface ImportMemoryQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+export interface ImportMemoryResult {
+  batchId: string | null;
+  source: ImportSource;
+  memoryCount: number;
+  tripleCount: number;
+  entityCount: number;
+  quads: ImportMemoryQuad[];
+  quadsTruncated?: boolean;
+  warnings?: string[];
+}
+export const importMemories = (text: string, source?: ImportSource, useLlm?: boolean) =>
+  post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
+
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>
   post<{ delivered: boolean; error?: string }>('/api/chat', { to, text });

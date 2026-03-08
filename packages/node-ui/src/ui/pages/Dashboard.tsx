@@ -1,36 +1,319 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations } from '../api.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { RdfGraph } from '@dkg/graph-viz/react';
+import type { ViewConfig } from '@dkg/graph-viz';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────
 
+const SOURCE_LABELS: Record<ImportSource, { label: string; icon: string }> = {
+  claude: { label: 'Claude', icon: '🟣' },
+  chatgpt: { label: 'ChatGPT', icon: '🟢' },
+  gemini: { label: 'Gemini', icon: '🔵' },
+  other: { label: 'Other', icon: '⚪' },
+};
+
+const SOURCE_OPTIONS = IMPORT_SOURCES.map(value => ({
+  value,
+  ...SOURCE_LABELS[value],
+}));
+
+type ResultTab = 'graph' | 'triples';
+
+const IMPORT_VIEW_CONFIG: ViewConfig = {
+  name: 'ImportPreview',
+  palette: 'dark',
+  paletteOverrides: { edgeColor: '#5f8598' },
+  animation: { fadeIn: true, linkParticles: false, drift: false, hoverTrace: false },
+};
+
+function humanizeUri(uri: string): string {
+  const stripped = uri.replace(/^"|".*$/g, '');
+  const hash = stripped.lastIndexOf('#');
+  const slash = stripped.lastIndexOf('/');
+  const colon = stripped.lastIndexOf(':');
+  const cut = Math.max(hash, slash, colon);
+  return cut >= 0 ? stripped.slice(cut + 1) : stripped;
+}
+
+function formatTripleObject(obj: string): string {
+  if (obj.startsWith('"') && obj.endsWith('"')) return obj.slice(1, -1);
+  if (obj.startsWith('"') && obj.includes('"^^<')) return obj.slice(1, obj.indexOf('"^^<'));
+  return obj;
+}
+
+function ImportResultView({
+  result,
+  onReset,
+  onClose,
+}: {
+  result: ImportMemoryResult;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<ResultTab>('graph');
+
+  const graphTriples = useMemo(() => {
+    if (!result.quads?.length) return [];
+    return result.quads
+      .filter(q => !q.object.startsWith('"'))
+      .map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object }));
+  }, [result.quads]);
+
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    padding: '6px 16px',
+    borderRadius: 8,
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'pointer',
+    border: active ? '1px solid rgba(74,222,128,.4)' : '1px solid var(--border)',
+    background: active ? 'var(--green-dim)' : 'transparent',
+    color: active ? 'var(--green)' : 'var(--text-muted)',
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Header stats */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--green)', marginBottom: 4 }}>
+          {result.memoryCount} memories imported
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          {result.tripleCount} triples created
+          {result.entityCount > 0 && <> · {result.entityCount} entities extracted</>}
+        </div>
+        <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+          Batch: {result.batchId} · Source: {result.source}
+        </div>
+      </div>
+
+      {/* Warnings */}
+      {result.warnings && result.warnings.length > 0 && (
+        <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(250,204,21,.08)', border: '1px solid rgba(250,204,21,.25)' }}>
+          {result.warnings.map((w, i) => (
+            <div key={i} style={{ fontSize: 11, color: 'rgb(250,204,21)', lineHeight: 1.5 }}>⚠ {w}</div>
+          ))}
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+        <button style={tabStyle(tab === 'graph')} onClick={() => setTab('graph')}>Graph</button>
+        <button style={tabStyle(tab === 'triples')} onClick={() => setTab('triples')}>Triples</button>
+      </div>
+
+      {/* Tab content */}
+      {tab === 'graph' && (
+        <div style={{ height: 320, borderRadius: 10, overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--bg)' }}>
+          {graphTriples.length > 0 ? (
+            <RdfGraph
+              data={graphTriples}
+              format="triples"
+              options={{
+                labelMode: 'humanized',
+                renderer: '2d',
+                style: {
+                  classColors: {
+                    'http://dkg.io/ontology/MemoryImport': '#f59e0b',
+                    'http://dkg.io/ontology/ImportedMemory': '#4ade80',
+                  },
+                  defaultNodeColor: '#22d3ee',
+                  defaultEdgeColor: '#5f8598',
+                  edgeWidth: 0.9,
+                },
+                hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+                focus: { maxNodes: 500, hops: 999 },
+              }}
+              viewConfig={IMPORT_VIEW_CONFIG}
+              style={{ width: '100%', height: '100%' }}
+            />
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-dim)', fontSize: 12 }}>
+              No graph edges to display
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'triples' && (
+        <div style={{
+          maxHeight: 320,
+          overflowY: 'auto',
+          borderRadius: 10,
+          border: '1px solid var(--border)',
+          background: 'var(--bg)',
+          padding: 0,
+        }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
+            <thead>
+              <tr style={{ position: 'sticky', top: 0, background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left', padding: '8px 10px', color: 'var(--text-dim)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '.05em' }}>Subject</th>
+                <th style={{ textAlign: 'left', padding: '8px 10px', color: 'var(--text-dim)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '.05em' }}>Predicate</th>
+                <th style={{ textAlign: 'left', padding: '8px 10px', color: 'var(--text-dim)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: '.05em' }}>Object</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(result.quads ?? []).map((q, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 10px', color: '#22d3ee', wordBreak: 'break-all' }}>{humanizeUri(q.subject)}</td>
+                  <td style={{ padding: '6px 10px', color: 'var(--text-muted)', wordBreak: 'break-all' }}>{humanizeUri(q.predicate)}</td>
+                  <td style={{ padding: '6px 10px', color: q.object.startsWith('"') ? 'var(--text)' : '#4ade80', wordBreak: 'break-all' }}>{formatTripleObject(q.object)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Privacy note + buttons */}
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6, textAlign: 'center' }}>
+        Stored as private Knowledge Assets in <code className="mono" style={{ fontSize: 10, background: 'var(--surface)', padding: '1px 4px', borderRadius: 3 }}>agent-memory</code>. Never shared with other nodes.
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+        <button onClick={onReset} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Import More</button>
+        <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700 }}>Done</button>
+      </div>
+    </div>
+  );
+}
+
 function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [text, setText] = useState('');
+  const [source, setSource] = useState<ImportSource>('claude');
+  const [useLlm, setUseLlm] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState<ImportMemoryResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = useCallback(() => {
+    setText('');
+    setSource('claude');
+    setUseLlm(false);
+    setImporting(false);
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const handleClose = useCallback(() => {
+    if (importing) return;
+    reset();
+    onClose();
+  }, [onClose, reset, importing]);
+
+  const handleImport = useCallback(async () => {
+    if (!text.trim() || importing) return;
+    setImporting(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await importMemories(text.trim(), source, useLlm);
+      setResult(res);
+    } catch (err: any) {
+      setError(err.message ?? 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  }, [text, source, useLlm, importing]);
+
   if (!open) return null;
   return (
-    <div className="import-modal-overlay open" onClick={onClose}>
-      <div className="import-modal" onClick={e => e.stopPropagation()}>
+    <div className="import-modal-overlay open" onClick={handleClose}>
+      <div className="import-modal" style={result ? { maxWidth: 680 } : undefined} onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <h3 className="serif" style={{ fontSize: 18, fontWeight: 700 }}>Import Memories</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18 }}>×</button>
+          <h3 className="serif" style={{ fontSize: 18, fontWeight: 700 }}>{result ? 'Import Complete' : 'Import Memories'}</h3>
+          <button onClick={handleClose} disabled={importing} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, opacity: importing ? 0.3 : 1 }}>×</button>
         </div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
-          Paste exported memories from Claude, ChatGPT, Gemini, or any other AI assistant. They'll be published as verified Knowledge Assets on your DKG node — owned by you, queryable by any agent.
-        </p>
-        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--blue-dim)', border: '1px solid rgba(96,165,250,.2)', marginBottom: 16 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--blue)', marginBottom: 4 }}>💡 TIP</div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            Paste this into your old AI assistant to export your memories:<br />
-            <code className="mono" style={{ fontSize: 10, color: 'var(--text)', background: 'rgba(255,255,255,.05)', padding: '2px 6px', borderRadius: 4 }}>
-              "List every memory you have stored about me in a single code block."
-            </code>
-          </div>
-        </div>
-        <textarea placeholder="Paste your exported memories here..." />
-        <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
-          <button disabled style={{ padding: '8px 20px', borderRadius: 8, border: 'none', background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700, opacity: 0.5, cursor: 'default' }} title="Coming soon">Publish as Knowledge Assets (coming soon)</button>
-        </div>
+
+        {result ? (
+          <ImportResultView result={result} onReset={reset} onClose={handleClose} />
+        ) : (
+          <>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.6 }}>
+              Paste exported memories from Claude, ChatGPT, Gemini, or any other AI assistant. They'll be stored as private Knowledge Assets on your DKG node — owned by you, queryable by your agent.
+            </p>
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+              {SOURCE_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  onClick={() => setSource(opt.value)}
+                  style={{
+                    padding: '6px 12px', borderRadius: 8, fontSize: 11, fontWeight: 600,
+                    border: source === opt.value ? '1px solid rgba(74,222,128,.4)' : '1px solid var(--border)',
+                    background: source === opt.value ? 'var(--green-dim)' : 'transparent',
+                    color: source === opt.value ? 'var(--green)' : 'var(--text-muted)',
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+                  }}
+                >
+                  <span style={{ fontSize: 12 }}>{opt.icon}</span>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--blue-dim)', border: '1px solid rgba(96,165,250,.2)', marginBottom: 16 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--blue)', marginBottom: 4 }}>HOW TO EXPORT</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                Paste this into {source === 'claude' ? 'Claude' : source === 'chatgpt' ? 'ChatGPT' : source === 'gemini' ? 'Gemini' : 'your AI assistant'} to export your memories:<br />
+                <code className="mono" style={{ fontSize: 10, color: 'var(--text)', background: 'rgba(255,255,255,.05)', padding: '2px 6px', borderRadius: 4, display: 'inline-block', marginTop: 4 }}>
+                  "List every memory you have stored about me in a single code block."
+                </code>
+              </div>
+            </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, cursor: 'pointer' }}>
+              <input type="checkbox" checked={useLlm} onChange={e => setUseLlm(e.target.checked)} disabled={importing} />
+              <span>Use LLM-assisted parsing <span style={{ fontSize: 10, opacity: 0.7 }}>(sends memories to configured LLM for better categorisation &amp; entity extraction)</span></span>
+            </label>
+
+            <textarea
+              value={text}
+              onChange={e => setText(e.target.value)}
+              placeholder="Paste your exported memories here..."
+              disabled={importing}
+            />
+
+            {text.trim() && (
+              <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+                {text.trim().split('\n').filter(l => l.trim().length > 3).length} lines detected
+              </div>
+            )}
+
+            {error && (
+              <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 6, background: 'var(--red-dim)', border: '1px solid rgba(248,113,113,.2)', color: 'var(--red)', fontSize: 12 }}>
+                {error}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
+              <button onClick={handleClose} disabled={importing} style={{ padding: '8px 20px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', fontSize: 12, fontWeight: 600 }}>Cancel</button>
+              <button
+                onClick={handleImport}
+                disabled={importing || !text.trim()}
+                style={{
+                  padding: '8px 20px', borderRadius: 8, border: 'none',
+                  background: 'var(--green)', color: 'var(--bg)', fontSize: 12, fontWeight: 700,
+                  opacity: importing || !text.trim() ? 0.5 : 1,
+                  cursor: importing || !text.trim() ? 'default' : 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}
+              >
+                {importing ? (
+                  <>
+                    <span style={{ width: 12, height: 12, border: '2px solid rgba(10,15,26,.3)', borderTopColor: 'var(--bg)', borderRadius: '50%', animation: 'spin .6s linear infinite', display: 'inline-block' }} />
+                    Importing…
+                  </>
+                ) : (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Import as Private Knowledge
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
