@@ -39,12 +39,19 @@ export interface EnshrineResult {
 
 export type ImportSource = 'claude' | 'chatgpt' | 'gemini' | 'other';
 
+export interface ImportResultQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
 export interface ImportResult {
   batchId: string;
   source: ImportSource;
   memoryCount: number;
   tripleCount: number;
   entityCount: number;
+  quads: ImportResultQuad[];
 }
 
 const MEMORY_PARANET = 'agent-memory';
@@ -601,12 +608,16 @@ export class ChatMemoryManager {
     const batchUri = `${MEMORY_NS}import:${batchId}`;
     const now = new Date().toISOString();
 
-    const memories = this.llmConfig?.apiKey
+    let memories = this.llmConfig?.apiKey
       ? await this.parseMemoriesWithLlm(rawText)
       : this.parseMemoriesHeuristic(rawText);
 
+    if (memories.length === 0 && this.llmConfig?.apiKey) {
+      memories = this.parseMemoriesHeuristic(rawText);
+    }
+
     if (memories.length === 0) {
-      return { batchId, source, memoryCount: 0, tripleCount: 0, entityCount: 0 };
+      return { batchId, source, memoryCount: 0, tripleCount: 0, entityCount: 0, quads: [] };
     }
 
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
@@ -646,6 +657,7 @@ export class ChatMemoryManager {
       memoryCount: memories.length,
       tripleCount: quads.length,
       entityCount,
+      quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object })),
     };
   }
 
@@ -676,14 +688,21 @@ export class ChatMemoryManager {
       output = output.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim();
       const parsed = JSON.parse(output);
       if (!Array.isArray(parsed)) return this.parseMemoriesHeuristic(rawText);
-      return parsed
-        .filter((m: any) => typeof m.text === 'string' && m.text.trim())
+      const extractText = (m: any): string =>
+        (typeof m.text === 'string' && m.text.trim()) ||
+        (typeof m.memory === 'string' && m.memory.trim()) ||
+        (typeof m.content === 'string' && m.content.trim()) ||
+        '';
+      const results = parsed
+        .filter((m: any) => extractText(m).length > 0)
         .map((m: any) => ({
-          text: m.text.trim(),
+          text: extractText(m),
           category: ['preference', 'fact', 'context', 'instruction', 'relationship'].includes(m.category)
             ? m.category
             : 'fact',
         }));
+      if (results.length === 0) return this.parseMemoriesHeuristic(rawText);
+      return results;
     } catch {
       return this.parseMemoriesHeuristic(rawText);
     }

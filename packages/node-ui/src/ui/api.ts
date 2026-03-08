@@ -137,12 +137,19 @@ export const fetchMemorySession = (sessionId: string) =>
 export const fetchMemoryStats = () =>
   get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
+export interface ImportMemoryQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
 export interface ImportMemoryResult {
   batchId: string;
   source: string;
   memoryCount: number;
   tripleCount: number;
   entityCount: number;
+  quads: ImportMemoryQuad[];
 }
 export const importMemories = (text: string, source?: string) =>
   post<ImportMemoryResult>('/api/memory/import', { text, source });

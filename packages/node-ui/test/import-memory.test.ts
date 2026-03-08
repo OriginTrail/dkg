@@ -287,6 +287,64 @@ describe('Import Memory — LLM-assisted parsing', () => {
     expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
   });
 
+  it('handles LLM using alternate key names like "memory" instead of "text"', async () => {
+    const llmResponse = JSON.stringify([
+      { memory: 'Prefers dark mode', category: 'preference' },
+      { memory: 'Works at Acme Corp', category: 'fact' },
+    ]);
+
+    globalThis.fetch = vi.fn()
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: llmResponse } }],
+        }),
+      } as any);
+
+    const manager = new ChatMemoryManager(mocks.tools, {
+      apiKey: 'test-key',
+      model: 'gpt-4o-mini',
+      baseURL: 'https://api.openai.com/v1',
+    });
+    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude');
+
+    expect(result.memoryCount).toBe(2);
+    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const textTriple = quads.find(
+      (q: any) => q.predicate === 'http://schema.org/text' && q.object === '"Prefers dark mode"',
+    );
+    expect(textTriple).toBeDefined();
+  });
+
+  it('falls back to heuristic when LLM returns unrecognized item shapes', async () => {
+    const llmResponse = JSON.stringify([
+      { description: 'Prefers dark mode', type: 'preference' },
+      { description: 'Works at Acme Corp', type: 'fact' },
+    ]);
+
+    globalThis.fetch = vi.fn()
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          choices: [{ message: { content: llmResponse } }],
+        }),
+      } as any);
+
+    const manager = new ChatMemoryManager(mocks.tools, {
+      apiKey: 'test-key',
+      model: 'gpt-4o-mini',
+      baseURL: 'https://api.openai.com/v1',
+    });
+    const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude');
+
+    expect(result.memoryCount).toBe(2);
+    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const catTriples = quads.filter(
+      (q: any) => q.predicate === 'http://dkg.io/ontology/category',
+    );
+    expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
+  });
+
   it('extracts knowledge entities when LLM returns N-Triples', async () => {
     const parseResponse = JSON.stringify([
       { text: 'Works at Acme Corp as an engineer', category: 'fact' },

@@ -161,7 +161,19 @@ Otherwise, just answer in plain language. Keep any queries read-only (SELECT, CO
     if (this.agentTools) {
       p += `
 
-You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".`;
+You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
+
+The user may have imported memories from other AI assistants (Claude, ChatGPT, Gemini). These are stored in the "agent-memory" paranet. To query them, ALWAYS use dkg_query with paranetId "agent-memory". The data model:
+- Import batches: type <http://dkg.io/ontology/MemoryImport>, with predicates <http://dkg.io/ontology/importSource> (e.g. "claude"), <http://schema.org/dateCreated>, <http://dkg.io/ontology/itemCount>
+- Individual memories: type <http://dkg.io/ontology/ImportedMemory>, with predicates <http://schema.org/text> (the memory content), <http://dkg.io/ontology/category> (preference/fact/context/instruction/relationship), <http://dkg.io/ontology/importBatch> (links to batch), <http://dkg.io/ontology/importSource>
+- Extracted entities: URIs starting with urn:dkg:entity:, typed with schema.org types
+
+Example queries:
+- List all imported memories: SELECT ?text ?category WHERE { ?m a <http://dkg.io/ontology/ImportedMemory> ; <http://schema.org/text> ?text ; <http://dkg.io/ontology/category> ?category } LIMIT 50
+- List import batches: SELECT ?batch ?source ?date ?count WHERE { ?batch a <http://dkg.io/ontology/MemoryImport> ; <http://dkg.io/ontology/importSource> ?source ; <http://schema.org/dateCreated> ?date ; <http://dkg.io/ontology/itemCount> ?count } ORDER BY DESC(?date) LIMIT 10
+- Search memories by text: SELECT ?text WHERE { ?m a <http://dkg.io/ontology/ImportedMemory> ; <http://schema.org/text> ?text FILTER(CONTAINS(LCASE(?text), "dark mode")) } LIMIT 20
+
+When the user asks about their memories, imported memories, preferences, or what you know about them, use dkg_query to look up their imported memories from the agent-memory paranet. Do NOT say you can't access memories — always try the query first.`;
     }
     return p;
   }
