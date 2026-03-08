@@ -116,7 +116,7 @@ export interface ChainProvenance {
   ual: string;
 }
 
-export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[]): Quad[] {
+export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[], provenance?: ChainProvenance): Quad[] {
   const g = contextGraph(paranetId, swarmId);
   const t = turnUri(swarmId, turn);
   const quads = [
@@ -128,6 +128,13 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
   ];
   for (const peerId of approvers) {
     quads.push(quad(t, otUri('approvedBy'), playerUri(peerId), g));
+  }
+  if (provenance) {
+    quads.push(
+      quad(t, otUri('transactionHash'), literal(provenance.txHash), g),
+      quad(t, otUri('blockNumber'), literal(provenance.blockNumber), g),
+      quad(t, otUri('ual'), literal(provenance.ual), g),
+    );
   }
   return quads;
 }
