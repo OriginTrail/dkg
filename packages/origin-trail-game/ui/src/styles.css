@@ -5,8 +5,10 @@
   --text: #e6edf3;
   --muted: #8b949e;
   --accent: #58a6ff;
-  --green: #3fb950;
+  --green: #4ade80;
+  --green-dim: rgba(74,222,128,0.1);
   --red: #f85149;
+  --red-dim: rgba(248,81,73,0.1);
   --orange: #d29922;
 }
 
@@ -23,6 +25,9 @@ body {
   max-width: 800px;
   margin: 0 auto;
   padding: 2rem 1.5rem;
+}
+.ot-container--wide {
+  max-width: 1400px;
 }
 
 h1 { font-size: 1.75rem; font-weight: 700; }
@@ -52,7 +57,7 @@ h4 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 0.
 }
 
 .ot-card.ot-clickable { cursor: pointer; transition: border-color 0.15s; }
-.ot-card.ot-clickable:hover { border-color: var(--accent); }
+.ot-card.ot-clickable:hover { border-color: var(--green); }
 
 .ot-card label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 0.25rem; }
 
@@ -66,23 +71,23 @@ h4 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 0.
   font-size: 0.95rem;
   margin-bottom: 0.75rem;
 }
-.ot-card input:focus { outline: none; border-color: var(--accent); }
+.ot-card input:focus { outline: none; border-color: var(--green); }
 
 button {
   padding: 0.5rem 1rem;
-  border: none;
-  border-radius: 6px;
-  background: var(--accent);
-  color: #fff;
+  border: 1px solid rgba(74,222,128,.3);
+  border-radius: 8px;
+  background: var(--green-dim);
+  color: var(--green);
   font-size: 0.9rem;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: filter 0.15s;
 }
-button:hover { opacity: 0.85; }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:hover { filter: brightness(1.2); }
+button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
 
-.ot-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.ot-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
 
 .ot-error {
   background: rgba(248, 81, 73, 0.15);
@@ -143,10 +148,22 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .ot-member { padding: 0.25rem 0; font-size: 0.9rem; }
 .ot-member.ot-dead { color: var(--red); text-decoration: line-through; }
 .ot-member.ot-sick { color: var(--orange); }
+.ot-gm-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #000;
+  background: var(--green);
+  border-radius: 3px;
+  vertical-align: middle;
+  letter-spacing: 0.04em;
+}
 
 .ot-vote-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 0.5rem;
   margin: 0.75rem 0;
 }
@@ -241,4 +258,248 @@ ul li { padding: 0.2rem 0; }
   font-size: 11px;
   color: #475569;
   margin-top: 4px;
+}
+
+/* Split play layout */
+.ot-play-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+  gap: 1.25rem;
+  height: calc(100vh - 160px);
+  min-height: 520px;
+}
+.ot-play-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  overflow-y: auto;
+}
+.ot-play-right {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+/* Journey panel — right side (tabs + content) */
+.ot-journey-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ot-journey-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ot-journey-tab {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  background: transparent;
+  border: none !important;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.ot-journey-tab:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.ot-journey-tab--active {
+  color: var(--green);
+  border-bottom: 2px solid var(--green);
+}
+.ot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--green);
+  color: #000;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.ot-journey-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* Decision trace timeline */
+.ot-trace-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.75rem 1rem 0.75rem 1.5rem;
+}
+.ot-trace-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+.ot-trace-entry {
+  position: relative;
+  padding: 0 0 1rem 1.25rem;
+  border-left: 2px solid var(--border);
+}
+.ot-trace-entry:last-child { border-left-color: var(--green); }
+.ot-trace-dot {
+  position: absolute;
+  left: -5px;
+  top: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  border: 2px solid var(--surface);
+}
+.ot-trace-body { font-size: 0.85rem; }
+.ot-trace-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.ot-trace-turn {
+  font-weight: 700;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.ot-trace-action {
+  font-weight: 500;
+  color: var(--green);
+  font-size: 0.8rem;
+}
+.ot-trace-result {
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin-bottom: 2px;
+}
+.ot-trace-resolution {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.06);
+  white-space: nowrap;
+}
+.ot-trace-votes {
+  margin: 4px 0;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.ot-trace-vote-group {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 0;
+  font-size: 0.78rem;
+}
+.ot-trace-vote-action {
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 85px;
+  flex-shrink: 0;
+}
+.ot-trace-vote-players {
+  color: var(--muted);
+}
+.ot-trace-winner-check {
+  color: var(--green);
+  font-weight: 700;
+}
+.ot-trace-event {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin: 4px 0;
+  background: rgba(210,153,34,0.1);
+  border: 1px solid rgba(210,153,34,0.25);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--orange);
+}
+.ot-trace-event-icon {
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+.ot-trace-deaths {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.ot-trace-death-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--red-dim);
+  border: 1px solid rgba(248,81,73,0.3);
+  border-radius: 8px;
+}
+.ot-trace-skull {
+  font-size: 1.6rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.ot-trace-death-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ot-trace-death-name {
+  color: var(--red);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.ot-trace-death-cause {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+.ot-trace-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* Context graph */
+.ot-graph-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 2rem;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .ot-play-split {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .ot-container--wide {
+    max-width: 800px;
+  }
+  .ot-play-right {
+    height: 500px;
+  }
 }

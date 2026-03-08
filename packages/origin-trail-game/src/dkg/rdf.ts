@@ -59,7 +59,7 @@ export function contextGraph(paranetId: string, swarmId: string): string {
   return `did:dkg:paranet:${paranetId}/context/${swarmId}`;
 }
 
-export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName: string, leaderPeerId: string, createdAt: number): Quad[] {
+export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName: string, leaderPeerId: string, createdAt: number, maxPlayers: number): Quad[] {
   const g = workspaceGraph(paranetId);
   const s = swarmUri(swarmId);
   return [
@@ -68,6 +68,7 @@ export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName:
     quad(s, otUri('orchestrator'), playerUri(leaderPeerId), g),
     quad(s, otUri('createdAt'), literal(createdAt), g),
     quad(s, otUri('status'), literal('recruiting'), g),
+    quad(s, otUri('maxPlayers'), literal(maxPlayers), g),
   ];
 }
 

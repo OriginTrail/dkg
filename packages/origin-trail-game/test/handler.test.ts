@@ -402,9 +402,6 @@ describe('Graph-based lobby sync', () => {
     let queryCount = 0;
     syncAgent.query = async (sparql: string) => {
       queryCount++;
-      if (sparql.includes('Player')) {
-        return { bindings: [{ name: '"GraphPlayer"', peerId: '"sync-peer"', registeredAt: '"2026-01-01"' }] };
-      }
       if (sparql.includes('AgentSwarm')) {
         return {
           bindings: [{
@@ -415,6 +412,9 @@ describe('Graph-based lobby sync', () => {
             createdAt: '"1700000000000"',
           }],
         };
+      }
+      if (sparql.includes('a <') && sparql.includes('Player')) {
+        return { bindings: [{ name: '"GraphPlayer"', peerId: '"sync-peer"', registeredAt: '"2026-01-01"' }] };
       }
       if (sparql.includes('displayName')) {
         return {

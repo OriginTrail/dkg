@@ -3,6 +3,7 @@ import { gameEngine } from './game-engine.js';
 import type { GameState, ActionResult } from '../game/types.js';
 
 export const MIN_PLAYERS = 3;
+export const MAX_PLAYERS = 8;
 
 export function signatureThreshold(n: number): number {
   return Math.ceil((2 * n) / 3);
@@ -53,7 +54,7 @@ export interface SwarmLobby {
 
 const swarms = new Map<string, Swarm>();
 
-export function createSwarm(leaderId: string, leaderName: string, swarmName: string, maxPlayers: number = 8): Swarm {
+export function createSwarm(leaderId: string, leaderName: string, swarmName: string, maxPlayers: number = 3): Swarm {
   const existing = findPlayerSwarm(leaderId);
   if (existing && existing.status !== 'finished') throw new Error('You already have an active swarm. Leave it first.');
 
@@ -61,7 +62,7 @@ export function createSwarm(leaderId: string, leaderName: string, swarmName: str
     id: `swarm-${uuid().slice(0, 8)}`,
     name: swarmName,
     leaderId,
-    maxPlayers: Math.min(Math.max(MIN_PLAYERS, maxPlayers), 8),
+    maxPlayers: Math.min(Math.max(MIN_PLAYERS, maxPlayers), MAX_PLAYERS),
     players: [{ playerId: leaderId, displayName: leaderName, joinedAt: Date.now(), isLeader: true }],
     status: 'recruiting',
     gameState: null,
