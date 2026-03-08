@@ -148,14 +148,15 @@ export interface ImportMemoryQuad {
 
 export interface ImportMemoryResult {
   batchId: string | null;
-  source: string;
+  source: ImportSource;
   memoryCount: number;
   tripleCount: number;
   entityCount: number;
   quads: ImportMemoryQuad[];
+  quadsTruncated?: boolean;
   warnings?: string[];
 }
-export const importMemories = (text: string, source?: string, useLlm?: boolean) =>
+export const importMemories = (text: string, source?: ImportSource, useLlm?: boolean) =>
   post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
 
 // --- Peer-to-peer messaging ---

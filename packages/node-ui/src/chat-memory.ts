@@ -53,6 +53,7 @@ export interface ImportResult {
   tripleCount: number;
   entityCount: number;
   quads: ImportResultQuad[];
+  quadsTruncated?: boolean;
   warnings?: string[];
 }
 
@@ -674,13 +675,15 @@ export class ChatMemoryManager {
       }
     }
 
+    const QUAD_PREVIEW_LIMIT = 500;
     const result: ImportResult = {
       batchId,
       source,
       memoryCount: memories.length,
       tripleCount: quads.length + extractionTripleCount,
       entityCount,
-      quads: allQuads,
+      quads: allQuads.slice(0, QUAD_PREVIEW_LIMIT),
+      quadsTruncated: allQuads.length > QUAD_PREVIEW_LIMIT,
     };
     if (warnings.length > 0) result.warnings = warnings;
     return result;

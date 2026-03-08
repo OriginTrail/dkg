@@ -264,7 +264,8 @@ export async function handleNodeUIRequest(
       const result = await memoryManager.importMemories(text.trim(), importSource, { useLlm: useLlm === true });
       return json(res, 200, result);
     } catch (err: any) {
-      return json(res, 500, { error: err.message ?? 'Failed to import memories' });
+      console.error('[node-ui] Import memories failed:', err);
+      return json(res, 500, { error: 'Failed to import memories' });
     }
   }
 
