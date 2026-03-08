@@ -17,6 +17,7 @@
     "build:ui": "vite build",
     "dev:ui": "vite",
     "test": "vitest run",
+    "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "clean": "rm -rf dist dist-ui tsconfig.tsbuildinfo"
   },
@@ -30,9 +31,14 @@
     "uuid": "^9.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@types/uuid": "^9",
     "@vitejs/plugin-react": "^4",
+    "happy-dom": "^20.8.3",
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",
