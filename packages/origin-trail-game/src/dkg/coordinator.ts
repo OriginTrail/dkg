@@ -500,8 +500,16 @@ export class OriginTrailGameCoordinator {
     return swarm.gameState.party.filter((m, i) => m.alive && i < swarm.players.length).length;
   }
 
+  private isPeerAlive(swarm: SwarmState, peerId: string): boolean {
+    if (!swarm.gameState) return true;
+    const idx = swarm.players.findIndex(p => p.peerId === peerId);
+    if (idx === -1 || idx >= swarm.gameState.party.length) return false;
+    return swarm.gameState.party[idx].alive;
+  }
+
   private allAliveVoted(swarm: SwarmState): boolean {
-    return swarm.votes.length >= this.alivePlayerCount(swarm);
+    const aliveVotes = swarm.votes.filter(v => this.isPeerAlive(swarm, v.peerId)).length;
+    return aliveVotes >= this.alivePlayerCount(swarm);
   }
 
   private startVoteHeartbeat(swarmId: string): void {
@@ -910,6 +918,10 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm || swarm.currentTurn !== msg.turn) return;
     if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
+    if (!this.isPeerAlive(swarm, msg.peerId)) {
+      this.log(`Rejected vote from dead peer ${msg.peerId.slice(0, 8)} on ${msg.swarmId}`);
+      return;
+    }
     swarm.votes = swarm.votes.filter(v => v.peerId !== msg.peerId);
     swarm.votes.push({
       peerId: msg.peerId,
