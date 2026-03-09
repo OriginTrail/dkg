@@ -182,7 +182,7 @@ export function playerProfileQuads(paranetId: string, peerId: string, displayNam
 export interface TopologyPeer {
   peerId: string;
   connectionType: 'relay' | 'direct';
-  latencyMs: number;
+  messageAgeMs: number;
   lastSeen: number;
 }
 
@@ -200,7 +200,7 @@ export function networkTopologyQuads(paranetId: string, writerPeerId: string, pe
       quad(peerNode, `${RDF}type`, otUri('TopologyPeer'), g),
       quad(peerNode, otUri('peerId'), literal(peer.peerId), g),
       quad(peerNode, otUri('connectionType'), literal(peer.connectionType), g),
-      quad(peerNode, otUri('latencyMs'), literal(peer.latencyMs), g),
+      quad(peerNode, otUri('messageAgeMs'), literal(peer.messageAgeMs), g),
       quad(peerNode, otUri('lastSeen'), literal(peer.lastSeen), g),
       quad(s, otUri('hasPeer'), peerNode, g),
     );

@@ -916,8 +916,8 @@ describe('Network topology hints (V3)', () => {
   it('networkTopologyQuads generates correct RDF structure', async () => {
     const { networkTopologyQuads, OT } = await import('../src/dkg/rdf.js');
     const peers = [
-      { peerId: 'peer-a', connectionType: 'relay' as const, latencyMs: 120, lastSeen: 1700000000000 },
-      { peerId: 'peer-b', connectionType: 'direct' as const, latencyMs: 30, lastSeen: 1700000001000 },
+      { peerId: 'peer-a', connectionType: 'relay' as const, messageAgeMs: 120, lastSeen: 1700000000000 },
+      { peerId: 'peer-b', connectionType: 'direct' as const, messageAgeMs: 30, lastSeen: 1700000001000 },
     ];
     const quads = networkTopologyQuads('test-paranet', 'writer-1', peers);
 
@@ -937,10 +937,10 @@ describe('Network topology hints (V3)', () => {
     expect(connTypeQuads.some(q => q.object.includes('relay'))).toBe(true);
     expect(connTypeQuads.some(q => q.object.includes('direct'))).toBe(true);
 
-    const latencyQuads = quads.filter(q => q.predicate.includes('latencyMs'));
-    expect(latencyQuads).toHaveLength(2);
-    expect(latencyQuads.some(q => q.object.includes('120'))).toBe(true);
-    expect(latencyQuads.some(q => q.object.includes('30'))).toBe(true);
+    const ageQuads = quads.filter(q => q.predicate.includes('messageAgeMs'));
+    expect(ageQuads).toHaveLength(2);
+    expect(ageQuads.some(q => q.object.includes('120'))).toBe(true);
+    expect(ageQuads.some(q => q.object.includes('30'))).toBe(true);
 
     const lastSeenQuads = quads.filter(q => q.predicate.includes('lastSeen'));
     expect(lastSeenQuads).toHaveLength(2);
@@ -1009,7 +1009,7 @@ describe('Network topology hints (V3)', () => {
     coordinator.destroy();
   });
 
-  it('coordinator publishNetworkTopology skips when no peers are known', async () => {
+  it('coordinator publishNetworkTopology writes empty snapshot when no peers are known', async () => {
     const emptyAgent = makeMockAgent('empty-topo-peer');
     emptyAgent.query = async () => ({ bindings: [] });
 
@@ -1020,8 +1020,10 @@ describe('Network topology hints (V3)', () => {
     const writesBefore = emptyAgent._workspaceWrites.length;
     await coordinator.publishNetworkTopology();
 
-    expect(emptyAgent._workspaceWrites.length).toBe(writesBefore);
-    expect(logs.filter(l => l.includes('Topology snapshot'))).toHaveLength(0);
+    expect(emptyAgent._workspaceWrites.length).toBe(writesBefore + 1);
+    const lastWrite = emptyAgent._workspaceWrites[emptyAgent._workspaceWrites.length - 1];
+    expect(lastWrite.some((q: any) => q.object?.includes('NetworkSnapshot'))).toBe(true);
+    expect(lastWrite).toHaveLength(3);
 
     coordinator.destroy();
   });
