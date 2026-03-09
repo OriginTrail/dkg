@@ -34,6 +34,7 @@ export class Canvas2DRenderer implements RendererBackend {
   private _animFrameId: number | null = null;
   private _initialFitDone = false;
   private _lastTopologyKey = '';
+  private _continuousSimulation = false;
 
   /** force-graph version compatibility guard */
   private _setAlphaTarget(value: number): void {
@@ -241,8 +242,12 @@ export class Canvas2DRenderer implements RendererBackend {
   ): void {
     if (!this._graph) this.init();
 
-    // Reset auto-fit when the graph topology changes (node IDs + edge count)
-    const topoKey = `${[...nodes.keys()].sort().join(',')}|${edges.size}`;
+    // Reset auto-fit when the graph topology changes (node IDs + edge pairs)
+    const sortedEdgeKeys = [...edges.values()]
+      .map(e => `${e.source}->${e.target}`)
+      .sort()
+      .join(',');
+    const topoKey = `${[...nodes.keys()].sort().join(',')}|${sortedEdgeKeys}`;
     if (topoKey !== this._lastTopologyKey) {
       this._lastTopologyKey = topoKey;
       this._initialFitDone = false;
@@ -335,6 +340,16 @@ export class Canvas2DRenderer implements RendererBackend {
       links: newLinks,
     });
 
+    // Continuous sim prevents onEngineStop, so trigger initial fit via timeout
+    if (!this._initialFitDone && this._continuousSimulation) {
+      setTimeout(() => {
+        if (this._graph && !this._initialFitDone) {
+          this._initialFitDone = true;
+          this._graph.zoomToFit(400, 40);
+        }
+      }, 300);
+    }
+
     // Add a gentle x-force to maintain chronological left→right ordering
     if (xByDate && xByDate.size >= 2) {
       this._graph.d3Force('chronoX', (alpha: number) => {
@@ -383,14 +398,14 @@ export class Canvas2DRenderer implements RendererBackend {
       this._repaintPending = false;
       if (!this._graph) return;
 
-      if (this._riskPulseEnabled) {
+      if (this._continuousSimulation) {
         try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
       } else {
         this._graph.cooldownTicks(3);
         try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
         this._setAlphaTarget(0);
         setTimeout(() => {
-          if (this._graph && !this._riskPulseEnabled) {
+          if (this._graph && !this._continuousSimulation) {
             this._graph.cooldownTicks(0);
             this._setAlphaTarget(0);
           }
@@ -546,6 +561,7 @@ export class Canvas2DRenderer implements RendererBackend {
 
     // When drift or pulse is active, the simulation must run indefinitely
     const needsContinuousRender = config.drift || this._riskPulseEnabled;
+    this._continuousSimulation = needsContinuousRender;
 
     if (needsContinuousRender) {
       // Prevent the simulation from ever stopping on its own
