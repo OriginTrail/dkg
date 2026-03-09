@@ -532,6 +532,29 @@ export async function handleNodeUIRequest(
     }
   }
 
+  // --- Notifications ---
+
+  if (req.method === 'GET' && path === '/api/notifications') {
+    const since = url.searchParams.get('since');
+    const limit = url.searchParams.get('limit');
+    const data = db.getNotifications({
+      since: since ? Number(since) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+    return json(res, 200, data);
+  }
+
+  if (req.method === 'POST' && path === '/api/notifications/read') {
+    const body = await readBody(req);
+    let ids: number[] | undefined;
+    try {
+      const parsed = JSON.parse(body);
+      if (Array.isArray(parsed.ids)) ids = parsed.ids.map(Number);
+    } catch { /* mark all */ }
+    const count = db.markNotificationsRead(ids);
+    return json(res, 200, { marked: count });
+  }
+
   // --- Static UI files ---
 
   if (path === '/ui' || path.startsWith('/ui/')) {

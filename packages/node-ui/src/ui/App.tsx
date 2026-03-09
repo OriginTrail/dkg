@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { DashboardPage } from './pages/Dashboard.js';
 import { ExplorerPage } from './pages/Explorer.js';
@@ -6,6 +6,7 @@ import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
 import { SettingsPage } from './pages/Settings.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
+import { fetchNotifications, markNotificationsRead, type Notification } from './api.js';
 
 const chevronIcon = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -96,6 +97,136 @@ function useLiveStatus() {
   return status;
 }
 
+const NOTIF_ICONS: Record<string, string> = {
+  chat_message: '\u{1F4AC}',
+  peer_connected: '\u{1F7E2}',
+  peer_disconnected: '\u{1F534}',
+  kc_published: '\u{1F4E6}',
+};
+
+function formatTimeAgo(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+function NotificationBell() {
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [open, setOpen] = useState(false);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await fetchNotifications({ limit: 100 });
+      setNotifications(data.notifications);
+      setUnreadCount(data.unreadCount);
+    } catch { /* swallow */ }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 4000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const handleOpen = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && unreadCount > 0) {
+      await markNotificationsRead();
+      refresh();
+    }
+  };
+
+  return (
+    <div ref={bellRef} style={{ position: 'relative' }}>
+      <button
+        onClick={handleOpen}
+        aria-label="Notifications"
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer', position: 'relative',
+          padding: '6px 8px', borderRadius: 6, color: 'var(--text)',
+          display: 'flex', alignItems: 'center',
+        }}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+        </svg>
+        {unreadCount > 0 && (
+          <span style={{
+            position: 'absolute', top: 2, right: 2,
+            background: 'var(--green)', color: '#000', fontSize: 9, fontWeight: 700,
+            borderRadius: '50%', minWidth: 16, height: 16, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: '0 4px',
+          }}>
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: '100%', right: 0, width: 340,
+          background: 'var(--bg-card, var(--bg))', border: '1px solid var(--border)',
+          borderRadius: 10, boxShadow: '0 8px 32px rgba(0,0,0,.4)',
+          zIndex: 9999, maxHeight: 420, display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            padding: '12px 16px', borderBottom: '1px solid var(--border)',
+            fontWeight: 600, fontSize: 13, color: 'var(--text)',
+          }}>
+            Notifications
+          </div>
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {notifications.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-dim)', fontSize: 13 }}>
+                No notifications yet
+              </div>
+            ) : notifications.slice(0, 50).map(n => (
+              <div key={n.id} style={{
+                padding: '10px 16px', borderBottom: '1px solid var(--border)',
+                display: 'flex', gap: 10, alignItems: 'flex-start',
+                background: n.read ? 'transparent' : 'rgba(74,222,128,.06)',
+              }}>
+                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>
+                  {NOTIF_ICONS[n.type] ?? '\u{1F514}'}
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text)', marginBottom: 2 }}>
+                    {n.title}
+                  </div>
+                  <div style={{
+                    fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {n.message}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>
+                    {formatTimeAgo(n.ts)}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const installedApps = useInstalledApps();
   const liveStatus = useLiveStatus();
@@ -156,6 +287,14 @@ export function App() {
       </aside>
 
       <main className="main-content">
+        <div style={{
+          display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+          padding: '4px 16px', borderBottom: '1px solid var(--border)',
+          flexShrink: 0, minHeight: 36,
+        }}>
+          <NotificationBell />
+        </div>
+        <div style={{ flex: 1, overflow: 'auto' }}>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
@@ -170,6 +309,7 @@ export function App() {
           <Route path="/wallet" element={<Navigate to="/settings" replace />} />
           <Route path="/integrations" element={<Navigate to="/settings" replace />} />
         </Routes>
+        </div>
       </main>
     </div>
   );

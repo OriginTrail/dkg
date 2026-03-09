@@ -161,6 +161,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
   agent.onChat((text, senderPeerId, _convId) => {
     try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'in', peer: senderPeerId, text }); } catch { /* never crash */ }
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: 'chat_message',
+        title: 'New message',
+        message: `Message from ${shortId(senderPeerId)}: ${text.slice(0, 120)}`,
+        source: 'peer-chat',
+        peer: senderPeerId,
+      });
+    } catch { /* never crash */ }
     log(`CHAT IN  [${shortId(senderPeerId)}]: ${text}`);
   });
 
@@ -320,11 +330,48 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     tracker.complete(ctx, { details: { transport: data.transport, direction: data.direction } });
   });
 
+  // Notify on new peer connections
+  agent.eventBus.on(DKGEvent.PEER_CONNECTED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: 'peer_connected',
+        title: 'Peer connected',
+        message: `Peer ${shortId(data.peerId)} connected`,
+        source: 'network',
+        peer: data.peerId,
+      });
+    } catch { /* never crash */ }
+  });
+
+  agent.eventBus.on(DKGEvent.PEER_DISCONNECTED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: 'peer_disconnected',
+        title: 'Peer disconnected',
+        message: `Peer ${shortId(data.peerId)} disconnected`,
+        source: 'network',
+        peer: data.peerId,
+      });
+    } catch { /* never crash */ }
+  });
+
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { paranetId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: 'kc_published',
+        title: 'Knowledge published',
+        message: `Knowledge collection published${data.paranetId ? ` on paranet ${shortId(data.paranetId)}` : ''}`,
+        source: 'dkg',
+        meta: JSON.stringify({ kcId: data.kcId, paranetId: data.paranetId }),
+      });
+    } catch { /* never crash */ }
   });
 
   const agentToolsContext = {
@@ -399,7 +446,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       log(`App static port would collide with libp2p listenPort ${config.listenPort}, using ${desiredAppPort}`);
     }
     try {
-      const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiPortRef, log);
+      const boundToLoopback = appHost === '127.0.0.1' || appHost === '::1';
+      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
+      const appAuthTokenRef = boundToLoopback && authEnabled ? { value: firstToken } : undefined;
+      const result = await startAppStaticServer(installedApps, appHost, desiredAppPort, apiPortRef, log, appAuthTokenRef);
       appStaticServer = result.server;
       appStaticPort = result.port;
     } catch (err: any) {

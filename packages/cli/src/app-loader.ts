@@ -231,6 +231,7 @@ export async function startAppStaticServer(
   port: number,
   apiPortRef: { value: number },
   log?: (msg: string) => void,
+  authTokenRef?: { value: string | undefined },
 ): Promise<{ server: Server; port: number }> {
   const appServer = createServer(async (req, res) => {
     try {
@@ -253,7 +254,7 @@ export async function startAppStaticServer(
         const app = apps.find(a => a.id === appId);
         if (app) {
           const apiOrigin = apiPortRef.value ? deriveOrigin(req, apiPortRef.value) : undefined;
-          await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', undefined, apiOrigin);
+          await serveAppStatic(res, app.staticDir, path.slice(`/apps/${appId}`.length) || '/', authTokenRef?.value, apiOrigin);
           return;
         }
       }

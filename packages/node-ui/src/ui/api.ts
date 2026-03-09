@@ -527,6 +527,31 @@ export const fetchIntegrations = () =>
 export const subscribeToParanet = (paranetId: string) =>
   post<{ subscribed: string }>('/api/subscribe', { paranetId });
 
+// --- Notifications ---
+
+export interface Notification {
+  id: number;
+  ts: number;
+  type: string;
+  title: string;
+  message: string;
+  source: string | null;
+  peer: string | null;
+  read: number;
+  meta: string | null;
+}
+
+export const fetchNotifications = (opts?: { since?: number; limit?: number }) => {
+  const params = new URLSearchParams();
+  if (opts?.since) params.set('since', String(opts.since));
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  return get<{ notifications: Notification[]; unreadCount: number }>(`/api/notifications${qs ? `?${qs}` : ''}`);
+};
+
+export const markNotificationsRead = (ids?: number[]) =>
+  post<{ marked: number }>('/api/notifications/read', ids ? { ids } : {});
+
 // --- OriginTrail Game ---
 const GAME_BASE = '/api/apps/origin-trail-game';
 

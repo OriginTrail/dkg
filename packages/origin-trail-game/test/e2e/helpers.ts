@@ -158,22 +158,36 @@ export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
 export function nodeApi(node: TestNode) {
   const base = `http://127.0.0.1:${node.apiPort}`;
   const token = node.authToken;
+  const game = `${base}/api/apps/origin-trail-game`;
 
   return {
     status: () => httpGet(`${base}/api/status`),
     apps: () => httpGet(`${base}/api/apps`, token),
-    info: () => httpGet(`${base}/api/apps/origin-trail-game/info`, token),
-    lobby: () => httpGet(`${base}/api/apps/origin-trail-game/lobby`, token),
-    swarm: (id: string) => httpGet(`${base}/api/apps/origin-trail-game/swarm/${id}`, token),
-    create: (playerName: string, swarmName: string) =>
-      httpPost(`${base}/api/apps/origin-trail-game/create`, { playerName, swarmName }, token),
+    info: () => httpGet(`${game}/info`, token),
+    lobby: () => httpGet(`${game}/lobby`, token),
+    swarm: (id: string) => httpGet(`${game}/swarm/${id}`, token),
+    leaderboard: () => httpGet(`${game}/leaderboard`, token),
+    notifications: () => httpGet(`${game}/notifications`, token),
+    players: () => httpGet(`${game}/players`, token),
+    create: (playerName: string, swarmName: string, maxPlayers?: number) =>
+      httpPost(`${game}/create`, { playerName, swarmName, maxPlayers }, token),
     join: (swarmId: string, playerName: string) =>
-      httpPost(`${base}/api/apps/origin-trail-game/join`, { swarmId, playerName }, token),
+      httpPost(`${game}/join`, { swarmId, playerName }, token),
+    leave: (swarmId: string) =>
+      httpPost(`${game}/leave`, { swarmId }, token),
     start: (swarmId: string) =>
-      httpPost(`${base}/api/apps/origin-trail-game/start`, { swarmId }, token),
+      httpPost(`${game}/start`, { swarmId }, token),
     vote: (swarmId: string, action: string, params?: any) =>
-      httpPost(`${base}/api/apps/origin-trail-game/vote`, { swarmId, voteAction: action, params }, token),
+      httpPost(`${game}/vote`, { swarmId, voteAction: action, params }, token),
     forceResolve: (swarmId: string) =>
-      httpPost(`${base}/api/apps/origin-trail-game/force-resolve`, { swarmId }, token),
+      httpPost(`${game}/force-resolve`, { swarmId }, token),
+    markNotificationsRead: (ids?: string[]) =>
+      httpPost(`${game}/notifications/read`, ids ? { ids } : {}, token),
   };
+}
+
+export async function httpGetRaw(url: string, token?: string): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return fetch(url, { headers });
 }

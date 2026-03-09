@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -181,6 +181,24 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 5) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          message TEXT NOT NULL,
+          source TEXT,
+          peer TEXT,
+          read INTEGER NOT NULL DEFAULT 0,
+          meta TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_notif_ts ON notifications(ts);
+        CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read);
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
   }
 
@@ -193,6 +211,7 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM query_history WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
+    this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
   }
 
   // --- Prepared statements (lazy-initialized) ---
@@ -823,6 +842,60 @@ export class DashboardDB {
     this.db.prepare('DELETE FROM saved_queries WHERE id = ?').run(id);
   }
 
+  // --- Notifications ---
+
+  insertNotification(n: {
+    ts: number;
+    type: string;
+    title: string;
+    message: string;
+    source?: string | null;
+    peer?: string | null;
+    meta?: string | null;
+  }): number {
+    const result = this.stmt('insertNotif', `
+      INSERT INTO notifications (ts, type, title, message, source, peer, read, meta)
+      VALUES (@ts, @type, @title, @message, @source, @peer, 0, @meta)
+    `).run({
+      ts: n.ts,
+      type: n.type,
+      title: n.title,
+      message: n.message,
+      source: n.source ?? null,
+      peer: n.peer ?? null,
+      meta: n.meta ?? null,
+    });
+    return result.lastInsertRowid as number;
+  }
+
+  getNotifications(opts: { limit?: number; since?: number } = {}): { notifications: NotificationRow[]; unreadCount: number } {
+    const limit = opts.limit ?? 100;
+    const sinceClause = opts.since ? 'WHERE ts > ?' : '';
+    const params: unknown[] = opts.since ? [opts.since] : [];
+
+    const notifications = this.db.prepare(
+      `SELECT * FROM notifications ${sinceClause} ORDER BY ts DESC LIMIT ?`,
+    ).all(...params, limit) as NotificationRow[];
+
+    const unread = this.db.prepare(
+      'SELECT COUNT(*) as c FROM notifications WHERE read = 0',
+    ).get() as { c: number };
+
+    return { notifications, unreadCount: unread.c };
+  }
+
+  markNotificationsRead(ids?: number[]): number {
+    if (ids && ids.length > 0) {
+      const placeholders = ids.map(() => '?').join(',');
+      const result = this.db.prepare(
+        `UPDATE notifications SET read = 1 WHERE id IN (${placeholders}) AND read = 0`,
+      ).run(...ids);
+      return result.changes;
+    }
+    const result = this.db.prepare('UPDATE notifications SET read = 1 WHERE read = 0').run();
+    return result.changes;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -932,6 +1005,18 @@ export interface SavedQueryRow {
   sparql: string;
   created_at: number;
   updated_at: number;
+}
+
+export interface NotificationRow {
+  id: number;
+  ts: number;
+  type: string;
+  title: string;
+  message: string;
+  source: string | null;
+  peer: string | null;
+  read: number;
+  meta: string | null;
 }
 
 export interface ChatMessageRow {
