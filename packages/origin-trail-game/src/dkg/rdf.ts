@@ -166,10 +166,10 @@ export function consensusAttestationQuads(
 ): Quad[] {
   const g = contextGraph(paranetId, swarmId);
   const t = turnUri(swarmId, turn);
-  const root = `urn:dkg:attestation:${swarmId}:${proposalHash}`;
+  const root = `urn:dkg:attestation:${swarmId}:turn${turn}:${proposalHash}`;
   const quads: Quad[] = [
     quad(root, `${RDF}type`, otUri('ConsensusAttestationBatch'), g),
-    quad(root, otUri('forTurnResult'), t, g),
+    quad(root, otUri('forTurn'), t, g),
     quad(root, otUri('resolution'), literal(resolution), g),
   ];
   for (const att of attestations) {
@@ -295,7 +295,8 @@ export function strategyPatternQuads(
     quad(s, otUri('turnsSurvived'), literal(stats.turnsSurvived), g),
   ];
   for (const [action, count] of Object.entries(stats.actionCounts)) {
-    const acUri = otUri(`strategy/${swarmId}/${peerId}/action/${encodeURIComponent(action)}`);
+    const safeKey = action.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const acUri = otUri(`strategy/${swarmId}/${peerId}/action/${safeKey}`);
     quads.push(quad(s, otUri('hasActionCount'), acUri, g));
     quads.push(quad(acUri, otUri('action'), literal(action), g));
     quads.push(quad(acUri, otUri('count'), literal(count), g));

@@ -66,7 +66,7 @@ export interface TurnProposal {
   approvalTimestamps: Map<string, number>;
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string; partyIndex: number }>;
+  deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
 }
 
@@ -94,7 +94,7 @@ export interface ResolvedTurn {
   approvers: string[];
   votes: Array<{ peerId: string; action: string }>;
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
-  deaths: Array<{ name: string; cause: string; partyIndex: number }>;
+  deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
   timestamp: number;
 }
@@ -695,19 +695,6 @@ export class OriginTrailGameCoordinator {
         this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
         this.log(`Consensus attestations published for turn ${proposal.turn}`);
 
-        const onChain = publishResult?.onChainResult;
-        if (onChain?.txHash && publishResult?.ual) {
-          try {
-            await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
-              this.paranetId, swarm.id, proposal.turn,
-              { txHash: onChain.txHash, blockNumber: onChain.blockNumber, ual: publishResult.ual },
-            ));
-            this.log(`Turn ${proposal.turn} provenance written: tx=${onChain.txHash}`);
-          } catch (err: any) {
-            this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
-          }
-        }
-        await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
         const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
         await this.publishProvenanceChain(turnEntity, publishResult);
       } catch (err: any) {
@@ -826,24 +813,6 @@ export class OriginTrailGameCoordinator {
       this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
       this.log(`Force-resolve: attestation published for turn ${turnNumber}`);
 
-      const onChain = publishResult?.onChainResult;
-      if (onChain?.txHash && publishResult?.ual) {
-        const provenance: rdf.ChainProvenance = {
-          txHash: onChain.txHash,
-          blockNumber: onChain.blockNumber,
-          ual: publishResult.ual,
-        };
-        try {
-          await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
-            this.paranetId, swarm.id, turnNumber,
-            provenance,
-          ));
-          this.log(`Force-resolve: turn ${turnNumber} provenance written: tx=${onChain.txHash}`);
-        } catch (err: any) {
-          this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
-        }
-      }
-      await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
       await this.publishProvenanceChain(turnEntity, publishResult);
     } catch (err: any) {
@@ -1002,9 +971,10 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
-    if (msg.partyOrder) {
+    if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
       swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
     } else {
+      if (msg.partyOrder) this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
       swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     }
     swarm.status = 'traveling';
@@ -1016,6 +986,13 @@ export class OriginTrailGameCoordinator {
     // through workspace gossip replication (Rule 4: don't write to leader-owned root).
 
     this.log(`Journey started for ${msg.swarmId} (remote)`);
+  }
+
+  private isValidPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
+    const currentPeerIds = new Set(swarm.players.map(p => p.peerId));
+    if (partyOrder.length !== currentPeerIds.size) return false;
+    if (new Set(partyOrder).size !== partyOrder.length) return false;
+    return partyOrder.every(pid => currentPeerIds.has(pid));
   }
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {
@@ -1122,6 +1099,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    const receivedAt = Date.now();
     swarm.pendingProposal = {
       turn: msg.turn,
       hash: msg.proposalHash,
@@ -1129,7 +1107,7 @@ export class OriginTrailGameCoordinator {
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
       approvals: new Set([msg.peerId, this.myPeerId]),
-      approvalTimestamps: new Map([[msg.peerId, Date.now()], [this.myPeerId, Date.now()]]),
+      approvalTimestamps: new Map([[msg.peerId, receivedAt], [this.myPeerId, receivedAt]]),
       votes,
       resolution,
       deaths,
@@ -1367,7 +1345,7 @@ export class OriginTrailGameCoordinator {
       const partyIndex = swarm.playerIndexMap.get(peerId);
       const partyMember = partyIndex != null ? swarm.gameState?.party[partyIndex] : undefined;
       const turnsSurvived = partyMember && !partyMember.alive
-        ? this.findDeathTurn(swarm, partyIndex)
+        ? this.findDeathTurn(swarm, partyIndex!, partyMember.name)
         : swarm.turnHistory.length;
       results.push({
         peerId,
@@ -1377,9 +1355,9 @@ export class OriginTrailGameCoordinator {
     return results;
   }
 
-  private findDeathTurn(swarm: SwarmState, partyIndex: number): number {
+  private findDeathTurn(swarm: SwarmState, partyIndex: number, name?: string): number {
     for (const turn of swarm.turnHistory) {
-      if (turn.deaths.some(d => d.partyIndex === partyIndex)) return turn.turn;
+      if (turn.deaths.some(d => d.partyIndex != null ? d.partyIndex === partyIndex : d.name === name)) return turn.turn;
     }
     return swarm.turnHistory.length;
   }
@@ -1401,6 +1379,28 @@ export class OriginTrailGameCoordinator {
       this.log(`Published ${strategies.length} strategy patterns for ${swarm.id}`);
     } catch (err: any) {
       this.log(`Failed to publish strategy patterns for ${swarm.id}: ${err.message}`);
+    }
+  }
+
+  // ── Provenance chain ─────────────────────────────────────────────
+
+  async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
+    const ual = publishResult?.ual ?? (publishResult?.kcId != null ? String(publishResult.kcId) : '');
+    const txHash = publishResult?.onChainResult?.txHash ?? '';
+    if (!ual && !txHash) return;
+    const provenance: rdf.PublishProvenance = {
+      rootEntity,
+      ual,
+      txHash,
+      blockNumber: publishResult?.onChainResult?.blockNumber || undefined,
+      publisherPeerId: this.myPeerId,
+      publishedAt: Date.now(),
+    };
+    try {
+      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
+      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
+    } catch (err: any) {
+      this.log(`Failed to write provenance chain for ${rootEntity}: ${err.message}`);
     }
   }
 
