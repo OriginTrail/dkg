@@ -184,9 +184,10 @@ export class DKGPublisher implements Publisher {
       this.workspaceOwnedEntities.set(paranetId, new Map());
     }
     const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
+    const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
     for (const r of rootEntities) {
-      if (!wsOwned.has(r)) {
-        this.workspaceOwnedEntities.get(paranetId)!.set(r, options.publisherPeerId);
+      if (!liveOwned.has(r)) {
+        liveOwned.set(r, options.publisherPeerId);
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
       }
     }

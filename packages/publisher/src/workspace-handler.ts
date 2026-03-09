@@ -127,9 +127,10 @@ export class WorkspaceHandler {
         this.workspaceOwnedEntities.set(paranetId, new Map());
       }
       const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
+      const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
       for (const r of rootEntities) {
-        if (!wsOwned.has(r)) {
-          this.workspaceOwnedEntities.get(paranetId)!.set(r, publisherPeerId);
+        if (!liveOwned.has(r)) {
+          liveOwned.set(r, publisherPeerId);
           newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
         }
       }
