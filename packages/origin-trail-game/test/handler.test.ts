@@ -269,6 +269,12 @@ describe('OriginTrail Game API handler', () => {
     // Follower should NOT write to workspace (Rule 4: leader owns swarm root);
     // launch state is replicated via leader's workspace gossip instead
     expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
+
+    const swarm = coordinator.getSwarm('swarm-c3');
+    expect(swarm).not.toBeNull();
+    expect(swarm!.status).toBe('traveling');
+    expect(swarm!.currentTurn).toBe(1);
+    expect(swarm!.gameState).toEqual(gs);
   });
 
   it('GET /players returns registered players from the graph', async () => {
