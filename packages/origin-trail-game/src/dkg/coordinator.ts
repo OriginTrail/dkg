@@ -145,6 +145,7 @@ export class OriginTrailGameCoordinator {
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
+  private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -353,7 +354,8 @@ export class OriginTrailGameCoordinator {
       ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
       ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName),
     ];
-    await this.agent.writeToWorkspace(this.paranetId, quads);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, quads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, quads);
 
     const msg: proto.SwarmCreatedMsg = {
       app: proto.APP_ID,
@@ -385,9 +387,9 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
     });
 
-    await this.agent.writeToWorkspace(this.paranetId, rdf.playerJoinedQuads(
-      this.paranetId, swarmId, this.myPeerId, playerName,
-    ));
+    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, joinQuads);
 
     const msg: proto.SwarmJoinedMsg = {
       app: proto.APP_ID,
@@ -409,6 +411,7 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.leaderPeerId === this.myPeerId && swarm.status === 'recruiting') {
       this.swarms.delete(swarmId);
+      this.workspaceOps.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
@@ -417,6 +420,7 @@ export class OriginTrailGameCoordinator {
     if (swarm.status === 'traveling') {
       swarm.status = 'finished';
       if (swarm.gameState) swarm.gameState.status = 'lost';
+      this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
     }
 
@@ -490,9 +494,9 @@ export class OriginTrailGameCoordinator {
     };
     swarm.votes.push(vote);
 
-    await this.agent.writeToWorkspace(this.paranetId, rdf.voteCastQuads(
-      this.paranetId, swarmId, swarm.currentTurn, this.myPeerId, action, params,
-    ));
+    const voteQuads = rdf.voteCastQuads(this.paranetId, swarmId, swarm.currentTurn, this.myPeerId, action, params);
+    const wsResult = await this.agent.writeToWorkspace(this.paranetId, voteQuads);
+    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, voteQuads);
 
     const msg: proto.VoteCastMsg = {
       app: proto.APP_ID,
@@ -631,6 +635,10 @@ export class OriginTrailGameCoordinator {
     const threshold = signatureThreshold(swarm.players.length);
     if (proposal.approvals.size < threshold) return;
 
+    const isLeader = swarm.leaderPeerId === this.myPeerId;
+    const opsSnapshot = isLeader ? [...(this.workspaceOps.get(swarm.id) ?? [])] : [];
+    if (isLeader) this.workspaceOps.delete(swarm.id);
+
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
 
@@ -657,9 +665,9 @@ export class OriginTrailGameCoordinator {
       swarm.turnDeadline = Date.now() + 30_000;
     }
 
-    if (swarm.leaderPeerId === this.myPeerId) {
+    if (isLeader) {
       try {
-        await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+        const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
           this.paranetId, swarm.id, proposal.turn,
           proposal.winningAction, proposal.newStateJson,
           [...proposal.approvals],
@@ -678,8 +686,10 @@ export class OriginTrailGameCoordinator {
             this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
           }
         }
+        await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
+        await this.writeFailedLineage(opsSnapshot).catch(() => {});
       }
 
       const resolvedMsg: proto.TurnResolvedMsg = {
@@ -722,9 +732,9 @@ export class OriginTrailGameCoordinator {
     const deaths = detectDeaths(swarm.gameState, result.newState, event);
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
-    // Force-resolve bypasses normal consensus — apply the turn directly
-    // without fabricating approvals. Only the actual force-resolver is recorded.
     const turnNumber = swarm.currentTurn;
+    const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
+    this.workspaceOps.delete(swarm.id);
 
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
@@ -793,8 +803,10 @@ export class OriginTrailGameCoordinator {
           this.log(`Failed to write provenance for force-resolved turn ${turnNumber}: ${err.message}`);
         }
       }
+      await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
+      await this.writeFailedLineage(opsSnapshot).catch(() => {});
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -931,6 +943,7 @@ export class OriginTrailGameCoordinator {
     if (!swarm) return;
     if (msg.peerId === swarm.leaderPeerId && swarm.status === 'recruiting') {
       this.swarms.delete(msg.swarmId);
+      this.workspaceOps.delete(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
@@ -1013,6 +1026,7 @@ export class OriginTrailGameCoordinator {
       }
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.workspaceOps.delete(msg.swarmId);
       swarm.gameState = newState;
 
       swarm.turnHistory.push({
@@ -1105,6 +1119,7 @@ export class OriginTrailGameCoordinator {
       const proposal = swarm.pendingProposal;
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.workspaceOps.delete(msg.swarmId);
 
       const newState: GameState = JSON.parse(proposal.newStateJson);
       swarm.gameState = newState;
@@ -1203,6 +1218,52 @@ export class OriginTrailGameCoordinator {
     };
   }
 
+  // ── Workspace lineage ────────────────────────────────────────────
+
+  private trackWorkspaceOp(swarmId: string, opId: string, quads: Array<{ subject: string }>): void {
+    if (!this.workspaceOps.has(swarmId)) this.workspaceOps.set(swarmId, []);
+    const rootEntities = [...new Set(quads.map(q => q.subject))];
+    this.workspaceOps.get(swarmId)!.push({ workspaceOperationId: opId, rootEntities });
+  }
+
+  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
+    const quads = rdf.workspaceLineageQuads(paranetId, entries);
+    if (quads.length > 0) {
+      await this.agent.writeToWorkspace(paranetId, quads);
+      this.log(`Recorded workspace lineage for ${entries.length} operation(s)`);
+    }
+  }
+
+  private async writeLineageFromSnapshot(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>, publishResult: any): Promise<void> {
+    if (snapshot.length === 0) return;
+    const now = Date.now();
+    const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
+      workspaceOperationId: op.workspaceOperationId,
+      rootEntity,
+      status: publishResult?.ual ? 'published' as const : 'workspace' as const,
+      publishedUal: publishResult?.ual as string | undefined,
+      publishedTxHash: publishResult?.onChainResult?.txHash as string | undefined,
+      publishedAt: publishResult?.ual ? now : undefined,
+      confirmed: !!publishResult?.onChainResult?.txHash,
+    })));
+    try {
+      await this.recordWorkspaceLineage(this.paranetId, entries);
+    } catch (err: any) {
+      this.log(`Lineage write failed (dropped ${snapshot.length} ops): ${err.message}`);
+    }
+  }
+
+  private async writeFailedLineage(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>): Promise<void> {
+    if (snapshot.length === 0) return;
+    const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
+      workspaceOperationId: op.workspaceOperationId,
+      rootEntity,
+      status: 'failed' as const,
+    })));
+    await this.recordWorkspaceLineage(this.paranetId, entries);
+    this.log(`Recorded ${entries.length} failed lineage entries`);
+  }
+
   // ── Utilities ─────────────────────────────────────────────────────
 
   private async broadcast(msg: proto.OTMessage): Promise<void> {
@@ -1267,6 +1328,7 @@ export class OriginTrailGameCoordinator {
     for (const swarmId of this.voteHeartbeatTimers.keys()) {
       this.stopVoteHeartbeat(swarmId);
     }
+    this.workspaceOps.clear();
     this.agent.gossip.offMessage(this.topic, this.handleMessage);
   }
 }

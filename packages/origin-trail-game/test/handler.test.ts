@@ -26,7 +26,7 @@ function makeMockAgent(peerId = 'test-peer-1') {
     },
     publish: async (_paranetId: string, quads: any[]) => {
       published.push(quads);
-      return {};
+      return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
     query: async () => ({ bindings: [] }),
     _published: published,
@@ -988,6 +988,98 @@ describe('Network topology hints (V3)', () => {
     const handle = handlers![0];
     for (const [pid, name] of [['topo-p2', 'P2'], ['topo-p3', 'P3']]) {
       handle('dkg/paranet/topo-test/app', encode({
+
+describe('Workspace lineage quads', () => {
+  it('generates enshrined quads when confirmed is true', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [{
+      workspaceOperationId: 'op-123',
+      rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-abc',
+      publishedUal: 'did:dkg:test-ual',
+      publishedTxHash: '0xabcdef',
+      publishedAt: 1700000000000,
+      confirmed: true,
+    }]);
+
+    expect(quads.length).toBe(8);
+    expect(quads[0].subject).toContain('lineage/op-123');
+    expect(quads[0].predicate).toContain('rdf-syntax-ns#type');
+    expect(quads[0].object).toContain('WorkspaceLineage');
+    expect(quads[0].graph).toBe('did:dkg:paranet:origin-trail-game');
+
+    const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
+    expect(statusQuad?.object).toContain('published');
+
+    const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
+    expect(confirmedQuad?.object).toContain('true');
+
+    const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
+    expect(ualQuad?.object).toContain('did:dkg:test-ual');
+  });
+
+  it('generates workspace-only quads when not confirmed', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [{
+      workspaceOperationId: 'op-456',
+      rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-def/vote/peer-1',
+    }]);
+
+    expect(quads.length).toBe(5);
+    const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
+    expect(statusQuad?.object).toContain('workspace');
+
+    const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
+    expect(confirmedQuad?.object).toContain('false');
+
+    const ualQuad = quads.find((q: any) => q.predicate.includes('publishedUal'));
+    expect(ualQuad).toBeUndefined();
+  });
+
+  it('handles multiple entries with distinct subjects', async () => {
+    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = workspaceLineageQuads('origin-trail-game', [
+      { workspaceOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1', confirmed: true },
+      { workspaceOperationId: 'op-b', rootEntity: 'https://example.com/e2' },
+    ]);
+
+    const subjects = new Set(quads.map((q: any) => q.subject));
+    expect(subjects.size).toBe(2);
+    expect([...subjects].some(s => s.includes('op-a'))).toBe(true);
+    expect([...subjects].some(s => s.includes('op-b'))).toBe(true);
+
+    const enshrined = quads.filter((q: any) => q.object?.includes?.('published'));
+    const wsOnly = quads.filter((q: any) => q.object?.includes?.('workspace'));
+    expect(enshrined.length).toBe(1);
+    expect(wsOnly.length).toBe(1);
+  });
+});
+
+describe('Workspace lineage tracking', () => {
+  it('writes lineage quads after force-resolve turn publish', async () => {
+    const leaderPeerId = 'lineage-leader';
+    let opCounter = 0;
+    const lineageAgent = makeMockAgent(leaderPeerId);
+    lineageAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      lineageAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    lineageAgent.publish = async (_paranetId: string, quads: any[]) => {
+      lineageAgent._published.push(quads);
+      return { ual: 'did:dkg:published-ual', onChainResult: { txHash: '0xabc123' } };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(lineageAgent as any, { paranetId: 'lineage-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'Lineage Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = lineageAgent._messageHandlers.get('dkg/paranet/lineage-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [['lineage-p2', 'P2'], ['lineage-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-test/app', encode({
         app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
         peerId: pid, timestamp: Date.now(), playerName: name,
       }), pid);
@@ -1037,6 +1129,221 @@ describe('Network topology hints (V3)', () => {
 
     coordinator.destroy();
     // No error thrown, timer cleaned up
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    const writesBeforeForce = lineageAgent._workspaceWrites.length;
+
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageWrites = lineageAgent._workspaceWrites.slice(writesBeforeForce).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('published'))).toBe(true);
+
+    const lineageLogs = logs.filter(l => l.includes('lineage'));
+    expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('writes lineage quads after normal consensus turn resolution', async () => {
+    const leaderPeerId = 'consensus-leader';
+    const p2 = 'consensus-p2';
+    const p3 = 'consensus-p3';
+    let opCounter = 0;
+    const consensusAgent = makeMockAgent(leaderPeerId);
+    consensusAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      consensusAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    consensusAgent.publish = async (_paranetId: string, quads: any[]) => {
+      consensusAgent._published.push(quads);
+      return { ual: 'did:dkg:consensus-ual', onChainResult: { txHash: '0xconsensus' } };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const coordinator = new OriginTrailGameCoordinator(consensusAgent as any, { paranetId: 'consensus-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'Consensus Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = consensusAgent._messageHandlers.get('dkg/paranet/consensus-test/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [[p2, 'P2'], [p3, 'P3']]) {
+      handle('dkg/paranet/consensus-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Remote peers vote first
+    for (const pid of [p2, p3]) {
+      handle('dkg/paranet/consensus-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    const writesBeforeConsensus = consensusAgent._workspaceWrites.length;
+
+    // Leader votes last — triggers proposeTurnResolution (all 3 voted)
+    await coordinator.castVote(swarm.id, 'advance');
+    await new Promise(r => setTimeout(r, 50));
+
+    // Simulate remote peer approving the proposal to reach threshold
+    const pendingProposal = swarm.pendingProposal;
+    expect(pendingProposal).not.toBeNull();
+    handle('dkg/paranet/consensus-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: p2, timestamp: Date.now(), turn: 1,
+      proposalHash: pendingProposal!.hash,
+    }), p2);
+    await new Promise(r => setTimeout(r, 100));
+
+    const lineageWrites = consensusAgent._workspaceWrites.slice(writesBeforeConsensus).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('published'))).toBe(true);
+
+    const lineageLogs = logs.filter(l => l.includes('lineage'));
+    expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('lineage entries are workspace-only when publish returns no UAL', async () => {
+    const leaderPeerId = 'lineage-noul-leader';
+    let opCounter = 0;
+    const noUalAgent = makeMockAgent(leaderPeerId);
+    noUalAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      noUalAgent._workspaceWrites.push(quads);
+      return { workspaceOperationId: `op-${++opCounter}` };
+    };
+    noUalAgent.publish = async (_paranetId: string, quads: any[]) => {
+      noUalAgent._published.push(quads);
+      return {};
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(noUalAgent as any, { paranetId: 'lineage-noul' });
+
+    const swarm = await coordinator.createSwarm('Leader', 'No-UAL Swarm');
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = noUalAgent._messageHandlers.get('dkg/paranet/lineage-noul/app');
+    const handle = handlers![0];
+
+    for (const [pid, name] of [['noul-p2', 'P2'], ['noul-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-noul/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageWrites = noUalAgent._workspaceWrites.filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
+    );
+    expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
+
+    const lineageQuads = lineageWrites[0];
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
+  });
+
+  it('publish failure drops lineage ops instead of carrying them to the next turn', async () => {
+    const leaderPeerId = 'lineage-fail-leader';
+    const logs: string[] = [];
+    let publishCallCount = 0;
+    let wsOpCounter = 0;
+
+    const failAgent = makeMockAgent(leaderPeerId);
+    failAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
+      failAgent._workspaceWrites.push(quads);
+      wsOpCounter++;
+      return { workspaceOperationId: `ws-op-${wsOpCounter}` };
+    };
+    failAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCallCount++;
+      if (publishCallCount === 1) throw new Error('publish failed');
+      failAgent._published.push(quads);
+      return { ual: 'did:dkg:test/ual/retry', onChainResult: { txHash: '0xretry', blockNumber: 50 } };
+    };
+    failAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(failAgent as any, { paranetId: 'lineage-fail' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 4);
+    const handlers = failAgent._messageHandlers.get('dkg/paranet/lineage-fail/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [['fail-p2', 'P2'], ['fail-p3', 'P3']]) {
+      handle('dkg/paranet/lineage-fail/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    const firstTurnOpIds = new Set<string>();
+    for (let i = 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
+
+    const writesBeforeFail = failAgent._workspaceWrites.length;
+    await coordinator.forceResolveTurn(swarm.id);
+
+    for (let i = firstTurnOpIds.size + 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
+
+    const failLogs = logs.filter(l => l.includes('Failed to publish'));
+    expect(failLogs.length).toBeGreaterThanOrEqual(1);
+
+    const failedLineage = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('failed')),
+    );
+    expect(failedLineage.length).toBeGreaterThanOrEqual(1);
+
+    const successLineageAfterFail = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('published')),
+    );
+    expect(successLineageAfterFail).toHaveLength(0);
+
+    await coordinator.castVote(swarm.id, 'advance');
+    const secondTurnOpsStart = wsOpCounter + 1;
+    const writesBeforeSecond = failAgent._workspaceWrites.length;
+    await coordinator.forceResolveTurn(swarm.id);
+
+    const lineageAfterSecond = failAgent._workspaceWrites.slice(writesBeforeSecond).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('published') || q.object?.includes?.('workspace')),
+    );
+    expect(lineageAfterSecond.length).toBeGreaterThanOrEqual(1);
+
+    const allLineageSubjects = lineageAfterSecond.flatMap((quads: any[]) =>
+      quads.map((q: any) => q.subject as string),
+    );
+    for (const opId of firstTurnOpIds) {
+      expect(allLineageSubjects.some(s => s.includes(opId))).toBe(false);
+    }
   });
 });
 

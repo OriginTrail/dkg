@@ -208,6 +208,30 @@ export function networkTopologyQuads(paranetId: string, writerPeerId: string, pe
   return quads;
 }
 
+export function workspaceLineageQuads(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const quads: Quad[] = [];
+  for (const entry of entries) {
+    const s = otUri(`lineage/${entry.workspaceOperationId}`);
+    quads.push(quad(s, `${RDF}type`, otUri('WorkspaceLineage'), g));
+    quads.push(quad(s, otUri('workspaceOperationId'), literal(entry.workspaceOperationId), g));
+    quads.push(quad(s, otUri('rootEntity'), entry.rootEntity, g));
+    if (entry.publishedUal) {
+      quads.push(quad(s, otUri('publishedUal'), literal(entry.publishedUal), g));
+    }
+    if (entry.publishedTxHash) {
+      quads.push(quad(s, otUri('publishedTxHash'), literal(entry.publishedTxHash), g));
+    }
+    if (entry.publishedAt != null) {
+      quads.push(quad(s, otUri('publishedAt'), literal(entry.publishedAt), g));
+    }
+    quads.push(quad(s, otUri('confirmed'), literal(entry.confirmed ?? false), g));
+    const status = entry.status ?? (entry.confirmed ? 'published' : 'workspace');
+    quads.push(quad(s, otUri('status'), literal(status), g));
+  }
+  return quads;
+}
+
 export const SPARQL_PREFIXES = {
   OT,
   RDF,
