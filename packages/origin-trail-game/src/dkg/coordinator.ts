@@ -919,6 +919,8 @@ export class OriginTrailGameCoordinator {
   private async onRemoteExpeditionLaunched(msg: proto.ExpeditionLaunchedMsg): Promise<void> {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
+    if (msg.peerId !== swarm.leaderPeerId) return;
+    if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
     swarm.status = 'traveling';
     swarm.currentTurn = 1;

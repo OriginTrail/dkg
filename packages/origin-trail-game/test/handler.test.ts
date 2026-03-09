@@ -597,6 +597,13 @@ describe('Turn proposal accepts non-deterministic state', () => {
     handle('dkg/paranet/test/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 50));
 
+    // Verify swarm transitioned to traveling after remote launch
+    const swarmAfterLaunch = coordinator.getSwarm('swarm-test');
+    expect(swarmAfterLaunch).not.toBeNull();
+    expect(swarmAfterLaunch!.status).toBe('traveling');
+    expect(swarmAfterLaunch!.currentTurn).toBe(1);
+    expect(swarmAfterLaunch!.gameState).toBeDefined();
+
     // All three players vote 'advance'
     const voteLeader = encode({
       app: 'origin-trail-game', type: 'vote:cast', swarmId: 'swarm-test',
