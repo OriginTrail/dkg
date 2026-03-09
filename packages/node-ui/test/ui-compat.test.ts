@@ -150,7 +150,7 @@ describe('dashboard uses runtime data', () => {
   });
 
   it('stat cards use live data with fallback', () => {
-    expect(dashboard).toContain('totalAssets');
+    expect(dashboard).toContain('totalKCs');
     expect(dashboard).toContain('peerCount');
     expect(dashboard).toContain('agentCount');
   });

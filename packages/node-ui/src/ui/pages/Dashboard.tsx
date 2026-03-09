@@ -633,7 +633,7 @@ export function DashboardPage() {
   const isLiveParanets = paranets.length > 0;
 
   const peerCount = status?.connectedPeers ?? (status as any)?.peerCount ?? null;
-  const totalAssets = (metrics as any)?.total_triples ?? null;
+  const totalKCs = (metrics as any)?.total_kcs ?? null;
   const confirmedKCs = (metrics as any)?.confirmed_kcs ?? null;
   const tentativeKCs = (metrics as any)?.tentative_kcs ?? null;
   const agentCount = agentData?.agents != null ? agentData.agents.length : null;
@@ -666,10 +666,10 @@ export function DashboardPage() {
             label: 'Knowledge Collections',
             value: confirmedKCs != null && tentativeKCs != null
               ? String(Number(confirmedKCs) + Number(tentativeKCs))
-              : totalAssets != null ? Number(totalAssets).toLocaleString() : '—',
+              : totalKCs != null ? Number(totalKCs).toLocaleString() : '—',
             sub: confirmedKCs != null && tentativeKCs != null
               ? <><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs).toLocaleString()} confirmed</span>{' · '}<span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs).toLocaleString()} tentative</span></>
-              : totalAssets != null ? 'from node metrics' : 'loading…',
+              : totalKCs != null ? 'from node metrics' : 'loading…',
             color: 'var(--green)',
           },
           { label: 'Connected Peers', value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
