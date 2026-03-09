@@ -980,11 +980,32 @@ function normalizeRepo(repo: string): string {
   return t;
 }
 
-async function checkForUpdate(
+export async function checkForUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<void> {
   try {
+    const cwd = process.cwd();
+
+    // Bail out if not inside a git worktree
+    try {
+      const inWorktree = execSync('git rev-parse --is-inside-work-tree', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+      if (inWorktree !== 'true') {
+        log('Auto-update: skipping — not inside a git worktree');
+        return;
+      }
+    } catch {
+      log('Auto-update: skipping — not inside a git worktree');
+      return;
+    }
+
+    // Bail out if worktree has tracked uncommitted changes
+    const status = execSync('git status --porcelain --untracked-files=no', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (status) {
+      log('Auto-update: skipping — worktree has tracked uncommitted changes');
+      return;
+    }
+
     const commitFile = join(dkgDir(), '.current-commit');
 
     // Get current running commit
@@ -994,7 +1015,7 @@ async function checkForUpdate(
     } catch {
       // First run — record current commit
       try {
-        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: process.cwd() }).trim();
+        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd }).trim();
         await writeFile(commitFile, currentCommit);
       } catch {
         return;
@@ -1027,12 +1048,25 @@ async function checkForUpdate(
 
     log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
 
-    // Pull and rebuild
-    const cwd = process.cwd();
     try {
-      execSync(`git fetch origin ${branch} && git reset --hard origin/${branch}`, {
+      execSync(`git fetch origin ${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
+    } catch (fetchErr: any) {
+      log(`Auto-update: fetch failed — ${fetchErr.message}`);
+      return;
+    }
+
+    try {
+      execSync(`git merge --ff-only origin/${branch}`, {
+        cwd, encoding: 'utf-8', stdio: 'pipe',
+      });
+    } catch (mergeErr: any) {
+      log(`Auto-update: skipping — fast-forward merge failed: ${mergeErr.message}`);
+      return;
+    }
+
+    try {
       execSync('pnpm install --frozen-lockfile', {
         cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
       });
@@ -1040,13 +1074,18 @@ async function checkForUpdate(
         cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
       });
     } catch (err: any) {
-      log(`Auto-update: build failed, rolling back to ${currentCommit.slice(0, 8)}`);
+      log(`Auto-update: build failed after merge — ${err.message}`);
       try {
         execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
         execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-      } catch {
-        log('Auto-update: rollback also failed — manual intervention needed');
+        try {
+          execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+        } catch (buildErr: any) {
+          log(`Auto-update: rollback build failed — artifacts may be stale: ${buildErr.message}`);
+        }
+        log('Auto-update: rolled back to previous commit after build failure');
+      } catch (resetErr: any) {
+        log(`Auto-update: rollback failed — ${resetErr.message}`);
       }
       return;
     }
