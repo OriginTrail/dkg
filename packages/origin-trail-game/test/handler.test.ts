@@ -1067,8 +1067,6 @@ describe('Publish provenance chain (V2)', () => {
       blockNumber: 42,
       publisherPeerId: 'peer-pub-1',
       publishedAt: 1700000000000,
-      knowledgeCollectionId: 'kc-1',
-      knowledgeAssetId: 'ka-1',
     });
 
     const typeQuad = quads.find(q => q.predicate.includes('rdf-syntax-ns#type'));
@@ -1080,23 +1078,6 @@ describe('Publish provenance chain (V2)', () => {
     expect(quads.find(q => q.predicate.includes('blockNumber'))!.object).toContain('42');
     expect(quads.find(q => q.predicate.includes('publisherDID'))!.object).toContain('peer-pub-1');
     expect(quads.find(q => q.predicate.includes('publishedAt'))!.object).toContain('1700000000000');
-    expect(quads.find(q => q.predicate.includes('knowledgeCollection'))!.object).toContain('kc-1');
-    expect(quads.find(q => q.predicate.includes('knowledgeAsset'))!.object).toContain('ka-1');
-  });
-
-  it('publishProvenanceChainQuads works without optional KC/KA fields', async () => {
-    const { publishProvenanceChainQuads } = await import('../src/dkg/rdf.js');
-    const quads = publishProvenanceChainQuads('test-paranet', {
-      rootEntity: 'did:dkg:entity:2',
-      ual: 'did:dkg:ual:456',
-      txHash: '0xdef',
-      blockNumber: 99,
-      publisherPeerId: 'peer-pub-2',
-      publishedAt: 1700000001000,
-    });
-
-    expect(quads.find(q => q.predicate.includes('knowledgeCollection'))).toBeUndefined();
-    expect(quads.find(q => q.predicate.includes('knowledgeAsset'))).toBeUndefined();
     expect(quads.length).toBe(6);
   });
 
@@ -1143,6 +1124,73 @@ describe('Publish provenance chain (V2)', () => {
 
     const chainLogs = logs.filter(l => l.includes('Provenance chain published'));
     expect(chainLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consensus flow publishes provenance chain after threshold is met', async () => {
+    const leaderPeerId = 'leader-prov-cons-1';
+    const followerPeerId = 'follower-prov-cons-1';
+    const thirdPeerId = 'third-prov-cons-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {
+        ual: 'did:dkg:test/ual/consensus-chain',
+        onChainResult: { txHash: '0xconsensus', blockNumber: 300 },
+      };
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-cons-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ProvConsSwarm');
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/prov-cons-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
+      handle('dkg/paranet/prov-cons-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+    await coordinator.castVote(swarm.id, 'advance');
+
+    for (const pid of [followerPeerId, thirdPeerId]) {
+      handle('dkg/paranet/prov-cons-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 100));
+
+    const proposal = swarm.pendingProposal;
+    expect(proposal).not.toBeNull();
+
+    handle('dkg/paranet/prov-cons-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: followerPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: proposal!.hash,
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const provenancePublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('PublishedEntity')),
+    );
+    expect(provenancePublish).toBeDefined();
+
+    const chainLogs = logs.filter(l => l.includes('Provenance chain published'));
+    expect(chainLogs.length).toBeGreaterThanOrEqual(1);
+
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.turnHistory).toHaveLength(1);
+    expect(swarm.turnHistory[0].resolution).toBe('consensus');
   });
 });
 

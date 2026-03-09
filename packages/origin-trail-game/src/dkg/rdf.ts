@@ -213,8 +213,6 @@ export interface PublishProvenance {
   blockNumber: number;
   publisherPeerId: string;
   publishedAt: number;
-  knowledgeCollectionId?: string;
-  knowledgeAssetId?: string;
 }
 
 export function publishProvenanceChainQuads(paranetId: string, provenance: PublishProvenance): Quad[] {
@@ -228,13 +226,6 @@ export function publishProvenanceChainQuads(paranetId: string, provenance: Publi
     quad(s, otUri('publisherDID'), literal(provenance.publisherPeerId), g),
     quad(s, otUri('publishedAt'), literal(provenance.publishedAt), g),
   ];
-  if (provenance.knowledgeCollectionId) {
-    quad(s, otUri('knowledgeCollection'), literal(provenance.knowledgeCollectionId), g);
-    quads.push(quad(s, otUri('knowledgeCollection'), literal(provenance.knowledgeCollectionId), g));
-  }
-  if (provenance.knowledgeAssetId) {
-    quads.push(quad(s, otUri('knowledgeAsset'), literal(provenance.knowledgeAssetId), g));
-  }
   return quads;
 }
 

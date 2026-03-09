@@ -703,7 +703,7 @@ export class OriginTrailGameCoordinator {
         }
         await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
         const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
-        await this.publishProvenanceChain(this.paranetId, turnEntity, publishResult);
+        await this.publishProvenanceChain(turnEntity, publishResult);
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
         await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -835,7 +835,7 @@ export class OriginTrailGameCoordinator {
       }
       await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
-      await this.publishProvenanceChain(this.paranetId, turnEntity, publishResult);
+      await this.publishProvenanceChain(turnEntity, publishResult);
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});
@@ -1268,7 +1268,7 @@ export class OriginTrailGameCoordinator {
     }
   }
 
-    async publishProvenanceChain(paranetId: string, rootEntity: string, publishResult: any): Promise<void> {
+  async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
     if (!publishResult?.ual || !publishResult?.onChainResult?.txHash) return;
     const provenance: rdf.PublishProvenance = {
       rootEntity,
@@ -1277,11 +1277,9 @@ export class OriginTrailGameCoordinator {
       blockNumber: publishResult.onChainResult.blockNumber ?? 0,
       publisherPeerId: this.myPeerId,
       publishedAt: Date.now(),
-      knowledgeCollectionId: publishResult.knowledgeCollectionId,
-      knowledgeAssetId: publishResult.knowledgeAssetId,
     };
     try {
-      await this.agent.publish(this.paranetId, rdf.publishProvenanceChainQuads(paranetId, provenance));
+      await this.agent.publish(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
       this.log(`Provenance chain published for ${rootEntity}: tx=${provenance.txHash}`);
     } catch (err: any) {
       this.log(`Failed to publish provenance chain for ${rootEntity}: ${err.message}`);
