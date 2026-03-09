@@ -2396,5 +2396,277 @@ describe('Score in swarm state', () => {
 
     expect(created).toHaveProperty('score');
     expect(typeof created.score).toBe('number');
+
+describe('Notifications', () => {
+  it('GET /notifications returns empty initially', async () => {
+    const nAgent = makeMockAgent('notif-peer');
+    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+    const req = createMockReq('GET', '/api/apps/origin-trail-game/notifications');
+    const mock = createMockRes();
+    await nHandler(req, mock.res, new URL(req.url, 'http://localhost'));
+    const data = JSON.parse(mock.body);
+    expect(data.notifications).toEqual([]);
+    expect(data.unreadCount).toBe(0);
+  });
+
+  it('generates notification when remote player joins a swarm', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const localPeer = 'notif-local';
+    const nAgent = makeMockAgent(localPeer);
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test' });
+    const swarm = await coordinator.createSwarm('Leader', 'TestSwarm');
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test/app')![0];
+
+    handle('dkg/paranet/notif-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+      peerId: 'remote-peer', timestamp: Date.now(), playerName: 'Alice',
+    }), 'remote-peer');
+    await new Promise(r => setTimeout(r, 50));
+
+    const { notifications, unreadCount } = coordinator.getNotifications();
+    expect(unreadCount).toBe(1);
+    expect(notifications[0].type).toBe('player_joined');
+    expect(notifications[0].playerName).toBe('Alice');
+    expect(notifications[0].message).toContain('Alice');
+    expect(notifications[0].read).toBe(false);
+  });
+
+  it('generates notification when remote swarm is created', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('local-2');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test2' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test2/app')![0];
+
+    handle('dkg/paranet/notif-test2/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'remote-swarm-1',
+      peerId: 'remote-leader', timestamp: Date.now(), swarmName: 'RemoteSwarm',
+      playerName: 'RemoteLeader', maxPlayers: 5,
+    }), 'remote-leader');
+    await new Promise(r => setTimeout(r, 50));
+
+    const { notifications, unreadCount } = coordinator.getNotifications();
+    expect(unreadCount).toBe(1);
+    expect(notifications[0].type).toBe('swarm_created');
+    expect(notifications[0].message).toContain('RemoteSwarm');
+  });
+
+  it('generates notification when expedition launches', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+
+    const nAgent = makeMockAgent('local-3');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test3' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test3/app')![0];
+
+    handle('dkg/paranet/notif-test3/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'expedition-swarm',
+      peerId: 'leader-x', timestamp: Date.now(), swarmName: 'ExpSwarm',
+      playerName: 'Leader', maxPlayers: 3,
+    }), 'leader-x');
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Local'], 'leader-x');
+
+    handle('dkg/paranet/notif-test3/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'expedition-swarm',
+      peerId: 'leader-x', timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
+    }), 'leader-x');
+    await new Promise(r => setTimeout(r, 50));
+
+    const { notifications } = coordinator.getNotifications();
+    const expNotif = notifications.find((n: any) => n.type === 'expedition_launched');
+    expect(expNotif).toBeDefined();
+    expect(expNotif!.message).toContain('ExpSwarm');
+  });
+
+  it('generates notification when remote vote is cast', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+
+    const nAgent = makeMockAgent('local-4');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test4' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-test4/app')![0];
+
+    handle('dkg/paranet/notif-test4/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'vote-swarm',
+      peerId: 'leader-v', timestamp: Date.now(), swarmName: 'VoteSwarm',
+      playerName: 'Leader', maxPlayers: 3,
+    }), 'leader-v');
+
+    handle('dkg/paranet/notif-test4/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'vote-swarm',
+      peerId: 'local-4', timestamp: Date.now(), playerName: 'Local',
+    }), 'local-4');
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Local'], 'leader-v');
+
+    handle('dkg/paranet/notif-test4/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'vote-swarm',
+      peerId: 'leader-v', timestamp: Date.now(), gameStateJson: JSON.stringify(gameState),
+    }), 'leader-v');
+    await new Promise(r => setTimeout(r, 50));
+
+    handle('dkg/paranet/notif-test4/app', encode({
+      app: 'origin-trail-game', type: 'vote:cast', swarmId: 'vote-swarm',
+      peerId: 'leader-v', timestamp: Date.now(), turn: 1, action: 'advance',
+    }), 'leader-v');
+    await new Promise(r => setTimeout(r, 50));
+
+    const { notifications } = coordinator.getNotifications();
+    const voteNotif = notifications.find((n: any) => n.type === 'vote_cast');
+    expect(voteNotif).toBeDefined();
+    expect(voteNotif!.action).toBe('advance');
+    expect(voteNotif!.message).toContain('voted');
+  });
+
+  it('markNotificationsRead marks all notifications as read', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('local-mark');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-mark' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-mark/app')![0];
+
+    handle('dkg/paranet/notif-mark/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'mark-swarm',
+      peerId: 'remote-m', timestamp: Date.now(), swarmName: 'MarkSwarm',
+      playerName: 'Bob', maxPlayers: 3,
+    }), 'remote-m');
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(coordinator.getNotifications().unreadCount).toBe(1);
+
+    const count = coordinator.markNotificationsRead();
+    expect(count).toBe(1);
+    expect(coordinator.getNotifications().unreadCount).toBe(0);
+    expect(coordinator.getNotifications().notifications[0].read).toBe(true);
+  });
+
+  it('markNotificationsRead with specific ids only marks those', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('local-partial');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-partial' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-partial/app')![0];
+
+    for (let i = 0; i < 3; i++) {
+      handle('dkg/paranet/notif-partial/app', encode({
+        app: 'origin-trail-game', type: 'swarm:created', swarmId: `partial-${i}`,
+        peerId: `remote-${i}`, timestamp: Date.now(), swarmName: `Swarm${i}`,
+        playerName: `Player${i}`, maxPlayers: 3,
+      }), `remote-${i}`);
+      await new Promise(r => setTimeout(r, 20));
+    }
+
+    expect(coordinator.getNotifications().unreadCount).toBe(3);
+
+    const firstId = coordinator.getNotifications().notifications[0].id;
+    coordinator.markNotificationsRead([firstId]);
+    expect(coordinator.getNotifications().unreadCount).toBe(2);
+  });
+
+  it('GET /notifications returns notifications via API', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('api-notif');
+    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+
+    const handle = nAgent._messageHandlers.get('dkg/paranet/origin-trail-game/app')![0];
+    handle('dkg/paranet/origin-trail-game/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'api-swarm',
+      peerId: 'remote-api', timestamp: Date.now(), swarmName: 'APISwarm',
+      playerName: 'APIUser', maxPlayers: 3,
+    }), 'remote-api');
+    await new Promise(r => setTimeout(r, 50));
+
+    const req = createMockReq('GET', '/api/apps/origin-trail-game/notifications');
+    const mock = createMockRes();
+    await nHandler(req, mock.res, new URL(req.url, 'http://localhost'));
+    const data = JSON.parse(mock.body);
+
+    expect(data.unreadCount).toBe(1);
+    expect(data.notifications.length).toBe(1);
+    expect(data.notifications[0].type).toBe('swarm_created');
+  });
+
+  it('POST /notifications/read marks notifications as read via API', async () => {
+    const { encode } = await import('../src/dkg/protocol.js');
+    const nAgent = makeMockAgent('api-read');
+    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+
+    const handle = nAgent._messageHandlers.get('dkg/paranet/origin-trail-game/app')![0];
+    handle('dkg/paranet/origin-trail-game/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'read-swarm',
+      peerId: 'remote-r', timestamp: Date.now(), swarmName: 'ReadSwarm',
+      playerName: 'Reader', maxPlayers: 3,
+    }), 'remote-r');
+    await new Promise(r => setTimeout(r, 50));
+
+    const readReq = createMockReq('POST', '/api/apps/origin-trail-game/notifications/read', {});
+    const readMock = createMockRes();
+    await nHandler(readReq, readMock.res, new URL(readReq.url, 'http://localhost'));
+    const readData = JSON.parse(readMock.body);
+    expect(readData.markedRead).toBe(1);
+
+    const req = createMockReq('GET', '/api/apps/origin-trail-game/notifications');
+    const mock = createMockRes();
+    await nHandler(req, mock.res, new URL(req.url, 'http://localhost'));
+    const data = JSON.parse(mock.body);
+    expect(data.unreadCount).toBe(0);
+  });
+
+  it('notifications are returned in reverse chronological order', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('local-order');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-order' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-order/app')![0];
+
+    for (let i = 0; i < 3; i++) {
+      handle('dkg/paranet/notif-order/app', encode({
+        app: 'origin-trail-game', type: 'swarm:created', swarmId: `order-${i}`,
+        peerId: `r-${i}`, timestamp: 1000 + i, swarmName: `S${i}`,
+        playerName: `P${i}`, maxPlayers: 3,
+      }), `r-${i}`);
+      await new Promise(r => setTimeout(r, 20));
+    }
+
+    const { notifications } = coordinator.getNotifications();
+    expect(notifications.length).toBe(3);
+    expect(notifications[0].swarmName).toBe('S2');
+    expect(notifications[2].swarmName).toBe('S0');
+  });
+
+  it('caps notifications at MAX_NOTIFICATIONS', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const nAgent = makeMockAgent('local-cap');
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-cap' });
+    const handle = nAgent._messageHandlers.get('dkg/paranet/notif-cap/app')![0];
+
+    for (let i = 0; i < 210; i++) {
+      handle('dkg/paranet/notif-cap/app', encode({
+        app: 'origin-trail-game', type: 'swarm:created', swarmId: `cap-${i}`,
+        peerId: `c-${i}`, timestamp: Date.now() + i, swarmName: `C${i}`,
+        playerName: `P${i}`, maxPlayers: 3,
+      }), `c-${i}`);
+    }
+    await new Promise(r => setTimeout(r, 100));
+
+    const { notifications } = coordinator.getNotifications();
+    expect(notifications.length).toBeLessThanOrEqual(200);
   });
 });

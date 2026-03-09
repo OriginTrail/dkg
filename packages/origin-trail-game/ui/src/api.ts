@@ -38,4 +38,7 @@ export const api = {
     request('POST', '/vote', { swarmId, voteAction, params }),
   forceResolve: (swarmId: string) =>
     request('POST', '/force-resolve', { swarmId }),
+  notifications: () => request('GET', '/notifications'),
+  markNotificationsRead: (ids?: string[]) =>
+    request('POST', '/notifications/read', ids ? { ids } : {}),
 };

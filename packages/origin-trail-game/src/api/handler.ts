@@ -78,6 +78,11 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         return json(res, 200, { entries });
       }
 
+      if (req.method === 'GET' && subpath === '/notifications') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        return json(res, 200, coordinator.getNotifications());
+      }
+
       if (req.method === 'GET' && subpath === '/info') {
         return json(res, 200, {
           id: 'origin-trail-game',
@@ -88,6 +93,17 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
           peerId: coordinator?.myPeerId ?? null,
           nodeName: config?.name ?? null,
         });
+      }
+
+      if (req.method === 'POST' && subpath === '/notifications/read') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse(await readBody(req));
+        if (body.ids !== undefined && !Array.isArray(body.ids)) {
+          return json(res, 400, { error: '"ids" must be an array of strings' });
+        }
+        const ids: string[] | undefined = body.ids;
+        const count = coordinator.markNotificationsRead(ids);
+        return json(res, 200, { markedRead: count });
       }
 
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });

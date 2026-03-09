@@ -100,6 +100,127 @@ function HeroBanner() {
   );
 }
 
+const NOTIF_TYPE_ICONS: Record<string, string> = {
+  swarm_created: '🆕',
+  player_joined: '👋',
+  player_left: '🚪',
+  expedition_launched: '🚀',
+  vote_cast: '🗳',
+  turn_resolved: '✅',
+};
+
+function NotificationBell() {
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const data = await api.notifications();
+      setNotifications(data.notifications ?? []);
+      setUnreadCount(data.unreadCount ?? 0);
+      setFetchError(null);
+    } catch {
+      setFetchError('Failed to load notifications');
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 4000);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [open]);
+
+  useEffect(() => {
+    if (!fetchError) return;
+    const timer = setTimeout(() => setFetchError(null), 5000);
+    return () => clearTimeout(timer);
+  }, [fetchError]);
+
+  const handleOpen = async () => {
+    const wasOpen = open;
+    setOpen(!wasOpen);
+    if (!wasOpen && unreadCount > 0) {
+      try {
+        await api.markNotificationsRead();
+        setUnreadCount(0);
+        setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+      } catch {
+        setFetchError('Failed to mark notifications read');
+      }
+    }
+  };
+
+  const formatTime = (ts: number) => {
+    const d = new Date(ts);
+    const now = Date.now();
+    const diff = now - ts;
+    if (diff < 60_000) return 'just now';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    return d.toLocaleDateString();
+  };
+
+  return (
+    <div className="ot-notif-wrapper" ref={bellRef}>
+      <button className="ot-notif-bell" onClick={handleOpen} aria-label="Notifications">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {unreadCount > 0 && (
+          <span className="ot-notif-badge" data-testid="notif-badge">
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="ot-notif-dropdown">
+          <div className="ot-notif-dropdown-header">
+            <span>Notifications</span>
+            {notifications.length > 0 && (
+              <button className="ot-notif-clear" onClick={async () => {
+                try {
+                  await api.markNotificationsRead();
+                  setUnreadCount(0);
+                  setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+                } catch {
+                  setFetchError('Failed to mark notifications read');
+                }
+              }}>Mark all read</button>
+            )}
+          </div>
+          {fetchError && <div className="ot-notif-error">{fetchError}</div>}
+          <div className="ot-notif-list">
+            {notifications.length === 0 ? (
+              <div className="ot-notif-empty">No notifications yet</div>
+            ) : notifications.slice(0, 30).map((n: any) => (
+              <div key={n.id} className={`ot-notif-item ${!n.read ? 'ot-notif-unread' : ''}`}>
+                <span className="ot-notif-icon">{NOTIF_TYPE_ICONS[n.type] ?? '📢'}</span>
+                <div className="ot-notif-content">
+                  <span className="ot-notif-msg">{n.message}</span>
+                  <span className="ot-notif-time">{formatTime(n.timestamp)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const ACTION_LABELS: Record<string, string> = {
   advance: 'Advance',
   upgradeSkills: 'Upgrade Skills',
@@ -491,7 +612,10 @@ export function App() {
 
         <div className="ot-header">
           <h1>OriginTrail Game</h1>
-          <span className="ot-player">Playing as: {playerName}</span>
+          <div className="ot-header-right">
+            <NotificationBell />
+            <span className="ot-player">Playing as: {playerName}</span>
+          </div>
         </div>
 
         <div className="ot-section">
@@ -537,7 +661,8 @@ export function App() {
       <div className={isPlaying ? 'ot-container ot-container--wide' : 'ot-container'}>
         <div className="ot-header">
           <h1>{swarm.name}</h1>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div className="ot-header-right" style={{ display: 'flex', gap: 8 }}>
+            <NotificationBell />
             {swarm.status === 'traveling' && (
               <button className="ot-danger" onClick={async () => {
                 if (!confirm('Leave this swarm? The game is in progress — it will end for everyone.')) return;

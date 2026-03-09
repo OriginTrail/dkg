@@ -44,7 +44,129 @@ h4 { font-size: 0.9rem; font-weight: 600; color: var(--muted); margin-bottom: 0.
   margin-bottom: 1.5rem;
 }
 
+.ot-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
 .ot-player { color: var(--muted); font-size: 0.9rem; }
+
+/* Notification bell */
+.ot-notif-wrapper {
+  position: relative;
+}
+.ot-notif-bell {
+  position: relative;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ot-notif-bell:hover {
+  background: rgba(56, 139, 253, 0.08);
+  border-color: rgba(56, 139, 253, 0.3);
+}
+.ot-notif-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: #da3633;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.ot-notif-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 340px;
+  max-height: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ot-notif-dropdown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.ot-notif-clear {
+  background: transparent;
+  border: none;
+  color: var(--green);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.ot-notif-clear:hover { background: rgba(74, 222, 128, 0.08); }
+.ot-notif-list {
+  overflow-y: auto;
+  flex: 1;
+}
+.ot-notif-empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.ot-notif-item {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid rgba(48, 54, 61, 0.5);
+  transition: background 0.12s;
+}
+.ot-notif-item:last-child { border-bottom: none; }
+.ot-notif-item:hover { background: rgba(56, 139, 253, 0.04); }
+.ot-notif-unread {
+  background: rgba(74, 222, 128, 0.04);
+  border-left: 3px solid var(--green);
+}
+.ot-notif-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+.ot-notif-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ot-notif-msg {
+  font-size: 0.82rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.ot-notif-time {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
 
 .ot-section { margin-bottom: 2rem; }
 
@@ -603,4 +725,12 @@ ul li { padding: 0.2rem 0; }
   .ot-play-right {
     height: 500px;
   }
+}
+
+.ot-notif-error {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  color: var(--red, #f85149);
+  background: rgba(248, 81, 73, 0.1);
+  border-bottom: 1px solid var(--border, #30363d);
 }

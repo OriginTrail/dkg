@@ -140,6 +140,33 @@ function stripQuotes(s: string): string {
   return s;
 }
 
+export type NotificationType =
+  | 'swarm_created'
+  | 'player_joined'
+  | 'player_left'
+  | 'expedition_launched'
+  | 'vote_cast'
+  | 'turn_resolved';
+
+export interface GameNotification {
+  id: string;
+  type: NotificationType;
+  swarmId: string;
+  swarmName?: string;
+  playerName?: string;
+  peerId: string;
+  message: string;
+  turn?: number;
+  action?: string;
+  timestamp: number;
+  read: boolean;
+}
+
+let notifSeq = 0;
+function nextNotifId(): string {
+  return `notif-${Date.now()}-${++notifSeq}`;
+}
+
 export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
@@ -150,6 +177,8 @@ export class OriginTrailGameCoordinator {
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
+  private notifications: GameNotification[] = [];
+  private static readonly MAX_NOTIFICATIONS = 200;
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -159,6 +188,31 @@ export class OriginTrailGameCoordinator {
     this.subscribe();
     this.scheduleGraphSync();
     this.scheduleTopologySnapshots();
+  }
+
+  private pushNotification(n: Omit<GameNotification, 'id' | 'read' | 'timestamp'> & { timestamp?: number }): void {
+    const notification: GameNotification = { ...n, timestamp: n.timestamp ?? Date.now(), id: nextNotifId(), read: false };
+    this.notifications.push(notification);
+    if (this.notifications.length > OriginTrailGameCoordinator.MAX_NOTIFICATIONS) {
+      this.notifications = this.notifications.slice(-OriginTrailGameCoordinator.MAX_NOTIFICATIONS);
+    }
+  }
+
+  getNotifications(): { notifications: GameNotification[]; unreadCount: number } {
+    const sorted = [...this.notifications].sort((a, b) => b.timestamp - a.timestamp);
+    return {
+      notifications: sorted,
+      unreadCount: this.notifications.filter(n => !n.read).length,
+    };
+  }
+
+  markNotificationsRead(ids?: string[]): number {
+    let count = 0;
+    for (const n of this.notifications) {
+      if (n.read) continue;
+      if (!ids || ids.includes(n.id)) { n.read = true; count++; }
+    }
+    return count;
   }
 
   get myPeerId(): string {
@@ -956,6 +1010,11 @@ export class OriginTrailGameCoordinator {
       playerIndexMap: new Map(),
     };
     this.swarms.set(msg.swarmId, swarm);
+    this.pushNotification({
+      type: 'swarm_created', swarmId: msg.swarmId, swarmName: msg.swarmName,
+      playerName: msg.playerName, peerId: msg.peerId, timestamp: msg.timestamp,
+      message: `${msg.playerName} created swarm "${msg.swarmName}"`,
+    });
     this.log(`Remote swarm discovered: ${msg.swarmName} (${msg.swarmId})`);
   }
 
@@ -969,18 +1028,35 @@ export class OriginTrailGameCoordinator {
       joinedAt: msg.timestamp,
       isLeader: false,
     });
+    this.pushNotification({
+      type: 'player_joined', swarmId: msg.swarmId, swarmName: swarm.name,
+      playerName: msg.playerName, peerId: msg.peerId, timestamp: msg.timestamp,
+      message: `${msg.playerName} joined "${swarm.name}"`,
+    });
     this.log(`Player ${msg.playerName} joined ${msg.swarmId}`);
   }
 
   private onRemotePlayerLeft(msg: proto.SwarmLeftMsg): void {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
+    const player = swarm.players.find(p => p.peerId === msg.peerId);
+    const playerName = player?.displayName ?? msg.peerId.slice(0, 8);
     if (msg.peerId === swarm.leaderPeerId && swarm.status === 'recruiting') {
+      this.pushNotification({
+        type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
+        playerName, peerId: msg.peerId, timestamp: msg.timestamp,
+        message: `"${swarm.name}" was disbanded by ${playerName}`,
+      });
       this.swarms.delete(msg.swarmId);
       this.workspaceOps.delete(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
+    this.pushNotification({
+      type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
+      playerName, peerId: msg.peerId, timestamp: msg.timestamp,
+      message: `${playerName} left "${swarm.name}"`,
+    });
   }
 
   private async onRemoteExpeditionLaunched(msg: proto.ExpeditionLaunchedMsg): Promise<void> {
@@ -1003,6 +1079,11 @@ export class OriginTrailGameCoordinator {
     // Leader persists launch state via workspace write; followers receive it
     // through workspace gossip replication (Rule 4: don't write to leader-owned root).
 
+    this.pushNotification({
+      type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,
+      peerId: msg.peerId, timestamp: msg.timestamp,
+      message: `Expedition launched for "${swarm.name}"!`,
+    });
     this.log(`Journey started for ${msg.swarmId} (remote)`);
   }
 
@@ -1028,6 +1109,13 @@ export class OriginTrailGameCoordinator {
       params: msg.params,
       turn: msg.turn,
       timestamp: msg.timestamp,
+    });
+    const voterName = swarm.players.find(p => p.peerId === msg.peerId)?.displayName ?? msg.peerId.slice(0, 8);
+    this.pushNotification({
+      type: 'vote_cast', swarmId: msg.swarmId, swarmName: swarm.name,
+      playerName: voterName, peerId: msg.peerId, timestamp: msg.timestamp,
+      turn: msg.turn, action: msg.action,
+      message: `${voterName} voted on turn ${msg.turn}`,
     });
     this.log(`Remote vote: ${msg.action} from ${msg.peerId.slice(0, 8)} on turn ${msg.turn}`);
 
@@ -1192,6 +1280,12 @@ export class OriginTrailGameCoordinator {
         swarm.votes = [];
         swarm.turnDeadline = Date.now() + 30_000;
       }
+      this.pushNotification({
+        type: 'turn_resolved', swarmId: swarm.id, swarmName: swarm.name,
+        peerId: msg.peerId, timestamp: msg.timestamp, turn: proposal.turn,
+        action: proposal.winningAction,
+        message: `Turn ${proposal.turn} resolved — ${proposal.winningAction}`,
+      });
       this.log(`Applied resolved turn ${proposal.turn} for ${swarm.id} (via turn:resolved)`);
     }
   }
