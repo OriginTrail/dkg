@@ -437,10 +437,14 @@ export class OriginTrailGameCoordinator {
     const gameStateJson = JSON.stringify(swarm.gameState);
     const now = Date.now();
 
-    await this.agent.writeToWorkspace(
-      this.paranetId,
-      rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
-    );
+    try {
+      await this.agent.writeToWorkspace(
+        this.paranetId,
+        rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now),
+      );
+    } catch (err) {
+      this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     const msg: proto.ExpeditionLaunchedMsg = {
       app: proto.APP_ID,
