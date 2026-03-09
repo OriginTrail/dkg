@@ -1206,7 +1206,6 @@ export class DKGAgent {
       this.gossipPublishHandler = new GossipPublishHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
-        this.eventBus,
         this.subscribedParanets,
         {
           paranetExists: (id) => this.paranetExists(id),

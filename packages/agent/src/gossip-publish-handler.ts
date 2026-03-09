@@ -11,7 +11,6 @@ import {
   validatePublishRequest,
   type KAMetadata,
 } from '@dkg/publisher';
-import { TypedEventBus } from '@dkg/core';
 import { ethers } from 'ethers';
 
 export interface GossipPublishHandlerCallbacks {
@@ -22,7 +21,6 @@ export interface GossipPublishHandlerCallbacks {
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
-  private readonly eventBus: TypedEventBus;
   private readonly subscribedParanets: Map<string, any>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
@@ -30,21 +28,25 @@ export class GossipPublishHandler {
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    eventBus: TypedEventBus,
     subscribedParanets: Map<string, any>,
     callbacks: GossipPublishHandlerCallbacks,
   ) {
     this.store = store;
     this.chain = chain;
-    this.eventBus = eventBus;
     this.subscribedParanets = subscribedParanets;
     this.callbacks = callbacks;
   }
 
-  async handlePublishMessage(data: Uint8Array, _paranetId: string): Promise<void> {
+  async handlePublishMessage(data: Uint8Array, paranetId: string): Promise<void> {
     const ctx = createOperationContext('gossip');
     try {
       const request = decodePublishRequest(data);
+
+      if (request.paranetId && request.paranetId !== paranetId) {
+        this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
+        return;
+      }
+
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
 
@@ -131,8 +133,13 @@ export class GossipPublishHandler {
 
         const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities);
         if (!validation.valid) {
-          this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: ${validation.errors.join('; ')}`);
-          return;
+          const allRule4 = validation.errors.every(e => e.startsWith('Rule 4'));
+          if (!allRule4) {
+            this.log.warn(ctx, `Gossip structural validation rejected publish ${request.ual}: ${validation.errors.join('; ')}`);
+            return;
+          }
+          this.log.info(ctx, `Gossip replay detected for ${request.ual}, skipping insert but running verification`);
+          normalized = [];
         }
       }
 
@@ -365,7 +372,7 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
 
 function isValidIri(value: string): boolean {
   if (!value) return false;
-  return !/[><\s{}|^`]/.test(value);
+  return !/[><\s{}|^`"\\]/.test(value);
 }
 
 function stripLiteral(s: string): string {
