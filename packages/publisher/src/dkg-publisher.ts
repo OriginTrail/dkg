@@ -187,12 +187,14 @@ export class DKGPublisher implements Publisher {
     const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
     for (const r of rootEntities) {
       if (!liveOwned.has(r)) {
-        liveOwned.set(r, options.publisherPeerId);
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
       }
     }
     if (newOwnershipEntries.length > 0) {
       await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
+      for (const entry of newOwnershipEntries) {
+        liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+      }
     }
 
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
@@ -662,6 +664,10 @@ export class DKGPublisher implements Publisher {
   /**
    * Reconstruct the in-memory workspaceOwnedEntities map from persisted
    * ownership triples in workspace_meta graphs. Call on startup.
+   *
+   * TODO: Currently trusts any dkg:workspaceOwner triple found in the store.
+   * A future improvement should cross-validate against operation metadata
+   * (e.g. publisher signatures) to guard against tampered triples.
    */
   async reconstructWorkspaceOwnership(): Promise<number> {
     const DKG = 'http://dkg.io/ontology/';

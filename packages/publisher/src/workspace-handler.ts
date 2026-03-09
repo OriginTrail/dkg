@@ -130,12 +130,14 @@ export class WorkspaceHandler {
       const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
       for (const r of rootEntities) {
         if (!liveOwned.has(r)) {
-          liveOwned.set(r, publisherPeerId);
           newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
         }
       }
       if (newOwnershipEntries.length > 0) {
         await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
+        for (const entry of newOwnershipEntries) {
+          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+        }
       }
 
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);

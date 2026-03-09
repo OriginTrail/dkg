@@ -240,10 +240,15 @@ export class DKGAgent {
       workspaceOwnedEntities,
     });
 
-    const restored = await publisher.reconstructWorkspaceOwnership();
-    if (restored > 0) {
+    try {
+      const restored = await publisher.reconstructWorkspaceOwnership();
+      if (restored > 0) {
+        const log = new Logger('DKGAgent');
+        log.info(createOperationContext('init'), `Restored ${restored} workspace ownership entries from store`);
+      }
+    } catch (err) {
       const log = new Logger('DKGAgent');
-      log.info(createOperationContext('init'), `Restored ${restored} workspace ownership entries from store`);
+      log.warn(createOperationContext('init'), `Failed to reconstruct workspace ownership, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const queryEngine = new DKGQueryEngine(store);
