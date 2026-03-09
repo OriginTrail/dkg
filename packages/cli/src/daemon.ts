@@ -1036,11 +1036,16 @@ export async function checkForUpdate(
 
     log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
 
-    // Fetch and attempt fast-forward only merge
     try {
       execSync(`git fetch origin ${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
+    } catch (fetchErr: any) {
+      log(`Auto-update: fetch failed — ${fetchErr.message}`);
+      return;
+    }
+
+    try {
       execSync(`git merge --ff-only origin/${branch}`, {
         cwd, encoding: 'utf-8', stdio: 'pipe',
       });
@@ -1060,7 +1065,9 @@ export async function checkForUpdate(
       log(`Auto-update: build failed after merge — ${err.message}`);
       try {
         execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
+        execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
         log('Auto-update: rolled back to previous commit after build failure');
+        log('Auto-update: warning — node_modules and build artifacts may be stale after rollback');
       } catch (resetErr: any) {
         log(`Auto-update: rollback failed — ${resetErr.message}`);
       }

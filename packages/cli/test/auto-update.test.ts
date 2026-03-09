@@ -81,7 +81,7 @@ describe('checkForUpdate', () => {
     expect(mockedWriteFile).not.toHaveBeenCalled();
   });
 
-  it('does not force-reset on build failure after merge', async () => {
+  it('rolls back and reinstalls dependencies on build failure after merge', async () => {
     const currentCommit = 'aaa111';
     const latestCommit = 'ccc333';
 
@@ -105,8 +105,12 @@ describe('checkForUpdate', () => {
     );
     const allCmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
     expect(allCmds.some(cmd => cmd.includes(`git reset --hard ${currentCommit}`))).toBe(true);
+    expect(allCmds.some(cmd => cmd === 'pnpm install --frozen-lockfile')).toBe(true);
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('rolled back to previous commit'),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('stale after rollback'),
     );
   });
 });
