@@ -26,7 +26,7 @@ function makeMockAgent(peerId = 'test-peer-1') {
     },
     publish: async (_paranetId: string, quads: any[]) => {
       published.push(quads);
-      return {};
+      return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
     query: async () => ({ bindings: [] }),
     _published: published,
@@ -1008,7 +1008,7 @@ describe('Workspace lineage quads', () => {
     expect(quads[0].graph).toBe('did:dkg:paranet:origin-trail-game');
 
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
-    expect(statusQuad?.object).toContain('enshrined');
+    expect(statusQuad?.object).toContain('published');
 
     const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
     expect(confirmedQuad?.object).toContain('true');
@@ -1026,7 +1026,7 @@ describe('Workspace lineage quads', () => {
 
     expect(quads.length).toBe(5);
     const statusQuad = quads.find((q: any) => q.predicate.includes('status'));
-    expect(statusQuad?.object).toContain('workspace-only');
+    expect(statusQuad?.object).toContain('workspace');
 
     const confirmedQuad = quads.find((q: any) => q.predicate.includes('confirmed'));
     expect(confirmedQuad?.object).toContain('false');
@@ -1047,8 +1047,8 @@ describe('Workspace lineage quads', () => {
     expect([...subjects].some(s => s.includes('op-a'))).toBe(true);
     expect([...subjects].some(s => s.includes('op-b'))).toBe(true);
 
-    const enshrined = quads.filter((q: any) => q.object?.includes?.('enshrined'));
-    const wsOnly = quads.filter((q: any) => q.object?.includes?.('workspace-only'));
+    const enshrined = quads.filter((q: any) => q.object?.includes?.('published'));
+    const wsOnly = quads.filter((q: any) => q.object?.includes?.('workspace'));
     expect(enshrined.length).toBe(1);
     expect(wsOnly.length).toBe(1);
   });
@@ -1145,7 +1145,7 @@ describe('Workspace lineage tracking', () => {
     const lineageQuads = lineageWrites[0];
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
-    expect(lineageQuads.some((q: any) => q.object?.includes?.('enshrined'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('published'))).toBe(true);
 
     const lineageLogs = logs.filter(l => l.includes('lineage'));
     expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
@@ -1219,7 +1219,7 @@ describe('Workspace lineage tracking', () => {
     const lineageQuads = lineageWrites[0];
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('confirmed') && q.object?.includes?.('true'))).toBe(true);
-    expect(lineageQuads.some((q: any) => q.object?.includes?.('enshrined'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('published'))).toBe(true);
 
     const lineageLogs = logs.filter(l => l.includes('lineage'));
     expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
@@ -1265,7 +1265,7 @@ describe('Workspace lineage tracking', () => {
     expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
 
     const lineageQuads = lineageWrites[0];
-    expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace-only'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
   });
 
@@ -1315,13 +1315,18 @@ describe('Workspace lineage tracking', () => {
 
     for (let i = firstTurnOpIds.size + 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
 
-    const failLogs = logs.filter(l => l.includes('dropped') && l.includes('lineage'));
+    const failLogs = logs.filter(l => l.includes('Failed to publish'));
     expect(failLogs.length).toBeGreaterThanOrEqual(1);
 
-    const lineageAfterFail = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
-      quads.some((q: any) => q.object?.includes?.('enshrined') || q.object?.includes?.('workspace-only')),
+    const failedLineage = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('failed')),
     );
-    expect(lineageAfterFail).toHaveLength(0);
+    expect(failedLineage.length).toBeGreaterThanOrEqual(1);
+
+    const successLineageAfterFail = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('published')),
+    );
+    expect(successLineageAfterFail).toHaveLength(0);
 
     await coordinator.castVote(swarm.id, 'advance');
     const secondTurnOpsStart = wsOpCounter + 1;
@@ -1329,7 +1334,7 @@ describe('Workspace lineage tracking', () => {
     await coordinator.forceResolveTurn(swarm.id);
 
     const lineageAfterSecond = failAgent._workspaceWrites.slice(writesBeforeSecond).filter((quads: any[]) =>
-      quads.some((q: any) => q.object?.includes?.('enshrined') || q.object?.includes?.('workspace-only')),
+      quads.some((q: any) => q.object?.includes?.('published') || q.object?.includes?.('workspace')),
     );
     expect(lineageAfterSecond.length).toBeGreaterThanOrEqual(1);
 

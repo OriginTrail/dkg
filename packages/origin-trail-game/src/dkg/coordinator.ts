@@ -420,6 +420,7 @@ export class OriginTrailGameCoordinator {
     if (swarm.status === 'traveling') {
       swarm.status = 'finished';
       if (swarm.gameState) swarm.gameState.status = 'lost';
+      this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
     }
 
@@ -634,6 +635,10 @@ export class OriginTrailGameCoordinator {
     const threshold = signatureThreshold(swarm.players.length);
     if (proposal.approvals.size < threshold) return;
 
+    const isLeader = swarm.leaderPeerId === this.myPeerId;
+    const opsSnapshot = isLeader ? [...(this.workspaceOps.get(swarm.id) ?? [])] : [];
+    if (isLeader) this.workspaceOps.delete(swarm.id);
+
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
 
@@ -660,9 +665,7 @@ export class OriginTrailGameCoordinator {
       swarm.turnDeadline = Date.now() + 30_000;
     }
 
-    if (swarm.leaderPeerId === this.myPeerId) {
-      const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
-      this.workspaceOps.delete(swarm.id);
+    if (isLeader) {
       try {
         const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
           this.paranetId, swarm.id, proposal.turn,
@@ -685,7 +688,8 @@ export class OriginTrailGameCoordinator {
         }
         await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
       } catch (err: any) {
-        this.log(`Failed to publish turn ${proposal.turn} (dropped ${opsSnapshot.length} lineage ops): ${err.message}`);
+        this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
+        await this.writeFailedLineage(opsSnapshot).catch(() => {});
       }
 
       const resolvedMsg: proto.TurnResolvedMsg = {
@@ -728,9 +732,9 @@ export class OriginTrailGameCoordinator {
     const deaths = detectDeaths(swarm.gameState, result.newState, event);
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
-    // Force-resolve bypasses normal consensus — apply the turn directly
-    // without fabricating approvals. Only the actual force-resolver is recorded.
     const turnNumber = swarm.currentTurn;
+    const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
+    this.workspaceOps.delete(swarm.id);
 
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
@@ -775,8 +779,6 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
 
-    const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
-    this.workspaceOps.delete(swarm.id);
     try {
       const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
         this.paranetId, swarm.id, turnNumber,
@@ -803,7 +805,8 @@ export class OriginTrailGameCoordinator {
       }
       await this.writeLineageFromSnapshot(opsSnapshot, publishResult);
     } catch (err: any) {
-      this.log(`Failed to publish force-resolved turn ${turnNumber} (dropped ${opsSnapshot.length} lineage ops): ${err.message}`);
+      this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
+      await this.writeFailedLineage(opsSnapshot).catch(() => {});
     }
 
     const resolvedMsg: proto.TurnResolvedMsg = {
@@ -1023,6 +1026,7 @@ export class OriginTrailGameCoordinator {
       }
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.workspaceOps.delete(msg.swarmId);
       swarm.gameState = newState;
 
       swarm.turnHistory.push({
@@ -1115,6 +1119,7 @@ export class OriginTrailGameCoordinator {
       const proposal = swarm.pendingProposal;
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
+      this.workspaceOps.delete(msg.swarmId);
 
       const newState: GameState = JSON.parse(proposal.newStateJson);
       swarm.gameState = newState;
@@ -1221,7 +1226,7 @@ export class OriginTrailGameCoordinator {
     this.workspaceOps.get(swarmId)!.push({ workspaceOperationId: opId, rootEntities });
   }
 
-  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
+  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
     const quads = rdf.workspaceLineageQuads(paranetId, entries);
     if (quads.length > 0) {
       await this.agent.writeToWorkspace(paranetId, quads);
@@ -1235,6 +1240,7 @@ export class OriginTrailGameCoordinator {
     const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
       workspaceOperationId: op.workspaceOperationId,
       rootEntity,
+      status: publishResult?.ual ? 'published' as const : 'workspace' as const,
       publishedUal: publishResult?.ual as string | undefined,
       publishedTxHash: publishResult?.onChainResult?.txHash as string | undefined,
       publishedAt: publishResult?.ual ? now : undefined,
@@ -1245,6 +1251,17 @@ export class OriginTrailGameCoordinator {
     } catch (err: any) {
       this.log(`Lineage write failed (dropped ${snapshot.length} ops): ${err.message}`);
     }
+  }
+
+  private async writeFailedLineage(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>): Promise<void> {
+    if (snapshot.length === 0) return;
+    const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
+      workspaceOperationId: op.workspaceOperationId,
+      rootEntity,
+      status: 'failed' as const,
+    })));
+    await this.recordWorkspaceLineage(this.paranetId, entries);
+    this.log(`Recorded ${entries.length} failed lineage entries`);
   }
 
   // ── Utilities ─────────────────────────────────────────────────────

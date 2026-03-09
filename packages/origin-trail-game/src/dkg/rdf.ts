@@ -208,7 +208,7 @@ export function networkTopologyQuads(paranetId: string, writerPeerId: string, pe
   return quads;
 }
 
-export function workspaceLineageQuads(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Quad[] {
+export function workspaceLineageQuads(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Quad[] {
   const g = workspaceGraph(paranetId);
   const quads: Quad[] = [];
   for (const entry of entries) {
@@ -226,7 +226,8 @@ export function workspaceLineageQuads(paranetId: string, entries: Array<{ worksp
       quads.push(quad(s, otUri('publishedAt'), literal(entry.publishedAt), g));
     }
     quads.push(quad(s, otUri('confirmed'), literal(entry.confirmed ?? false), g));
-    quads.push(quad(s, otUri('status'), literal(entry.confirmed ? 'enshrined' : 'workspace-only'), g));
+    const status = entry.status ?? (entry.confirmed ? 'published' : 'workspace');
+    quads.push(quad(s, otUri('status'), literal(status), g));
   }
   return quads;
 }
