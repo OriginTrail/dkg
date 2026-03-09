@@ -275,6 +275,9 @@ describe('OriginTrail Game API handler', () => {
     expect(swarm!.status).toBe('traveling');
     expect(swarm!.currentTurn).toBe(1);
     expect(swarm!.gameState).toEqual(gs);
+    expect(swarm!.gameState!.status).toBe('active');
+    expect(swarm!.gameState!.sessionId).toBeDefined();
+    expect(swarm!.gameState!.party).toHaveLength(3);
   });
 
   it('GET /players returns registered players from the graph', async () => {
