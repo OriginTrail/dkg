@@ -377,6 +377,11 @@ export class PublishHandler {
     this.pendingPublishes.delete(ual);
     this.persistJournal();
     try {
+      if (await this.isPublishConfirmed(ual, paranetId)) {
+        this.log.info(ctx, `Publish already confirmed, skipping cleanup: ${ual}`);
+        return;
+      }
+
       await this.store.delete(dataQuads);
       await this.store.delete(metadataQuads);
 
@@ -529,7 +534,7 @@ export class PublishHandler {
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return false;
     const status = result.bindings[0]?.['status'] ?? '';
-    return status.includes('confirmed');
+    return status === 'confirmed' || status === '"confirmed"';
   }
 
   private rejectAck(reason: string): Uint8Array {
