@@ -478,9 +478,9 @@ describe('Entity exclusivity — no duplicate root entities', () => {
 });
 
 describe('Chain provenance in turn results (C4)', () => {
-  it('turnResolvedQuads includes provenance triples when provided', async () => {
-    const { turnResolvedQuads } = await import('../src/dkg/rdf.js');
-    const quads = turnResolvedQuads('test-paranet', 'swarm-1', 1, 'advance', '{}', ['peer-a'], {
+  it('turnProvenanceQuads uses workspace graph and distinct root entity', async () => {
+    const { turnProvenanceQuads } = await import('../src/dkg/rdf.js');
+    const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
       txHash: '0xabc123',
       blockNumber: 42,
       ual: 'did:dkg:test/ual/1',
@@ -497,9 +497,17 @@ describe('Chain provenance in turn results (C4)', () => {
     const ualQuad = quads.find(q => q.predicate.includes('/ual'));
     expect(ualQuad).toBeDefined();
     expect(ualQuad!.object).toContain('did:dkg:test/ual/1');
+
+    const graphs = new Set(quads.map(q => q.graph));
+    expect(graphs.size).toBe(1);
+    expect([...graphs][0]).toBe('did:dkg:paranet:test-paranet');
+
+    const roots = new Set(quads.map(q => q.subject));
+    expect(roots.size).toBe(1);
+    expect([...roots][0]).toContain('/provenance');
   });
 
-  it('turnResolvedQuads omits provenance triples when not provided', async () => {
+  it('turnResolvedQuads does not include provenance triples', async () => {
     const { turnResolvedQuads } = await import('../src/dkg/rdf.js');
     const quads = turnResolvedQuads('test-paranet', 'swarm-1', 1, 'advance', '{}', ['peer-a']);
 
@@ -508,9 +516,9 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeUndefined();
   });
 
-  it('turnResolvedQuads omits blockNumber triple when blockNumber is undefined', async () => {
-    const { turnResolvedQuads } = await import('../src/dkg/rdf.js');
-    const quads = turnResolvedQuads('test-paranet', 'swarm-1', 1, 'advance', '{}', ['peer-a'], {
+  it('turnProvenanceQuads omits blockNumber when undefined', async () => {
+    const { turnProvenanceQuads } = await import('../src/dkg/rdf.js');
+    const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
       txHash: '0xabc123',
       blockNumber: undefined,
       ual: 'did:dkg:test/ual/1',
@@ -570,6 +578,14 @@ describe('Chain provenance in turn results (C4)', () => {
     const blockQuad = provenanceWrite.find((q: any) => q.predicate?.includes('blockNumber'));
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('100');
+
+    const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
+    expect(wsGraphs.size).toBe(1);
+    expect([...wsGraphs][0]).toBe('did:dkg:paranet:prov-test');
+
+    const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
+    expect(wsRoots.size).toBe(1);
+    expect([...wsRoots][0]).toContain('/provenance');
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs.length).toBeGreaterThanOrEqual(1);
@@ -692,6 +708,14 @@ describe('Chain provenance in turn results (C4)', () => {
     const blockQuad = provenanceWrite.find((q: any) => q.predicate?.includes('blockNumber'));
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('200');
+
+    const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
+    expect(wsGraphs.size).toBe(1);
+    expect([...wsGraphs][0]).toBe('did:dkg:paranet:consensus-prov');
+
+    const wsRoots = new Set(provenanceWrite.map((q: any) => q.subject));
+    expect(wsRoots.size).toBe(1);
+    expect([...wsRoots][0]).toContain('/provenance');
 
     const provLogs = logs.filter(l => l.includes('provenance written'));
     expect(provLogs.length).toBeGreaterThanOrEqual(1);

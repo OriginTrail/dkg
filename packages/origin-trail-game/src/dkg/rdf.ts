@@ -116,7 +116,7 @@ export interface ChainProvenance {
   ual: string;
 }
 
-export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[], provenance?: ChainProvenance): Quad[] {
+export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[]): Quad[] {
   const g = contextGraph(paranetId, swarmId);
   const t = turnUri(swarmId, turn);
   const quads = [
@@ -129,14 +129,21 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
   for (const peerId of approvers) {
     quads.push(quad(t, otUri('approvedBy'), playerUri(peerId), g));
   }
-  if (provenance) {
-    quads.push(
-      quad(t, otUri('transactionHash'), literal(provenance.txHash), g),
-      quad(t, otUri('ual'), literal(provenance.ual), g),
-    );
-    if (typeof provenance.blockNumber === 'number') {
-      quads.push(quad(t, otUri('blockNumber'), literal(provenance.blockNumber), g));
-    }
+  return quads;
+}
+
+export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance): Quad[] {
+  const g = workspaceGraph(paranetId);
+  const s = `${turnUri(swarmId, turn)}/provenance`;
+  const quads: Quad[] = [
+    quad(s, `${RDF}type`, otUri('TurnProvenance'), g),
+    quad(s, otUri('turn'), literal(turn), g),
+    quad(s, otUri('swarm'), swarmUri(swarmId), g),
+    quad(s, otUri('transactionHash'), literal(provenance.txHash), g),
+    quad(s, otUri('ual'), literal(provenance.ual), g),
+  ];
+  if (typeof provenance.blockNumber === 'number') {
+    quads.push(quad(s, otUri('blockNumber'), literal(provenance.blockNumber), g));
   }
   return quads;
 }

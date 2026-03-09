@@ -661,10 +661,8 @@ export class OriginTrailGameCoordinator {
         const onChain = publishResult?.onChainResult;
         if (onChain?.txHash && publishResult?.ual) {
           try {
-            await this.agent.writeToWorkspace(this.paranetId, rdf.turnResolvedQuads(
+            await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
               this.paranetId, swarm.id, proposal.turn,
-              proposal.winningAction, proposal.newStateJson,
-              [...proposal.approvals],
               { txHash: onChain.txHash, blockNumber: onChain.blockNumber, ual: publishResult.ual },
             ));
             this.log(`Turn ${proposal.turn} provenance written: tx=${onChain.txHash}`);
@@ -778,9 +776,8 @@ export class OriginTrailGameCoordinator {
           ual: publishResult.ual,
         };
         try {
-          await this.agent.writeToWorkspace(this.paranetId, rdf.turnResolvedQuads(
+          await this.agent.writeToWorkspace(this.paranetId, rdf.turnProvenanceQuads(
             this.paranetId, swarm.id, turnNumber,
-            winningAction, newStateJson, [this.myPeerId],
             provenance,
           ));
           this.log(`Force-resolve: turn ${turnNumber} provenance written: tx=${onChain.txHash}`);
