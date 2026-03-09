@@ -181,14 +181,18 @@ export function consensusAttestationQuads(
   turn: number,
   attestations: ConsensusAttestation[],
   resolution: string,
+  proposalHash: string,
 ): Quad[] {
   const g = contextGraph(paranetId, swarmId);
   const t = turnUri(swarmId, turn);
+  const root = `urn:dkg:attestation:${swarmId}:${proposalHash}`;
   const quads: Quad[] = [
-    quad(t, otUri('resolution'), literal(resolution), g),
+    quad(root, `${RDF}type`, otUri('ConsensusAttestationBatch'), g),
+    quad(root, otUri('forTurnResult'), t, g),
+    quad(root, otUri('resolution'), literal(resolution), g),
   ];
   for (const att of attestations) {
-    const attUri = otUri(`swarm/${swarmId}/turn/${turn}/attestation/${att.peerId}/${att.proposalHash.slice(0, 8)}`);
+    const attUri = otUri(`swarm/${swarmId}/turn/${turn}/attestation/${att.proposalHash}/${att.peerId}`);
     quads.push(
       quad(attUri, `${RDF}type`, otUri('ConsensusAttestation'), g),
       quad(attUri, otUri('turn'), literal(turn), g),
@@ -196,7 +200,7 @@ export function consensusAttestationQuads(
       quad(attUri, otUri('proposalHash'), literal(att.proposalHash), g),
       quad(attUri, otUri('approved'), literal(att.approved), g),
       quad(attUri, otUri('attestedAt'), literal(att.timestamp), g),
-      quad(t, otUri('hasAttestation'), attUri, g),
+      quad(root, otUri('hasAttestation'), attUri, g),
     );
   }
   return quads;
