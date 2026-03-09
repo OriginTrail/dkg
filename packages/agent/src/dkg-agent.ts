@@ -240,6 +240,18 @@ export class DKGAgent {
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
     });
+
+    try {
+      const restored = await publisher.reconstructWorkspaceOwnership();
+      if (restored > 0) {
+        const log = new Logger('DKGAgent');
+        log.info(createOperationContext('init'), `Restored ${restored} workspace ownership entries from store`);
+      }
+    } catch (err) {
+      const log = new Logger('DKGAgent');
+      log.warn(createOperationContext('init'), `Failed to reconstruct workspace ownership, continuing without: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const queryEngine = new DKGQueryEngine(store);
 
     return new DKGAgent(
@@ -836,6 +848,13 @@ export class DKGAgent {
           // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
           const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
           paranetDeleted += metaDeleted;
+
+          for (const re of rootEntities) {
+            const ownerDeleted = await this.store.deleteByPattern({
+              graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
+            });
+            paranetDeleted += ownerDeleted;
+          }
 
           const ownedSet = this.workspaceOwnedEntities.get(pid);
           if (ownedSet) {

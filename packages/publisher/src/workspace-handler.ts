@@ -5,7 +5,7 @@ import { Logger, createOperationContext } from '@dkg/core';
 import { decodeWorkspacePublishRequest } from '@dkg/core';
 import { validatePublishRequest } from './validation.js';
 import { computePublicRoot, computeKARoot } from './merkle.js';
-import { generateWorkspaceMetadata } from './metadata.js';
+import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
 import { autoPartition } from './auto-partition.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
@@ -126,9 +126,24 @@ export class WorkspaceHandler {
       if (!this.workspaceOwnedEntities.has(paranetId)) {
         this.workspaceOwnedEntities.set(paranetId, new Map());
       }
+      const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
+      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
       for (const r of rootEntities) {
-        if (!wsOwned.has(r)) {
-          this.workspaceOwnedEntities.get(paranetId)!.set(r, publisherPeerId);
+        if (!liveOwned.has(r)) {
+          newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
+        }
+      }
+      if (newOwnershipEntries.length > 0) {
+        for (const entry of newOwnershipEntries) {
+          await this.store.deleteByPattern({
+            graph: workspaceMetaGraph,
+            subject: entry.rootEntity,
+            predicate: 'http://dkg.io/ontology/workspaceOwner',
+          });
+        }
+        await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
+        for (const entry of newOwnershipEntries) {
+          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
         }
       }
 

@@ -246,3 +246,17 @@ export function generateWorkspaceMetadata(
 
   return quads;
 }
+
+/**
+ * Generate ownership triples for workspace root entities.
+ * Each triple: `<rootEntity> dkg:workspaceOwner "creatorPeerId"` in workspace_meta.
+ * Used to persist the in-memory workspaceOwnedEntities map so it survives restarts.
+ */
+export function generateOwnershipQuads(
+  rootEntities: { rootEntity: string; creatorPeerId: string }[],
+  workspaceMetaGraph: string,
+): Quad[] {
+  return rootEntities.map((entry) =>
+    mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), workspaceMetaGraph),
+  );
+}

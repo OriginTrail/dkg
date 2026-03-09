@@ -9,7 +9,7 @@ export {
   computeKCRoot,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, type KCMetadata, type KAMetadata } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, type KCMetadata, type KAMetadata } from './metadata.js';
 export {
   DKGPublisher,
   type DKGPublisherConfig,
