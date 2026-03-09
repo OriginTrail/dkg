@@ -1116,13 +1116,13 @@ describe('Publish provenance chain (V2)', () => {
     await coordinator.castVote(swarm.id, 'advance');
     await coordinator.forceResolveTurn(swarm.id);
 
-    const provenanceChainPublish = publishCalls.find((quads: any[]) =>
+    const provenanceChainPublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
       quads.some((q: any) => q.object?.includes('PublishedEntity')),
     );
     expect(provenanceChainPublish).toBeDefined();
     expect(provenanceChainPublish.some((q: any) => q.predicate?.includes('publisherDID'))).toBe(true);
 
-    const chainLogs = logs.filter(l => l.includes('Provenance chain published'));
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
     expect(chainLogs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1180,12 +1180,12 @@ describe('Publish provenance chain (V2)', () => {
     }), followerPeerId);
     await new Promise(r => setTimeout(r, 100));
 
-    const provenancePublish = publishCalls.find((quads: any[]) =>
+    const provenancePublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
       quads.some((q: any) => q.object?.includes('PublishedEntity')),
     );
     expect(provenancePublish).toBeDefined();
 
-    const chainLogs = logs.filter(l => l.includes('Provenance chain published'));
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
     expect(chainLogs.length).toBeGreaterThanOrEqual(1);
 
     expect(swarm.currentTurn).toBe(2);

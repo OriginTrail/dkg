@@ -1279,8 +1279,8 @@ export class OriginTrailGameCoordinator {
       publishedAt: Date.now(),
     };
     try {
-      await this.agent.publish(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
-      this.log(`Provenance chain published for ${rootEntity}: tx=${provenance.txHash}`);
+      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
+      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
     } catch (err: any) {
       this.log(`Failed to publish provenance chain for ${rootEntity}: ${err.message}`);
     }

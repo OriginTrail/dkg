@@ -217,7 +217,7 @@ export interface PublishProvenance {
 
 export function publishProvenanceChainQuads(paranetId: string, provenance: PublishProvenance): Quad[] {
   const g = contextGraph(paranetId, 'provenance');
-  const s = provenance.rootEntity;
+  const s = `${provenance.rootEntity}/provenance`;
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('PublishedEntity'), g),
     quad(s, otUri('ual'), literal(provenance.ual), g),
