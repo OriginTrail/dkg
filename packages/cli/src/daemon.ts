@@ -988,7 +988,7 @@ export async function checkForUpdate(
     const cwd = process.cwd();
 
     // Bail out if worktree has uncommitted changes
-    const status = execSync('git status --porcelain', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
+    const status = execSync('git status --porcelain --untracked-files=no', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
     if (status) {
       log('Auto-update: skipping — worktree has uncommitted changes');
       return;
@@ -1058,6 +1058,12 @@ export async function checkForUpdate(
       });
     } catch (err: any) {
       log(`Auto-update: build failed after merge — ${err.message}`);
+      try {
+        execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
+        log('Auto-update: rolled back to previous commit after build failure');
+      } catch (resetErr: any) {
+        log(`Auto-update: rollback failed — ${resetErr.message}`);
+      }
       return;
     }
 

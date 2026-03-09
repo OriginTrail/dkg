@@ -43,7 +43,7 @@ describe('checkForUpdate', () => {
 
   it('skips update when worktree has uncommitted changes', async () => {
     mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd === 'git status --porcelain') return ' M dirty-file.ts\n';
+      if (cmd.startsWith('git status --porcelain')) return ' M dirty-file.ts\n';
       return '';
     });
 
@@ -61,7 +61,7 @@ describe('checkForUpdate', () => {
     const latestCommit = 'bbb222';
 
     mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd === 'git status --porcelain') return '';
+      if (cmd.startsWith('git status --porcelain')) return '';
       if (cmd.startsWith('git fetch')) return '';
       if (cmd.startsWith('git merge --ff-only')) throw new Error('Not possible to fast-forward');
       return '';
@@ -86,11 +86,12 @@ describe('checkForUpdate', () => {
     const latestCommit = 'ccc333';
 
     mockedExecSync.mockImplementation((cmd: string) => {
-      if (cmd === 'git status --porcelain') return '';
+      if (cmd.startsWith('git status --porcelain')) return '';
       if (cmd.startsWith('git fetch')) return '';
       if (cmd.startsWith('git merge --ff-only')) return '';
       if (cmd.startsWith('pnpm install')) return '';
       if (cmd === 'pnpm build') throw new Error('build exploded');
+      if (cmd.startsWith('git reset --hard')) return '';
       return '';
     });
     mockedReadFile.mockResolvedValueOnce(currentCommit);
@@ -103,6 +104,9 @@ describe('checkForUpdate', () => {
       expect.stringContaining('build failed after merge'),
     );
     const allCmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
-    expect(allCmds).not.toContain(expect.stringContaining('git reset --hard'));
+    expect(allCmds.some(cmd => cmd.includes(`git reset --hard ${currentCommit}`))).toBe(true);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('rolled back to previous commit'),
+    );
   });
 });
