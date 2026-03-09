@@ -435,6 +435,7 @@ export class PublishHandler {
 
     let restored = 0;
     let expired = 0;
+    let skippedInvalid = 0;
     for (const entry of entries) {
       if (this.pendingPublishes.has(entry.ual)) continue;
 
@@ -443,6 +444,19 @@ export class PublishHandler {
       if (remaining <= 0) {
         this.log.info(ctx, `Journal entry expired, skipping: ${entry.ual}`);
         expired++;
+        continue;
+      }
+
+      let merkleRoot: Uint8Array;
+      let startKAId: bigint;
+      let endKAId: bigint;
+      try {
+        merkleRoot = ethers.getBytes(entry.expectedMerkleRoot);
+        startKAId = BigInt(entry.expectedStartKAId);
+        endKAId = BigInt(entry.expectedEndKAId);
+      } catch (parseErr) {
+        this.log.warn(ctx, `Skipping malformed journal entry ${entry.ual}: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+        skippedInvalid++;
         continue;
       }
 
@@ -458,9 +472,9 @@ export class PublishHandler {
         metadataQuads: [],
         timeout,
         expectedPublisherAddress: entry.expectedPublisherAddress,
-        expectedMerkleRoot: ethers.getBytes(entry.expectedMerkleRoot),
-        expectedStartKAId: BigInt(entry.expectedStartKAId),
-        expectedEndKAId: BigInt(entry.expectedEndKAId),
+        expectedMerkleRoot: merkleRoot,
+        expectedStartKAId: startKAId,
+        expectedEndKAId: endKAId,
         expectedChainId: entry.expectedChainId,
         rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
@@ -468,7 +482,7 @@ export class PublishHandler {
       restored++;
     }
 
-    if (expired > 0) {
+    if (expired > 0 || skippedInvalid > 0) {
       this.persistJournal();
     }
 
@@ -486,6 +500,10 @@ export class PublishHandler {
 
     if (pending) {
       try {
+        if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+          this.log.info(ctx, `Restored publish already confirmed, skipping cleanup: ${ual}`);
+          return;
+        }
         const dataGraph = this.graphManager.dataGraphUri(pending.paranetId);
         const metaGraph = this.graphManager.metaGraphUri(pending.paranetId);
         for (const rootEntity of pending.rootEntities) {
@@ -501,6 +519,17 @@ export class PublishHandler {
     } else {
       this.log.info(ctx, `Restored tentative publish expired: ${ual}`);
     }
+  }
+
+  private async isPublishConfirmed(ual: string, paranetId: string): Promise<boolean> {
+    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+    const DKG_STATUS = 'http://dkg.io/ontology/status';
+    const result = await this.store.query(
+      `SELECT ?status WHERE { GRAPH <${metaGraph}> { <${ual}> <${DKG_STATUS}> ?status } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return false;
+    const status = result.bindings[0]?.['status'] ?? '';
+    return status.includes('confirmed');
   }
 
   private rejectAck(reason: string): Uint8Array {
