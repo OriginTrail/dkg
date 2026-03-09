@@ -467,6 +467,26 @@ export const fetchMessages = (opts: { peer?: string; since?: number; limit?: num
   );
 };
 
+// --- OpenClaw agents ---
+export interface OpenClawAgent {
+  peerId: string;
+  name: string;
+  description?: string;
+  framework: string;
+  connected: boolean;
+  lastSeen: number | null;
+  latencyMs: number | null;
+}
+
+export const fetchOpenClawAgents = () =>
+  get<{ agents: OpenClawAgent[] }>('/api/openclaw-agents');
+
+export const sendOpenClawChat = (peerId: string, text: string) =>
+  post<{ delivered: boolean; reply: string | null; timedOut: boolean; waitMs: number; error?: string }>(
+    '/api/chat-openclaw',
+    { peerId, text },
+  );
+
 // --- Economics / spending ---
 export interface SpendingPeriod {
   label: string;
