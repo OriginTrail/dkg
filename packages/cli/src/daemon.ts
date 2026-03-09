@@ -638,6 +638,81 @@ async function handleRequest(
     return jsonResponse(res, 200, { messages: msgs });
   }
 
+  // GET /api/openclaw-agents — discover connected OpenClaw agents
+  if (req.method === 'GET' && path === '/api/openclaw-agents') {
+    try {
+      const allAgents = await agent.findAgents({ framework: 'OpenClaw' });
+      const allConns = agent.node.libp2p.getConnections();
+      const connectedPeers = new Set(allConns.map((c: any) => c.remotePeer.toString()));
+      const healthMap = agent.getPeerHealth();
+
+      const enriched = allAgents.map((a: any) => {
+        const isConnected = connectedPeers.has(a.peerId);
+        const health = healthMap.get(a.peerId);
+        return {
+          peerId: a.peerId,
+          name: a.name,
+          description: a.description,
+          framework: a.framework,
+          connected: isConnected,
+          lastSeen: health?.lastSeen ?? null,
+          latencyMs: health?.latencyMs ?? null,
+        };
+      });
+      return jsonResponse(res, 200, { agents: enriched });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/chat-openclaw  { peerId: "...", text: "..." }
+  // Sends a message to an OpenClaw agent via P2P and waits for a response.
+  if (req.method === 'POST' && path === '/api/chat-openclaw') {
+    const body = await readBody(req);
+    const { peerId: rawPeerId, text } = JSON.parse(body);
+    if (!rawPeerId || !text) return jsonResponse(res, 400, { error: 'Missing "peerId" or "text"' });
+
+    const peerId = await resolveNameToPeerId(agent, rawPeerId);
+    if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+
+    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text }); } catch { /* never crash */ }
+
+    const sendResult = await agent.sendChat(peerId, text);
+    if (!sendResult.delivered) {
+      return jsonResponse(res, 502, {
+        error: sendResult.error ?? 'Message not delivered — agent may be offline',
+        delivered: false,
+      });
+    }
+
+    // Wait for a reply from the OpenClaw agent (poll incoming messages)
+    const waitStart = Date.now();
+    const TIMEOUT_MS = 30_000;
+    const POLL_MS = 500;
+    let reply: string | null = null;
+
+    while (Date.now() - waitStart < TIMEOUT_MS) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      try {
+        const rows = dashDb.getChatMessages({ peer: peerId, since: waitStart - 100, limit: 10 });
+        const incoming = rows.filter(
+          (r: any) => r.direction === 'in' && r.ts >= waitStart && r.peer === peerId,
+        );
+        if (incoming.length > 0) {
+          reply = incoming[incoming.length - 1].text;
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+
+    return jsonResponse(res, 200, {
+      delivered: true,
+      reply: reply ?? null,
+      timedOut: reply === null,
+      waitMs: Date.now() - waitStart,
+    });
+  }
+
   // POST /api/connect  { multiaddr: "..." }
   if (req.method === 'POST' && path === '/api/connect') {
     const body = await readBody(req);
