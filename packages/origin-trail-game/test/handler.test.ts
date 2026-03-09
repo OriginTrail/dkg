@@ -881,7 +881,7 @@ describe('Consensus attestation triples (V1)', () => {
     expect(linkQuads).toHaveLength(2);
   });
 
-  it('forceResolveTurn publishes attestation triples', async () => {
+  it('forceResolveTurn publishes turn and attestation triples in a single call', async () => {
     const leaderPeerId = 'leader-att-1';
     const logs: string[] = [];
     const publishCalls: any[] = [];
@@ -913,18 +913,95 @@ describe('Consensus attestation triples (V1)', () => {
     await coordinator.castVote(swarm.id, 'advance');
     await coordinator.forceResolveTurn(swarm.id);
 
-    // Should have published: player profile, turn result quads, and attestation quads
-    const attestationPublish = publishCalls.find((quads: any[]) =>
-      quads.some((q: any) => q.object?.includes('ConsensusAttestation')),
+    // Turn + attestation quads should be merged in a single publish call
+    const combinedPublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('ConsensusAttestation')) &&
+      quads.some((q: any) => q.object?.includes('TurnResult')),
     );
-    expect(attestationPublish).toBeDefined();
+    expect(combinedPublish).toBeDefined();
 
-    const signerQuad = attestationPublish.find((q: any) => q.predicate?.includes('/signer'));
+    const signerQuad = combinedPublish.find((q: any) => q.predicate?.includes('/signer'));
     expect(signerQuad).toBeDefined();
     expect(signerQuad.object).toContain(leaderPeerId);
 
     const attLogs = logs.filter(l => l.includes('attestation published'));
     expect(attLogs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('consensus flow publishes turn and attestation triples in a single call', async () => {
+    const leaderPeerId = 'leader-cons-1';
+    const followerPeerId = 'follower-cons-1';
+    const thirdPeerId = 'third-cons-1';
+    const logs: string[] = [];
+    const publishCalls: any[] = [];
+
+    const leaderAgent = makeMockAgent(leaderPeerId);
+    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+      publishCalls.push(quads);
+      return {};
+    };
+    leaderAgent.query = async () => ({ bindings: [] });
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'cons-test' }, (msg) => logs.push(msg));
+
+    const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm');
+
+    const handlers = leaderAgent._messageHandlers.get('dkg/paranet/cons-test/app');
+    const handle = handlers![0];
+    for (const [pid, name] of [[followerPeerId, 'Follower'], [thirdPeerId, 'Third']] as const) {
+      handle('dkg/paranet/cons-test/app', encode({
+        app: 'origin-trail-game', type: 'swarm:joined', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), playerName: name,
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 50));
+
+    await coordinator.launchExpedition(swarm.id);
+
+    // Leader votes locally
+    await coordinator.castVote(swarm.id, 'advance');
+
+    // Remote peers vote via gossip — third vote triggers proposeTurnResolution
+    for (const pid of [followerPeerId, thirdPeerId]) {
+      handle('dkg/paranet/cons-test/app', encode({
+        app: 'origin-trail-game', type: 'vote:cast', swarmId: swarm.id,
+        peerId: pid, timestamp: Date.now(), turn: 1, action: 'advance',
+      }), pid);
+    }
+    await new Promise(r => setTimeout(r, 100));
+
+    // Leader auto-approved (1/2 needed for 3 players). Simulate a follower approval.
+    const proposal = swarm.pendingProposal;
+    expect(proposal).not.toBeNull();
+
+    handle('dkg/paranet/cons-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:approve', swarmId: swarm.id,
+      peerId: followerPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash: proposal!.hash,
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Turn + attestation quads should be merged in a single publish call
+    const combinedPublish = publishCalls.find((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes('ConsensusAttestation')) &&
+      quads.some((q: any) => q.object?.includes('TurnResult')),
+    );
+    expect(combinedPublish).toBeDefined();
+
+    // Should have attestations from both leader and follower
+    const signerQuads = combinedPublish.filter((q: any) => q.predicate?.includes('/signer'));
+    expect(signerQuads.length).toBe(2);
+
+    const resolutionQuad = combinedPublish.find((q: any) => q.predicate?.includes('resolution'));
+    expect(resolutionQuad).toBeDefined();
+    expect(resolutionQuad.object).toContain('consensus');
+
+    // Turn should have advanced
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.turnHistory).toHaveLength(1);
+    expect(swarm.turnHistory[0].resolution).toBe('consensus');
   });
 });
 
