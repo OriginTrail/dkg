@@ -675,18 +675,20 @@ async function handleRequest(
     const peerId = await resolveNameToPeerId(agent, rawPeerId);
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
 
-    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text }); } catch { /* never crash */ }
-
+    const waitStart = Date.now();
     const sendResult = await agent.sendChat(peerId, text);
+    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text, delivered: sendResult.delivered }); } catch { /* never crash */ }
+
     if (!sendResult.delivered) {
-      return jsonResponse(res, 502, {
-        error: sendResult.error ?? 'Message not delivered — agent may be offline',
+      return jsonResponse(res, 200, {
         delivered: false,
+        reply: null,
+        timedOut: false,
+        error: sendResult.error ?? 'Message not delivered — agent may be offline',
       });
     }
 
     // Wait for a reply from the OpenClaw agent (poll incoming messages)
-    const waitStart = Date.now();
     const TIMEOUT_MS = 30_000;
     const POLL_MS = 500;
     let reply: string | null = null;

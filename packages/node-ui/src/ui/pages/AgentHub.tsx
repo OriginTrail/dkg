@@ -709,7 +709,7 @@ function OpenClawChatView() {
     setSending(true);
     try {
       const res = await sendOpenClawChat(selectedAgent.peerId, text);
-      if (res.reply) {
+      if (res.reply != null) {
         setMessages(prev => [...prev, { id: _ocMid++, role: 'assistant', content: res.reply!, ts: new Date().toLocaleTimeString() }]);
       } else if (res.timedOut) {
         setMessages(prev => [...prev, { id: _ocMid++, role: 'system', content: 'Agent did not respond within 30 seconds. The message was delivered — the agent may still be processing.', ts: new Date().toLocaleTimeString() }]);

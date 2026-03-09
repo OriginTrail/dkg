@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -134,5 +134,165 @@ describe('Agent Hub UI — OpenClaw tab', () => {
 
   it('OpenClawChatView handles delivery failure', () => {
     expect(agentHub).toContain('Failed to deliver');
+  });
+});
+
+
+describe('OpenClaw bridge behavioral tests', () => {
+  beforeEach(() => {
+    (globalThis as any).window = { __DKG_TOKEN__: undefined };
+    vi.resetModules();
+  });
+  afterEach(() => {
+    delete (globalThis as any).window;
+  });
+
+  it('fetchOpenClawAgents calls GET /api/openclaw-agents', async () => {
+    const mockAgents = [
+      { peerId: '12D3abc', name: 'TestClaw', framework: 'OpenClaw', connected: true, lastSeen: Date.now(), latencyMs: 42 },
+    ];
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ agents: mockAgents }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { fetchOpenClawAgents } = await import('../src/ui/api.js');
+      const result = await fetchOpenClawAgents();
+      expect(fakeFetch).toHaveBeenCalledTimes(1);
+      const calledUrl = fakeFetch.mock.calls[0][0] as string;
+      expect(calledUrl).toContain('/api/openclaw-agents');
+      expect(result.agents).toEqual(mockAgents);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('sendOpenClawChat handles delivered + reply', async () => {
+    const fakeResponse = { delivered: true, reply: 'Hello from OpenClaw!', timedOut: false, waitMs: 120 };
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => fakeResponse,
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { sendOpenClawChat } = await import('../src/ui/api.js');
+      const result = await sendOpenClawChat('12D3abc', 'hello');
+      expect(fakeFetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = fakeFetch.mock.calls[0];
+      expect(url).toContain('/api/chat-openclaw');
+      expect(opts.method).toBe('POST');
+      expect(JSON.parse(opts.body)).toEqual({ peerId: '12D3abc', text: 'hello' });
+      expect(result.delivered).toBe(true);
+      expect(result.reply).toBe('Hello from OpenClaw!');
+      expect(result.timedOut).toBe(false);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('sendOpenClawChat handles delivered + timeout (no reply)', async () => {
+    const fakeResponse = { delivered: true, reply: null, timedOut: true, waitMs: 30000 };
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => fakeResponse,
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { sendOpenClawChat } = await import('../src/ui/api.js');
+      const result = await sendOpenClawChat('12D3abc', 'hello');
+      expect(result.delivered).toBe(true);
+      expect(result.reply).toBeNull();
+      expect(result.timedOut).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('sendOpenClawChat handles not-delivered response', async () => {
+    const fakeResponse = { delivered: false, reply: null, timedOut: false, error: 'Agent offline' };
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => fakeResponse,
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { sendOpenClawChat } = await import('../src/ui/api.js');
+      const result = await sendOpenClawChat('12D3abc', 'hello');
+      expect(result.delivered).toBe(false);
+      expect(result.reply).toBeNull();
+      expect(result.timedOut).toBe(false);
+      expect(result.error).toBe('Agent offline');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('sendOpenClawChat handles empty-string reply (not treated as no reply)', async () => {
+    const fakeResponse = { delivered: true, reply: '', timedOut: false, waitMs: 50 };
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => fakeResponse,
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { sendOpenClawChat } = await import('../src/ui/api.js');
+      const result = await sendOpenClawChat('12D3abc', 'hello');
+      expect(result.delivered).toBe(true);
+      expect(result.reply).toBe('');
+      expect(result.timedOut).toBe(false);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('daemon handler captures waitStart before sendChat (timing race fix)', () => {
+    const daemonSrc = readCliFile('daemon.ts');
+    const chatOclawBlock = daemonSrc.slice(
+      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
+      daemonSrc.indexOf("// POST /api/connect"),
+    );
+    const waitStartIdx = chatOclawBlock.indexOf('const waitStart = Date.now()');
+    const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
+    expect(waitStartIdx).toBeGreaterThan(-1);
+    expect(sendChatIdx).toBeGreaterThan(-1);
+    expect(waitStartIdx).toBeLessThan(sendChatIdx);
+  });
+
+  it('daemon handler persists message with delivered flag after sendChat', () => {
+    const daemonSrc = readCliFile('daemon.ts');
+    const chatOclawBlock = daemonSrc.slice(
+      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
+      daemonSrc.indexOf("// POST /api/connect"),
+    );
+    const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
+    const insertIdx = chatOclawBlock.indexOf('insertChatMessage');
+    expect(sendChatIdx).toBeGreaterThan(-1);
+    expect(insertIdx).toBeGreaterThan(-1);
+    expect(insertIdx).toBeGreaterThan(sendChatIdx);
+    expect(chatOclawBlock.slice(insertIdx, insertIdx + 200)).toContain('delivered: sendResult.delivered');
+  });
+
+  it('daemon handler returns 200 for undelivered messages (not 502)', () => {
+    const daemonSrc = readCliFile('daemon.ts');
+    const chatOclawBlock = daemonSrc.slice(
+      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
+      daemonSrc.indexOf("// POST /api/connect"),
+    );
+    expect(chatOclawBlock).not.toContain('502');
+    expect(chatOclawBlock).toContain('delivered: false');
+    expect(chatOclawBlock).toContain("reply: null");
+    expect(chatOclawBlock).toContain("timedOut: false");
+  });
+
+  it('UI checks reply with != null (not truthy)', () => {
+    const agentHub = readUiFile('pages/AgentHub.tsx');
+    expect(agentHub).toContain('res.reply != null');
+    expect(agentHub).not.toMatch(/if\s*\(\s*res\.reply\s*\)\s*\{/);
   });
 });
