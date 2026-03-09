@@ -27,7 +27,7 @@ interface DKGAgent {
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
   writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
-  publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<{ ual?: string; onChainResult?: { txHash?: string; blockNumber?: number } } | undefined>;
+  publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<any>;
   query(sparql: string, options?: any): Promise<any>;
 }
 
@@ -617,27 +617,12 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.leaderPeerId === this.myPeerId) {
       try {
-        const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+        await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
           this.paranetId, swarm.id, proposal.turn,
           proposal.winningAction, proposal.newStateJson,
           [...proposal.approvals],
         ));
         this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
-
-        const onChain = publishResult?.onChainResult;
-        if (onChain?.txHash && publishResult?.ual) {
-          try {
-            await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
-              this.paranetId, swarm.id, proposal.turn,
-              proposal.winningAction, proposal.newStateJson,
-              [...proposal.approvals],
-              { txHash: onChain.txHash, blockNumber: onChain.blockNumber ?? 0, ual: publishResult.ual },
-            ));
-            this.log(`Turn ${proposal.turn} provenance written: tx=${onChain.txHash}`);
-          } catch (err: any) {
-            this.log(`Failed to write provenance for turn ${proposal.turn}: ${err.message}`);
-          }
-        }
       } catch (err: any) {
         this.log(`Failed to publish turn ${proposal.turn}: ${err.message}`);
       }
@@ -730,25 +715,11 @@ export class OriginTrailGameCoordinator {
     await this.broadcast(msg);
 
     try {
-      const publishResult = await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
+      await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
         this.paranetId, swarm.id, turnNumber,
         winningAction, newStateJson, [this.myPeerId],
       ));
       this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
-
-      const onChain = publishResult?.onChainResult;
-      if (onChain?.txHash && publishResult?.ual) {
-        try {
-          await this.agent.publish(this.paranetId, rdf.turnResolvedQuads(
-            this.paranetId, swarm.id, turnNumber,
-            winningAction, newStateJson, [this.myPeerId],
-            { txHash: onChain.txHash, blockNumber: onChain.blockNumber ?? 0, ual: publishResult.ual },
-          ));
-          this.log(`Force-resolve: turn ${turnNumber} provenance written: tx=${onChain.txHash}`);
-        } catch (err: any) {
-          this.log(`Failed to write force-resolve provenance for turn ${turnNumber}: ${err.message}`);
-        }
-      }
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
     }

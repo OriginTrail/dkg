@@ -364,8 +364,8 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
 }
 
 function isValidIri(value: string): boolean {
-  if (!value || value.includes('>') || value.includes(' ')) return false;
-  return /^(https?:|did:|urn:)/i.test(value);
+  if (!value) return false;
+  return !/[><\s{}|^`]/.test(value);
 }
 
 function stripLiteral(s: string): string {
