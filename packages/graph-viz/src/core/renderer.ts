@@ -35,6 +35,7 @@ export class Canvas2DRenderer implements RendererBackend {
   private _initialFitDone = false;
   private _lastTopologyKey = '';
   private _continuousSimulation = false;
+  private _fitTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   /** force-graph version compatibility guard */
   private _setAlphaTarget(value: number): void {
@@ -243,13 +244,19 @@ export class Canvas2DRenderer implements RendererBackend {
     if (!this._graph) this.init();
 
     // Reset auto-fit when graph topology changes.
-    // Additive hash is O(N+E) with no sort or string allocation.
-    let topoHash = (nodes.size << 16) ^ edges.size;
-    for (const id of nodes.keys()) {
-      topoHash = (topoHash + simpleHash(id)) | 0;
+    // Sorted node IDs + sorted edge source->target keys for strong collision resistance.
+    let topoHash = 0;
+    const sortedNodeIds = [...nodes.keys()].sort();
+    for (const id of sortedNodeIds) {
+      topoHash = ((topoHash * 31) + simpleHash(id)) | 0;
     }
+    const sortedEdgeKeys: string[] = [];
     for (const e of edges.values()) {
-      topoHash = (topoHash + simpleHash(e.source) * 31 + simpleHash(e.target)) | 0;
+      sortedEdgeKeys.push(`${e.source}\0${e.target}`);
+    }
+    sortedEdgeKeys.sort();
+    for (const ek of sortedEdgeKeys) {
+      topoHash = ((topoHash * 31) + simpleHash(ek)) | 0;
     }
     const topoKey = String(topoHash);
     if (topoKey !== this._lastTopologyKey) {
@@ -344,13 +351,15 @@ export class Canvas2DRenderer implements RendererBackend {
       links: newLinks,
     });
 
-    // Continuous sim prevents onEngineStop, so trigger initial fit via timeout
-    if (!this._initialFitDone && this._continuousSimulation) {
-      setTimeout(() => {
+    // Schedule initial fit independently of engine stop (handles continuous mode too)
+    if (!this._initialFitDone) {
+      if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
+      this._fitTimeoutId = setTimeout(() => {
         if (this._graph && !this._initialFitDone) {
           this._initialFitDone = true;
           this._graph.zoomToFit(400, 40);
         }
+        this._fitTimeoutId = null;
       }, 300);
     }
 
@@ -402,14 +411,14 @@ export class Canvas2DRenderer implements RendererBackend {
       this._repaintPending = false;
       if (!this._graph) return;
 
-      if (this._continuousSimulation) {
+      if (this._continuousSimulation || this._riskPulseEnabled) {
         try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
       } else {
         this._graph.cooldownTicks(3);
         try { this._graph.d3ReheatSimulation(); } catch { /* noop */ }
         this._setAlphaTarget(0);
         setTimeout(() => {
-          if (this._graph && !this._continuousSimulation) {
+          if (this._graph && !this._continuousSimulation && !this._riskPulseEnabled) {
             this._graph.cooldownTicks(0);
             this._setAlphaTarget(0);
           }
@@ -494,6 +503,10 @@ export class Canvas2DRenderer implements RendererBackend {
   /** Clean up */
   destroy(): void {
     this._stopAnimLoop();
+    if (this._fitTimeoutId !== null) {
+      clearTimeout(this._fitTimeoutId);
+      this._fitTimeoutId = null;
+    }
     if (this._graph) {
       this._graph._destructor();
       this._graph = null;
@@ -574,11 +587,13 @@ export class Canvas2DRenderer implements RendererBackend {
       // render() runs before applyAnimation(), so the fallback in render() may
       // not fire when _continuousSimulation wasn't set yet. Trigger here too.
       if (!this._initialFitDone) {
-        setTimeout(() => {
+        if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
+        this._fitTimeoutId = setTimeout(() => {
           if (this._graph && !this._initialFitDone) {
             this._initialFitDone = true;
             this._graph.zoomToFit(400, 40);
           }
+          this._fitTimeoutId = null;
         }, 300);
       }
     } else {
