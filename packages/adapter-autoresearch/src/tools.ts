@@ -18,7 +18,12 @@ function stripType(v: string): string {
 }
 
 function esc(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
 }
 
 function ok(text: string) {
@@ -82,8 +87,9 @@ export function registerTools(
             'Autoresearch',
             'Collaborative autonomous ML research — experiment results shared as Knowledge Assets',
           );
-        } catch {
-          // already exists — fine
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!(/already exists/i.test(msg) || /duplicate/i.test(msg))) throw e;
         }
         await client.subscribe(paranetId);
         return ok(`Paranet "${paranetId}" ready. This node is subscribed.`);
@@ -112,8 +118,8 @@ export function registerTools(
         total_tokens_m: z.number().optional().describe('Total tokens processed in millions'),
         num_params_m: z.number().optional().describe('Model parameter count in millions'),
         mfu_percent: z.number().optional().describe('Model FLOPs utilization percentage'),
-        depth: z.number().optional().describe('Number of transformer layers'),
-        num_steps: z.number().optional().describe('Number of training steps'),
+        depth: z.number().int().nonnegative().optional().describe('Number of transformer layers'),
+        num_steps: z.number().int().nonnegative().optional().describe('Number of training steps'),
         platform: z.string().optional().describe('Hardware platform (e.g. H100, A100, M4-Max)'),
         agent_did: z.string().optional().describe('DID of the agent that ran this experiment'),
         run_tag: z.string().optional().describe('Run tag (e.g. mar8, mar8-gpu0)'),
@@ -177,7 +183,7 @@ export function registerTools(
         'on the autoresearch paranet. Use this before starting a new experiment to ' +
         'learn from the collective findings.',
       inputSchema: {
-        limit: z.number().optional().default(20).describe('Max results to return (default 20)'),
+        limit: z.number().int().min(1).optional().default(20).describe('Max results to return (default 20)'),
         platform: z.string().optional().describe('Filter by platform (e.g. H100)'),
         status: z.enum(['keep', 'discard', 'crash']).optional().describe('Filter by status'),
       },
@@ -245,7 +251,7 @@ export function registerTools(
       inputSchema: {
         run_tag: z.string().optional().describe('Filter by run tag (e.g. mar8)'),
         agent_did: z.string().optional().describe('Filter by agent DID'),
-        limit: z.number().optional().default(50).describe('Max results (default 50)'),
+        limit: z.number().int().min(1).optional().default(50).describe('Max results (default 50)'),
       },
     },
     async ({ run_tag, agent_did, limit }) => {
@@ -289,7 +295,7 @@ export function registerTools(
         'Use this to avoid re-running failed experiments and to find promising leads.',
       inputSchema: {
         keyword: z.string().describe('Keyword to search in experiment descriptions (e.g. "learning rate", "GeLU", "depth")'),
-        limit: z.number().optional().default(20).describe('Max results (default 20)'),
+        limit: z.number().int().min(1).optional().default(20).describe('Max results (default 20)'),
       },
     },
     async ({ keyword, limit }) => {
