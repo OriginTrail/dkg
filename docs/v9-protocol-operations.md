@@ -33,7 +33,7 @@ sequenceDiagram
     participant Agent as DKGAgent
     participant Node as DKGNode (libp2p)
     participant Store as TripleStore
-    participant Chain as EVM Adapter
+    participant Chain as Chain
     participant Relay as Relay Node
     participant DHT as Kademlia DHT
 
@@ -86,8 +86,11 @@ Current implementation note: the code path today is a **single-node publish
 submission** with local data storage first, then a direct
 `publishKnowledgeAssets(...)` call. The publisher currently signs both the
 publisher commitment and the receiver-attestation payload with its configured
-EVM wallet before submitting on-chain. Gossip and the chain poller are then
-used to distribute and confirm the result on other nodes.
+EVM wallet before submitting on-chain. Gossip then distributes the result to
+other nodes. Receiver-side confirmation currently happens only through the
+targeted on-chain verification in `GossipPublishHandler`; `ChainEventPoller`
+confirms local pending publishes tracked by `PublishHandler`, not gossip-only
+tentative data.
 
 ```mermaid
 sequenceDiagram
@@ -131,12 +134,13 @@ sequenceDiagram
         Pub->>Store: storePrivateTriples(paranetId, rootEntity, privateQuads)
     end
 
-    Note over Pub: Phase 4 — Submit on-chain publish
-
-    Pub->>Pub: sign publisher commitment
-    Pub->>Pub: sign (merkleRoot, publicByteSize) attestation
-    Pub->>Chain: publishKnowledgeAssets({kaCount, merkleRoot, publicByteSize, tokenAmount, publisherSignature, receiverSignatures})
-    Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
+    rect rgb(232, 245, 233)
+        Note over Pub,Chain: Phase 4 — Submit on-chain publish
+        Pub->>Pub: sign publisher commitment
+        Pub->>Pub: sign (merkleRoot, publicByteSize) attestation
+        Pub->>Chain: publishKnowledgeAssets({kaCount, merkleRoot, publicByteSize, tokenAmount, publisherSignature, receiverSignatures})
+        Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
+    end
 
     alt on-chain call succeeds
         Note over Pub: Phase 5 — Store confirmed metadata
@@ -150,7 +154,7 @@ sequenceDiagram
         Pub->>Store: insert(metadataQuads → meta graph)
     end
 
-    Note over Pub: Phase 6 — Broadcast public payload
+    Note over Pub: Phase 6 — Gossip replication of publish result
 
     Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status}
     Agent->>Agent: encodePublishRequest(paranetId, nquads, ual, chainInfo?)
@@ -159,6 +163,12 @@ sequenceDiagram
 
 Important implementation details reflected in code:
 
+- There is only **one protocol publish** in this flow:
+  `publishKnowledgeAssets(...)` is the actual on-chain publish. The final
+  `GossipSub.publish(...)` call is just peer-to-peer replication of that result.
+- In the current implementation, gossip replication happens after
+  `DKGPublisher.publish()` returns, regardless of whether the result is
+  `confirmed` or `tentative`.
 - The publisher inserts **data first** and writes tentative metadata only if the
   on-chain step fails or is unavailable.
 - The on-chain publish path uses `publishKnowledgeAssets(...)`, not a separate
@@ -168,6 +178,9 @@ Important implementation details reflected in code:
   publishes.
 - Broadcasts contain **public quads only**; private triples stay in the private
   store.
+
+That means the final network step is best read as: "replicate the current local
+publish result to peers," not "perform the publish."
 
 ### 2.2 RDF Triples Produced
 
