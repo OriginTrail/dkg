@@ -256,14 +256,11 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
             revert KnowledgeCollectionLib.SignaturesSignersMismatch(r.length, vs.length, identityIds.length);
         }
 
-        if (r.length < parametersStorage.minimumRequiredSignatures()) {
-            revert KnowledgeCollectionLib.MinSignaturesRequirementNotMet(
-                parametersStorage.minimumRequiredSignatures(),
-                r.length
-            );
-        }
-
         uint256 minSigs = parametersStorage.minimumRequiredSignatures();
+
+        if (r.length < minSigs) {
+            revert KnowledgeCollectionLib.MinSignaturesRequirementNotMet(minSigs, r.length);
+        }
         uint256 uniqueCount;
         for (uint256 i; i < identityIds.length; i++) {
             bool isDuplicate = false;

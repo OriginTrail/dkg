@@ -807,8 +807,9 @@ describe('@integration KnowledgeAssets V9', () => {
   // ========================================================================
 
   it('Should revert batchMint when all receiver identities are the same', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
     const publishingNode = getDefaultPublishingNode(accounts);
-    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
     const kcCreator = getDefaultKCCreator(accounts);
 
     const { identityId: pubId } = await createProfile(Profile, publishingNode);
@@ -830,14 +831,10 @@ describe('@integration KnowledgeAssets V9', () => {
       publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
-    // TAMPER: use receiver 0's identity and signature in all three positions
-    const dupReceiverIds = [
-      receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-    ];
-    const dupReceiverRs = [receiverRs[0], receiverRs[0], receiverRs[0]];
-    const dupReceiverVSs = [receiverVSs[0], receiverVSs[0], receiverVSs[0]];
+    // TAMPER: fill all minSigs positions with receiver 0's identity and signature
+    const dupReceiverIds = Array(minSigs).fill(receiverProfiles[0].identityId);
+    const dupReceiverRs = Array(minSigs).fill(receiverRs[0]);
+    const dupReceiverVSs = Array(minSigs).fill(receiverVSs[0]);
 
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
@@ -849,8 +846,10 @@ describe('@integration KnowledgeAssets V9', () => {
   });
 
   it('Should accept batchMint when duplicates exist but enough unique identities remain', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
     const publishingNode = getDefaultPublishingNode(accounts);
-    const receivingNodes = getDefaultReceivingNodes(accounts);
+    // Need minSigs unique receivers; create exactly minSigs nodes
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
     const kcCreator = getDefaultKCCreator(accounts);
 
     const { identityId: pubId } = await createProfile(Profile, publishingNode);
@@ -872,15 +871,13 @@ describe('@integration KnowledgeAssets V9', () => {
       publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
     );
 
-    // 4 entries: receiver 0 duplicated, but 3 unique identities (0,1,2)
+    // minSigs+1 entries: receiver 0 duplicated once, all others unique → minSigs unique
     const mixedReceiverIds = [
       receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-      receiverProfiles[1].identityId,
-      receiverProfiles[2].identityId,
+      ...receiverProfiles.map((p) => p.identityId),
     ];
-    const mixedReceiverRs = [receiverRs[0], receiverRs[0], receiverRs[1], receiverRs[2]];
-    const mixedReceiverVSs = [receiverVSs[0], receiverVSs[0], receiverVSs[1], receiverVSs[2]];
+    const mixedReceiverRs = [receiverRs[0], ...receiverRs];
+    const mixedReceiverVSs = [receiverVSs[0], ...receiverVSs];
 
     const tx = await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
       pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount,
@@ -889,7 +886,6 @@ describe('@integration KnowledgeAssets V9', () => {
     );
     await tx.wait();
 
-    // Verify it succeeded
     const batchId = await KnowledgeAssetsStorage.getLatestBatchId();
     expect(batchId).to.equal(1);
   });

@@ -318,9 +318,10 @@ describe('@unit KnowledgeCollection', () => {
   });
 
   it('Should revert when all receiver identities are the same', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
     const kcCreator = getDefaultKCCreator(accounts);
     const publishingNode = getDefaultPublishingNode(accounts);
-    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
 
     const { identityId: publisherIdentityId } = await createProfile(
       Profile,
@@ -339,22 +340,10 @@ describe('@unit KnowledgeCollection', () => {
       ethers.parseEther('100'),
     );
 
-    // TAMPER: use receiver 0's identity and signature in all three positions
-    const dupReceiverIds = [
-      receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-    ];
-    const dupReceiverRs = [
-      signaturesData.receiverRs[0],
-      signaturesData.receiverRs[0],
-      signaturesData.receiverRs[0],
-    ];
-    const dupReceiverVSs = [
-      signaturesData.receiverVSs[0],
-      signaturesData.receiverVSs[0],
-      signaturesData.receiverVSs[0],
-    ];
+    // TAMPER: fill all minSigs positions with receiver 0's identity and signature
+    const dupReceiverIds = Array(minSigs).fill(receiverProfiles[0].identityId);
+    const dupReceiverRs = Array(minSigs).fill(signaturesData.receiverRs[0]);
+    const dupReceiverVSs = Array(minSigs).fill(signaturesData.receiverVSs[0]);
 
     await expect(
       KnowledgeCollection.connect(kcCreator).createKnowledgeCollection(
@@ -377,9 +366,10 @@ describe('@unit KnowledgeCollection', () => {
   });
 
   it('Should accept KC when duplicates exist but enough unique identities remain', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
     const kcCreator = getDefaultKCCreator(accounts);
     const publishingNode = getDefaultPublishingNode(accounts);
-    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
 
     const { identityId: publisherIdentityId } = await createProfile(
       Profile,
@@ -398,24 +388,18 @@ describe('@unit KnowledgeCollection', () => {
       ethers.parseEther('100'),
     );
 
-    // 4 entries: receiver 0 duplicated, but 3 unique identities (0,1,2)
+    // minSigs+1 entries: receiver 0 duplicated once, all others unique → minSigs unique
     const mixedReceiverIds = [
       receiverProfiles[0].identityId,
-      receiverProfiles[0].identityId,
-      receiverProfiles[1].identityId,
-      receiverProfiles[2].identityId,
+      ...receiverProfiles.map((p) => p.identityId),
     ];
     const mixedReceiverRs = [
       signaturesData.receiverRs[0],
-      signaturesData.receiverRs[0],
-      signaturesData.receiverRs[1],
-      signaturesData.receiverRs[2],
+      ...signaturesData.receiverRs,
     ];
     const mixedReceiverVSs = [
       signaturesData.receiverVSs[0],
-      signaturesData.receiverVSs[0],
-      signaturesData.receiverVSs[1],
-      signaturesData.receiverVSs[2],
+      ...signaturesData.receiverVSs,
     ];
 
     const tx = await KnowledgeCollection.connect(
