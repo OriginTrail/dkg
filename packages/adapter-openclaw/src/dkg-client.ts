@@ -9,6 +9,8 @@
 export interface DkgClientOptions {
   /** Base URL of the DKG daemon (default: "http://127.0.0.1:9200"). */
   baseUrl?: string;
+  /** Bearer token for daemon API auth. If omitted, tries ~/.dkg/auth.token. */
+  apiToken?: string;
   /** Request timeout in ms (default: 30 000). */
   timeoutMs?: number;
 }
@@ -16,10 +18,34 @@ export interface DkgClientOptions {
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly apiToken: string | undefined;
 
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = (opts?.baseUrl ?? 'http://127.0.0.1:9200').replace(/\/+$/, '');
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
+    this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile();
+  }
+
+  /** Try to read the default token file (~/.dkg/auth.token). */
+  private static loadTokenFromFile(): string | undefined {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('node:fs');
+      const os = require('node:os');
+      const path = require('node:path');
+      const tokenPath = path.join(os.homedir(), '.dkg', 'auth.token');
+      const raw: string = fs.readFileSync(tokenPath, 'utf-8');
+      // Token file may have comments (lines starting with #) and blank lines
+      const token = raw.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#'));
+      return token || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private authHeaders(): Record<string, string> {
+    if (!this.apiToken) return {};
+    return { Authorization: `Bearer ${this.apiToken}` };
   }
 
   // ---------------------------------------------------------------------------
@@ -39,8 +65,16 @@ export class DkgDaemonClient {
   // SPARQL query
   // ---------------------------------------------------------------------------
 
-  async query(sparql: string, opts?: { paranetId?: string }): Promise<any> {
-    return this.post('/api/query', { sparql, paranetId: opts?.paranetId });
+  async query(
+    sparql: string,
+    opts?: { paranetId?: string; graphSuffix?: string; includeWorkspace?: boolean },
+  ): Promise<any> {
+    return this.post('/api/query', {
+      sparql,
+      paranetId: opts?.paranetId,
+      graphSuffix: opts?.graphSuffix,
+      includeWorkspace: opts?.includeWorkspace,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -106,7 +140,7 @@ export class DkgDaemonClient {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json' },
+      headers: { 'Accept': 'application/json', ...this.authHeaders() },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
@@ -119,7 +153,7 @@ export class DkgDaemonClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });

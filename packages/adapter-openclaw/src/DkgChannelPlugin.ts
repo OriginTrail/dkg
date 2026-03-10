@@ -57,9 +57,34 @@ export class DkgChannelPlugin {
     this.api = api;
     const log = api.logger;
 
+    // Debug: log available API surface to understand routing options
+    const apiKeys = Object.keys(api).filter(k => typeof (api as any)[k] === 'function').sort();
+    log.info?.(`[dkg-channel] Available API methods: ${apiKeys.join(', ')}`);
+
+    // Inspect runtime.channel for message routing API
+    const runtime = (api as any).runtime;
+    if (runtime?.channel) {
+      const ch = runtime.channel;
+      const chMethods = Object.keys(ch).filter(k => typeof ch[k] === 'function').sort();
+      log.info?.(`[dkg-channel] runtime.channel methods: ${chMethods.join(', ')}`);
+      const chAllKeys = Object.keys(ch).sort();
+      log.info?.(`[dkg-channel] runtime.channel all keys: ${chAllKeys.join(', ')}`);
+
+      // Check for nested objects that might have routing
+      for (const key of chAllKeys) {
+        if (ch[key] && typeof ch[key] === 'object' && !Array.isArray(ch[key])) {
+          const nested = Object.keys(ch[key]).filter(k => typeof ch[key][k] === 'function').sort();
+          if (nested.length > 0) {
+            log.info?.(`[dkg-channel] runtime.channel.${key} methods: ${nested.join(', ')}`);
+          }
+        }
+      }
+    }
+
     // --- Strategy 1: register as a first-class channel ---
     if (typeof api.registerChannel === 'function') {
       api.registerChannel({
+        id: CHANNEL_NAME,
         name: CHANNEL_NAME,
         plugin: {
           name: CHANNEL_NAME,
@@ -76,16 +101,18 @@ export class DkgChannelPlugin {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
+        auth: 'owner',
         handler: (req: any, res: any) => this.handleGatewayRoute(req, res),
       });
       this.useGatewayRoute = true;
       log.info?.('[dkg-channel] Registered HTTP route on gateway: POST /api/dkg-channel/inbound');
     }
 
-    // --- Lifecycle hook for standalone server startup ---
-    // Only register session_start for starting the bridge server.
-    // Stop is handled by DkgNodePlugin.stop() to avoid double-stop.
-    api.registerHook('session_start', () => this.start(), { name: 'dkg-channel-start' });
+    // Start the bridge server immediately so it's ready to receive
+    // inbound messages before any session exists.
+    this.start().catch((err) => {
+      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -93,8 +120,6 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
-    // If we registered an HTTP route on the gateway, no standalone server needed
-    if (this.useGatewayRoute) return;
     if (this.server) return;
 
     this.server = createServer((req, res) => this.handleHttpRequest(req, res));

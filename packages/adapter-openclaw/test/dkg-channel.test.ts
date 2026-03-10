@@ -32,24 +32,16 @@ describe('DkgChannelPlugin', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
   });
 
-  it('should register session_start lifecycle hook', () => {
+  it('should start bridge server immediately on register', async () => {
     const api = makeApi();
     plugin.register(api);
 
-    expect(api.registerHook).toHaveBeenCalledWith(
+    // Bridge starts asynchronously during register — no session_start hook needed
+    expect(api.registerHook).not.toHaveBeenCalledWith(
       'session_start',
       expect.any(Function),
-      { name: 'dkg-channel-start' },
+      expect.objectContaining({ name: 'dkg-channel-start' }),
     );
-  });
-
-  it('should NOT register session_end hook (stop handled by DkgNodePlugin)', () => {
-    const api = makeApi();
-    plugin.register(api);
-
-    const hookCalls = (api.registerHook as any).mock.calls;
-    const endHooks = hookCalls.filter((c: any) => c[0] === 'session_end');
-    expect(endHooks).toHaveLength(0);
   });
 
   it('should call registerChannel if available', () => {

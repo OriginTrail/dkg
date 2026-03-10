@@ -24,12 +24,13 @@ export interface OpenClawPluginApi {
   // --- Extended APIs (spike — may not be available in all versions) ---
 
   /** Register a bidirectional channel plugin. */
-  registerChannel?(opts: { name: string; plugin: OpenClawChannelAdapter }): void;
+  registerChannel?(opts: { id: string; name: string; plugin: OpenClawChannelAdapter }): void;
 
   /** Register an HTTP route on the gateway. */
   registerHttpRoute?(route: {
     method: string;
     path: string;
+    auth?: string;
     handler: (req: any, res: any) => Promise<void> | void;
   }): void;
 

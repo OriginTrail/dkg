@@ -1,24 +1,22 @@
 /**
- * WriteCapture — Spike B: Hook-based + file-watcher memory write capture.
+ * WriteCapture — Spike B: File-watcher-based memory write capture.
  *
  * OpenClaw's MemorySearchManager is read-only.  Memory writes happen through
- * three paths that all bypass the memory plugin:
+ * generic file tools (write/edit) and direct filesystem writes (session-memory
+ * hook).  This version of OpenClaw does not expose after_tool_call hooks to
+ * plugins, so we rely entirely on filesystem watching.
  *
- *   Path 1: Agent tool calls (write/edit to memory files) → after_tool_call hook
- *   Path 2: Pre-compaction memory flush (wrapped write tool) → after_tool_call hook
- *   Path 3: session-memory hook direct writes → file watcher only
+ * The file watcher monitors:
+ *   - `MEMORY.md` at the workspace root
+ *   - All `.md` files inside the `memory/` directory
  *
- * This module captures writes from all three paths and syncs them to the
- * DKG agent-memory graph via the daemon HTTP API.
- *
- * Defense in depth: hooks fire immediately; file watcher is the universal
- * fallback with a configurable debounce (default 1.5s, matching OpenClaw's
- * existing pattern).
+ * Changes are debounced (default 1.5s, matching OpenClaw's own pattern) and
+ * synced to the DKG agent-memory graph via the daemon HTTP API.
  */
 
 import { readFile, stat } from 'node:fs/promises';
-import { watch, type FSWatcher } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { DkgDaemonClient } from './dkg-client.js';
 import type { DkgOpenClawConfig, OpenClawPluginApi } from './types.js';
 
@@ -35,7 +33,7 @@ const NS = {
 
 export class WriteCapture {
   private api: OpenClawPluginApi | null = null;
-  private watcher: FSWatcher | null = null;
+  private watchers: FSWatcher[] = [];
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly memoryDir: string;
   private readonly debounceMs: number;
@@ -57,67 +55,84 @@ export class WriteCapture {
   register(api: OpenClawPluginApi): void {
     this.api = api;
 
-    // --- Hook-based capture (Path 1 + 2) ---
-    api.registerHook('after_tool_call', async (...args: any[]) => {
-      // The hook args shape depends on OpenClaw version.
-      // Try both { toolName, params, result } and positional args.
-      const ctx = typeof args[0] === 'object' ? args[0] : { toolName: args[0], params: args[1], result: args[2] };
-      const { toolName, params } = ctx;
+    // Note: after_tool_call hooks are not available in this version of OpenClaw.
+    // All write capture relies on filesystem watching.
 
-      if (isWriteTool(toolName) && params?.path && isMemoryPath(params.path, this.memoryDir)) {
-        try {
-          await this.syncFile(String(params.path));
-          api.logger.debug?.(`[dkg-write-capture] Synced ${params.path} via after_tool_call`);
-        } catch (err: any) {
-          api.logger.warn?.(`[dkg-write-capture] Hook sync failed for ${params.path}: ${err.message}`);
-        }
-      }
-    }, { name: 'dkg-write-capture' });
+    // Start file watchers immediately
+    this.startWatchers();
 
-    api.logger.info?.('[dkg-write-capture] Registered after_tool_call hook for memory write capture');
+    api.logger.info?.('[dkg-write-capture] Registered — file watcher mode (no tool-call hooks available)');
   }
 
   // ---------------------------------------------------------------------------
-  // File watcher (universal fallback)
+  // File watchers
   // ---------------------------------------------------------------------------
 
+  private startWatchers(): void {
+    const log = this.api?.logger;
+
+    // Watch 1: memory/ directory (recursive)
+    if (this.memoryDir) {
+      const absMemDir = resolve(this.memoryDir);
+      if (existsSync(absMemDir)) {
+        try {
+          const w = watch(absMemDir, { recursive: true }, (eventType, filename) => {
+            if (!filename || !filename.endsWith('.md')) return;
+            this.debouncedSync(join(absMemDir, filename));
+          });
+          this.watchers.push(w);
+          log?.info?.(`[dkg-write-capture] Watching memory dir: ${absMemDir}`);
+        } catch (err: any) {
+          log?.warn?.(`[dkg-write-capture] Failed to watch memory dir: ${err.message}`);
+        }
+      } else {
+        log?.warn?.(`[dkg-write-capture] Memory dir does not exist yet: ${absMemDir}`);
+      }
+    }
+
+    // Watch 2: MEMORY.md at workspace root (parent of memory/)
+    const workspaceDir = this.memoryDir ? dirname(resolve(this.memoryDir)) : null;
+    if (workspaceDir) {
+      const memoryMd = join(workspaceDir, 'MEMORY.md');
+      if (existsSync(workspaceDir)) {
+        try {
+          const w = watch(workspaceDir, (eventType, filename) => {
+            if (filename?.toUpperCase() === 'MEMORY.MD') {
+              this.debouncedSync(memoryMd);
+            }
+          });
+          this.watchers.push(w);
+          log?.info?.(`[dkg-write-capture] Watching MEMORY.md in: ${workspaceDir}`);
+        } catch (err: any) {
+          log?.warn?.(`[dkg-write-capture] Failed to watch workspace dir: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  /** Exposed for DkgNodePlugin to call if memoryDir wasn't available at register time. */
   startFileWatcher(memoryDir?: string): void {
-    const dir = memoryDir || this.memoryDir;
-    if (!dir) {
-      this.api?.logger.warn?.('[dkg-write-capture] No memoryDir configured — file watcher not started');
-      return;
+    // If watchers already running, skip
+    if (this.watchers.length > 0) return;
+    if (memoryDir) {
+      (this as any).memoryDir = memoryDir;
     }
+    this.startWatchers();
+  }
 
-    // Resolve to absolute path
-    const absDir = resolve(dir);
+  private debouncedSync(fullPath: string): void {
+    const existing = this.debounceTimers.get(fullPath);
+    if (existing) clearTimeout(existing);
 
-    try {
-      this.watcher = watch(absDir, { recursive: true }, (eventType, filename) => {
-        if (!filename) return;
-        const fullPath = join(absDir, filename);
-
-        // Only watch .md files in the memory directory
-        if (!filename.endsWith('.md')) return;
-
-        // Debounce: wait for writes to settle before syncing
-        const existing = this.debounceTimers.get(fullPath);
-        if (existing) clearTimeout(existing);
-
-        this.debounceTimers.set(fullPath, setTimeout(async () => {
-          this.debounceTimers.delete(fullPath);
-          try {
-            await this.syncFile(fullPath);
-            this.api?.logger.debug?.(`[dkg-write-capture] Synced ${filename} via file watcher`);
-          } catch (err: any) {
-            this.api?.logger.warn?.(`[dkg-write-capture] Watcher sync failed for ${filename}: ${err.message}`);
-          }
-        }, this.debounceMs));
-      });
-
-      this.api?.logger.info?.(`[dkg-write-capture] File watcher started on ${absDir}`);
-    } catch (err: any) {
-      this.api?.logger.warn?.(`[dkg-write-capture] Failed to start file watcher: ${err.message}`);
-    }
+    this.debounceTimers.set(fullPath, setTimeout(async () => {
+      this.debounceTimers.delete(fullPath);
+      try {
+        await this.syncFile(fullPath);
+        this.api?.logger.info?.(`[dkg-write-capture] Synced ${basename(fullPath)} via file watcher`);
+      } catch (err: any) {
+        this.api?.logger.warn?.(`[dkg-write-capture] Watcher sync failed for ${basename(fullPath)}: ${err.message}`);
+      }
+    }, this.debounceMs));
   }
 
   // ---------------------------------------------------------------------------
@@ -173,10 +188,10 @@ export class WriteCapture {
   // ---------------------------------------------------------------------------
 
   stop(): void {
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = null;
+    for (const w of this.watchers) {
+      w.close();
     }
+    this.watchers = [];
     for (const timer of this.debounceTimers.values()) {
       clearTimeout(timer);
     }
@@ -187,13 +202,6 @@ export class WriteCapture {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Check if a tool name is a write/edit operation. */
-function isWriteTool(toolName: unknown): boolean {
-  if (typeof toolName !== 'string') return false;
-  const name = toolName.toLowerCase();
-  return name === 'write' || name === 'edit' || name === 'fs_write' || name === 'fs_edit';
-}
 
 /** Check if a file path targets a memory file. */
 export function isMemoryPath(filePath: unknown, memoryDir: string): boolean {
