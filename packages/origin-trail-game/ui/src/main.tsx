@@ -2,12 +2,13 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 
-let rendered = false;
 const root = createRoot(document.getElementById('root')!);
+const ac = new AbortController();
+let fallbackTimer: ReturnType<typeof setTimeout>;
 
 function renderApp() {
-  if (rendered) return;
-  rendered = true;
+  ac.abort();
+  clearTimeout(fallbackTimer);
   root.render(<App />);
 }
 
@@ -21,12 +22,10 @@ window.addEventListener('message', (e) => {
     }
     renderApp();
   }
-});
+}, { signal: ac.signal });
 
-// If token is already injected via script tag (same-origin serving), render immediately
 if ((window as any).__DKG_TOKEN__) {
   renderApp();
 } else {
-  // Fallback: render after timeout in case handshake doesn't happen (e.g. direct access)
-  setTimeout(renderApp, 2000);
+  fallbackTimer = setTimeout(renderApp, 2000);
 }

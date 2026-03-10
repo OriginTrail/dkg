@@ -60,6 +60,7 @@ export class RdfGraphViz {
   private _temporalFilter: TemporalFilter;
   private _timelineOverlay: TimelineOverlay | null = null;
   private _renderQueued = false;
+  private _autoFitDisabled = false;
 
   constructor(container: HTMLElement, config: RdfGraphVizConfig = {}) {
     this._config = config;
@@ -111,9 +112,7 @@ export class RdfGraphViz {
     }
 
     if (config.autoFitDisabled) {
-      if (this._renderer) {
-        this._renderer.autoFitDisabled = true;
-      }
+      this._autoFitDisabled = true;
       this._rendererReady.then(() => {
         if (this._renderer) this._renderer.autoFitDisabled = true;
       });
@@ -321,7 +320,14 @@ export class RdfGraphViz {
 
   /** Prevent the renderer from automatically calling zoomToFit when the simulation settles. */
   set autoFitDisabled(value: boolean) {
-    if (this._renderer) this._renderer.autoFitDisabled = value;
+    this._autoFitDisabled = value;
+    if (this._renderer) {
+      this._renderer.autoFitDisabled = value;
+    } else {
+      this._rendererReady.then(() => {
+        if (this._renderer) this._renderer.autoFitDisabled = value;
+      });
+    }
   }
 
   // --- Label Mode ---
