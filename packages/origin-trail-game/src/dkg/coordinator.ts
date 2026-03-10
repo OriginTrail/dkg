@@ -1495,28 +1495,6 @@ export class OriginTrailGameCoordinator {
     }
   }
 
-  // ── Provenance chain ─────────────────────────────────────────────
-
-  async publishProvenanceChain(rootEntity: string, publishResult: any): Promise<void> {
-    const ual = publishResult?.ual ?? (publishResult?.kcId != null ? String(publishResult.kcId) : '');
-    const txHash = publishResult?.onChainResult?.txHash ?? '';
-    if (!ual && !txHash) return;
-    const provenance: rdf.PublishProvenance = {
-      rootEntity,
-      ual,
-      txHash,
-      blockNumber: publishResult?.onChainResult?.blockNumber || undefined,
-      publisherPeerId: this.myPeerId,
-      publishedAt: Date.now(),
-    };
-    try {
-      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
-      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
-    } catch (err: any) {
-      this.log(`Failed to write provenance chain for ${rootEntity}: ${err.message}`);
-    }
-  }
-
   // ── Utilities ─────────────────────────────────────────────────────
 
   private async broadcast(msg: proto.OTMessage): Promise<void> {
@@ -1571,6 +1549,8 @@ export class OriginTrailGameCoordinator {
     const quads = rdf.networkTopologyQuads(this.paranetId, this.myPeerId, peers);
     await this.agent.writeToWorkspace(this.paranetId, quads);
     this.log(`Topology snapshot written: ${peers.length} peers`);
+  }
+
   // ── Leaderboard ───────────────────────────────────────────────────
 
   private async publishLeaderboardEntries(swarm: SwarmState): Promise<void> {

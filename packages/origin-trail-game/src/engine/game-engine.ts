@@ -255,7 +255,7 @@ export class GameEngine {
       }
       if (!newState.party.some(m => m.alive)) { newState.status = 'lost'; return newState; }
     }
-    if (newState.epochs >= 2000) { newState.status = 'won'; return newState; }
+    if (newState.epochs >= 1000) { newState.status = 'won'; return newState; }
     return newState;
   }
 

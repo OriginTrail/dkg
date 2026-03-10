@@ -302,6 +302,8 @@ export function strategyPatternQuads(
     quads.push(quad(acUri, otUri('count'), literal(count), g));
   }
   return quads;
+}
+
 export function leaderboardEntryQuads(
   paranetId: string,
   swarmId: string,
