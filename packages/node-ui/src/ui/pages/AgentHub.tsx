@@ -155,7 +155,7 @@ function markStoredMessagesEnshrined(prevMsgs: Message[]): Message[] {
   const next = prevMsgs.map((m) => {
     if (m.role !== 'assistant' || m.persistStatus !== 'stored') return m;
     changed = true;
-    return { ...m, persistStatus: 'enshrined' };
+    return { ...m, persistStatus: 'enshrined' as const };
   });
   return changed ? next : prevMsgs;
 }
@@ -448,6 +448,7 @@ function PeerChatView() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingPeers, setLoadingPeers] = useState(true);
+  const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -522,16 +523,30 @@ function PeerChatView() {
       <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
         <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
           <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Network Peers</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
             {connectedCount} connected · {peers.length} discovered
           </div>
+          <input
+            type="text"
+            value={peerSearch}
+            onChange={e => setPeerSearch(e.target.value)}
+            placeholder="Search peers…"
+            style={{
+              width: '100%', padding: '7px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 11, outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={e => { (e.target as HTMLInputElement).style.borderColor = 'var(--green)'; }}
+            onBlur={e => { (e.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loadingPeers && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading peers…</div>}
           {!loadingPeers && peers.length === 0 && (
             <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers discovered yet.</div>
           )}
-          {peers.map(p => {
+          {peers.filter(p => !peerSearch || p.name.toLowerCase().includes(peerSearch.toLowerCase()) || p.peerId.toLowerCase().includes(peerSearch.toLowerCase())).map(p => {
             const isSelected = selectedPeer?.peerId === p.peerId;
             const isOnline = p.connectionStatus === 'connected' || (p.lastSeen != null && Date.now() - p.lastSeen < ALIVE_MS);
             return (
@@ -674,6 +689,7 @@ function OpenClawChatView() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [agentSearch, setAgentSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -729,9 +745,23 @@ function OpenClawChatView() {
       <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
         <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
           <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>OpenClaw Agents</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
             {agents.filter(a => a.connected).length} connected · {agents.length} discovered
           </div>
+          <input
+            type="text"
+            value={agentSearch}
+            onChange={e => setAgentSearch(e.target.value)}
+            placeholder="Search agents…"
+            style={{
+              width: '100%', padding: '7px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 11, outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={e => { (e.target as HTMLInputElement).style.borderColor = 'var(--green)'; }}
+            onBlur={e => { (e.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loading && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Scanning network…</div>}
@@ -740,7 +770,7 @@ function OpenClawChatView() {
               No OpenClaw agents found on the network. Make sure an OpenClaw agent with the DKG adapter is running and connected.
             </div>
           )}
-          {agents.map(ag => {
+          {agents.filter(ag => !agentSearch || ag.name.toLowerCase().includes(agentSearch.toLowerCase()) || ag.peerId.toLowerCase().includes(agentSearch.toLowerCase()) || (ag.description ?? '').toLowerCase().includes(agentSearch.toLowerCase())).map(ag => {
             const isSelected = selectedAgent?.peerId === ag.peerId;
             return (
               <div
@@ -1074,9 +1104,9 @@ export function AgentHubPage() {
         const nextTotalMs = nextLlmMs + nextStoreMs;
         return {
           ...m,
-          persistStatus: (m.persistStatus === 'enshrined' && event.status === 'stored')
-            ? 'enshrined'
-            : event.status,
+          persistStatus: ((m.persistStatus === 'enshrined' && event.status === 'stored')
+            ? 'enshrined' as const
+            : event.status),
           persistError: event.error,
           persistAttempts: event.attempts,
           persistMaxAttempts: event.maxAttempts,
