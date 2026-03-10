@@ -82,6 +82,13 @@ sequenceDiagram
 
 ### 2.1 Full End-to-End Flow
 
+Current implementation note: the code path today is a **single-node publish
+submission** with local data storage first, then a direct
+`publishKnowledgeAssets(...)` call. The publisher currently signs both the
+publisher commitment and the receiver-attestation payload with its configured
+EVM wallet before submitting on-chain. Gossip and the chain poller are then
+used to distribute and confirm the result on other nodes.
+
 ```mermaid
 sequenceDiagram
     participant App as Application
@@ -96,14 +103,11 @@ sequenceDiagram
 
     Agent->>Pub: publish(options)
 
-    Note over Pub: Phase 1 — Prepare
+    Note over Pub: Phase 1 — Prepare + validate
 
+    Pub->>GM: ensureParanet(paranetId)
     Pub->>Pub: autoPartition(quads) → group by rootEntity
-    Pub->>Pub: skolemize blank nodes per rootEntity
-    Pub->>Pub: Build KAManifest [{tokenId, rootEntity, privateMerkleRoot}]
-
-    Note over Pub: Phase 2 — Validate
-
+    Pub->>Pub: Build manifest + KA metadata
     Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
     Note over Pub: Rule 1: Graph URI matches paranet
     Note over Pub: Rule 2: Subjects are rootEntities or skolemized children
@@ -111,37 +115,59 @@ sequenceDiagram
     Note over Pub: Rule 4: Entity exclusivity (no duplicates)
     Note over Pub: Rule 5: No raw blank nodes
 
-    Note over Pub: Phase 3 — Compute Merkle Roots
+    Note over Pub: Phase 2 — Compute Merkle roots
 
-    Pub->>Pub: computePublicRoot(quads) per KA
-    Pub->>Pub: computeKARoot(publicRoot, privateRoot?) per KA
-    Pub->>Pub: computeKCRoot(kaRoots[]) → kcMerkleRoot
+    opt privateQuads present
+        Pub->>Pub: computePrivateRoot(all private quads)
+        Pub->>Pub: add synthetic public anchor hash
+    end
+    Pub->>Pub: compute kcMerkleRoot
+    Note over Pub: default path = flat Merkle tree over public triple hashes<br/>entityProofs=true = per-KA roots then computeKCRoot(kaRoots)
 
-    Note over Pub: Phase 4 — Store Locally
+    Note over Pub: Phase 3 — Store locally first
 
-    Pub->>GM: ensureParanet(paranetId)
     Pub->>Store: insert(quads → data graph)
     opt Private quads provided
-        Pub->>Store: insert(privateQuads → private graph)
+        Pub->>Store: storePrivateTriples(paranetId, rootEntity, privateQuads)
     end
 
-    Note over Pub: Phase 5 — On-Chain
+    Note over Pub: Phase 4 — Submit on-chain publish
 
-    Pub->>Chain: reserveUALRange(kaCount) → {startId, endId}
-    Pub->>Chain: batchMintKnowledgeAssets({merkleRoot, startKAId, endKAId, signatures})
+    Pub->>Pub: sign publisher commitment
+    Pub->>Pub: sign (merkleRoot, publicByteSize) attestation
+    Pub->>Chain: publishKnowledgeAssets({kaCount, merkleRoot, publicByteSize, tokenAmount, publisherSignature, receiverSignatures})
     Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
 
-    Note over Pub: Phase 6 — Metadata
+    alt on-chain call succeeds
+        Note over Pub: Phase 5 — Store confirmed metadata
 
-    Pub->>Pub: generateConfirmedFullMetadata(ual, manifest, chainResult)
-    Pub->>Store: insert(metadataQuads → meta graph)
+        Pub->>Pub: generateConfirmedFullMetadata(...)
+        Pub->>Store: insert(metadataQuads → meta graph)
+        Pub->>Pub: track ownedEntities + batch→paranet binding
+    else on-chain call fails or is skipped
+        Note over Pub: Phase 5 — Store tentative metadata
+        Pub->>Pub: generateTentativeMetadata(...)
+        Pub->>Store: insert(metadataQuads → meta graph)
+    end
 
-    Note over Pub: Phase 7 — Broadcast
+    Note over Pub: Phase 6 — Broadcast public payload
 
-    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status: "confirmed"}
-    Agent->>Agent: encodePublishRequest(paranetId, nquads, ual, chainInfo)
+    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status}
+    Agent->>Agent: encodePublishRequest(paranetId, nquads, ual, chainInfo?)
     Agent->>GS: publish(paranetPublishTopic, encodedMsg)
 ```
+
+Important implementation details reflected in code:
+
+- The publisher inserts **data first** and writes tentative metadata only if the
+  on-chain step fails or is unavailable.
+- The on-chain publish path uses `publishKnowledgeAssets(...)`, not a separate
+  `reserveUALRange(...)` + `batchMintKnowledgeAssets(...)` sequence in the
+  current `DKGPublisher.publish()` implementation.
+- `ownedEntities` and `knownBatchParanets` are updated only on confirmed local
+  publishes.
+- Broadcasts contain **public quads only**; private triples stay in the private
+  store.
 
 ### 2.2 RDF Triples Produced
 
@@ -185,18 +211,18 @@ Optional private content marker:
     dkg:chainId           "base:84532" .
 
 # KA (Knowledge Asset) — one per rootEntity
-<did:dkg:base:84532/0xPubAddr/42/0>
+<did:dkg:base:84532/0xPubAddr/42/1>
     rdf:type                dkg:KnowledgeAsset ;
     dkg:rootEntity          <https://example.org/entity/1> ;
     dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "0"^^xsd:integer ;
+    dkg:tokenId             "1"^^xsd:integer ;
     dkg:publicTripleCount   "3"^^xsd:integer .
 
-<did:dkg:base:84532/0xPubAddr/42/1>
+<did:dkg:base:84532/0xPubAddr/42/2>
     rdf:type                dkg:KnowledgeAsset ;
     dkg:rootEntity          <https://example.org/entity/2> ;
     dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "1"^^xsd:integer ;
+    dkg:tokenId             "2"^^xsd:integer ;
     dkg:publicTripleCount   "5"^^xsd:integer ;
     dkg:privateTripleCount  "2"^^xsd:integer ;
     dkg:privateMerkleRoot   "0x7c211..." .
@@ -212,7 +238,7 @@ sequenceDiagram
     participant GS as GossipSub Mesh
     participant R1 as Receiver Node 1
     participant R2 as Receiver Node 2
-    participant Chain as Base Sepolia
+    participant Chain as Chain
 
     Pub->>GS: publish(paranetPublishTopic, PublishRequest)
 
@@ -221,28 +247,34 @@ sequenceDiagram
     GS-->>R1: PublishRequest
     GS-->>R2: PublishRequest
 
-    Note over R1: Phase 1 — Store tentatively
+    Note over R1: Phase 1 — Decode + structural validation
 
     R1->>R1: Decode PublishRequest
     R1->>R1: Validate: paranetId matches subscription
-    R1->>R1: Parse nquads → insert into data graph
+    R1->>R1: Parse N-Triples/N-Quads payload
+    R1->>R1: validatePublishRequest(...)
+    R1->>R1: Query local data graph for Rule 4 replay/conflict check
+
+    Note over R1: Phase 2 — Tentative insert
+
+    R1->>R1: Insert public data unless this is a replay
+    R1->>R1: Recompute Merkle root from received payload
     R1->>R1: generateTentativeMetadata(ual, manifest)
     R1->>R1: Store meta with dkg:status "tentative"
 
-    Note over R1: Phase 2 — Verify on-chain (optional)
+    Note over R1: Phase 3 — Targeted on-chain verification (optional)
 
     alt PublishRequest includes txHash + blockNumber
-        R1->>Chain: listenForEvents({fromBlock: blockNumber})
+        R1->>Chain: listenForEvents({fromBlock: blockNumber, toBlock: blockNumber, eventTypes: [KnowledgeBatchCreated]})
         Chain-->>R1: KnowledgeBatchCreated event
-        R1->>R1: Verify merkleRoot matches, publisher owns range
+        R1->>R1: Verify txHash, merkleRoot, publisherAddress, KA range
         R1->>R1: promoteGossipToConfirmed()
         R1->>R1: Swap dkg:status "tentative" → "confirmed"
-        R1->>R1: Add chain provenance (txHash, blockNumber, etc.)
     else No chain info in message
         R1->>R1: Stay tentative, register for ChainEventPoller
     end
 
-    Note over R1: Phase 3 — Tentative timeout (60 min)
+    Note over R1: Phase 4 — Tentative timeout (60 min)
 
     alt Not confirmed within 60 min
         R1->>R1: Remove tentative data + metadata
@@ -256,6 +288,17 @@ sequenceDiagram
 > - Consider making the timeout configurable and/or adding a re-request
 >   mechanism via the sync protocol.
 
+Current implementation details:
+
+- Receivers do **not** trust gossip-supplied on-chain status; they always store
+  gossip-received publishes as tentative first.
+- `GossipPublishHandler` promotes tentative metadata by swapping status quads.
+  It does **not** currently append full chain provenance during gossip-based
+  promotion.
+- Replay publishes are tolerated: if validation failures are all Rule 4
+  conflicts, the handler treats the message as a replay and skips duplicate data
+  insertion while still attempting verification.
+
 ---
 
 ## 4. Chain Event Confirmation
@@ -268,9 +311,10 @@ sequenceDiagram
     participant Store as TripleStore
 
     loop Every 12 seconds
-        Poller->>Poller: Check: hasPendingPublishes?
-        alt Has pending publishes
-            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, types: ["KnowledgeBatchCreated"]})
+        Poller->>Poller: Check pending publishes / paranet watcher
+        alt Has pending publishes or paranet watcher enabled
+            Poller->>Chain: getBlockNumber()
+            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, toBlock: upperBound, eventTypes})
 
             loop For each KnowledgeBatchCreated event
                 Chain-->>Poller: {merkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
@@ -279,17 +323,30 @@ sequenceDiagram
                 alt Match found
                     PH->>Store: Delete dkg:status "tentative"
                     PH->>Store: Insert dkg:status "confirmed"
-                    PH->>Store: Insert chain provenance triples
                     PH-->>Poller: confirmed = true
                 else No match
                     PH-->>Poller: confirmed = false
                 end
             end
 
-            Poller->>Poller: Update lastBlock
+            opt ParanetCreated observed
+                Poller->>Poller: invoke onParanetCreated callback
+            end
+
+            Poller->>Poller: Advance lastBlock to scanned upperBound
         end
     end
 ```
+
+Current implementation details:
+
+- The poller only starts work when there are pending publishes or a paranet
+  discovery callback is configured.
+- On first successful head lookup, if there are no pending publishes, it seeds
+  the cursor near the tip instead of scanning full history.
+- Publish confirmation is a **status-only promotion** in `PublishHandler`:
+  delete tentative status, insert confirmed status, clear timeout, persist the
+  pending-publish journal.
 
 ### Chain Events Emitted
 
@@ -356,15 +413,30 @@ sequenceDiagram
     dkg:rootEntity        <https://example.org/entity/2> .
 ```
 
-> **REVIEW: Workspace access control.**
+> **Implementation note: Workspace access control.**
 > The current model is creator-only upsert — only the original publisher can
-> overwrite their entities. This is enforced via `workspaceOwnedEntities` (in-memory map).
-> **Problem:** On node restart, this map is empty. Any node can then claim
-> ownership of unclaimed entities. Consider persisting ownership to workspace_meta.
+> overwrite their entities. This is enforced via `workspaceOwnedEntities`
+> (`Map<paranetId, Map<rootEntity, creatorPeerId>>`) and persisted into
+> `/_workspace_meta` with `dkg:workspaceOwner` / `prov:wasAttributedTo` triples.
+> `DKGPublisher.reconstructWorkspaceOwnership()` rebuilds the in-memory map on
+> startup from those persisted ownership records.
 
 ---
 
 ## 6. Update Operation
+
+There are two distinct concerns in an update flow:
+
+1. **Owner authorization** — only the batch publisher is allowed to change the
+   KC on-chain.
+2. **State safety** — if other nodes, apps, or reducers depend on the current
+   version, the ecosystem may still need consensus before the owner commits the
+   replacement.
+
+On mainnet, treat `updateKnowledgeAssets` as the final commit primitive, not as
+proof that the new state was socially or application-wise accepted. The chain
+confirms who may update; consensus confirms whether the dependent system should
+move to that update.
 
 ```mermaid
 sequenceDiagram
@@ -382,12 +454,13 @@ sequenceDiagram
     Pub->>Pub: Validate quads (same rules)
     Pub->>Pub: Compute new merkle root
 
-    Pub->>Store: Delete old data for affected rootEntities
-    Pub->>Store: Insert new quads into data graph
-
-    Pub->>Chain: updateKnowledgeAssets({batchId, newMerkleRoot, signatures})
+    Pub->>Chain: updateKnowledgeAssets({batchId, newMerkleRoot, newPublicByteSize})
     Chain-->>Pub: TxResult {txHash, blockNumber}
-    Chain->>Chain: Emit KnowledgeBatchUpdated
+
+    loop For each affected rootEntity
+        Pub->>Store: Delete old data in canonical graph
+        Pub->>Store: Insert replacement quads
+    end
 
     Pub->>Store: Update meta graph (new merkle root, timestamp)
     Pub-->>Agent: PublishResult {kcId, ual, status: "confirmed"}
@@ -396,6 +469,73 @@ sequenceDiagram
 
     Note over GS: Receivers verify via chain.verifyKAUpdate()<br/>then apply update in canonical order
 ```
+
+### Why updates may need consensus first
+
+Protocol authorization is not enough when the updated KC is a dependency for
+other execution paths. If a pricing graph, policy graph, workflow state, or
+shared reducer input changes underneath active consumers, a unilateral update
+can create a cascading mismatch:
+
+- one service starts using the new state,
+- another still executes against the old assumptions,
+- downstream validation disagrees,
+- retries, compensating actions, or manual intervention follow.
+
+That is why mainnet applications commonly gate updates behind a pre-update
+consensus step whenever dependents exist.
+
+```mermaid
+sequenceDiagram
+    participant Owner as KC Owner
+    participant DepA as Dependent A
+    participant DepB as Dependent B
+    participant DepC as Dependent C
+    participant Chain as Mainnet
+
+    rect rgb(251, 234, 234)
+        Note over Owner,DepC: No consensus gate
+        Owner->>Chain: commit update U2
+        Chain-->>DepA: sees U2
+        Note over DepB,DepC: still executing against U1-derived assumptions
+        DepA-->>DepB: emits data based on U2
+        DepB-->>DepC: validation mismatch / rollback / fork
+    end
+
+    rect rgb(232, 245, 233)
+        Note over Owner,DepC: Consensus gate before commit
+        Owner->>DepA: propose U2
+        Owner->>DepB: propose U2
+        Owner->>DepC: propose U2
+        DepA-->>Owner: accept
+        DepB-->>Owner: accept
+        DepC-->>Owner: accept
+        Owner->>Chain: commit update U2 after quorum
+        Chain-->>DepA: canonical U2
+        Chain-->>DepB: canonical U2
+        Chain-->>DepC: canonical U2
+    end
+```
+
+### Mainnet-safe update policy
+
+- **Use owner-only update directly** for isolated assets where no live process
+  depends on the previous version.
+- **Require consensus before update** for shared state machines, workflow
+  checkpoints, pricing/policy inputs, or any asset that other parties execute
+  against.
+- **Broadcast the on-chain update last** so gossip acts as distribution of an
+  already-agreed canonical state, not as the place where conflicts are created.
+
+Current implementation details:
+
+- `DKGPublisher.update()` computes the replacement Merkle root before touching
+  the local store.
+- It only mutates local triples after `chain.updateKnowledgeAssets(...)`
+  succeeds.
+- Receivers verify updates with `verifyKAUpdate(...)`, recompute the Merkle
+  root from the payload, and apply updates in canonical `(blockNumber, txIndex)`
+  order.
 
 > **REVIEW: Update ordering.**
 > Updates are applied in canonical `(blockNumber, txIndex)` order. This is
