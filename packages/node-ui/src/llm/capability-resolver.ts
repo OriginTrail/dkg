@@ -9,7 +9,7 @@ function isReasoningStyleModel(model: string): boolean {
 }
 
 export function resolveCapabilities(config: LlmConfig): LlmCapabilities {
-  const model = normalizeModel(config.model);
+  const model = normalizeModel(config.model || 'gpt-5-mini');
   const reasoningModel = isReasoningStyleModel(model);
   const gpt5Model = model.startsWith('gpt-5');
   const supportsTemperature = !reasoningModel && !gpt5Model;
