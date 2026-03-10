@@ -57,16 +57,16 @@ program
       console.log('DKG Node Setup\n');
     }
 
-    const name = await ask('Node name?', existing.name !== 'dkg-node' ? existing.name : undefined);
+    const name = await ask('Node name', existing.name !== 'dkg-node' ? existing.name : undefined);
     const defaultRole = existing.nodeRole ?? network?.defaultNodeRole ?? 'edge';
-    const roleAnswer = await ask('Node role? (edge / core)', defaultRole);
+    const roleAnswer = await ask('Node role (edge / core)', defaultRole);
     const nodeRole = roleAnswer === 'core' ? 'core' as const : 'edge' as const;
 
     // Pre-fill relay from network config if user hasn't set one
     const defaultRelay = existing.relay ?? network?.relays?.[0];
     const relay = nodeRole === 'edge'
-      ? await ask('Relay multiaddr?', defaultRelay)
-      : await ask('Relay multiaddr? (optional for core)', defaultRelay);
+      ? await ask('Relay multiaddr', defaultRelay)
+      : await ask('Relay multiaddr (optional for core)', defaultRelay);
 
     const defaultParanets = existing.paranets?.length
       ? existing.paranets.join(',')
@@ -74,15 +74,15 @@ program
         ? network.defaultParanets.join(',')
         : undefined;
     const paranetsStr = await ask(
-      'Paranets to subscribe? (comma-separated)',
+      'Paranets to subscribe (comma-separated)',
       defaultParanets,
     );
     const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-    const apiPort = parseInt(await ask('API port?', String(existing.apiPort)), 10);
+    const apiPort = parseInt(await ask('API port', String(existing.apiPort)), 10);
 
     const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
     const enableAutoUpdate = (await ask(
-      'Enable auto-update from GitHub? (y/n)',
+      'Enable auto-update from GitHub (y/n)',
       autoUpdateDefault ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
@@ -91,9 +91,9 @@ program
       const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
       const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
-      const repo = await ask('GitHub repo (owner/name)?', defaultRepo);
-      const branch = await ask('Branch?', defaultBranch);
-      const interval = parseInt(await ask('Check interval (minutes)?', String(defaultInterval)), 10);
+      const repo = await ask('GitHub repo (owner/name)', defaultRepo);
+      const branch = await ask('Branch', defaultBranch);
+      const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
       autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
     }
 
@@ -103,9 +103,9 @@ program
     const defaultChainId = existing.chain?.chainId ?? network?.chain?.chainId;
 
     console.log('\nBlockchain Configuration:');
-    const rpcUrl = await ask('RPC URL?', defaultRpcUrl);
-    const hubAddress = await ask('Hub contract address?', defaultHubAddress);
-    const chainIdStr = await ask('Chain ID?', defaultChainId);
+    const rpcUrl = await ask('RPC URL', defaultRpcUrl);
+    const hubAddress = await ask('Hub contract address', defaultHubAddress);
+    const chainIdStr = await ask('Chain ID', defaultChainId);
 
     const chainSection: any = rpcUrl && hubAddress ? {
       type: 'evm' as const,
@@ -118,7 +118,7 @@ program
     console.log('\nAPI Authentication:');
     const existingAuthEnabled = existing.auth?.enabled !== false;
     const enableAuth = (await ask(
-      'Enable API authentication? (y/n)',
+      'Enable API authentication (y/n)',
       existingAuthEnabled ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
