@@ -542,6 +542,24 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             );
         }
 
+        uint256 uniqueCount;
+        for (uint256 i; i < identityIds.length; i++) {
+            bool isDuplicate = false;
+            for (uint256 j; j < i; j++) {
+                if (identityIds[i] == identityIds[j]) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                uniqueCount++;
+            }
+        }
+        require(
+            uniqueCount >= parametersStorage.minimumRequiredSignatures(),
+            "Insufficient unique receiver identities"
+        );
+
         for (uint256 i; i < identityIds.length; i++) {
             _verifySignature(identityIds[i], messageHash, r[i], vs[i]);
         }

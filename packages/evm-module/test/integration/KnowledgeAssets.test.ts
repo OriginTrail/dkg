@@ -803,6 +803,98 @@ describe('@integration KnowledgeAssets V9', () => {
   });
 
   // ========================================================================
+  // Duplicate receiver identity checks
+  // ========================================================================
+
+  it('Should revert batchMint when all receiver identities are the same', async () => {
+    const publishingNode = getDefaultPublishingNode(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const kcCreator = getDefaultKCCreator(accounts);
+
+    const { identityId: pubId } = await createProfile(Profile, publishingNode);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+    await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
+
+    const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('dup-receiver-test'));
+    const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
+    );
+
+    // TAMPER: use receiver 0's identity and signature in all three positions
+    const dupReceiverIds = [
+      receiverProfiles[0].identityId,
+      receiverProfiles[0].identityId,
+      receiverProfiles[0].identityId,
+    ];
+    const dupReceiverRs = [receiverRs[0], receiverRs[0], receiverRs[0]];
+    const dupReceiverVSs = [receiverVSs[0], receiverVSs[0], receiverVSs[0]];
+
+    await expect(
+      KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
+        pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount,
+        ethers.ZeroAddress, pubR, pubVS,
+        dupReceiverIds, dupReceiverRs, dupReceiverVSs,
+      ),
+    ).to.be.revertedWith('Insufficient unique receiver identities');
+  });
+
+  it('Should accept batchMint when duplicates exist but enough unique identities remain', async () => {
+    const publishingNode = getDefaultPublishingNode(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts);
+    const kcCreator = getDefaultKCCreator(accounts);
+
+    const { identityId: pubId } = await createProfile(Profile, publishingNode);
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+
+    await AskStorage.setWeightedActiveAskSum(ethers.parseEther('1'));
+    await AskStorage.setTotalActiveStake(1);
+    const publicByteSize = 1000;
+    const epochs = 2;
+    const ask = await AskStorage.getStakeWeightedAverageAsk();
+    const tokenAmount = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
+    await Token.mint(kcCreator.address, tokenAmount * 2n);
+    const kaAddr = await KnowledgeAssets.getAddress();
+    await Token.connect(kcCreator).increaseAllowance(kaAddr, tokenAmount * 2n);
+    await KnowledgeAssets.connect(kcCreator).reserveUALRange(10);
+
+    const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('dup-but-enough-test'));
+    const { pubR, pubVS, receiverRs, receiverVSs } = await buildSignatures(
+      publishingNode, pubId, receivingNodes, merkleRoot, publicByteSize,
+    );
+
+    // 4 entries: receiver 0 duplicated, but 3 unique identities (0,1,2)
+    const mixedReceiverIds = [
+      receiverProfiles[0].identityId,
+      receiverProfiles[0].identityId,
+      receiverProfiles[1].identityId,
+      receiverProfiles[2].identityId,
+    ];
+    const mixedReceiverRs = [receiverRs[0], receiverRs[0], receiverRs[1], receiverRs[2]];
+    const mixedReceiverVSs = [receiverVSs[0], receiverVSs[0], receiverVSs[1], receiverVSs[2]];
+
+    const tx = await KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
+      pubId, merkleRoot, 1, 5, publicByteSize, epochs, tokenAmount,
+      ethers.ZeroAddress, pubR, pubVS,
+      mixedReceiverIds, mixedReceiverRs, mixedReceiverVSs,
+    );
+    await tx.wait();
+
+    // Verify it succeeded
+    const batchId = await KnowledgeAssetsStorage.getLatestBatchId();
+    expect(batchId).to.equal(1);
+  });
+
+  // ========================================================================
   // Full lifecycle: reserve → mint → update → extend → second batch
   // ========================================================================
 
