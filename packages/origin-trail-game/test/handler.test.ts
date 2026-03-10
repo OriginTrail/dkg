@@ -2216,7 +2216,8 @@ describe('V5: Strategy patterns published when game finishes', () => {
       const action = tokens >= alive * 5 ? 'advance' : 'syncMemory';
       try {
         await coordinator.castVote(swarm.id, action);
-      } catch {
+      } catch (err: any) {
+        expect(err.message).toMatch(/eliminated|cannot vote/i);
         swarm.votes.push({ peerId: leaderPeerId, action, turn: swarm.currentTurn, timestamp: Date.now() });
       }
       await new Promise(r => setTimeout(r, 5));

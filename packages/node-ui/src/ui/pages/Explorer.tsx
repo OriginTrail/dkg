@@ -229,10 +229,14 @@ function buildGraphColorsFromMembership(
 function GraphTab() {
   const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
   const paranetKey = useMemo(
-    () => JSON.stringify((paranetData?.paranets ?? []).map((p: any) => p.id).sort()),
+    () => JSON.stringify(
+      (paranetData?.paranets ?? [])
+        .map((p: any) => ({ id: p.id, uri: p.uri, name: p.name }))
+        .sort((a: any, b: any) => (a.id > b.id ? 1 : -1)),
+    ),
     [paranetData],
   );
-  // Only produce a new reference when the set of paranet IDs actually changes,
+  // Only produce a new reference when paranet metadata actually changes,
   // not on every 30-second poll cycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const paranets = useMemo(() => paranetData?.paranets ?? [], [paranetKey]);

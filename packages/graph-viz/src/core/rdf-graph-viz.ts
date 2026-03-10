@@ -113,9 +113,13 @@ export class RdfGraphViz {
 
     if (config.autoFitDisabled) {
       this._autoFitDisabled = true;
-      this._rendererReady.then(() => {
-        if (this._renderer) this._renderer.autoFitDisabled = true;
-      });
+      if (this._renderer) {
+        this._renderer.autoFitDisabled = true;
+      } else {
+        this._rendererReady.then(() => {
+          if (this._renderer) this._renderer.autoFitDisabled = true;
+        });
+      }
     }
 
     // Auto-resize on container resize
