@@ -1146,23 +1146,24 @@ export class ChatMemoryManager {
   private async parseMemoriesWithLlm(
     rawText: string,
   ): Promise<Array<{ text: string; category: string }>> {
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     if (!apiKey) return this.parseMemoriesHeuristic(rawText);
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+    const isGpt5 = model.toLowerCase().startsWith('gpt-5');
     try {
+      const body: Record<string, unknown> = {
+        model,
+        messages: [
+          { role: 'system', content: MEMORY_PARSE_PROMPT },
+          { role: 'user', content: rawText },
+        ],
+      };
+      if (!isGpt5) { body.temperature = 0; body.max_tokens = 4096; }
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: MEMORY_PARSE_PROMPT },
-            { role: 'user', content: rawText },
-          ],
-          temperature: 0,
-          max_tokens: 4096,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) return this.parseMemoriesHeuristic(rawText);
       const data = (await res.json()) as any;
@@ -1208,21 +1209,22 @@ export class ChatMemoryManager {
   ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
     const empty = { entityCount: 0, tripleCount: 0, quads: [] };
     const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
+    const isGpt5 = model.toLowerCase().startsWith('gpt-5');
 
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: MEMORY_KG_PROMPT },
+        { role: 'user', content: combined },
+      ],
+    };
+    if (!isGpt5) { body.temperature = 0.1; body.max_tokens = 2048; }
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: MEMORY_KG_PROMPT },
-          { role: 'user', content: combined },
-        ],
-        temperature: 0.1,
-        max_tokens: 2048,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) return empty;
