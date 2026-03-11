@@ -3,6 +3,7 @@ import type { AutoUpdateConfig } from '../src/config.js';
 
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
+  exec: vi.fn((_cmd: string, _opts: any, cb: Function) => cb(null, '', '')),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -39,17 +40,17 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
-import { execSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { exec } from 'node:child_process';
 import { checkForUpdate, performUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
-const mockedExecSync = vi.mocked(execSync);
 const mockedReadFile = vi.mocked(readFile);
 const mockedWriteFile = vi.mocked(writeFile);
 const mockedExistsSync = vi.mocked(existsSync);
 const mockedSwapSlot = vi.mocked(swapSlot);
+const mockedExec = vi.mocked(exec);
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -65,11 +66,19 @@ function makeFetchOk(sha: string) {
   });
 }
 
+function getExecCalls() {
+  return mockedExec.mock.calls.map(c => ({
+    cmd: String(c[0]),
+    cwd: (c[1] as any)?.cwd,
+  }));
+}
+
 describe('blue-green checkForUpdate', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
   });
 
   it('skips when blue-green slots are not initialized', async () => {
@@ -89,7 +98,7 @@ describe('blue-green checkForUpdate', () => {
     const log = vi.fn();
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
-    expect(mockedExecSync).not.toHaveBeenCalled();
+    expect(mockedExec).not.toHaveBeenCalled();
   });
 
   it('builds in inactive slot on new commit', async () => {
@@ -97,17 +106,12 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'bbb222';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockReturnValue('' as any);
 
     const log = vi.fn();
     const result = await performUpdate(AU, log);
     expect(result).toBe(true);
 
-    const allCmds = mockedExecSync.mock.calls.map(c => ({
-      cmd: String(c[0]),
-      cwd: (c[1] as any)?.cwd,
-    }));
-
+    const allCmds = getExecCalls();
     const targetDir = '/tmp/dkg-test/releases/b';
     expect(allCmds.some(c => c.cmd.includes('git fetch') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('git checkout --force') && c.cwd === targetDir)).toBe(true);
@@ -123,7 +127,6 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'ccc333';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockReturnValue('' as any);
 
     await performUpdate(AU, vi.fn());
 
@@ -139,7 +142,6 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'ddd444';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockReturnValue('' as any);
 
     const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const log = vi.fn();
@@ -153,9 +155,9 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'eee555';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd) === 'pnpm build') throw new Error('build exploded');
-      return '' as any;
+    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).includes('pnpm build')) return cb(new Error('build exploded'), '', '');
+      return cb(null, '', '');
     });
 
     const log = vi.fn();
@@ -170,14 +172,14 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'fff666';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd) === 'pnpm build') throw new Error('build exploded');
-      return '' as any;
+    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).includes('pnpm build')) return cb(new Error('build exploded'), '', '');
+      return cb(null, '', '');
     });
 
     await performUpdate(AU, vi.fn());
 
-    const allCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    const allCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     const activeDir = '/tmp/dkg-test/releases/a';
     expect(allCwds.every((cwd: string) => cwd !== activeDir)).toBe(true);
   });
@@ -187,16 +189,16 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'ggg777';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd).includes('git fetch')) throw new Error('network down');
-      return '' as any;
+    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).includes('git fetch')) return cb(new Error('network down'), '', '');
+      return cb(null, '', '');
     });
 
     const log = vi.fn();
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
 
-    const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
+    const allCmds = getExecCalls().map(c => c.cmd);
     expect(allCmds.some(c => c.includes('pnpm install'))).toBe(false);
     expect(allCmds.some(c => c.includes('pnpm build'))).toBe(false);
   });
@@ -206,23 +208,22 @@ describe('blue-green checkForUpdate', () => {
     mockActiveSlot = 'a';
     mockedReadFile.mockResolvedValueOnce('commit1' as any);
     makeFetchOk('commit2');
-    mockedExecSync.mockReturnValue('' as any);
 
     await performUpdate(AU, vi.fn());
-    const firstBuildCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    const firstBuildCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     expect(firstBuildCwds.some((cwd: string) => cwd.includes('/b'))).toBe(true);
 
     vi.resetAllMocks();
     mockedExistsSync.mockReturnValue(true);
+    (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
 
     // Second update: active=b, builds in a
     mockActiveSlot = 'b';
     mockedReadFile.mockResolvedValueOnce('commit2' as any);
     makeFetchOk('commit3');
-    mockedExecSync.mockReturnValue('' as any);
 
     await performUpdate(AU, vi.fn());
-    const secondBuildCwds = mockedExecSync.mock.calls.map(c => (c[1] as any)?.cwd).filter(Boolean);
+    const secondBuildCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     expect(secondBuildCwds.some((cwd: string) => cwd.includes('/a'))).toBe(true);
   });
 });

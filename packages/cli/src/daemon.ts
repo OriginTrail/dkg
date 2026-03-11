@@ -1,6 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
-import { execSync } from 'node:child_process';
+import { execSync, exec } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -1135,6 +1138,11 @@ export async function checkForNewCommit(
 
   const repo = normalizeRepo(au.repo);
   const branch = au.branch.trim() || 'main';
+  if (!/^[\w.\-/]+$/.test(branch)) {
+    log(`Auto-update: invalid branch name "${branch}"`);
+    return null;
+  }
+
   const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
@@ -1178,8 +1186,9 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
         }
       } catch { /* can't read lock */ }
     }
-    // Lock acquisition failed for non-EEXIST reasons (e.g., no releases dir)
-    // Proceed without lock in graceful degradation
+    // Lock acquisition failed for non-EEXIST reasons (e.g., no releases dir yet)
+    // Proceed without lock — performUpdate will bail if slots aren't initialized
+    log(`Auto-update: could not acquire lock (${err.code ?? err.message}), proceeding`);
     return true;
   }
 }
@@ -1228,9 +1237,9 @@ async function _performUpdateInner(
   const target = await inactiveSlot();
   const targetDir = join(rDir, target);
 
-  // Bail out if the release slots don't exist yet (not migrated)
-  if (!existsSync(activeDir) || !existsSync(targetDir)) {
-    log('Auto-update: skipping — blue-green slots not initialized');
+  // Bail out if the release slots don't exist or aren't git repos
+  if (!existsSync(activeDir) || !existsSync(join(targetDir, '.git'))) {
+    log('Auto-update: skipping — blue-green slots not initialized (run "dkg start" first)');
     return false;
   }
 
@@ -1241,7 +1250,8 @@ async function _performUpdateInner(
     currentCommit = (await readFile(commitFile, 'utf-8')).trim();
   } catch {
     try {
-      currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
+      const { stdout } = await execAsync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir });
+      currentCommit = stdout.trim();
       await writeFile(commitFile, currentCommit);
     } catch {
       return false;
@@ -1281,11 +1291,11 @@ async function _performUpdateInner(
   log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), building in slot ${target}...`);
 
   try {
-    execSync(`git fetch origin ${branch}`, {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
+    await execAsync(`git fetch origin ${branch}`, {
+      cwd: targetDir, encoding: 'utf-8', timeout: 120_000,
     });
-    execSync(`git checkout --force origin/${branch}`, {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 60_000,
+    await execAsync(`git checkout --force origin/${branch}`, {
+      cwd: targetDir, encoding: 'utf-8', timeout: 60_000,
     });
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout failed in slot ${target} — ${fetchErr.message}`);
@@ -1293,11 +1303,11 @@ async function _performUpdateInner(
   }
 
   try {
-    execSync('pnpm install --frozen-lockfile', {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000,
+    await execAsync('pnpm install --frozen-lockfile', {
+      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
     });
-    execSync('pnpm build', {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000,
+    await execAsync('pnpm build', {
+      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
     });
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
@@ -1312,7 +1322,14 @@ async function _performUpdateInner(
 
   // Write commit before swap so a crash between the two doesn't trigger a re-build
   await writeFile(commitFile, latestCommit);
-  await swapSlot(target);
+  try {
+    await swapSlot(target);
+  } catch (swapErr: any) {
+    // Restore old commit to allow retry on next cycle
+    await writeFile(commitFile, currentCommit);
+    log(`Auto-update: symlink swap failed — ${swapErr.message}`);
+    return false;
+  }
   log(`Auto-update: build succeeded in slot ${target}. Swapped symlink. Restarting...`);
   return true;
 }

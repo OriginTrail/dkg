@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -143,7 +143,8 @@ export function releasesDir(): string {
 /** Read the active slot from the `releases/current` symlink. Falls back to the `active` file. */
 export async function activeSlot(): Promise<'a' | 'b' | null> {
   try {
-    const target = await readlink(join(releasesDir(), 'current'));
+    const raw = await readlink(join(releasesDir(), 'current'));
+    const target = basename(raw);
     if (target === 'a' || target === 'b') return target;
   } catch { /* symlink doesn't exist */ }
   try {
