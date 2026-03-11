@@ -2128,10 +2128,13 @@ async function _performUpdateInner(
   log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
 
   try {
-    await execAsync(`git fetch origin ${ref}`, {
+    const maybeTag = parseTagName(ref);
+    const fetchRef = maybeTag
+      ? `${ref}:${ref}`
+      : ref;
+    await execAsync(`git fetch origin ${fetchRef}`, {
       cwd: targetDir, encoding: 'utf-8', timeout: 120_000,
     });
-    const maybeTag = parseTagName(ref);
     if (opts.verifyTagSignature && maybeTag) {
       await execAsync(`git verify-tag "${maybeTag}"`, {
         cwd: targetDir, encoding: 'utf-8', timeout: 30_000,
