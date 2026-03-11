@@ -2,6 +2,7 @@ import type { TripleStore, Quad } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { EventBus } from '@dkg/core';
 import { Logger, createOperationContext } from '@dkg/core';
+import type { PhaseCallback } from './publisher.js';
 import { decodeWorkspacePublishRequest } from '@dkg/core';
 import { validatePublishRequest } from './validation.js';
 import { computePublicRoot, computeKARoot } from './merkle.js';
@@ -40,9 +41,10 @@ export class WorkspaceHandler {
    * Handler for GossipSub workspace topic: (data, fromPeerId) => void.
    * Validates, stores to workspace + workspace_meta, updates workspaceOwnedEntities.
    */
-  async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
+  async handle(data: Uint8Array, fromPeerId: string, onPhase?: PhaseCallback): Promise<void> {
     const ctx = createOperationContext('workspace');
     try {
+      onPhase?.('decode', 'start');
       const request = decodeWorkspacePublishRequest(data);
       const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
@@ -56,6 +58,7 @@ export class WorkspaceHandler {
 
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
+      onPhase?.('decode', 'end');
 
       const manifestForValidation: KAManifestEntry[] = (manifest ?? []).map((m) => ({
         tokenId: 0n,
@@ -75,6 +78,7 @@ export class WorkspaceHandler {
         }
       }
 
+      onPhase?.('validate', 'start');
       const validation = validatePublishRequest(
         quads, manifestForValidation, paranetId, existing,
         { allowUpsert: true, upsertableEntities: upsertable },
@@ -93,9 +97,12 @@ export class WorkspaceHandler {
         computeKARoot(publicRoot, privateRoot);
       }
 
+      onPhase?.('validate', 'end');
+
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
+      onPhase?.('store', 'start');
       // Delete-then-insert for upserted entities.
       // Delete exact root + skolemized children only to avoid prefix collisions.
       // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
@@ -147,6 +154,7 @@ export class WorkspaceHandler {
         }
       }
 
+      onPhase?.('store', 'end');
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
     } catch (err) {
       this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);

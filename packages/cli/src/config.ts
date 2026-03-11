@@ -80,7 +80,25 @@ export interface DkgConfig {
    * on first start and stored in `<DKG_HOME>/auth.token`.
    */
   auth?: { enabled?: boolean; tokens?: string[] };
+  /** Opt-in telemetry streaming to central network dashboard. */
+  telemetry?: { enabled?: boolean };
 }
+
+/**
+ * Hardcoded per-network telemetry endpoints.
+ * Nodes resolve the correct endpoints from the network they're on.
+ * Operators only see a single toggle — no endpoint configuration.
+ */
+export const TELEMETRY_ENDPOINTS: Record<string, { syslog: { host: string; port: number }; otlp: string }> = {
+  testnet: {
+    syslog: { host: 'loggly.origin-trail.network', port: 12201 },
+    otlp: 'https://telemetry-testnet.origintrail.io/v1/metrics',
+  },
+  mainnet: {
+    syslog: { host: 'loggly.origin-trail.network', port: 0 }, // TODO: assign mainnet syslog port
+    otlp: 'https://telemetry.origintrail.io/v1/metrics',
+  },
+};
 
 const DEFAULT_CONFIG: DkgConfig = {
   name: 'dkg-node',

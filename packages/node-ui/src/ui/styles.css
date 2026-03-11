@@ -343,6 +343,12 @@ h1,h2,h3{font-family:'JetBrains Mono',monospace}
 .quick-action .qa-label{font-size:12px;font-weight:600;color:var(--green)}
 .quick-action .qa-desc{font-size:10px;color:var(--text-muted);font-weight:400}
 
+/* ── Tx link icon ── */
+.tx-link-icon{color:var(--green);display:inline-flex;transition:color .2s}
+.tx-link-icon:hover{color:#4ade80}
+.tx-link-icon svg{animation:tx-pulse 2s ease-in-out infinite}
+@keyframes tx-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+
 /* ── Empty & loading states ── */
 .empty-state{display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:13px;padding:48px 24px;text-align:center}
 .loading{display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:13px;padding:48px 24px}

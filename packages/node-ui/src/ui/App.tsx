@@ -4,7 +4,7 @@ import { DashboardPage } from './pages/Dashboard.js';
 import { ExplorerPage } from './pages/Explorer.js';
 import { AgentHubPage } from './pages/AgentHub.js';
 import { AppsPage } from './pages/Apps.js';
-import { SettingsPage } from './pages/Settings.js';
+import { SettingsPage, isDevModeEnabled } from './pages/Settings.js';
 import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
 import { fetchNotifications, markNotificationsRead, type Notification } from './api.js';
 
@@ -20,6 +20,7 @@ const NAV_ICONS: Record<string, React.ReactNode> = {
   terminal: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
   play: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
   messages: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
+  activity: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
   settings: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
 };
 
@@ -73,6 +74,44 @@ function AppsNavSection({ installedApps }: { installedApps: InstalledApp[] }) {
           </button>
         ))}
       </div>
+    </>
+  );
+}
+
+function SettingsNavSection() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [devMode, setDevMode] = useState(isDevModeEnabled);
+
+  useEffect(() => {
+    const sync = () => setDevMode(isDevModeEnabled());
+    window.addEventListener('devmode-change', sync);
+    window.addEventListener('storage', sync);
+    return () => { window.removeEventListener('devmode-change', sync); window.removeEventListener('storage', sync); };
+  }, []);
+
+  const isSettingsActive = location.pathname === '/settings' && location.search !== '?tab=observability';
+  const isObsActive = location.pathname === '/settings' && location.search === '?tab=observability';
+
+  return (
+    <>
+      <NavLink
+        to="/settings"
+        className={() => `nav-btn${isSettingsActive || isObsActive ? ' active' : ''}`}
+        onClick={(e) => { e.preventDefault(); navigate('/settings'); }}
+      >
+        {NAV_ICONS.settings}<span>Settings</span>
+      </NavLink>
+      {devMode && (
+        <button
+          className={`apps-sub-btn${isObsActive ? ' active-sub' : ''}`}
+          onClick={() => navigate('/settings?tab=observability')}
+          style={{ paddingLeft: 36 }}
+        >
+          {NAV_ICONS.activity}
+          <span style={{ marginLeft: 6 }}>Observability</span>
+        </button>
+      )}
     </>
   );
 }
@@ -267,9 +306,7 @@ export function App() {
             {NAV_ICONS.terminal}<span>Agent Hub</span>
           </NavLink>
           <AppsNavSection installedApps={installedApps} />
-          <NavLink to="/settings" className={({ isActive }) => `nav-btn${isActive ? ' active' : ''}`}>
-            {NAV_ICONS.settings}<span>Settings</span>
-          </NavLink>
+          <SettingsNavSection />
         </nav>
 
         <div className="sidebar-footer">
@@ -301,11 +338,11 @@ export function App() {
           <Route path="/agent" element={<AgentHubPage />} />
           <Route path="/messages" element={<Navigate to="/agent" replace />} />
           <Route path="/apps/*" element={<AppsPage apps={installedApps} />} />
+          <Route path="/operations/*" element={<Navigate to="/settings?tab=observability" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/app/:appId" element={<AppHostPage apps={installedApps} />} />
           {/* Backward-compatible redirects for legacy routes */}
           <Route path="/network" element={<Navigate to="/" replace />} />
-          <Route path="/operations/*" element={<Navigate to="/" replace />} />
           <Route path="/wallet" element={<Navigate to="/settings" replace />} />
           <Route path="/integrations" element={<Navigate to="/settings" replace />} />
         </Routes>

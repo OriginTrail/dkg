@@ -798,4 +798,76 @@ describe('Tentative publish UAL uniqueness', () => {
       expect(count).toBe(3);
     }
   });
+
+  it('publish invokes onPhase for every major step', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const phases: [string, 'start' | 'end'][] = [];
+    const onPhase = (phase: string, status: 'start' | 'end') => phases.push([phase, status]);
+
+    await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"PhaseTest"')],
+      onPhase,
+    });
+
+    const phaseNames = [...new Set(phases.filter(([, s]) => s === 'start').map(([p]) => p))];
+    expect(phaseNames).toContain('prepare');
+    expect(phaseNames).toContain('store');
+    expect(phaseNames).toContain('chain');
+    expect(phaseNames).toContain('prepare:ensureParanet');
+    expect(phaseNames).toContain('prepare:partition');
+    expect(phaseNames).toContain('prepare:manifest');
+    expect(phaseNames).toContain('prepare:validate');
+    expect(phaseNames).toContain('prepare:merkle');
+  });
+
+  it('update invokes onPhase for prepare → chain → store', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const pub = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Original"')],
+    });
+
+    const phases: [string, 'start' | 'end'][] = [];
+    const onPhase = (phase: string, status: 'start' | 'end') => phases.push([phase, status]);
+
+    await publisher.update(pub.kcId, {
+      paranetId: PARANET,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Updated"')],
+      onPhase,
+    });
+
+    const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
+    expect(started).toContain('prepare');
+    expect(started).toContain('chain');
+    expect(started).toContain('store');
+    expect(started).toContain('prepare:partition');
+    expect(started).toContain('prepare:manifest');
+    expect(started).toContain('prepare:merkle');
+    expect(started).toContain('chain:submit');
+
+    // update should NOT have prepare:ensureParanet or prepare:validate
+    expect(started).not.toContain('prepare:ensureParanet');
+    expect(started).not.toContain('prepare:validate');
+  });
 });

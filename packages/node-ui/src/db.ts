@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -13,9 +13,11 @@ export interface DashboardDBOptions {
 
 export class DashboardDB {
   readonly db: Database.Database;
-  private readonly retentionDays: number;
+  readonly dataDir: string;
+  private retentionDays: number;
 
   constructor(opts: DashboardDBOptions) {
+    this.dataDir = opts.dataDir;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
@@ -23,6 +25,12 @@ export class DashboardDB {
     this.db.pragma('synchronous = NORMAL');
     this.migrate();
     this.prune();
+  }
+
+  getRetentionDays(): number { return this.retentionDays; }
+  setRetentionDays(days: number): void {
+    this.retentionDays = Math.max(1, Math.min(365, days));
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('retentionDays', ?)").run(String(this.retentionDays));
   }
 
   private migrate(): void {
@@ -199,7 +207,24 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 6) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+
+    const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
+    if (savedRetention) {
+      const days = Number(savedRetention.value);
+      if (Number.isFinite(days) && days >= 1 && days <= 365) {
+        this.retentionDays = days;
+      }
+    }
   }
 
   prune(): void {
@@ -325,6 +350,7 @@ export class DashboardDB {
   getOperations(opts: {
     name?: string;
     status?: string;
+    operationId?: string;
     from?: number;
     to?: number;
     limit?: number;
@@ -335,6 +361,7 @@ export class DashboardDB {
 
     if (opts.name) { wheres.push('operation_name = ?'); params.push(opts.name); }
     if (opts.status) { wheres.push('status = ?'); params.push(opts.status); }
+    if (opts.operationId) { wheres.push('operation_id = ?'); params.push(opts.operationId); }
     if (opts.from) { wheres.push('started_at >= ?'); params.push(opts.from); }
     if (opts.to) { wheres.push('started_at <= ?'); params.push(opts.to); }
 
@@ -348,6 +375,99 @@ export class DashboardDB {
     ).all(...params, limit, offset) as OperationRow[];
 
     return { operations, total };
+  }
+
+  getOperationsWithPhases(opts: {
+    name?: string;
+    status?: string;
+    operationId?: string;
+    from?: number;
+    to?: number;
+    limit?: number;
+    offset?: number;
+  } = {}): { operations: (OperationRow & { phases: OperationPhaseRow[] })[]; total: number } {
+    const { operations, total } = this.getOperations(opts);
+    if (operations.length === 0) return { operations: [], total };
+
+    const ids = operations.map(o => o.operation_id);
+    const placeholders = ids.map(() => '?').join(',');
+    const allPhases = this.db.prepare(
+      `SELECT * FROM operation_phases WHERE operation_id IN (${placeholders}) ORDER BY started_at`,
+    ).all(...ids) as OperationPhaseRow[];
+
+    const phaseMap = new Map<string, OperationPhaseRow[]>();
+    for (const p of allPhases) {
+      const arr = phaseMap.get(p.operation_id) ?? [];
+      arr.push(p);
+      phaseMap.set(p.operation_id, arr);
+    }
+
+    return {
+      operations: operations.map(o => ({ ...o, phases: phaseMap.get(o.operation_id) ?? [] })),
+      total,
+    };
+  }
+
+  getErrorHotspots(periodMs = 7 * 86_400_000): { phase: string; error_count: number; last_error: string | null; last_occurred: number | null }[] {
+    const cutoff = Date.now() - periodMs;
+    return this.db.prepare(`
+      SELECT
+        phase,
+        COUNT(*) as error_count,
+        (SELECT p2.details FROM operation_phases p2
+         WHERE p2.phase = operation_phases.phase
+           AND p2.status = 'error' AND p2.started_at >= ?
+         ORDER BY p2.started_at DESC LIMIT 1) as last_error,
+        MAX(started_at) as last_occurred
+      FROM operation_phases
+      WHERE status = 'error' AND started_at >= ?
+      GROUP BY phase
+      ORDER BY error_count DESC
+    `).all(cutoff, cutoff) as any[];
+  }
+
+  getFailedOperations(opts: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}): {
+    operations: Array<OperationRow & { phase: string; phase_error: string | null; phase_started_at: number; logs: LogRow[] }>;
+  } {
+    const cutoff = Date.now() - (opts.periodMs ?? 7 * 86_400_000);
+    const limit = opts.limit ?? 50;
+
+    let where = 'p.status = ? AND p.started_at >= ?';
+    const params: any[] = ['error', cutoff];
+
+    if (opts.phase) {
+      where += ' AND p.phase = ?';
+      params.push(opts.phase);
+    }
+    if (opts.q) {
+      where += ' AND (p.details LIKE ? OR o.operation_id LIKE ? OR o.error_message LIKE ?)';
+      const like = `%${opts.q}%`;
+      params.push(like, like, like);
+    }
+    params.push(limit);
+
+    const rows = this.db.prepare(`
+      SELECT
+        o.*,
+        p.phase AS phase,
+        p.details AS phase_error,
+        p.started_at AS phase_started_at
+      FROM operation_phases p
+      JOIN operations o ON o.operation_id = p.operation_id
+      WHERE ${where}
+      ORDER BY p.started_at DESC
+      LIMIT ?
+    `).all(...params) as Array<OperationRow & { phase: string; phase_error: string | null; phase_started_at: number }>;
+
+    const operations = rows.map(row => {
+      const logs = this.db.prepare(
+        'SELECT * FROM logs WHERE operation_id = ? ORDER BY ts DESC LIMIT 20',
+      ).all(row.operation_id) as LogRow[];
+      logs.reverse();
+      return { ...row, logs };
+    });
+
+    return { operations };
   }
 
   getOperation(operationId: string): { operation: OperationRow | null; logs: LogRow[]; phases: OperationPhaseRow[] } {
@@ -379,6 +499,22 @@ export class DashboardDB {
     this.stmt('completePhase', `
       UPDATE operation_phases SET status = 'success', duration_ms = @duration_ms
       WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
+    `).run(op);
+  }
+
+  failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
+    this.stmt('failPhase', `
+      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+        details = @error_message
+      WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
+    `).run(op);
+  }
+
+  failAllPhases(op: { operation_id: string; duration_ms: number; error_message: string }): void {
+    this.stmt('failAllPhases', `
+      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+        details = @error_message
+      WHERE operation_id = @operation_id AND status = 'in_progress'
     `).run(op);
   }
 
@@ -478,6 +614,72 @@ export class DashboardDB {
         totalGasCostEth: r.totalGasCostEth ?? 0,
       })),
     };
+  }
+
+  // --- Per-type time series ---
+
+  getPerTypeTimeSeries(opts: { periodMs: number; bucketMs: number }): {
+    buckets: number[];
+    types: string[];
+    series: Record<string, { count: number; avgMs: number; successRate: number; gasCostEth: number }[]>;
+  } {
+    const cutoff = Date.now() - opts.periodMs;
+    const rows = this.db.prepare(`
+      SELECT
+        (CAST(started_at / ? AS INTEGER) * ?) as bucket,
+        operation_name as type,
+        COUNT(*) as count,
+        AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgMs,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successCount,
+        SUM(gas_cost_eth) as gasCostEth
+      FROM operations WHERE started_at >= ?
+      GROUP BY bucket, operation_name ORDER BY bucket
+    `).all(opts.bucketMs, opts.bucketMs, cutoff) as any[];
+
+    const bucketSet = new Set<number>();
+    const typeSet = new Set<string>();
+    for (const r of rows) { bucketSet.add(r.bucket); typeSet.add(r.type); }
+
+    const buckets = [...bucketSet].sort((a, b) => a - b);
+    const types = [...typeSet].sort();
+
+    const byBucketType = new Map<string, any>();
+    for (const r of rows) byBucketType.set(`${r.bucket}:${r.type}`, r);
+
+    const series: Record<string, { count: number; avgMs: number; successRate: number; gasCostEth: number }[]> = {};
+    for (const t of types) {
+      series[t] = buckets.map(b => {
+        const r = byBucketType.get(`${b}:${t}`);
+        return {
+          count: r?.count ?? 0,
+          avgMs: r?.avgMs ?? 0,
+          successRate: r ? (r.count > 0 ? r.successCount / r.count : 0) : 0,
+          gasCostEth: r?.gasCostEth ?? 0,
+        };
+      });
+    }
+
+    return { buckets, types, series };
+  }
+
+  // --- Success rates by operation type ---
+
+  getSuccessRatesByType(periodMs: number): { type: string; total: number; success: number; error: number; rate: number; avgMs: number }[] {
+    const cutoff = Date.now() - periodMs;
+    return (this.db.prepare(`
+      SELECT
+        operation_name as type,
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success,
+        SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error,
+        AVG(CASE WHEN status = 'success' THEN duration_ms END) as avgMs
+      FROM operations WHERE started_at >= ?
+      GROUP BY operation_name ORDER BY total DESC
+    `).all(cutoff) as any[]).map(r => ({
+      ...r,
+      rate: r.total > 0 ? r.success / r.total : 0,
+      avgMs: r.avgMs ?? 0,
+    }));
   }
 
   // --- Spending summary ---

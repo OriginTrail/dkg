@@ -71,6 +71,12 @@ export interface LlmSettingsResponse {
 export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
 export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseURL?: string; clear?: boolean }) =>
   put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
+export const fetchRetentionSettings = () => get<{ retentionDays: number }>('/api/settings/retention');
+export const updateRetentionSettings = (retentionDays: number) =>
+  put<{ ok: boolean; retentionDays: number }>('/api/settings/retention', { retentionDays });
+export const fetchTelemetrySettings = () => get<{ enabled: boolean }>('/api/settings/telemetry');
+export const updateTelemetrySettings = (enabled: boolean) =>
+  put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
 
@@ -84,22 +90,59 @@ export const fetchOperations = (params: Record<string, string> = {}) => {
   const qs = new URLSearchParams(params).toString();
   return get<{ operations: any[]; total: number }>(`/api/operations${qs ? '?' + qs : ''}`);
 };
+export const fetchOperationsWithPhases = (params: Record<string, string> = {}) => {
+  const qs = new URLSearchParams({ ...params, phases: '1' }).toString();
+  return get<{ operations: any[]; total: number }>(`/api/operations?${qs}`);
+};
 export const fetchOperation = (id: string) =>
   get<{ operation: any; logs: any[]; phases: any[] }>(`/api/operations/${id}`);
+export const fetchErrorHotspots = (periodMs?: number) => {
+  const qs = periodMs ? `?periodMs=${periodMs}` : '';
+  return get<{ hotspots: Array<{ phase: string; error_count: number; last_error: string | null; last_occurred: number | null }> }>(`/api/error-hotspots${qs}`);
+};
+export const fetchFailedOperations = (params: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.phase) qs.set('phase', params.phase);
+  if (params.periodMs) qs.set('periodMs', String(params.periodMs));
+  if (params.q) qs.set('q', params.q);
+  if (params.limit) qs.set('limit', String(params.limit));
+  const q = qs.toString();
+  return get<{ operations: any[] }>(`/api/failed-operations${q ? '?' + q : ''}`);
+};
 
 // --- Operation stats ---
-export const fetchOperationStats = (params: { name?: string; period?: string } = {}) => {
+export const fetchOperationStats = (params: { name?: string; periodMs?: number } = {}) => {
   const qs = new URLSearchParams();
   if (params.name) qs.set('name', params.name);
-  if (params.period) qs.set('period', params.period);
+  if (params.periodMs) qs.set('periodMs', String(params.periodMs));
   const q = qs.toString();
   return get<{ summary: any; timeSeries: any[] }>(`/api/operation-stats${q ? '?' + q : ''}`);
+};
+
+export const fetchSuccessRates = (periodMs: number) =>
+  get<{ rates: Array<{ type: string; total: number; success: number; error: number; rate: number; avgMs: number }> }>(`/api/success-rates?periodMs=${periodMs}`);
+
+export const fetchPerTypeStats = (periodMs: number, bucketMs?: number) => {
+  const qs = `periodMs=${periodMs}${bucketMs ? `&bucketMs=${bucketMs}` : ''}`;
+  return get<{
+    buckets: number[];
+    types: string[];
+    series: Record<string, Array<{ count: number; avgMs: number; successRate: number; gasCostEth: number }>>;
+  }>(`/api/per-type-stats?${qs}`);
 };
 
 // --- Logs ---
 export const fetchLogs = (params: Record<string, string> = {}) => {
   const qs = new URLSearchParams(params).toString();
   return get<{ logs: any[]; total: number }>(`/api/logs${qs ? '?' + qs : ''}`);
+};
+
+export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.lines) qs.set('lines', String(params.lines));
+  if (params.q) qs.set('q', params.q);
+  const q = qs.toString();
+  return get<{ lines: string[]; totalSize: number }>(`/api/node-log${q ? '?' + q : ''}`);
 };
 
 // --- Paranets ---

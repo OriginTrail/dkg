@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { useFetch, formatDuration } from '../hooks.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
 
@@ -649,6 +649,134 @@ const FALLBACK_PARANETS = [
   { name: 'Supply Chain EU',  assets: 797,  agents: 4,  color: 'var(--amber)' },
 ];
 
+// ── Recent Operations Mini Waterfall ─────────────────────────────────────────
+
+const PHASE_COLORS: Record<string, string> = {
+  prepare: '#3b82f6', store: '#8b5cf6', chain: '#f59e0b', broadcast: '#22c55e',
+  parse: '#3b82f6', execute: '#8b5cf6', transfer: '#3b82f6', verify: '#22c55e',
+};
+
+function RecentOpsSection() {
+  const { data } = useFetch(() => fetchOperationsWithPhases({ limit: '8' }), [], 10_000);
+  const navigate = useNavigate();
+  const operations = data?.operations ?? [];
+
+  if (operations.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>Recent Operations</span>
+        <button
+          className="dkg-btn dkg-btn-secondary"
+          style={{ fontSize: 10, padding: '4px 10px' }}
+          onClick={() => navigate('/settings?tab=observability')}
+        >
+          View All
+        </button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {operations.map((op: any) => {
+          const dur = op.duration_ms ?? 0;
+          const isError = op.status === 'error';
+          const phases = op.phases ?? [];
+
+          return (
+            <div
+              key={op.operation_id}
+              onClick={() => navigate('/settings?tab=observability')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+                borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)',
+                cursor: 'pointer', transition: 'border-color .15s',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.borderColor = 'rgba(74,222,128,.3)')}
+              onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+            >
+              <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', width: 50, flexShrink: 0 }}>
+                {new Date(op.started_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+              </span>
+              <span style={{
+                fontSize: 10, fontWeight: 700, width: 60, flexShrink: 0,
+                color: isError ? '#ef4444' : '#22c55e',
+              }}>
+                {op.operation_name}
+              </span>
+              {/* Mini Gantt */}
+              <div style={{ flex: 1, display: 'flex', height: 8, borderRadius: 2, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+                {dur > 0 && phases.length > 0 ? phases.map((p: any, i: number) => {
+                  const pct = Math.max(((p.duration_ms ?? 0) / dur) * 100, 3);
+                  const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? '#6b7280';
+                  return <div key={i} style={{ width: `${pct}%`, background: color, minWidth: 2 }} />;
+                }) : (
+                  <div style={{ width: '100%', background: isError ? '#ef4444' : '#22c55e' }} />
+                )}
+              </div>
+              <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)', width: 50, textAlign: 'right', flexShrink: 0 }}>
+                {formatDuration(dur)}
+              </span>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: isError ? '#ef4444' : op.status === 'in_progress' ? '#f59e0b' : '#22c55e', flexShrink: 0 }} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ErrorHotspotsCard() {
+  const { data } = useFetch(() => fetchErrorHotspots(7 * 86_400_000), [], 30_000);
+  const hotspots = (data?.hotspots ?? []).slice(0, 5);
+
+  if (hotspots.length === 0) {
+    return (
+      <div className="paranet-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
+        <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>No errors in 7 days</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="paranet-card" style={{ padding: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red, #ef4444)', marginBottom: 6 }}>Error Hotspots (7d)</div>
+      {hotspots.map((h: any) => (
+        <div key={h.phase} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, padding: '3px 0', color: 'var(--text-muted)' }}>
+          <span style={{ color: PHASE_COLORS[h.phase] ?? 'var(--text)', fontWeight: 500 }}>{h.phase}</span>
+          <span style={{ color: '#ef4444', fontWeight: 700 }}>{h.error_count}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SpendingCard() {
+  const { data } = useFetch(fetchEconomics, [], 60_000);
+  const periods = (data as any)?.periods ?? [];
+  const latest = periods[0];
+
+  if (!latest) return null;
+
+  return (
+    <div className="paranet-card" style={{ padding: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 6 }}>Spending ({latest.label})</div>
+      <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalGasEth?.toFixed(6) ?? '0'}</div>
+          <div>ETH gas</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalTrac?.toFixed(2) ?? '0'}</div>
+          <div>TRAC</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.publishCount ?? 0}</div>
+          <div>publishes</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
@@ -751,6 +879,15 @@ export function DashboardPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Recent operations waterfall */}
+      <RecentOpsSection />
+
+      {/* Health + Spending cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <ErrorHotspotsCard />
+        <SpendingCard />
       </div>
 
       {/* Quick actions */}

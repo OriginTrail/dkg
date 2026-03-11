@@ -13,9 +13,12 @@ import {
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
 
+export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
+
 export interface GossipPublishHandlerCallbacks {
   paranetExists: (id: string) => Promise<boolean>;
   subscribeToParanet: (id: string, options?: { trackSyncScope?: boolean }) => void;
+  onPhase?: GossipPhaseCallback;
 }
 
 export class GossipPublishHandler {
@@ -37,16 +40,23 @@ export class GossipPublishHandler {
     this.callbacks = callbacks;
   }
 
-  async handlePublishMessage(data: Uint8Array, paranetId: string): Promise<void> {
+  async handlePublishMessage(data: Uint8Array, paranetId: string, onPhase?: GossipPhaseCallback): Promise<void> {
     const ctx = createOperationContext('gossip');
+    const phase = onPhase ?? this.callbacks.onPhase;
     try {
-      const request = decodePublishRequest(data);
+      phase?.('decode', 'start');
+      let request;
+      try {
+        request = decodePublishRequest(data);
 
-      if (!request.paranetId) {
-        request.paranetId = paranetId;
-      } else if (request.paranetId !== paranetId) {
-        this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
-        return;
+        if (!request.paranetId) {
+          request.paranetId = paranetId;
+        } else if (request.paranetId !== paranetId) {
+          this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
+          return;
+        }
+      } finally {
+        phase?.('decode', 'end');
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
@@ -115,6 +125,7 @@ export class GossipPublishHandler {
       // Structural validation (I-002): reject malformed gossip before inserting.
       // Only applies to real publishes with a manifest — ontology/paranet
       // broadcasts (no UAL or no KAs) bypass validation.
+      phase?.('validate', 'start');
       let isReplay = false;
       if (request.ual && request.kas?.length > 0) {
         const manifest = request.kas.map(ka => ({
@@ -146,6 +157,9 @@ export class GossipPublishHandler {
         }
       }
 
+      phase?.('validate', 'end');
+
+      phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
       }
@@ -188,6 +202,7 @@ export class GossipPublishHandler {
         // never trust self-reported on-chain status from gossip messages.
         const metaQuads = generateTentativeMetadata(kcMeta, kaMetadata);
         await this.store.insert(metaQuads);
+        phase?.('store', 'end');
 
         // If the gossip message includes on-chain proof (txHash + blockNumber),
         // attempt targeted verification and promote to confirmed if valid.
@@ -197,6 +212,7 @@ export class GossipPublishHandler {
         const endKAId = protoToBigInt(request.endKAId ?? 0);
 
         if (txHash && blockNumber > 0 && startKAId > 0n && request.publisherAddress) {
+          phase?.('chain-verify', 'start');
           const verified = await this.verifyGossipOnChain(
             txHash, blockNumber, merkleRoot, request.publisherAddress,
             startKAId, endKAId,
@@ -208,9 +224,12 @@ export class GossipPublishHandler {
           } else {
             this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (on-chain verification failed or pending)`);
           }
+          phase?.('chain-verify', 'end');
         } else {
           this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (no on-chain proof in message)`);
         }
+      } else {
+        phase?.('store', 'end');
       }
     } catch (err) {
       this.log.warn(ctx, `Gossip: failed to process publish broadcast: ${err instanceof Error ? err.message : String(err)}`);

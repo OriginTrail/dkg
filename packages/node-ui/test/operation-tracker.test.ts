@@ -151,4 +151,129 @@ describe('OperationTracker', () => {
     nullTracker.setCost(c, { gasUsed: 100n });
     nullTracker.setTxHash(c, '0xabc');
   });
+
+  // --- Nested phase cleanup on fail() ---------------------------------
+
+  it('fail() cleans up ALL active phases, not just one', async () => {
+    const c = ctx('publish', 'op-nested-fail');
+    tracker.start(c, { paranetId: 'testing' });
+
+    // Start nested phases: prepare > prepare:merkle (both active)
+    tracker.startPhase(c, 'prepare');
+    tracker.startPhase(c, 'prepare:merkle');
+    await new Promise(r => setTimeout(r, 5));
+
+    // Fail the whole operation — both phase keys must be cleaned up
+    tracker.fail(c, new Error('chain reverted'));
+
+    const { operation, phases } = db.getOperation('op-nested-fail');
+    expect(operation!.status).toBe('error');
+    expect(operation!.error_message).toBe('chain reverted');
+
+    // Both phases should have been failed (not left dangling)
+    const failedPhases = phases.filter(p => p.status === 'error');
+    expect(failedPhases.length).toBe(2);
+    expect(failedPhases.map(p => p.phase).sort()).toEqual(['prepare', 'prepare:merkle']);
+  });
+
+  it('fail() with no active phases still fails the operation', () => {
+    const c = ctx('sync', 'op-no-phases');
+    tracker.start(c);
+    tracker.fail(c, new Error('timeout'));
+
+    const { operation, phases } = db.getOperation('op-no-phases');
+    expect(operation!.status).toBe('error');
+    expect(phases.filter(p => p.status === 'error')).toHaveLength(0);
+  });
+
+  it('fail() does not affect phases from other operations', async () => {
+    const c1 = ctx('publish', 'op-A');
+    const c2 = ctx('sync', 'op-B');
+
+    tracker.start(c1);
+    tracker.start(c2);
+    tracker.startPhase(c1, 'prepare');
+    tracker.startPhase(c2, 'fetch');
+    await new Promise(r => setTimeout(r, 5));
+
+    // Fail op-A — op-B's phase should be untouched
+    tracker.fail(c1, new Error('boom'));
+
+    // op-B should still be in progress
+    const { operation: opB } = db.getOperation('op-B');
+    expect(opB!.status).toBe('in_progress');
+
+    // Complete op-B normally
+    tracker.completePhase(c2, 'fetch');
+    tracker.complete(c2);
+    const { operation: opB2, phases: phasesB } = db.getOperation('op-B');
+    expect(opB2!.status).toBe('success');
+    expect(phasesB[0].phase).toBe('fetch');
+    expect(phasesB[0].status).toBe('success');
+  });
+
+  // --- phaseCallback() helper ------------------------------------------
+
+  it('phaseCallback() produces a working start/end callback', async () => {
+    const c = ctx('publish', 'op-cb');
+    tracker.start(c);
+
+    const cb = tracker.phaseCallback(c);
+
+    cb('prepare', 'start');
+    await new Promise(r => setTimeout(r, 5));
+    cb('prepare', 'end');
+
+    cb('store', 'start');
+    await new Promise(r => setTimeout(r, 5));
+    cb('store', 'end');
+
+    tracker.complete(c);
+
+    const { phases } = db.getOperation('op-cb');
+    expect(phases).toHaveLength(2);
+    expect(phases[0].phase).toBe('prepare');
+    expect(phases[0].status).toBe('success');
+    expect(phases[0].duration_ms).toBeGreaterThanOrEqual(0);
+    expect(phases[1].phase).toBe('store');
+    expect(phases[1].status).toBe('success');
+  });
+
+  // --- trackPhase() async helper ---------------------------------------
+
+  it('trackPhase() completes phase on success', async () => {
+    const c = ctx('publish', 'op-track');
+    tracker.start(c);
+
+    const result = await tracker.trackPhase(c, 'prepare', async () => {
+      await new Promise(r => setTimeout(r, 5));
+      return 42;
+    });
+
+    expect(result).toBe(42);
+    tracker.complete(c);
+
+    const { phases } = db.getOperation('op-track');
+    expect(phases).toHaveLength(1);
+    expect(phases[0].phase).toBe('prepare');
+    expect(phases[0].status).toBe('success');
+  });
+
+  it('trackPhase() fails phase and re-throws on error', async () => {
+    const c = ctx('publish', 'op-track-err');
+    tracker.start(c);
+
+    await expect(
+      tracker.trackPhase(c, 'chain', async () => {
+        throw new Error('tx reverted');
+      }),
+    ).rejects.toThrow('tx reverted');
+
+    tracker.fail(c, new Error('tx reverted'));
+
+    const { phases } = db.getOperation('op-track-err');
+    const chainPhase = phases.find(p => p.phase === 'chain');
+    expect(chainPhase).toBeDefined();
+    expect(chainPhase!.status).toBe('error');
+  });
 });
