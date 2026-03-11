@@ -31,6 +31,16 @@ describe('SPARQL utility behavior', () => {
     expect(stripped).not.toContain('# remove this');
   });
 
+  it('keeps # inside relative IRI refs like <#me>', () => {
+    const query = `SELECT ?s WHERE {
+  <#me> <http://schema.org/name> "alice" .
+  # comment
+}`;
+    const stripped = stripSparqlComments(query);
+    expect(stripped).toContain('<#me>');
+    expect(stripped).not.toContain('# comment');
+  });
+
   it('derives triples using pattern constants and variable bindings', () => {
     const query = `SELECT ?o WHERE {
   <did:dkg:network:v9-testnet> <http://www.w3.org/2000/01/rdf-schema#label> ?o

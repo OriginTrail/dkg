@@ -31,7 +31,7 @@ export function stripSparqlComments(sparql: string): string {
         const prev = i > 0 ? sparql[i - 1] : ' ';
         const next = sparql[i + 1] ?? '';
         const tokenBoundaryBefore = /\s|[({[;,=]/.test(prev);
-        const tokenStartAfter = /[A-Za-z]/.test(next);
+        const tokenStartAfter = next !== '' && !/\s/.test(next) && next !== '=' && next !== '>';
         const hasClosingAngle = sparql.indexOf('>', i + 1) !== -1;
         const looksLikeIriStart = tokenBoundaryBefore && tokenStartAfter && hasClosingAngle;
         if (!looksLikeIriStart) {

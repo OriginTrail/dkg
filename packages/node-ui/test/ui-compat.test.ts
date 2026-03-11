@@ -236,14 +236,15 @@ describe('explorer graph query safety', () => {
 describe('SPARQL helper cards', () => {
   const explorer = readFile('pages/Explorer.tsx');
 
-  it('defines exactly 4 query helper cards', () => {
+  it('includes required helper cards', () => {
     const helperBlockMatch = explorer.match(
       /const QUERY_HELPERS:\s*Array<\{[^}]+\}>\s*=\s*\[([\s\S]*?)\n\];/,
     );
     expect(helperBlockMatch).not.toBeNull();
     const helperBlock = helperBlockMatch?.[1] ?? '';
-    const titleMatches = helperBlock.match(/title:\s*['"]/g) ?? [];
-    expect(titleMatches.length).toBe(4);
+    expect(helperBlock).toContain("title: 'All triples + provenance'");
+    expect(helperBlock).toContain("title: 'Agent Registry Snapshot'");
+    expect(helperBlock).toContain("title: 'Ontology Paranet Concepts'");
   });
 
   it('includes agents template as direct SPO query on agents paranet graph', () => {
@@ -311,6 +312,14 @@ describe('SPARQL helper cards', () => {
   it('falls back to generic row rendering for non-triple query results', () => {
     expect(explorer).toContain('function ResultBindingsFallback');
     expect(explorer).toContain('if (!triples.length) return <ResultBindingsFallback result={result} />;');
+    expect(explorer).toContain('<ResultJsonLd triples={derivedTriples} rawResult={result} />');
+    expect(explorer).toContain('<ResultNQuads triples={derivedTriples} rawResult={result} />');
+  });
+
+  it('parses serialized RDF literals for JSON-LD output', () => {
+    expect(explorer).toContain('function parseSerializedRdfLiteral');
+    expect(explorer).toContain("literalNode['@language']");
+    expect(explorer).toContain("literalNode['@type']");
   });
 });
 

@@ -842,21 +842,43 @@ ${values}
             const metaRes = await executeQuery(metaQuery);
             const metaRows = Array.isArray(metaRes?.result?.bindings) ? metaRes.result.bindings : [];
             graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
+            const candidateByGraph = new Map<string, {
+              source: Set<string>;
+              ual: Set<string>;
+              txHash: Set<string>;
+              timestamp: Set<string>;
+            }>();
             for (const r of metaRows) {
               const g = String(r.g ?? '');
               if (!g) continue;
-              const existing = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
-              const candidate =
+              const bucket = candidateByGraph.get(g) ?? {
+                source: new Set<string>(),
+                ual: new Set<string>(),
+                txHash: new Set<string>(),
+                timestamp: new Set<string>(),
+              };
+              const sourceCandidate =
                 normalizeNodeSource(String(r.publisherPeerId ?? '')) ||
                 normalizeNodeSource(String(r.creator ?? '')) ||
                 normalizeNodeSource(String(r.workspaceOwner ?? '')) ||
                 normalizeNodeSource(String(r.publisher ?? '')) ||
                 normalizeNodeSource(String(r.publisherAddress ?? ''));
+              const ualCandidate = String(r.ual ?? '').trim();
+              const txCandidate = String(r.txHash ?? '').trim();
+              const tsCandidate = String(r.timestamp ?? '').trim();
+              if (sourceCandidate) bucket.source.add(sourceCandidate);
+              if (ualCandidate) bucket.ual.add(ualCandidate);
+              if (txCandidate) bucket.txHash.add(txCandidate);
+              if (tsCandidate) bucket.timestamp.add(tsCandidate);
+              candidateByGraph.set(g, bucket);
+            }
+            for (const [g, bucket] of candidateByGraph.entries()) {
+              const onlyOrBlank = (set: Set<string>) => (set.size === 1 ? Array.from(set)[0] : '');
               graphMeta.set(g, {
-                source: existing.source || candidate,
-                ual: existing.ual || String(r.ual ?? ''),
-                txHash: existing.txHash || String(r.txHash ?? ''),
-                timestamp: existing.timestamp || String(r.timestamp ?? ''),
+                source: onlyOrBlank(bucket.source),
+                ual: onlyOrBlank(bucket.ual),
+                txHash: onlyOrBlank(bucket.txHash),
+                timestamp: onlyOrBlank(bucket.timestamp),
               });
             }
           } catch {
@@ -954,8 +976,8 @@ ${values}
                   onFocusSubject={setFocusedSubject}
                 />
               )}
-              {resultsTab === 'jsonld' && <ResultJsonLd triples={derivedTriples} />}
-              {resultsTab === 'nquads' && <ResultNQuads triples={derivedTriples} />}
+              {resultsTab === 'jsonld' && <ResultJsonLd triples={derivedTriples} rawResult={result} />}
+              {resultsTab === 'nquads' && <ResultNQuads triples={derivedTriples} rawResult={result} />}
             </div>
           </div>
         </div>
@@ -1236,25 +1258,58 @@ function metaGraphsForDataGraph(graphUri: string): string[] {
   return Array.from(out);
 }
 
+function parseSerializedRdfLiteral(value: string): { value: string; language?: string; type?: string } | null {
+  const m = value.match(/^"((?:[^"\\]|\\.)*)"(?:(@[A-Za-z-]+)|\^\^<([^>]+)>)?$/);
+  if (!m) return null;
+  const lexical = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  const lang = m[2] ? m[2].slice(1) : undefined;
+  const type = m[3] ?? undefined;
+  return { value: lexical, language: lang, type };
+}
+
 function buildJsonLd(triples: Array<{ s: string; p: string; o: string }>): any[] {
   const bySubject = new Map<string, Record<string, any>>();
   for (const t of triples) {
     if (!bySubject.has(t.s)) bySubject.set(t.s, { '@id': t.s });
     const node = bySubject.get(t.s)!;
     const values = Array.isArray(node[t.p]) ? node[t.p] : [];
-    values.push(isLikelyResource(t.o) ? { '@id': t.o } : { '@value': t.o });
+    if (isLikelyResource(t.o)) {
+      values.push({ '@id': t.o });
+    } else {
+      const parsed = parseSerializedRdfLiteral(t.o);
+      if (parsed) {
+        const literalNode: Record<string, string> = { '@value': parsed.value };
+        if (parsed.language) literalNode['@language'] = parsed.language;
+        if (parsed.type) literalNode['@type'] = parsed.type;
+        values.push(literalNode);
+      } else {
+        values.push({ '@value': t.o });
+      }
+    }
     node[t.p] = values;
   }
   return Array.from(bySubject.values());
 }
 
-function ResultJsonLd({ triples }: { triples: Array<{ s: string; p: string; o: string }> }) {
-  if (!triples.length) return <div className="empty-state">No triple-shaped rows to convert</div>;
+function ResultJsonLd({
+  triples,
+  rawResult,
+}: {
+  triples: Array<{ s: string; p: string; o: string }>;
+  rawResult: any;
+}) {
+  if (!triples.length) return <div className="json-view">{JSON.stringify(rawResult ?? [], null, 2)}</div>;
   return <div className="json-view">{JSON.stringify(buildJsonLd(triples), null, 2)}</div>;
 }
 
-function ResultNQuads({ triples }: { triples: Array<{ s: string; p: string; o: string }> }) {
-  if (!triples.length) return <div className="empty-state">No triple-shaped rows to convert</div>;
+function ResultNQuads({
+  triples,
+  rawResult,
+}: {
+  triples: Array<{ s: string; p: string; o: string }>;
+  rawResult: any;
+}) {
+  if (!triples.length) return <div className="json-view">{JSON.stringify(rawResult ?? [], null, 2)}</div>;
   const nquads = triples.map((t) => `${toNQuadTerm(t.s)} ${toNQuadTerm(t.p)} ${toNQuadTerm(t.o)} .`).join('\n');
   return <div className="json-view">{nquads}</div>;
 }
