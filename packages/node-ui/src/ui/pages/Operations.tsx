@@ -40,6 +40,7 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 const OP_TYPE_COLORS: Record<string, string> = {
   publish: '#3b82f6',
+  update: '#14b8a6',
   query: '#8b5cf6',
   workspace: '#f59e0b',
   enshrine: '#22c55e',
@@ -361,8 +362,6 @@ function StatsTab() {
     });
   }, []);
 
-  const visibleTypes = types.filter((t: string) => !hiddenSeries.has(t));
-
   const legendFormatter = useCallback((value: string) => {
     const dimmed = hiddenSeries.has(value);
     return <span style={{ color: dimmed ? '#555' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
@@ -448,8 +447,8 @@ function StatsTab() {
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
-                    {visibleTypes.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} />
+                    {types.map((t: string) => (
+                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
@@ -464,8 +463,8 @@ function StatsTab() {
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
-                    {visibleTypes.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} />
+                    {types.map((t: string) => (
+                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
@@ -480,8 +479,8 @@ function StatsTab() {
                     <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
-                    {visibleTypes.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} />
+                    {types.map((t: string) => (
+                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
@@ -496,8 +495,8 @@ function StatsTab() {
                     <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
-                    {visibleTypes.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} />
+                    {types.map((t: string) => (
+                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
