@@ -315,8 +315,18 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false, onPhase } = options;
+    const {
+      paranetId,
+      quads,
+      privateQuads = [],
+      publisherPeerId = '',
+      accessPolicy,
+      operationCtx,
+      entityProofs = false,
+      onPhase,
+    } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
 
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:ensureParanet', 'start');
@@ -529,7 +539,8 @@ export class DKGPublisher implements Publisher {
             paranetId,
             merkleRoot: kcMerkleRoot,
             kaCount,
-            publisherPeerId: options.publisherPeerId ?? 'unknown',
+            publisherPeerId: publisherPeerId || 'unknown',
+            accessPolicy: effectiveAccessPolicy,
             timestamp: new Date(),
           },
           kaMetadata,
@@ -564,7 +575,8 @@ export class DKGPublisher implements Publisher {
           paranetId,
           merkleRoot: kcMerkleRoot,
           kaCount,
-          publisherPeerId: options.publisherPeerId ?? 'unknown',
+          publisherPeerId: publisherPeerId || 'unknown',
+          accessPolicy: effectiveAccessPolicy,
           timestamp: new Date(),
         },
         kaMetadata,

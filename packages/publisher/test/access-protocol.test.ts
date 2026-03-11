@@ -51,7 +51,7 @@ describe('Access Protocol', () => {
     return { nodeA, nodeB };
   }
 
-  async function publishWithPrivate(store: OxigraphStore) {
+  async function publishWithPrivate(store: OxigraphStore, options?: { publisherPeerId?: string }) {
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -75,6 +75,7 @@ describe('Access Protocol', () => {
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"'),
         q(ENTITY, 'http://ex.org/credentials', '"password:hunter2"'),
       ],
+      publisherPeerId: options?.publisherPeerId,
     });
 
     return { result, bus, keypair };
@@ -84,7 +85,7 @@ describe('Access Protocol', () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
@@ -139,11 +140,11 @@ describe('Access Protocol', () => {
     expect(accessResult.rejectionReason).toContain('not found');
   }, 20000);
 
-  it('returns correct private triples for the specific KA requested', async () => {
+  it('denies non-owner by default for private KA access', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
@@ -157,18 +158,15 @@ describe('Access Protocol', () => {
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
-    expect(accessResult.granted).toBe(true);
-    // All returned triples should relate to the requested entity
-    for (const quad of accessResult.quads) {
-      expect(quad.subject).toContain(ENTITY);
-    }
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner-only');
   }, 20000);
 
   it('AccessClient sends requesterPublicKey for ownerOnly access', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     const onChain = result.onChainResult!;
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
@@ -192,5 +190,27 @@ describe('Access Protocol', () => {
 
     expect(accessResult.granted).toBe(true);
     expect(accessResult.quads.length).toBe(2);
+  }, 20000);
+
+  it('denies private access when owner identity is missing', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const onChain = result.onChainResult!;
+    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner identity missing');
   }, 20000);
 });

@@ -15,6 +15,10 @@ export interface PublishOptions {
   paranetId: string;
   quads: Quad[];
   privateQuads?: Quad[];
+  /** Publisher peer ID used for KC ownership/access metadata. */
+  publisherPeerId?: string;
+  /** KC-level private access policy metadata. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   manifest?: KAManifestEntry[];
   /** Publishing node identity (peerId) for provenance metadata. */
   publisherPeerId?: string;
