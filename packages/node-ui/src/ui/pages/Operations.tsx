@@ -581,20 +581,54 @@ function StatsTab() {
    ================================================================ */
 
 function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
+  const [hover, setHover] = useState<number | null>(null);
+
   if (!phases?.length || totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
   return (
-    <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', background: 'rgba(255,255,255,.04)', minWidth: 80, maxWidth: 160 }}>
-      {phases.map((p: any, i: number) => {
-        const pct = Math.max(((p.duration_ms ?? 0) / totalMs) * 100, 3);
-        const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? '#6b7280';
-        return (
-          <div
-            key={`${p.phase}-${i}`}
-            title={`${p.phase}: ${formatDuration(p.duration_ms)}${p.status === 'error' ? ' (FAILED)' : ''}`}
-            style={{ width: `${pct}%`, background: color, minWidth: 2, transition: 'width .2s' }}
-          />
-        );
-      })}
+    <div style={{ position: 'relative', minWidth: 80, maxWidth: 180 }}>
+      <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+        {phases.map((p: any, i: number) => {
+          const pct = Math.max(((p.duration_ms ?? 0) / totalMs) * 100, 3);
+          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? '#6b7280';
+          const isHovered = hover === i;
+          return (
+            <div
+              key={`${p.phase}-${i}`}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              style={{
+                width: `${pct}%`, background: color, minWidth: 2,
+                opacity: isHovered ? 1 : 0.65,
+                transition: 'opacity .15s, width .2s',
+                cursor: 'default',
+              }}
+            />
+          );
+        })}
+      </div>
+      {hover !== null && phases[hover] && (
+        <div style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          marginBottom: 6, padding: '5px 10px', borderRadius: 6,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+          whiteSpace: 'nowrap', fontSize: 11, zIndex: 10, pointerEvents: 'none',
+        }}>
+          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? '#9ca3af' }}>
+            {phases[hover].phase}
+          </span>
+          <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
+            {formatDuration(phases[hover].duration_ms)}
+          </span>
+          <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
+            ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
+          </span>
+          {phases[hover].status === 'error' && (
+            <span style={{ color: '#ef4444', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -682,14 +716,14 @@ function OperationsTab() {
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
                   <td>{formatTime(op.started_at)}</td>
-                  <td><span className="badge badge-info" style={{ background: OP_TYPE_COLORS[op.operation_name] ?? undefined }}>{op.operation_name}</span></td>
+                  <td><span className="badge" style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? '#6b7280'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? '#6b7280' }}>{op.operation_name}</span></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
                   <td>{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
                   <td>
                     {op.tx_hash ? (
-                      <a href={explorerUrl ? `${explorerUrl}/tx/${op.tx_hash}` : '#'} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} title={op.tx_hash}>
+                      <a href={explorerUrl ? `${explorerUrl}/tx/${op.tx_hash}` : '#'} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} title={op.tx_hash} className="tx-link-icon">
                         <TxLinkIcon />
                       </a>
                     ) : '—'}
