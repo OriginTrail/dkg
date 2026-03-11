@@ -129,7 +129,6 @@ describe('Phase-sequence contracts', () => {
       'store:start',
       'store:end',
       'chain:start',
-      'chain:metadata:end',
       'chain:end',
     ]);
   });
