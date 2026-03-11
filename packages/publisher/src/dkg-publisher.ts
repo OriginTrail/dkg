@@ -300,6 +300,11 @@ export class DKGPublisher implements Publisher {
     }
 
     const ctxGraphId = options?.contextGraphId;
+    if (ctxGraphId !== undefined && ctxGraphId !== null) {
+      try { BigInt(ctxGraphId); } catch {
+        throw new Error(`Invalid contextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
+      }
+    }
     const targetGraphUri = ctxGraphId ? contextGraphDataUri(paranetId, ctxGraphId) : undefined;
     const targetMetaGraphUri = ctxGraphId ? contextGraphMetaUri(paranetId, ctxGraphId) : undefined;
 
@@ -379,6 +384,13 @@ export class DKGPublisher implements Publisher {
                 this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
               }
             }
+            const ownedSet = this.ownedEntities.get(paranetId);
+            if (ownedSet) {
+              for (const ka of publishResult.kaManifest ?? []) {
+                ownedSet.delete(ka.rootEntity);
+              }
+            }
+
             this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
               reason: 'context_graph_registration_failed',
               batchId: String(publishResult.onChainResult.batchId),
@@ -666,10 +678,11 @@ export class DKGPublisher implements Publisher {
         await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
       );
 
-      // Determine receiver signatures: use collected sigs if available, else self-sign
       let receiverSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       if (collectedReceiverSigs && collectedReceiverSigs.length > 0) {
-        receiverSignatures = collectedReceiverSigs;
+        receiverSignatures = [...collectedReceiverSigs]
+          .sort((a, b) => (a.identityId < b.identityId ? -1 : a.identityId > b.identityId ? 1 : 0))
+          .filter((s, i, arr) => i === 0 || s.identityId !== arr[i - 1].identityId);
       } else {
         const rcvMsgHash = ethers.solidityPackedKeccak256(
           ['bytes32', 'uint64'],

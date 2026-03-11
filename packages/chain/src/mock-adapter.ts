@@ -605,8 +605,6 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
-    const result = await this.publishKnowledgeAssets(params);
-
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
       throw new Error(`Context graph ${params.contextGraphId} not found or inactive`);
@@ -617,6 +615,8 @@ export class MockChainAdapter implements ChainAdapter {
         `Not enough participant signatures: need ${cg.requiredSignatures}, got ${params.participantSignatures.length}`,
       );
     }
+
+    const result = await this.publishKnowledgeAssets(params);
 
     cg.batches.push(result.batchId);
     this.pushEvent('ContextGraphExpanded', {
