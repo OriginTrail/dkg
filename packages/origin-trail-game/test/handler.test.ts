@@ -2218,6 +2218,9 @@ describe('V5: Strategy patterns published when game finishes', () => {
         await coordinator.castVote(swarm.id, action);
       } catch (err: any) {
         if (!/eliminated|cannot vote/i.test(err.message)) throw err;
+        // Leader was eliminated; simulate a surviving player's vote so
+        // forceResolveTurn can pick a meaningful action (not just syncMemory).
+        swarm.votes.push({ peerId: 'finish-p2', action, turn: swarm.currentTurn, timestamp: Date.now() });
       }
       await new Promise(r => setTimeout(r, 5));
       if (swarm.status !== 'traveling') break;

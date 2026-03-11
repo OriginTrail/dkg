@@ -147,8 +147,12 @@ export function RdfGraph({
     loadData().then(() => {
       if (cancelled) return;
       if (viz && initialFit && !initialFitDoneRef.current) {
-        initialFitDoneRef.current = true;
-        fitTimer = setTimeout(() => { if (!cancelled) viz.zoomToFit(); }, 300);
+        fitTimer = setTimeout(() => {
+          if (!cancelled) {
+            initialFitDoneRef.current = true;
+            viz.zoomToFit();
+          }
+        }, 300);
       }
     }).catch((err) => {
       if (!cancelled) console.error('[RdfGraph] Error loading data:', err);
