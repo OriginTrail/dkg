@@ -55,13 +55,27 @@ export class OperationTracker {
 
   fail(ctx: OperationContext, err: unknown): void {
     if (!this.db) return;
+    const now = Date.now();
     const startedAt = this.starts.get(ctx.operationId);
     this.starts.delete(ctx.operationId);
     const message = err instanceof Error ? err.message : String(err);
     try {
+      const prefix = ctx.operationId + ':';
+      const activeKeys = [...this.phaseStarts.keys()].filter(k => k.startsWith(prefix));
+      for (const key of activeKeys) {
+        const phase = key.slice(prefix.length);
+        const phaseStartedAt = this.phaseStarts.get(key);
+        this.phaseStarts.delete(key);
+        this.db.failPhase({
+          operation_id: ctx.operationId,
+          phase,
+          duration_ms: phaseStartedAt ? now - phaseStartedAt : 0,
+          error_message: message,
+        });
+      }
       this.db.failOperation({
         operation_id: ctx.operationId,
-        duration_ms: startedAt ? Date.now() - startedAt : 0,
+        duration_ms: startedAt ? now - startedAt : 0,
         error_message: message,
       });
     } catch {
@@ -141,5 +155,44 @@ export class OperationTracker {
     } catch {
       // Must never break the node
     }
+  }
+
+  /**
+   * Execute `fn` as a tracked phase — no timing gaps, no forgotten end calls.
+   * On success completes the phase; on error fails the phase and re-throws.
+   */
+  async trackPhase<T>(ctx: OperationContext, phase: string, fn: () => Promise<T>): Promise<T> {
+    this.startPhase(ctx, phase);
+    try {
+      const result = await fn();
+      this.completePhase(ctx, phase);
+      return result;
+    } catch (err) {
+      if (this.db) {
+        const key = `${ctx.operationId}:${phase}`;
+        const startedAt = this.phaseStarts.get(key);
+        this.phaseStarts.delete(key);
+        try {
+          this.db.failPhase({
+            operation_id: ctx.operationId,
+            phase,
+            duration_ms: startedAt ? Date.now() - startedAt : 0,
+            error_message: err instanceof Error ? err.message : String(err),
+          });
+        } catch { /* never crash */ }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Create an onPhase callback wired to this tracker instance.
+   * Pass this to DKGAgent/Publisher methods that accept `onPhase`.
+   */
+  phaseCallback(ctx: OperationContext): (phase: string, status: 'start' | 'end') => void {
+    return (phase, status) => {
+      if (status === 'start') this.startPhase(ctx, phase);
+      else this.completePhase(ctx, phase);
+    };
   }
 }

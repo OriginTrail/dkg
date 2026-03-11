@@ -23,6 +23,29 @@ const MIME: Record<string, string> = {
 const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
+const PERIOD_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+
+function parsePeriodMs(input: string): number {
+  const num = parseInt(input, 10);
+  if (!isNaN(num) && num > 0 && /^\d+$/.test(input)) return num;
+  const match = input.match(/^(\d+)\s*([mhdw])$/i);
+  if (match) {
+    const val = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    if (val > 0 && PERIOD_UNITS[unit]) return val * PERIOD_UNITS[unit];
+  }
+  return 86_400_000;
+}
+
+function autoBucketMs(periodMs: number): number {
+  if (periodMs <= 15 * 60_000) return 60_000;          // <=15min  → 1-min buckets
+  if (periodMs <= 60 * 60_000) return 5 * 60_000;      // <=1h     → 5-min buckets
+  if (periodMs <= 6 * 3_600_000) return 15 * 60_000;   // <=6h     → 15-min buckets
+  if (periodMs <= 24 * 3_600_000) return 3_600_000;     // <=24h    → 1-hour buckets
+  if (periodMs <= 7 * 86_400_000) return 6 * 3_600_000; // <=7d     → 6-hour buckets
+  return 86_400_000;                                     // >7d      → daily buckets
+}
+
 function getChatPersistenceQueue(db: DashboardDB, memoryManager: ChatMemoryManager): ChatPersistenceQueue {
   let queue = chatPersistenceQueues.get(db);
   if (!queue) {
@@ -48,6 +71,11 @@ export interface LlmSettingsCallbacks {
   setLlm: (llm: { apiKey: string; model?: string; baseURL?: string } | null) => Promise<void>;
 }
 
+export interface TelemetrySettingsCallbacks {
+  getTelemetryEnabled: () => boolean;
+  setTelemetryEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/logs, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
@@ -63,6 +91,7 @@ export async function handleNodeUIRequest(
   authToken?: string,
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
+  telemetrySettings?: TelemetrySettingsCallbacks,
 ): Promise<boolean> {
   const path = url.pathname;
 
@@ -90,16 +119,101 @@ export async function handleNodeUIRequest(
     return json(res, 200, { snapshots });
   }
 
+  // --- Prometheus metrics ---
+
+  // TODO: Prometheus /metrics endpoint — implementation in progress, hidden until ready
+  // if (req.method === 'GET' && path === '/metrics') {
+  //   if (metricsCollector) {
+  //     try {
+  //       const m = await metricsCollector.collect();
+  //       const lines = [
+  //         `# HELP dkg_uptime_seconds Node uptime in seconds`,
+  //         `# TYPE dkg_uptime_seconds gauge`,
+  //         `dkg_uptime_seconds ${m.uptime_seconds ?? 0}`,
+  //         `# HELP dkg_cpu_percent CPU usage percentage`,
+  //         `# TYPE dkg_cpu_percent gauge`,
+  //         `dkg_cpu_percent ${m.cpu_percent ?? 0}`,
+  //         `# HELP dkg_memory_bytes Memory usage in bytes`,
+  //         `# TYPE dkg_memory_bytes gauge`,
+  //         `dkg_memory_bytes{type="heap"} ${m.heap_used_bytes ?? 0}`,
+  //         `dkg_memory_bytes{type="system"} ${m.mem_used_bytes ?? 0}`,
+  //         `# HELP dkg_peers_total Number of connected peers`,
+  //         `# TYPE dkg_peers_total gauge`,
+  //         `dkg_peers_total{type="direct"} ${m.direct_peers ?? 0}`,
+  //         `dkg_peers_total{type="relayed"} ${m.relayed_peers ?? 0}`,
+  //         `dkg_peers_total{type="mesh"} ${m.mesh_peers ?? 0}`,
+  //         `# HELP dkg_triples_total Total triples in the store`,
+  //         `# TYPE dkg_triples_total gauge`,
+  //         `dkg_triples_total ${m.total_triples ?? 0}`,
+  //         `# HELP dkg_kcs_total Knowledge collections`,
+  //         `# TYPE dkg_kcs_total gauge`,
+  //         `dkg_kcs_total{status="confirmed"} ${m.confirmed_kcs ?? 0}`,
+  //         `dkg_kcs_total{status="tentative"} ${m.tentative_kcs ?? 0}`,
+  //         `# HELP dkg_kas_total Knowledge assets`,
+  //         `# TYPE dkg_kas_total gauge`,
+  //         `dkg_kas_total ${m.total_kas ?? 0}`,
+  //         `# HELP dkg_store_bytes Triple store size in bytes`,
+  //         `# TYPE dkg_store_bytes gauge`,
+  //         `dkg_store_bytes ${m.store_bytes ?? 0}`,
+  //         `# HELP dkg_rpc_latency_ms RPC latency in milliseconds`,
+  //         `# TYPE dkg_rpc_latency_ms gauge`,
+  //         `dkg_rpc_latency_ms ${m.rpc_latency_ms ?? 0}`,
+  //         `# HELP dkg_rpc_healthy RPC health status (1=healthy, 0=unhealthy)`,
+  //         `# TYPE dkg_rpc_healthy gauge`,
+  //         `dkg_rpc_healthy ${m.rpc_healthy ?? 0}`,
+  //         '',
+  //       ];
+  //       res.writeHead(200, {
+  //         'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+  //         'Cache-Control': 'no-cache',
+  //       });
+  //       res.end(lines.join('\n'));
+  //       return true;
+  //     } catch {
+  //       res.writeHead(503, { 'Content-Type': 'text/plain' });
+  //       res.end('# metrics temporarily unavailable\n');
+  //       return true;
+  //     }
+  //   }
+  //   res.writeHead(503, { 'Content-Type': 'text/plain' });
+  //   res.end('# metrics collector not initialized\n');
+  //   return true;
+  // }
+
+  // --- Error hotspots ---
+
+  if (req.method === 'GET' && path === '/api/error-hotspots') {
+    const periodMs = parseInt(url.searchParams.get('periodMs') ?? String(7 * 86_400_000), 10);
+    const hotspots = db.getErrorHotspots(periodMs);
+    return json(res, 200, { hotspots });
+  }
+
+  if (req.method === 'GET' && path === '/api/failed-operations') {
+    const phase = url.searchParams.get('phase') ?? undefined;
+    const operationName = url.searchParams.get('operationName') ?? undefined;
+    const periodMs = parseInt(url.searchParams.get('periodMs') ?? String(7 * 86_400_000), 10);
+    const q = url.searchParams.get('q') ?? undefined;
+    const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+    const result = db.getFailedOperations({ phase, operationName, periodMs, q, limit });
+    return json(res, 200, result);
+  }
+
   // --- Operations ---
 
   if (req.method === 'GET' && path === '/api/operations') {
     const name = url.searchParams.get('name') ?? undefined;
     const status = url.searchParams.get('status') ?? undefined;
+    const operationId = url.searchParams.get('operationId') ?? undefined;
     const from = url.searchParams.get('from') ? parseInt(url.searchParams.get('from')!, 10) : undefined;
     const to = url.searchParams.get('to') ? parseInt(url.searchParams.get('to')!, 10) : undefined;
     const limit = parseInt(url.searchParams.get('limit') ?? '100', 10);
     const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
-    const result = db.getOperations({ name, status, from, to, limit, offset });
+    const includePhases = url.searchParams.get('phases') === '1';
+    if (includePhases) {
+      const result = db.getOperationsWithPhases({ name, status, operationId, from, to, limit, offset });
+      return json(res, 200, result);
+    }
+    const result = db.getOperations({ name, status, operationId, from, to, limit, offset });
     return json(res, 200, result);
   }
 
@@ -115,14 +229,27 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'GET' && path === '/api/operation-stats') {
     const name = url.searchParams.get('name') ?? undefined;
-    const period = url.searchParams.get('period') ?? '24h';
-    const periodMs = period === '30d' ? 30 * 86_400_000
-      : period === '7d' ? 7 * 86_400_000
-      : 86_400_000;
-    const bucketMs = period === '30d' ? 86_400_000
-      : period === '7d' ? 86_400_000
-      : 3_600_000;
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? url.searchParams.get('period') ?? '24h');
+    const bucketMs = autoBucketMs(periodMs);
     const result = db.getOperationStats({ name, periodMs, bucketMs });
+    return json(res, 200, result);
+  }
+
+  // --- Success rates by operation type ---
+
+  if (req.method === 'GET' && path === '/api/success-rates') {
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? url.searchParams.get('period') ?? '7d');
+    const rates = db.getSuccessRatesByType(periodMs);
+    return json(res, 200, { rates });
+  }
+
+  // --- Per-type time series ---
+
+  if (req.method === 'GET' && path === '/api/per-type-stats') {
+    const periodMs = parsePeriodMs(url.searchParams.get('periodMs') ?? url.searchParams.get('period') ?? '7d');
+    const rawBucket = url.searchParams.get('bucketMs');
+    const bucketMs = rawBucket ? parseInt(rawBucket, 10) : autoBucketMs(periodMs);
+    const result = db.getPerTypeTimeSeries({ periodMs, bucketMs });
     return json(res, 200, result);
   }
 
@@ -146,6 +273,38 @@ export async function handleNodeUIRequest(
     const offset = parseInt(url.searchParams.get('offset') ?? '0', 10);
     const result = db.searchLogs({ q, operationId, level, module, from, to, limit, offset });
     return json(res, 200, result);
+  }
+
+  // --- Node log (daemon.log file) ---
+
+  if (req.method === 'GET' && path === '/api/node-log') {
+    const logFilePath = join(db.dataDir, 'daemon.log');
+    const rawLines = parseInt(url.searchParams.get('lines') ?? '500', 10);
+    const tailLines = Number.isFinite(rawLines) && rawLines > 0 ? Math.min(rawLines, 5000) : 500;
+    const search = url.searchParams.get('q') ?? '';
+    try {
+      const fileStat = await stat(logFilePath);
+      const TAIL_BYTES = Math.min(tailLines * 300, fileStat.size);
+      const { createReadStream } = await import('node:fs');
+      const start = Math.max(0, fileStat.size - TAIL_BYTES);
+      const chunk = await new Promise<string>((resolve, reject) => {
+        const parts: string[] = [];
+        createReadStream(logFilePath, { start, encoding: 'utf-8' })
+          .on('data', (d: string | Buffer) => parts.push(typeof d === 'string' ? d : d.toString('utf-8')))
+          .on('end', () => resolve(parts.join('')))
+          .on('error', reject);
+      });
+      let lines = chunk.split('\n');
+      if (start > 0) lines = lines.slice(1);
+      lines = lines.slice(-tailLines);
+      if (search) {
+        const lower = search.toLowerCase();
+        lines = lines.filter(l => l.toLowerCase().includes(lower));
+      }
+      return json(res, 200, { lines, totalSize: fileStat.size });
+    } catch {
+      return json(res, 200, { lines: [], totalSize: 0 });
+    }
   }
 
   // --- Query history ---
@@ -186,6 +345,43 @@ export async function handleNodeUIRequest(
     if (isNaN(id)) return json(res, 400, { error: 'Invalid ID' });
     db.deleteSavedQuery(id);
     return json(res, 200, { ok: true });
+  }
+
+  // --- Data retention settings ---
+
+  if (req.method === 'GET' && path === '/api/settings/retention') {
+    return json(res, 200, { retentionDays: db.getRetentionDays() });
+  }
+
+  if (req.method === 'PUT' && path === '/api/settings/retention') {
+    const body = await readBody(req);
+    const payload = JSON.parse(body ?? '{}') as { retentionDays?: number };
+    const days = payload.retentionDays;
+    if (days == null || !Number.isInteger(days) || days < 1 || days > 365) {
+      return json(res, 400, { error: 'retentionDays must be an integer 1-365' });
+    }
+    db.setRetentionDays(days as number);
+    db.prune();
+    return json(res, 200, { ok: true, retentionDays: db.getRetentionDays() });
+  }
+
+  // --- Telemetry settings ---
+
+  if (req.method === 'GET' && path === '/api/settings/telemetry') {
+    const enabled = telemetrySettings?.getTelemetryEnabled() ?? false;
+    return json(res, 200, { enabled });
+  }
+
+  if (req.method === 'PUT' && path === '/api/settings/telemetry') {
+    if (!telemetrySettings) return json(res, 501, { error: 'Telemetry not available' });
+    const body = await readBody(req);
+    const payload = JSON.parse(body ?? '{}') as { enabled?: boolean };
+    if (typeof payload.enabled !== 'boolean') {
+      return json(res, 400, { error: 'enabled must be a boolean' });
+    }
+    const result = await telemetrySettings.setTelemetryEnabled(payload.enabled);
+    if (!result.ok) return json(res, 422, { error: result.error });
+    return json(res, 200, { ok: true, enabled: payload.enabled });
   }
 
   // --- LLM settings ---

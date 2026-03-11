@@ -12,13 +12,13 @@ import {
   fetchAgents,
   sendPeerMessage,
   fetchMessages,
-  fetchOpenClawAgents,
-  sendOpenClawChat,
+  streamOpenClawLocalChat,
+  fetchOpenClawLocalHealth,
+  fetchOpenClawLocalHistory,
   type MemorySession,
   type MemorySessionPublicationStatus,
   type ChatLlmDiagnostics,
   type ChatPersistenceStatusEvent,
-  type OpenClawAgent,
 } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
 
@@ -155,7 +155,7 @@ function markStoredMessagesEnshrined(prevMsgs: Message[]): Message[] {
   const next = prevMsgs.map((m) => {
     if (m.role !== 'assistant' || m.persistStatus !== 'stored') return m;
     changed = true;
-    return { ...m, persistStatus: 'enshrined' };
+    return { ...m, persistStatus: 'enshrined' as const };
   });
   return changed ? next : prevMsgs;
 }
@@ -448,6 +448,7 @@ function PeerChatView() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingPeers, setLoadingPeers] = useState(true);
+  const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -516,22 +517,50 @@ function PeerChatView() {
   const connectedCount = peers.filter(p => p.connectionStatus === 'connected').length;
   const ALIVE_MS = 5 * 60 * 1000;
 
+  const peerSearchLower = peerSearch.trim().toLowerCase();
+  const matchCount = peerSearchLower
+    ? peers.reduce((n, p) => n + (p.name.toLowerCase().includes(peerSearchLower) || p.peerId.toLowerCase().includes(peerSearchLower) ? 1 : 0), 0)
+    : peers.length;
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
       {/* Peer list sidebar */}
       <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
         <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Network Peers</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700 }}>Network Peers</div>
+            {peerSearchLower && (
+              <div style={{ fontSize: 10, color: 'var(--green)' }}>{matchCount} found</div>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
             {connectedCount} connected · {peers.length} discovered
           </div>
+          <input
+            type="text"
+            value={peerSearch}
+            onChange={ev => setPeerSearch(ev.target.value)}
+            placeholder="Search peers…"
+            style={{
+              width: '100%', padding: '7px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 11, outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--green)'; }}
+            onBlur={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loadingPeers && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading peers…</div>}
           {!loadingPeers && peers.length === 0 && (
             <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers discovered yet.</div>
           )}
+          {!loadingPeers && peers.length > 0 && matchCount === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers match "{peerSearch}"</div>
+          )}
           {peers.map(p => {
+            const isMatch = !peerSearchLower || p.name.toLowerCase().includes(peerSearchLower) || p.peerId.toLowerCase().includes(peerSearchLower);
             const isSelected = selectedPeer?.peerId === p.peerId;
             const isOnline = p.connectionStatus === 'connected' || (p.lastSeen != null && Date.now() - p.lastSeen < ALIVE_MS);
             return (
@@ -543,6 +572,7 @@ function PeerChatView() {
                   background: isSelected ? 'var(--surface)' : 'transparent',
                   border: isSelected ? '1px solid var(--border)' : '1px solid transparent',
                   transition: 'all .15s ease',
+                  display: isMatch ? undefined : 'none',
                 }}
                 onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface)'; }}
                 onMouseLeave={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
@@ -659,7 +689,7 @@ function PeerChatView() {
 }
 
 interface OcMessage {
-  id: number;
+  id: string | number;
   role: 'user' | 'assistant' | 'system';
   content: string;
   ts: string;
@@ -667,208 +697,575 @@ interface OcMessage {
 
 let _ocMid = 1000;
 
+const OC_SESSION_URI = 'urn:dkg:chat:session:openclaw:dkg-ui';
+const OC_SESSION_ID = 'openclaw:dkg-ui';
+
+function mergeOcMessages(existing: OcMessage[], incoming: OcMessage[]): OcMessage[] {
+  const seen = new Set<string>();
+  const merged: OcMessage[] = [];
+  for (const message of [...incoming, ...existing]) {
+    // Prefer stable URI/turnId for dedup; fall back to content-based key
+    const id = String(message.id);
+    const hasStableId = id && !id.startsWith('oc-') && !/^\d+$/.test(id);
+    const dedupeKey = hasStableId
+      ? id
+      : `${message.role}\u0000${message.ts}\u0000${message.content}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    merged.push(message);
+  }
+  return merged;
+}
+
 function OpenClawChatView() {
-  const [agents, setAgents] = useState<OpenClawAgent[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<OpenClawAgent | null>(null);
   const [messages, setMessages] = useState<OcMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [sendStartedAt, setSendStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
+  const [reconnectedAt, setReconnectedAt] = useState<number | null>(null);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [showGraph, setShowGraph] = useState(false);
+  const [graphTriples, setGraphTriples] = useState<Triple[] | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [publishNotice, setPublishNotice] = useState<string | null>(null);
+  const [publicationScope, setPublicationScope] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const lastHealthOnlineRef = useRef<boolean | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graphRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const publicationRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTimer = (timerRef: React.MutableRefObject<ReturnType<typeof setTimeout> | null>) => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const loadAgents = useCallback(async () => {
-    setLoading(true);
+  // Elapsed timer while sending
+  useEffect(() => {
+    if (sendStartedAt == null) { setElapsed(0); return; }
+    setElapsed(Math.floor((Date.now() - sendStartedAt) / 1000));
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - sendStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [sendStartedAt]);
+
+  // Abort in-flight request on unmount
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      clearTimer(reconnectTimerRef);
+      clearTimer(graphRefreshTimerRef);
+      clearTimer(publicationRefreshTimerRef);
+    };
+  }, []);
+
+  // Periodic health polling (every 15s)
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const h = await fetchOpenClawLocalHealth();
+        if (cancelled) return;
+        const online = h.ok;
+        // Detect offline→online transition — reload history + show indicator
+        if (online && lastHealthOnlineRef.current === false) {
+          setReconnectedAt(Date.now());
+          clearTimer(reconnectTimerRef);
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            setReconnectedAt(prev => prev && Date.now() - prev >= 2900 ? null : prev);
+          }, 3000);
+          fetchOpenClawLocalHistory(100).then(history => {
+            if (cancelled) return;
+            const loaded: OcMessage[] = history.map(h => ({
+              id: h.uri || `oc-history:${_ocMid++}`,
+              role: h.author.includes('agent') ? 'assistant' as const : 'user' as const,
+              content: h.text,
+              ts: h.ts ? new Date(h.ts).toLocaleTimeString() : '',
+            }));
+            if (loaded.length > 0) setMessages(prev => mergeOcMessages(prev, loaded));
+          }).catch(() => {});
+        }
+        lastHealthOnlineRef.current = online;
+        setAgentOnline(online);
+      } catch {
+        if (!cancelled) {
+          lastHealthOnlineRef.current = false;
+          setAgentOnline(false);
+        }
+      }
+    };
+    poll();
+    const id = setInterval(poll, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load chat history from DKG graph
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const history = await fetchOpenClawLocalHistory(100);
+        if (cancelled) return;
+        const loaded: OcMessage[] = history.map(h => ({
+          id: h.uri || `oc-history:${_ocMid++}`,
+          role: h.author.includes('agent') ? 'assistant' as const : 'user' as const,
+          content: h.text,
+          ts: h.ts ? new Date(h.ts).toLocaleTimeString() : '',
+        }));
+        if (loaded.length > 0) {
+          setMessages(prev => mergeOcMessages(prev, loaded));
+        }
+      } catch { /* no history available */ }
+      if (!cancelled) setHistoryLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Load graph for the openclaw session
+  const loadGraph = useCallback(async () => {
+    setGraphLoading(true);
     try {
-      const res = await fetchOpenClawAgents();
-      setAgents(res.agents ?? []);
-    } catch { /* ignore */ }
-    setLoading(false);
+      // The OpenClaw tab is a single local-memory surface, not a multi-session chat inbox.
+      // Imported memories from files and dkg_memory_import are global to agent-memory, so
+      // include their roots explicitly alongside the OpenClaw chat/session graph.
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        {
+          SELECT ?s ?p ?o WHERE {
+            { <${OC_SESSION_URI}> ?p ?o . BIND(<${OC_SESSION_URI}> AS ?s) }
+            UNION
+            { ?s <http://schema.org/isPartOf> <${OC_SESSION_URI}> . ?s ?p ?o }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?msg <http://dkg.io/ontology/usedTool> ?tool .
+              ?tool ?p ?o . BIND(?tool AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?entity ?p ?o . BIND(?entity AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
+              ?srcEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?srcEntity ?rel ?targetEntity .
+              FILTER(STRSTARTS(STR(?targetEntity), "urn:dkg:entity:"))
+              ?targetEntity ?p ?o . BIND(?targetEntity AS ?s) }
+            UNION
+            { ?memory <http://dkg.io/ontology/extractedFrom> <${OC_SESSION_URI}> .
+              ?memory ?p ?o . BIND(?memory AS ?s) }
+            UNION
+            { ?memory a <http://dkg.io/ontology/ImportedMemory> .
+              ?memory ?p ?o . BIND(?memory AS ?s) }
+            UNION
+            { ?batch a <http://dkg.io/ontology/MemoryImport> .
+              ?batch ?p ?o . BIND(?batch AS ?s) }
+            UNION
+            { ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
+              ?batch a <http://dkg.io/ontology/MemoryImport> .
+              ?sessionEntity ?p ?o . BIND(?sessionEntity AS ?s) }
+          }
+          ORDER BY ?s ?p ?o
+          LIMIT 5000
+        }
+      }`;
+      const res = await executeQuery(sparql, 'agent-memory', true);
+      const quads = Array.isArray(res?.result?.quads) ? res.result.quads : [];
+      setGraphTriples(quads.map((q: any) => ({
+        subject: q.subject,
+        predicate: q.predicate,
+        object: stripTypedLiteral(q.object),
+      })));
+    } catch {
+      setGraphTriples(null);
+    }
+    setGraphLoading(false);
   }, []);
 
-  useEffect(() => { loadAgents(); }, [loadAgents]);
+  useEffect(() => {
+    if (showGraph) loadGraph();
+  }, [showGraph, loadGraph]);
 
-  const selectAgent = useCallback((ag: OpenClawAgent) => {
-    setSelectedAgent(ag);
-    setMessages([{
-      id: _ocMid++,
-      role: 'system',
-      content: `Connected to ${ag.name} (OpenClaw). Send a message to start chatting.`,
-      ts: new Date().toLocaleTimeString(),
-    }]);
+  // Fetch publication scope when graph is shown (and after sends/publishes)
+  const refreshPublicationScope = useCallback(() => {
+    fetchMemorySessionPublication(OC_SESSION_ID).then(pub => {
+      setPublicationScope(pub.scope);
+    }).catch(() => {
+      // Session may not exist yet — show 'empty' instead of stuck 'checking...'
+      setPublicationScope(prev => prev ?? 'empty');
+    });
   }, []);
+
+  useEffect(() => {
+    if (showGraph) refreshPublicationScope();
+  }, [showGraph, refreshPublicationScope]);
+
+  const publishSession = useCallback(async () => {
+    if (publishing) return;
+    setPublishing(true);
+    setPublishNotice(null);
+    try {
+      const result = await Promise.race([
+        publishMemorySession(OC_SESSION_ID, { clearAfter: false }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Publishing timed out. Please retry.')), 45_000);
+        }),
+      ]);
+      setPublicationScope(result.publication.scope);
+      setPublishNotice(`Published ${result.rootEntityCount} root entities (${result.status})`);
+      await loadGraph();
+    } catch (err: any) {
+      setPublishNotice(`Publish failed: ${err?.message ?? 'Unknown error'}`);
+    } finally {
+      setPublishing(false);
+    }
+  }, [publishing, loadGraph]);
 
   const send = useCallback(async () => {
-    if (!selectedAgent || !input.trim() || sending) return;
+    if (!input.trim() || sending) return;
     const text = input.trim();
     setInput('');
     setMessages(prev => [...prev, { id: _ocMid++, role: 'user', content: text, ts: new Date().toLocaleTimeString() }]);
     setSending(true);
+    setSendStartedAt(Date.now());
+
+    // AbortController with 90s timeout
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const timeout = setTimeout(() => ac.abort(), 90_000);
+
+    // Add empty assistant message — will be progressively filled by stream
+    const assistantMsgId = _ocMid++;
+    setMessages(prev => [...prev, {
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '',
+      ts: new Date().toLocaleTimeString(),
+    }]);
+
     try {
-      const res = await sendOpenClawChat(selectedAgent.peerId, text);
-      if (res.reply != null) {
-        setMessages(prev => [...prev, { id: _ocMid++, role: 'assistant', content: res.reply!, ts: new Date().toLocaleTimeString() }]);
-      } else if (res.timedOut) {
-        setMessages(prev => [...prev, { id: _ocMid++, role: 'system', content: 'Agent did not respond within 30 seconds. The message was delivered — the agent may still be processing.', ts: new Date().toLocaleTimeString() }]);
-      } else if (!res.delivered) {
-        setMessages(prev => [...prev, { id: _ocMid++, role: 'system', content: `Failed to deliver: ${res.error ?? 'unknown error'}`, ts: new Date().toLocaleTimeString() }]);
+      await streamOpenClawLocalChat(text, {
+        signal: ac.signal,
+        onEvent: (event) => {
+          if (event.type === 'text_delta') {
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMsgId
+                ? { ...m, content: m.content + event.delta }
+                : m,
+            ));
+          } else if (event.type === 'final') {
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMsgId
+                ? { ...m, content: event.text }
+                : m,
+            ));
+          }
+        },
+      });
+      // Refresh graph if visible (brief delay for fire-and-forget turn persistence)
+      if (showGraph) {
+        clearTimer(graphRefreshTimerRef);
+        clearTimer(publicationRefreshTimerRef);
+        graphRefreshTimerRef.current = setTimeout(() => {
+          graphRefreshTimerRef.current = null;
+          void loadGraph();
+        }, 1500);
+        publicationRefreshTimerRef.current = setTimeout(() => {
+          publicationRefreshTimerRef.current = null;
+          refreshPublicationScope();
+        }, 2000);
       }
     } catch (err: any) {
-      setMessages(prev => [...prev, { id: _ocMid++, role: 'system', content: `Error: ${err.message}`, ts: new Date().toLocaleTimeString() }]);
+      // User-friendly error messages
+      let msg: string;
+      if (err.name === 'AbortError') {
+        msg = 'Request timed out after 90 seconds. The agent may be overloaded — try again later.';
+      } else if (agentOnline === false) {
+        msg = 'Agent is offline. Check that the OpenClaw gateway is running.';
+      } else if (err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        msg = 'Network error — unable to reach the agent. Check your connection.';
+      } else {
+        msg = `Error: ${err.message}`;
+      }
+      setMessages(prev => prev.map(m =>
+        m.id === assistantMsgId
+          ? { ...m, role: 'system' as const, content: msg }
+          : m,
+      ));
     } finally {
+      clearTimeout(timeout);
+      abortRef.current = null;
       setSending(false);
+      setSendStartedAt(null);
     }
-  }, [selectedAgent, input, sending]);
+  }, [input, sending, agentOnline, showGraph, loadGraph, refreshPublicationScope]);
+
+  const statusColor = agentOnline === true ? '#4ade80' : agentOnline === false ? '#ef4444' : '#888';
+  const statusText = agentOnline === true ? 'Online' : agentOnline === false ? 'Offline' : 'Checking…';
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
-      {/* Agent list sidebar */}
-      <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
-        <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>OpenClaw Agents</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-            {agents.filter(a => a.connected).length} connected · {agents.length} discovered
-          </div>
-        </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
-          {loading && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Scanning network…</div>}
-          {!loading && agents.length === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px', lineHeight: '1.6' }}>
-              No OpenClaw agents found on the network. Make sure an OpenClaw agent with the DKG adapter is running and connected.
-            </div>
-          )}
-          {agents.map(ag => {
-            const isSelected = selectedAgent?.peerId === ag.peerId;
-            return (
-              <div
-                key={ag.peerId}
-                onClick={() => selectAgent(ag)}
-                style={{
-                  padding: '10px 12px', marginBottom: 4, borderRadius: 8,
-                  cursor: 'pointer', transition: 'background .12s',
-                  background: isSelected ? 'rgba(74,222,128,.12)' : 'transparent',
-                  border: isSelected ? '1px solid rgba(74,222,128,.25)' : '1px solid transparent',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{
-                    width: 8, height: 8, borderRadius: '50%',
-                    background: ag.connected ? '#4ade80' : '#555',
-                    boxShadow: ag.connected ? '0 0 6px rgba(74,222,128,.4)' : 'none',
-                  }} />
-                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{ag.name}</span>
-                </div>
-                {ag.description && (
-                  <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4, paddingLeft: 16, lineHeight: '1.4' }}>
-                    {ag.description.slice(0, 80)}
-                  </div>
-                )}
-                <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 3, paddingLeft: 16, fontFamily: 'monospace' }}>
-                  {ag.peerId.slice(0, 16)}…
-                  {ag.latencyMs != null && <span style={{ marginLeft: 8 }}>{ag.latencyMs}ms</span>}
-                </div>
+    <div style={{ display: 'grid', gridTemplateColumns: showGraph ? '1fr 1fr' : '1fr', height: '100%', overflow: 'hidden' }}>
+      {/* Chat column */}
+      <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{
+              width: 10, height: 10, borderRadius: '50%',
+              background: statusColor,
+              boxShadow: agentOnline === true ? `0 0 6px ${statusColor}66` : 'none',
+            }} />
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>OpenClaw Agent</div>
+              <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                {reconnectedAt ? 'Reconnected' : statusText}
+                <span style={{
+                  marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 9,
+                  background: reconnectedAt ? 'rgba(34,211,238,.12)' : 'rgba(74,222,128,.12)',
+                  color: reconnectedAt ? '#22d3ee' : 'var(--green)',
+                }}>
+                  {reconnectedAt ? 'synced' : 'DKG UI'}
+                </span>
               </div>
-            );
-          })}
-        </div>
-        <div style={{ padding: '8px 14px', borderTop: '1px solid var(--border)' }}>
+            </div>
+          </div>
           <button
-            onClick={loadAgents}
+            onClick={() => setShowGraph(g => !g)}
+            title={showGraph ? 'Hide graph' : 'Show knowledge graph'}
             style={{
-              width: '100%', padding: '8px', borderRadius: 8, border: '1px solid var(--border)',
-              background: 'transparent', color: 'var(--text-muted)', fontSize: 11,
-              cursor: 'pointer',
+              padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border)',
+              background: showGraph ? 'rgba(74,222,128,.12)' : 'transparent',
+              color: showGraph ? 'var(--green)' : 'var(--text-muted)',
+              fontSize: 11, cursor: 'pointer', fontWeight: 600,
             }}
           >
-            Refresh
+            Graph
+          </button>
+        </div>
+
+        {/* Messages */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px 20px 8px' }}>
+          {!historyLoaded && (
+            <div style={{ textAlign: 'center', color: 'var(--text-dim)', fontSize: 12, padding: 20 }}>
+              Loading history…
+            </div>
+          )}
+          {historyLoaded && messages.length === 0 && (
+            <div style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '40px 20px' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: 12 }}>
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+              </svg>
+              <div style={{ fontSize: 13 }}>Send a message to start chatting with your OpenClaw agent.</div>
+              <div style={{ fontSize: 11, marginTop: 8 }}>
+                Messages and imported memories are persisted to the DKG knowledge graph.
+              </div>
+            </div>
+          )}
+          {messages.map(m => (
+            <div key={m.id} style={{ marginBottom: 16, display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+              <div style={{
+                maxWidth: '75%', padding: '10px 14px', borderRadius: 12,
+                background: m.role === 'user'
+                  ? 'rgba(74,222,128,.15)'
+                  : m.role === 'system'
+                    ? 'rgba(255,255,255,.04)'
+                    : 'rgba(255,255,255,.06)',
+                border: m.role === 'system' ? '1px solid rgba(255,255,255,.08)' : 'none',
+                fontSize: 13, lineHeight: '1.5', whiteSpace: 'pre-wrap',
+                color: m.role === 'system' ? 'var(--text-dim)' : 'var(--text)',
+                fontStyle: m.role === 'system' ? 'italic' : 'normal',
+              }}>
+                {m.content}
+                <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 4 }}>{m.ts}</div>
+              </div>
+            </div>
+          ))}
+          {sending && (
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
+              <div style={{ padding: '10px 14px', borderRadius: 12, background: 'rgba(255,255,255,.06)', fontSize: 13, color: 'var(--text-dim)' }}>
+                Thinking{elapsed > 0 ? `\u2026 ${elapsed}s` : '\u2026'}
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* Input */}
+        <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', display: 'flex', gap: 8 }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder="Message your OpenClaw agent…"
+            disabled={sending || agentOnline === false}
+            style={{
+              flex: 1, padding: '10px 14px', borderRadius: 10,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 13, outline: 'none',
+            }}
+          />
+          <button
+            onClick={send}
+            disabled={sending || !input.trim() || agentOnline === false}
+            style={{
+              padding: '10px 20px', borderRadius: 10, border: 'none',
+              background: sending || !input.trim() || agentOnline === false ? 'rgba(74,222,128,.2)' : 'var(--green)',
+              color: sending || !input.trim() || agentOnline === false ? 'var(--text-dim)' : '#000',
+              fontWeight: 700, fontSize: 12, cursor: sending ? 'wait' : 'pointer',
+            }}
+          >
+            Send
           </button>
         </div>
       </div>
 
-      {/* Chat area */}
-      <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {!selectedAgent ? (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{ textAlign: 'center', color: 'var(--text-dim)' }}>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.3, marginBottom: 12 }}>
-                <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-              </svg>
-              <div style={{ fontSize: 13 }}>Select an OpenClaw agent to chat</div>
-            </div>
-          </div>
-        ) : (
-          <>
-            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{
-                width: 10, height: 10, borderRadius: '50%',
-                background: selectedAgent.connected ? '#4ade80' : '#555',
-              }} />
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700 }}>{selectedAgent.name}</div>
-                <div style={{ fontSize: 10, color: 'var(--text-dim)', fontFamily: 'monospace' }}>{selectedAgent.peerId.slice(0, 24)}…</div>
+      {/* Graph pane */}
+      {showGraph && (
+        <div style={{ display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--border)', overflow: 'hidden' }}>
+          <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'grid', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700 }}>Knowledge Graph</span>
+                {graphTriples && (
+                  <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                    {graphTriples.length} triples
+                  </span>
+                )}
+                <span
+                  className="mono"
+                  style={{
+                    borderRadius: 999,
+                    border: publicationScope === 'enshrined'
+                      ? '1px solid rgba(74,222,128,.3)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? '1px solid rgba(245,158,11,.35)'
+                      : '1px solid var(--border)',
+                    background: publicationScope === 'enshrined'
+                      ? 'rgba(74,222,128,.1)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? 'rgba(245,158,11,.12)'
+                      : 'var(--surface)',
+                    color: publicationScope === 'enshrined'
+                      ? 'var(--green)'
+                      : publicationScope === 'enshrined_with_pending'
+                        ? '#f59e0b'
+                      : 'var(--text-dim)',
+                    padding: '2px 8px',
+                    fontSize: 10,
+                  }}
+                >
+                  {publicationScope === 'enshrined' ? 'enshrined'
+                    : publicationScope === 'enshrined_with_pending' ? 'enshrined + pending'
+                    : publicationScope === 'workspace_only' ? 'workspace only'
+                    : publicationScope ? 'empty' : 'checking...'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  onClick={loadGraph}
+                  disabled={graphLoading}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)',
+                    background: 'transparent', color: 'var(--text-muted)', fontSize: 10,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {graphLoading ? 'Loading…' : 'Refresh'}
+                </button>
+                <button
+                  onClick={() => { void publishSession(); }}
+                  disabled={publishing}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6,
+                    border: '1px solid rgba(74,222,128,.35)',
+                    background: 'rgba(74,222,128,.1)',
+                    color: 'var(--green)',
+                    fontSize: 10,
+                    cursor: publishing ? 'not-allowed' : 'pointer',
+                    opacity: publishing ? 0.65 : 1,
+                  }}
+                >
+                  {publishing ? 'Publishing…' : 'Publish session'}
+                </button>
               </div>
             </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px 20px 8px' }}>
-              {messages.map(m => (
-                <div key={m.id} style={{ marginBottom: 16, display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                  <div style={{
-                    maxWidth: '75%', padding: '10px 14px', borderRadius: 12,
-                    background: m.role === 'user'
-                      ? 'rgba(74,222,128,.15)'
-                      : m.role === 'system'
-                        ? 'rgba(255,255,255,.04)'
-                        : 'rgba(255,255,255,.06)',
-                    border: m.role === 'system' ? '1px solid rgba(255,255,255,.08)' : 'none',
-                    fontSize: 13, lineHeight: '1.5', whiteSpace: 'pre-wrap',
-                    color: m.role === 'system' ? 'var(--text-dim)' : 'var(--text)',
-                    fontStyle: m.role === 'system' ? 'italic' : 'normal',
-                  }}>
-                    {m.content}
-                    <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 4 }}>{m.ts}</div>
-                  </div>
-                </div>
-              ))}
-              {sending && (
-                <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
-                  <div style={{ padding: '10px 14px', borderRadius: 12, background: 'rgba(255,255,255,.06)', fontSize: 13, color: 'var(--text-dim)' }}>
-                    Waiting for response…
-                  </div>
-                </div>
-              )}
-              <div ref={bottomRef} />
-            </div>
-            <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', display: 'flex', gap: 8 }}>
-              <input
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder={`Message ${selectedAgent.name}…`}
-                disabled={sending}
+            {publishNotice && (
+              <div
+                className="mono"
                 style={{
-                  flex: 1, padding: '10px 14px', borderRadius: 10,
-                  border: '1px solid var(--border)', background: 'var(--bg-elevated)',
-                  color: 'var(--text)', fontSize: 13, outline: 'none',
-                }}
-              />
-              <button
-                onClick={send}
-                disabled={sending || !input.trim()}
-                style={{
-                  padding: '10px 20px', borderRadius: 10, border: 'none',
-                  background: sending || !input.trim() ? 'rgba(74,222,128,.2)' : 'var(--green)',
-                  color: sending || !input.trim() ? 'var(--text-dim)' : '#000',
-                  fontWeight: 700, fontSize: 12, cursor: sending ? 'wait' : 'pointer',
+                  fontSize: 10,
+                  color: publishNotice.toLowerCase().includes('failed') ? 'var(--red)' : 'var(--green)',
                 }}
               >
-                Send
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+                {publishNotice}
+              </div>
+            )}
+          </div>
+          <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+            {graphLoading && !graphTriples && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
+                Loading graph…
+              </div>
+            )}
+            {graphTriples && graphTriples.length === 0 && (
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
+                No graph data yet. Send some messages first.
+              </div>
+            )}
+            {graphTriples && graphTriples.length > 0 && (
+              <RdfGraph
+                data={graphTriples}
+                format="triples"
+                options={{
+                  labelMode: 'humanized',
+                  renderer: '2d',
+                  labels: {
+                    predicates: [
+                      'http://schema.org/text',
+                      'http://schema.org/name',
+                      'http://www.w3.org/2000/01/rdf-schema#label',
+                      'http://dkg.io/ontology/sessionId',
+                      'http://dkg.io/ontology/toolName',
+                    ],
+                  },
+                  style: {
+                    classColors: {
+                      'http://schema.org/Conversation': '#4ade80',
+                      'http://schema.org/Message': '#22d3ee',
+                      'http://dkg.io/ontology/ChatTurn': '#38bdf8',
+                      'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
+                      'http://dkg.io/ontology/ImportedMemory': '#a78bfa',
+                      'http://dkg.io/ontology/MemoryImport': '#818cf8',
+                      'http://schema.org/Person': '#f472b6',
+                      'http://schema.org/Organization': '#fb923c',
+                      'http://schema.org/Place': '#34d399',
+                      'http://schema.org/Product': '#c084fc',
+                      'http://schema.org/Event': '#facc15',
+                      'http://schema.org/CreativeWork': '#7dd3fc',
+                    },
+                    defaultNodeColor: '#94a3b8',
+                    defaultEdgeColor: '#5f8598',
+                    edgeWidth: 0.9,
+                  },
+                  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true,
+                    circleTypes: ['http://schema.org/Message'] },
+                  focus: { maxNodes: 5000, hops: 999 },
+                }}
+                style={{ width: '100%', height: '100%' }}
+              />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1038,7 +1435,9 @@ export function AgentHubPage() {
     setSessionsLoading(true);
     try {
       const res = await fetchMemorySessions(50);
-      setSessions(sessionSummariesFromApi(res.sessions ?? []));
+      // Filter out OpenClaw channel sessions — they belong in the OpenClaw tab
+      const filtered = (res.sessions ?? []).filter(s => !s.session?.startsWith('openclaw:'));
+      setSessions(sessionSummariesFromApi(filtered));
     } catch {
       setSessions([]);
     } finally {
@@ -1074,9 +1473,9 @@ export function AgentHubPage() {
         const nextTotalMs = nextLlmMs + nextStoreMs;
         return {
           ...m,
-          persistStatus: (m.persistStatus === 'enshrined' && event.status === 'stored')
-            ? 'enshrined'
-            : event.status,
+          persistStatus: ((m.persistStatus === 'enshrined' && event.status === 'stored')
+            ? 'enshrined' as const
+            : event.status),
           persistError: event.error,
           persistAttempts: event.attempts,
           persistMaxAttempts: event.maxAttempts,
@@ -1204,6 +1603,12 @@ export function AgentHubPage() {
             { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
               ?entity <http://dkg.io/ontology/mentionedIn> ?msg .
               ?entity ?p ?o . BIND(?entity AS ?s) }
+            UNION
+            { ?msg <http://schema.org/isPartOf> <${sessionUri}> .
+              ?srcEntity <http://dkg.io/ontology/mentionedIn> ?msg .
+              ?srcEntity ?rel ?targetEntity .
+              FILTER(STRSTARTS(STR(?targetEntity), "urn:dkg:entity:"))
+              ?targetEntity ?p ?o . BIND(?targetEntity AS ?s) }
             UNION
             { ?memory <http://dkg.io/ontology/extractedFrom> <${sessionUri}> .
               ?memory ?p ?o . BIND(?memory AS ?s) }
@@ -1947,7 +2352,7 @@ export function AgentHubPage() {
           </div>
         )}
         <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-          Publish session enshrines the full conversation graph currently in view. New turns remain in workspace until you publish again.
+          Publish session enshrines the OpenClaw conversation and durable memory graph currently in view. New writes remain in workspace until you publish again.
         </div>
       </div>
 
@@ -1966,7 +2371,7 @@ export function AgentHubPage() {
 
         {!graphLoading && graphTriples && graphTriples.length === 0 && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
-            No triples found for this conversation.
+            No triples found for this OpenClaw memory graph yet.
           </div>
         )}
 
@@ -1992,12 +2397,19 @@ export function AgentHubPage() {
                   'http://schema.org/Message': '#22d3ee',
                   'http://dkg.io/ontology/ToolInvocation': '#f59e0b',
                   'http://dkg.io/ontology/GraphCluster': '#a78bfa',
+                  'http://schema.org/Person': '#f472b6',
+                  'http://schema.org/Organization': '#fb923c',
+                  'http://schema.org/Place': '#34d399',
+                  'http://schema.org/Product': '#c084fc',
+                  'http://schema.org/Event': '#facc15',
+                  'http://schema.org/CreativeWork': '#7dd3fc',
                 },
                 defaultNodeColor: '#94a3b8',
                 defaultEdgeColor: '#5f8598',
                 edgeWidth: 0.9,
               },
-              hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+              hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true,
+                circleTypes: ['http://schema.org/Message'] },
               focus: { maxNodes: 5000, hops: 999 },
             }}
             viewConfig={graphViewConfig}

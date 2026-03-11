@@ -41,6 +41,7 @@ export class Canvas2DRenderer implements RendererBackend {
   private _fadeInDuration = 1500;
   private _animFrameId: number | null = null;
   private _initialFitDone = false;
+  private _autoFitDisabled = false;
   private _lastTopologyKey = '';
   private _continuousSimulation = false;
   private _fitTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -239,7 +240,7 @@ export class Canvas2DRenderer implements RendererBackend {
       .d3VelocityDecay(0.3)
       .warmupTicks(60)
       .onEngineStop(() => {
-        if (!this._initialFitDone && this._graph) {
+        if (!this._autoFitDisabled && !this._initialFitDone && this._graph) {
           this._initialFitDone = true;
           this._graph.zoomToFit(400, 40);
         }
@@ -391,10 +392,10 @@ export class Canvas2DRenderer implements RendererBackend {
     });
 
     // Schedule initial fit independently of engine stop (handles continuous mode too)
-    if (!this._initialFitDone) {
+    if (!this._autoFitDisabled && !this._initialFitDone) {
       if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
       this._fitTimeoutId = setTimeout(() => {
-        if (this._graph && !this._initialFitDone) {
+        if (this._graph && !this._autoFitDisabled && !this._initialFitDone) {
           this._initialFitDone = true;
           this._graph.zoomToFit(400, 40);
         }
@@ -431,6 +432,11 @@ export class Canvas2DRenderer implements RendererBackend {
   /** Fit all nodes in view */
   zoomToFit(padding = 40, durationMs = 500): void {
     this._graph?.zoomToFit(durationMs, padding);
+  }
+
+  /** Prevent the renderer from automatically calling zoomToFit when the simulation settles. */
+  set autoFitDisabled(value: boolean) {
+    this._autoFitDisabled = value;
   }
 
   /** Get the underlying canvas element for export */
@@ -639,10 +645,10 @@ export class Canvas2DRenderer implements RendererBackend {
 
       // render() runs before applyAnimation(), so the fallback in render() may
       // not fire when _continuousSimulation wasn't set yet. Trigger here too.
-      if (!this._initialFitDone) {
+      if (!this._autoFitDisabled && !this._initialFitDone) {
         if (this._fitTimeoutId !== null) clearTimeout(this._fitTimeoutId);
         this._fitTimeoutId = setTimeout(() => {
-          if (this._graph && !this._initialFitDone) {
+          if (this._graph && !this._autoFitDisabled && !this._initialFitDone) {
             this._initialFitDone = true;
             this._graph.zoomToFit(400, 40);
           }

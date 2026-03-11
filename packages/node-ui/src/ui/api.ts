@@ -71,6 +71,12 @@ export interface LlmSettingsResponse {
 export const fetchLlmSettings = () => get<LlmSettingsResponse>('/api/settings/llm');
 export const updateLlmSettings = (data: { apiKey?: string; model?: string; baseURL?: string; clear?: boolean }) =>
   put<LlmSettingsResponse & { ok: boolean }>('/api/settings/llm', data);
+export const fetchRetentionSettings = () => get<{ retentionDays: number }>('/api/settings/retention');
+export const updateRetentionSettings = (retentionDays: number) =>
+  put<{ ok: boolean; retentionDays: number }>('/api/settings/retention', { retentionDays });
+export const fetchTelemetrySettings = () => get<{ enabled: boolean }>('/api/settings/telemetry');
+export const updateTelemetrySettings = (enabled: boolean) =>
+  put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
 export const fetchAgents = () => get<any>('/api/agents');
 
@@ -84,16 +90,46 @@ export const fetchOperations = (params: Record<string, string> = {}) => {
   const qs = new URLSearchParams(params).toString();
   return get<{ operations: any[]; total: number }>(`/api/operations${qs ? '?' + qs : ''}`);
 };
+export const fetchOperationsWithPhases = (params: Record<string, string> = {}) => {
+  const qs = new URLSearchParams({ ...params, phases: '1' }).toString();
+  return get<{ operations: any[]; total: number }>(`/api/operations?${qs}`);
+};
 export const fetchOperation = (id: string) =>
   get<{ operation: any; logs: any[]; phases: any[] }>(`/api/operations/${id}`);
+export const fetchErrorHotspots = (periodMs?: number) => {
+  const qs = periodMs ? `?periodMs=${periodMs}` : '';
+  return get<{ hotspots: Array<{ phase: string; error_count: number; last_error: string | null; last_occurred: number | null }> }>(`/api/error-hotspots${qs}`);
+};
+export const fetchFailedOperations = (params: { phase?: string; operationName?: string; periodMs?: number; q?: string; limit?: number } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.phase) qs.set('phase', params.phase);
+  if (params.operationName) qs.set('operationName', params.operationName);
+  if (params.periodMs) qs.set('periodMs', String(params.periodMs));
+  if (params.q) qs.set('q', params.q);
+  if (params.limit) qs.set('limit', String(params.limit));
+  const q = qs.toString();
+  return get<{ operations: any[] }>(`/api/failed-operations${q ? '?' + q : ''}`);
+};
 
 // --- Operation stats ---
-export const fetchOperationStats = (params: { name?: string; period?: string } = {}) => {
+export const fetchOperationStats = (params: { name?: string; periodMs?: number } = {}) => {
   const qs = new URLSearchParams();
   if (params.name) qs.set('name', params.name);
-  if (params.period) qs.set('period', params.period);
+  if (params.periodMs) qs.set('periodMs', String(params.periodMs));
   const q = qs.toString();
   return get<{ summary: any; timeSeries: any[] }>(`/api/operation-stats${q ? '?' + q : ''}`);
+};
+
+export const fetchSuccessRates = (periodMs: number) =>
+  get<{ rates: Array<{ type: string; total: number; success: number; error: number; rate: number; avgMs: number }> }>(`/api/success-rates?periodMs=${periodMs}`);
+
+export const fetchPerTypeStats = (periodMs: number, bucketMs?: number) => {
+  const qs = `periodMs=${periodMs}${bucketMs ? `&bucketMs=${bucketMs}` : ''}`;
+  return get<{
+    buckets: number[];
+    types: string[];
+    series: Record<string, Array<{ count: number; avgMs: number; successRate: number; gasCostEth: number }>>;
+  }>(`/api/per-type-stats?${qs}`);
 };
 
 // --- Logs ---
@@ -102,8 +138,38 @@ export const fetchLogs = (params: Record<string, string> = {}) => {
   return get<{ logs: any[]; total: number }>(`/api/logs${qs ? '?' + qs : ''}`);
 };
 
+export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
+  const qs = new URLSearchParams();
+  if (params.lines) qs.set('lines', String(params.lines));
+  if (params.q) qs.set('q', params.q);
+  const q = qs.toString();
+  return get<{ lines: string[]; totalSize: number }>(`/api/node-log${q ? '?' + q : ''}`);
+};
+
 // --- Paranets ---
 export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
+
+// --- Catch-up sync jobs ---
+export interface CatchupStatusResponse {
+  jobId: string;
+  paranetId: string;
+  includeWorkspace: boolean;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: {
+    connectedPeers: number;
+    syncCapablePeers: number;
+    peersTried: number;
+    dataSynced: number;
+    workspaceSynced: number;
+  };
+  error?: string;
+}
+
+export const fetchCatchupStatus = (paranetId: string) =>
+  get<CatchupStatusResponse>(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
 
 // --- Query ---
 export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_workspace') =>
@@ -486,6 +552,187 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
     '/api/chat-openclaw',
     { peerId, text },
   );
+
+// --- OpenClaw local channel bridge ---
+
+export async function sendOpenClawLocalChat(
+  text: string,
+  opts?: { correlationId?: string; signal?: AbortSignal },
+): Promise<{ text: string; correlationId: string }> {
+  const body = { text, correlationId: opts?.correlationId ?? crypto.randomUUID() };
+  const res = await fetch('/api/openclaw-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export type OpenClawStreamEvent =
+  | { type: 'text_delta'; delta: string }
+  | { type: 'final'; text: string; correlationId: string }
+  | { type: 'error'; error: string };
+
+/**
+ * SSE streaming variant of sendOpenClawLocalChat.
+ * Yields text deltas as the agent produces them.
+ */
+export async function streamOpenClawLocalChat(
+  text: string,
+  opts: {
+    correlationId?: string;
+    signal?: AbortSignal;
+    onEvent?: (event: OpenClawStreamEvent) => void;
+  } = {},
+): Promise<{ text: string; correlationId: string }> {
+  const body = { text, correlationId: opts.correlationId ?? crypto.randomUUID() };
+  const res = await fetch('/api/openclaw-channel/stream', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+
+  // Fallback: if server didn't return SSE, treat as JSON
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    const data = await res.json() as { text: string; correlationId: string };
+    opts.onEvent?.({ type: 'final', ...data });
+    return data;
+  }
+
+  // Read SSE stream
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalPayload: { text: string; correlationId: string } | undefined;
+  let streamError: Error | undefined;
+
+  const handleEvent = (event: OpenClawStreamEvent): void => {
+    opts.onEvent?.(event);
+    if (event.type === 'error') {
+      streamError = new Error(event.error || 'Stream failed');
+    } else if (event.type === 'final') {
+      finalPayload = { text: event.text, correlationId: event.correlationId };
+    }
+  };
+
+  const processLines = (finalFlush: boolean): void => {
+    let lineEnd = buffer.indexOf('\n');
+    while (lineEnd !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const dataLine = line.slice(5).trim();
+      if (!dataLine) continue;
+      try {
+        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+      } catch { /* ignore malformed frames */ }
+      if (streamError) return;
+    }
+    if (finalFlush && buffer.trim().startsWith('data:')) {
+      const dataLine = buffer.trim().slice(5).trim();
+      if (!dataLine) return;
+      try {
+        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+      } catch { /* ignore malformed frames */ }
+      buffer = '';
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    processLines(false);
+    if (streamError) break;
+  }
+  buffer += decoder.decode();
+  processLines(true);
+
+  if (streamError) throw streamError;
+  if (!finalPayload) throw new Error('Stream ended without final payload');
+  return finalPayload;
+}
+
+export const fetchOpenClawLocalHealth = () =>
+  get<{
+    ok: boolean;
+    target?: 'bridge' | 'gateway';
+    bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
+    gateway?: { ok: boolean; channel?: string; error?: string };
+    error?: string;
+  }>(
+    '/api/openclaw-channel/health',
+  );
+
+/**
+ * Load chat history for the local OpenClaw agent from the DKG graph.
+ * Queries schema:Message items linked to the openclaw:dkg-ui session.
+ */
+export async function fetchOpenClawLocalHistory(limit = 50): Promise<
+  Array<{ uri: string; text: string; author: string; ts: string }>
+> {
+  const sparql = `SELECT ?uri ?text ?author ?ts WHERE {
+      ?uri a <http://schema.org/Message> ;
+           <http://schema.org/isPartOf> <urn:dkg:chat:session:openclaw:dkg-ui> ;
+           <http://schema.org/text> ?text ;
+           <http://schema.org/author> ?author ;
+           <http://schema.org/dateCreated> ?ts .
+    }
+    ORDER BY DESC(?ts)
+    LIMIT ${limit}`;
+  const res = await executeQuery(sparql, 'agent-memory', true);
+  const bindings: any[] = res?.result?.bindings ?? (res as any)?.results?.bindings ?? [];
+  const history = bindings.map((b: any) => ({
+    uri: bv(b.uri) ?? '',
+    text: bv(b.text) ?? '',
+    author: bv(b.author) ?? '',
+    ts: bv(b.ts) ?? '',
+  }));
+  history.reverse();
+  return history;
+}
+
+/** Extract plain string from a SPARQL binding value (standard JSON or N-Triples). */
+function bv(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
+  if (typeof v === 'string') {
+    // N-Triples typed literal: "value"^^<type> or "value"@lang — strip suffix first
+    let s = v;
+    const typedMatch = s.match(/^(".*")\^\^<[^>]+>$/);
+    if (typedMatch) s = typedMatch[1];
+    const langMatch = s.match(/^(".*")@[a-z-]+$/i);
+    if (langMatch) s = langMatch[1];
+    // Strip surrounding quotes
+    if (s.startsWith('"') && s.endsWith('"')) {
+      return s.slice(1, -1)
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t');
+    }
+    return v;
+  }
+  return String(v);
+}
 
 // --- Economics / spending ---
 export interface SpendingPeriod {

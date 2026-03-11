@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult } from '@dkg/chain';
 import type { EventBus, OperationContext } from '@dkg/core';
 import { DKGEvent, Logger, createOperationContext, sha256, MerkleTree, encodeWorkspacePublishRequest, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
-import type { Publisher, PublishOptions, PublishResult, KAManifestEntry } from './publisher.js';
+import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
 import { computeTripleHash, computePublicRoot, computePrivateRoot, computeKARoot, computeKCRoot } from './merkle.js';
@@ -241,7 +241,7 @@ export class DKGPublisher implements Publisher {
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { operationCtx?: OperationContext; clearWorkspaceAfter?: boolean },
+    options?: { operationCtx?: OperationContext; clearWorkspaceAfter?: boolean; onPhase?: PhaseCallback },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
@@ -289,6 +289,7 @@ export class DKGPublisher implements Publisher {
       paranetId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
+      onPhase: options?.onPhase,
     });
 
     if (options?.clearWorkspaceAfter) {
@@ -318,21 +319,24 @@ export class DKGPublisher implements Publisher {
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
 
     onPhase?.('prepare', 'start');
+    onPhase?.('prepare:ensureParanet', 'start');
     this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private (entityProofs=${entityProofs})`);
     await this.graphManager.ensureParanet(paranetId);
+    onPhase?.('prepare:ensureParanet', 'end');
 
+    onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
+    onPhase?.('prepare:partition', 'end');
 
     const manifestEntries: KAManifestEntry[] = [];
     const kaMetadata: KAMetadata[] = [];
 
-    // Step 1: Compute privateMerkleRoot over ALL private triples
+    onPhase?.('prepare:manifest', 'start');
     let privateMerkleRoot: Uint8Array | undefined;
     if (privateQuads.length > 0) {
       privateMerkleRoot = computePrivateRoot(privateQuads);
     }
 
-    // Step 2: Build manifest entries (needed regardless of merkle mode)
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
       const entityPrivateQuads = privateQuads.filter(
@@ -363,13 +367,17 @@ export class DKGPublisher implements Publisher {
     }
 
     const allSkolemizedQuads = [...kaMap.values()].flat();
+    onPhase?.('prepare:manifest', 'end');
+
+    onPhase?.('prepare:validate', 'start');
     const existing = this.ownedEntities.get(paranetId) ?? new Set();
     const validation = validatePublishRequest(allSkolemizedQuads, manifestEntries, paranetId, existing);
     if (!validation.valid) {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
     }
+    onPhase?.('prepare:validate', 'end');
 
-    // Step 3: Compute kcMerkleRoot using the two-level scheme
+    onPhase?.('prepare:merkle', 'start');
     let kcMerkleRoot: Uint8Array;
     const allPublicHashes = allSkolemizedQuads.map(computeTripleHash);
 
@@ -400,6 +408,7 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
     }
     const kaCount = manifestEntries.length;
+    onPhase?.('prepare:merkle', 'end');
 
     onPhase?.('prepare', 'end');
     onPhase?.('store', 'start');
@@ -447,6 +456,7 @@ export class DKGPublisher implements Publisher {
     } else if (identityId === 0n) {
       this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
     } else {
+      onPhase?.('chain:sign', 'start');
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
 
       // Public byte size = length of serialized public N-Quads (must match what receivers sign)
@@ -481,6 +491,8 @@ export class DKGPublisher implements Publisher {
         await this.publisherWallet.signMessage(ethers.getBytes(rcvMsgHash)),
       );
 
+      onPhase?.('chain:sign', 'end');
+      onPhase?.('chain:submit', 'start');
       this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
         onChainResult = await this.chain.publishKnowledgeAssets({
@@ -517,7 +529,7 @@ export class DKGPublisher implements Publisher {
             paranetId,
             merkleRoot: kcMerkleRoot,
             kaCount,
-            publisherPeerId: '',
+            publisherPeerId: options.publisherPeerId ?? 'unknown',
             timestamp: new Date(),
           },
           kaMetadata,
@@ -532,8 +544,11 @@ export class DKGPublisher implements Publisher {
         );
         await this.store.insert(confirmedQuads);
         status = 'confirmed';
+        onPhase?.('chain:submit', 'end');
+        onPhase?.('chain:metadata', 'start');
         this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
       } catch (err) {
+        onPhase?.('chain:submit', 'end');
         this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
@@ -549,7 +564,7 @@ export class DKGPublisher implements Publisher {
           paranetId,
           merkleRoot: kcMerkleRoot,
           kaCount,
-          publisherPeerId: '',
+          publisherPeerId: options.publisherPeerId ?? 'unknown',
           timestamp: new Date(),
         },
         kaMetadata,
@@ -567,6 +582,7 @@ export class DKGPublisher implements Publisher {
         this.ownedEntities.get(paranetId)!.add(e.rootEntity);
       }
       this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
+      onPhase?.('chain:metadata', 'end');
     }
 
     onPhase?.('chain', 'end');
@@ -586,13 +602,17 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(paranetId);
 
-    // Phase 1: compute merkle roots and manifest without mutating the store
+    onPhase?.('prepare', 'start');
+    onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
+    onPhase?.('prepare:partition', 'end');
+
+    onPhase?.('prepare:manifest', 'start');
     const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
     const entityPrivateMap = new Map<string, Quad[]>();
@@ -615,11 +635,16 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: entityPrivateQuads.length,
       });
     }
+    onPhase?.('prepare:manifest', 'end');
 
+    onPhase?.('prepare:merkle', 'start');
     const kcMerkleRoot = computeKCRoot(kaRoots);
     const allSkolemizedQuads = [...kaMap.values()].flat();
+    onPhase?.('prepare:merkle', 'end');
+    onPhase?.('prepare', 'end');
 
-    // Phase 2: submit chain tx — local store is still untouched
+    onPhase?.('chain', 'start');
+    onPhase?.('chain:submit', 'start');
     const txResult = await this.chain.updateKnowledgeAssets({
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
@@ -627,6 +652,8 @@ export class DKGPublisher implements Publisher {
     });
 
     if (!txResult.success) {
+      onPhase?.('chain:submit', 'end');
+      onPhase?.('chain', 'end');
       return {
         kcId,
         ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
@@ -636,8 +663,10 @@ export class DKGPublisher implements Publisher {
         publicQuads: allSkolemizedQuads,
       };
     }
+    onPhase?.('chain:submit', 'end');
+    onPhase?.('chain', 'end');
 
-    // Phase 3: chain succeeded — now apply local mutations
+    onPhase?.('store', 'start');
     for (const [rootEntity, publicQuads] of kaMap) {
       await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
@@ -651,6 +680,7 @@ export class DKGPublisher implements Publisher {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
     }
+    onPhase?.('store', 'end');
 
     const result: PublishResult = {
       kcId,

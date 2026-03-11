@@ -16,6 +16,8 @@ export interface PublishOptions {
   quads: Quad[];
   privateQuads?: Quad[];
   manifest?: KAManifestEntry[];
+  /** Publishing node identity (peerId) for provenance metadata. */
+  publisherPeerId?: string;
   operationCtx?: OperationContext;
   /**
    * When true, triples are grouped by root entity and each group gets its

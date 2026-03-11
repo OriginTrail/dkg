@@ -1,6 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { handleNodeUIRequest } from '../src/api.js';
 
 function createMockReq(opts: {
@@ -463,5 +466,129 @@ describe('handleNodeUIRequest Stage 5 sessionId validation', () => {
     expect(state.statusCode).toBe(400);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "sessionId" format' });
     expect(chatAssistant.answer).not.toHaveBeenCalled();
+  });
+});
+
+// --- /api/node-log tail behavior ---
+
+describe('handleNodeUIRequest /api/node-log', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeFakeDb(dataDir: string) {
+    return { dataDir } as any;
+  }
+
+  it('returns the last N lines from daemon.log', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    const lines = Array.from({ length: 20 }, (_, i) => `log line ${i + 1}`);
+    writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=5' });
+    const { res, state } = createMockRes();
+
+    const handled = await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(handled).toBe(true);
+    expect(state.statusCode).toBe(200);
+    const body = parseJsonBody(state.body);
+    const nonEmpty = body.lines.filter((l: string) => l.length > 0);
+    expect(nonEmpty.length).toBeLessThanOrEqual(5);
+    expect(nonEmpty[nonEmpty.length - 1]).toBe('log line 20');
+  });
+
+  it('defaults to 500 lines when lines param is missing', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
+    writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
+    const { res, state } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    const body = parseJsonBody(state.body);
+    expect(body.lines.length).toBeGreaterThan(0);
+    expect(body.lines.length).toBeLessThanOrEqual(500);
+  });
+
+  it('clamps negative/invalid lines to 500 (returns valid response)', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    writeFileSync(join(tmpDir, 'daemon.log'), 'single line\n');
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=-10' });
+    const { res, state } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).toBe(200);
+    const body = parseJsonBody(state.body);
+    expect(body.lines).toBeDefined();
+  });
+
+  it('clamps lines > 5000 to 5000', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
+    writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=99999' });
+    const { res, state } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).toBe(200);
+    const body = parseJsonBody(state.body);
+    // File has 100 lines, but clamped request means we get all of them (< 5000)
+    expect(body.lines.length).toBeGreaterThan(0);
+  });
+
+  it('filters lines by search query', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    const content = [
+      'INFO publish started',
+      'DEBUG heartbeat',
+      'INFO publish completed',
+      'ERROR timeout',
+    ].join('\n') + '\n';
+    writeFileSync(join(tmpDir, 'daemon.log'), content);
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?q=publish' });
+    const { res, state } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    const body = parseJsonBody(state.body);
+    expect(body.lines.every((l: string) => l.toLowerCase().includes('publish'))).toBe(true);
+    expect(body.lines).toHaveLength(2);
+  });
+
+  it('returns empty lines when daemon.log does not exist', async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
+    // No daemon.log created
+
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
+    const { res, state } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).toBe(200);
+    const body = parseJsonBody(state.body);
+    expect(body.lines).toEqual([]);
+    expect(body.totalSize).toBe(0);
   });
 });

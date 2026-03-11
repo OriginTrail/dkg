@@ -1,78 +1,120 @@
 ---
 name: dkg-node
-description: OriginTrail Decentralized Knowledge Graph (DKG) V9 node — create a verifiable agent identity and passport on the DKG, publish knowledge, run SPARQL queries, discover agents, send encrypted messages, and invoke remote skills over a decentralized P2P network.
+description: DKG V9 for OpenClaw — use verifiable memory tools first for recall and durable storage, then use the embedded DKG node for publishing, querying, discovery, messaging, and remote skill calls.
 ---
 
 # DKG Node Skill
 
-You are connected to the **OriginTrail Decentralized Knowledge Graph (DKG) V9** network as a full P2P node.
+You are connected to the **OriginTrail Decentralized Knowledge Graph (DKG) V9** through the OpenClaw adapter.
 
-## Available Tools
+For OpenClaw, the primary use of this integration is:
+
+1. recall stored memories from the DKG
+2. record new verifiable memories to the DKG
+3. use the embedded DKG node for graph queries, publishing, discovery, and peer-to-peer agent interaction
+
+## Use These First
+
+### `dkg_memory_search`
+Use this first when you need to recall prior facts, preferences, decisions, conversation history, extracted entities, or anything the system may already know.
+
+- `query` (required): natural-language search query
+- `limit` (optional): max results, default `10`
+
+### `dkg_memory_import`
+Use this when the user wants something remembered or when you identify a durable fact, preference, decision, or summary worth storing in the DKG memory graph.
+
+- `text` (required): text to import as memories
+- `source` (optional): one of `claude`, `chatgpt`, `gemini`, `other`
+
+Prefer `dkg_memory_import` over writing memory files when this tool is available.
+
+## Node / Network Tools
 
 ### `dkg_status`
-Check your node status — peer ID, connected peers, and network addresses. Call this first to verify your node is running before using other tools.
+Check node status — peer ID, connected peers, and network addresses. Call this first if you need to verify the node is running or diagnose connectivity/setup issues.
+
+### `dkg_list_paranets`
+List paranets known to the node before publishing or querying paranet-scoped data.
 
 ### `dkg_publish`
-Publish knowledge (RDF triples in N-Quads format) to a DKG paranet.
-- `paranet_id` (required): the paranet to publish to (e.g. `"testing"`, `"my-research"`)
+Publish knowledge as RDF triples in N-Quads format to a DKG paranet.
+
+- `paranet_id` (required): target paranet, for example `"testing"` or `"my-research"`
 - `nquads` (required): N-Quads string, one triple per line
 
-**N-Quads format** — each line is: `<subject> <predicate> <object> .`
+**N-Quads format**
+- each line is `<subject> <predicate> <object> .`
 - URIs go in angle brackets: `<https://example.org/thing>`
-- Literals go in quotes: `"Hello World"`
-- Each line ends with a space and dot: ` .`
+- literals go in quotes: `"Hello World"`
 
 Example:
-```
+```nquads
 <did:dkg:entity:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
 <did:dkg:entity:alice> <https://schema.org/name> "Alice" .
 <did:dkg:entity:alice> <https://schema.org/description> "A researcher on the DKG network" .
 ```
 
 ### `dkg_query`
-Run a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE) against the local knowledge graph.
+Run a read-only SPARQL query (`SELECT`, `CONSTRUCT`, `ASK`, `DESCRIBE`) against the local knowledge graph.
+
 - `sparql` (required): SPARQL query string
-- `paranet_id` (optional): scope to a specific paranet — omit to query all data
+- `paranet_id` (optional): limit query scope to a specific paranet
 
 Example queries:
-- List everything: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20`
-- Named graph aware: `SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }`
-- Filter by type: `SELECT ?s ?name WHERE { ?s a <https://schema.org/Person> . ?s <https://schema.org/name> ?name }`
+- list everything: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20`
+- named-graph aware: `SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }`
+- filter by type: `SELECT ?s ?name WHERE { ?s a <https://schema.org/Person> . ?s <https://schema.org/name> ?name }`
 
 ### `dkg_find_agents`
-Discover other AI agents on the DKG network. Call with no parameters to list all known agents.
-- `framework` (optional): filter by framework (e.g. `"OpenClaw"`, `"ElizaOS"`)
-- `skill_type` (optional): filter by skill type URI (e.g. `"ImageAnalysis"`)
+Discover other DKG agents on the network.
+
+- `framework` (optional): filter by framework such as `"OpenClaw"` or `"ElizaOS"`
+- `skill_type` (optional): filter by skill type URI
 
 ### `dkg_send_message`
-Send an encrypted chat message to another agent. Both agents must be online.
-- `peer_id` (required): recipient's DKG peer ID (starts with `12D3KooW...`)
+Send an encrypted chat message to another DKG agent.
+
+- `peer_id` (required): recipient peer ID, usually starting with `12D3KooW...`
 - `text` (required): message text
 
 Use `dkg_find_agents` first to discover peer IDs.
 
 ### `dkg_invoke_skill`
 Call a remote agent's skill over the DKG network.
-- `peer_id` (required): target agent's peer ID (starts with `12D3KooW...`)
-- `skill_uri` (required): skill URI (e.g. `"ImageAnalysis"`)
+
+- `peer_id` (required): target agent peer ID
+- `skill_uri` (required): skill URI to invoke
 - `input` (required): input data as text
 
-Use `dkg_find_agents` with `skill_type` first to discover which agents offer the skill.
+Use `dkg_find_agents` with `skill_type` first to discover which agents offer the capability.
 
-## Workflow Examples
+## Recommended Workflow
 
-**Publish knowledge, then verify it:**
-1. `dkg_publish` with your N-Quads to the target paranet
-2. `dkg_query` with a SPARQL SELECT to confirm the data is stored
+### Memory recall
+1. Call `dkg_memory_search` before assuming something is unknown.
+2. Use the returned memories to answer, plan, or continue the conversation.
 
-**Find and message another agent:**
-1. `dkg_find_agents` to discover agents (optionally filter by framework)
-2. `dkg_send_message` using the peer ID from the results
+### Memory recording
+1. When the user asks you to remember something, call `dkg_memory_import`.
+2. Store a concise but durable memory, not raw noise.
 
-**Invoke a remote skill:**
-1. `dkg_find_agents` with `skill_type` to find agents offering the capability
-2. `dkg_invoke_skill` with the peer ID, skill URI, and input data
+### Publish and verify
+1. Call `dkg_list_paranets` if you are not sure which paranet to use.
+2. Call `dkg_publish` with N-Quads.
+3. Call `dkg_query` to verify the stored data.
+
+### Find and contact another agent
+1. Call `dkg_find_agents`.
+2. Call `dkg_send_message` or `dkg_invoke_skill` with the discovered peer ID.
+
+## Guidance
+
+- Prefer `dkg_memory_search` for recall and `dkg_memory_import` for durable memory capture.
+- Use `dkg_query` for structured graph inspection and verification.
+- Use `dkg_publish` only when the task is about publishing knowledge to a paranet, not ordinary memory capture.
+- If something seems unavailable, call `dkg_status` before assuming the integration is broken.
 
 ## Identity
 
-Your DKG identity persists across sessions. Your peer ID is your unique identifier on the network.
+Your DKG identity persists across sessions. Your peer ID is your durable identifier on the network.

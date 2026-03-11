@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { useFetch, formatDuration } from '../hooks.js';
+import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, fetchOperation, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { isDevModeEnabled } from './Settings.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
 
@@ -649,6 +650,233 @@ const FALLBACK_PARANETS = [
   { name: 'Supply Chain EU',  assets: 797,  agents: 4,  color: 'var(--amber)' },
 ];
 
+// ── Recent Operations Mini Waterfall ─────────────────────────────────────────
+
+const PHASE_COLORS: Record<string, string> = {
+  prepare: '#3b82f6', 'prepare:ensureParanet': '#60a5fa', 'prepare:partition': '#2563eb',
+  'prepare:manifest': '#93c5fd', 'prepare:validate': '#1d4ed8', 'prepare:merkle': '#7dd3fc',
+  store: '#8b5cf6', chain: '#f59e0b', 'chain:sign': '#fbbf24', 'chain:submit': '#d97706',
+  'chain:metadata': '#f97316', broadcast: '#22c55e', decode: '#14b8a6', validate: '#2dd4bf',
+  'read-workspace': '#06b6d4', parse: '#3b82f6', execute: '#8b5cf6', transfer: '#60a5fa',
+  verify: '#22c55e',
+};
+const PHASE_FALLBACK_COLOR = '#a78bfa';
+
+function DashMiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
+  const [hover, setHover] = useState<number | null>(null);
+  if (!phases?.length || totalMs <= 0) return <div style={{ flex: 1, height: 8, borderRadius: 2, background: 'rgba(255,255,255,.04)' }} />;
+  const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
+  return (
+    <div style={{ flex: 1, position: 'relative' }}>
+      <div style={{ display: 'flex', height: 8, borderRadius: 2, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+        {phases.map((p: any, i: number) => {
+          const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 2);
+          const color = p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+          return (
+            <div
+              key={`${p.phase}-${i}`}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover(null)}
+              style={{ width: `${pct}%`, background: color, minWidth: 2, opacity: hover === i ? 1 : 0.7, transition: 'opacity .15s', cursor: 'default' }}
+            />
+          );
+        })}
+      </div>
+      {hover !== null && phases[hover] && (
+        <div style={{
+          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+          marginBottom: 6, padding: '4px 8px', borderRadius: 6,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+          whiteSpace: 'nowrap', fontSize: 10, zIndex: 10, pointerEvents: 'none',
+        }}>
+          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? PHASE_FALLBACK_COLOR }}>
+            {phases[hover].phase}
+          </span>
+          <span style={{ color: 'var(--text-muted)', margin: '0 4px' }}>·</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
+            {formatDuration(phases[hover].duration_ms)}
+          </span>
+          {phases[hover].status === 'error' && (
+            <span style={{ color: '#ef4444', marginLeft: 4, fontWeight: 600 }}>FAIL</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OpDetailPanel({ operationId }: { operationId: string }) {
+  const { data, loading } = useFetch(() => fetchOperation(operationId), [operationId]);
+  if (loading) return <div style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-dim)' }}>Loading...</div>;
+  if (!data) return null;
+  const { operation: op, phases, logs } = data;
+  if (!op) return null;
+  const recentLogs = (logs ?? []).slice(-5);
+
+  return (
+    <div style={{ padding: '10px 12px', background: 'rgba(255,255,255,.02)', borderTop: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8, fontSize: 11 }}>
+        <span style={{ color: 'var(--text-muted)' }}>Status: <strong style={{ color: op.status === 'error' ? '#ef4444' : '#22c55e' }}>{op.status}</strong></span>
+        <span style={{ color: 'var(--text-muted)' }}>Duration: <strong style={{ fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(op.duration_ms)}</strong></span>
+        {op.error_message && <span style={{ color: '#ef4444', fontSize: 10 }}>{op.error_message}</span>}
+      </div>
+      {phases?.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: recentLogs.length ? 8 : 0 }}>
+          {phases.map((p: any, i: number) => (
+            <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR, flexShrink: 0 }} />
+              <span style={{ color: PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 600, minWidth: 100 }}>{p.phase}</span>
+              <span className="mono" style={{ color: 'var(--text-dim)' }}>{formatDuration(p.duration_ms)}</span>
+              {p.status === 'error' && <span style={{ color: '#ef4444', fontWeight: 600 }}>FAILED</span>}
+            </div>
+          ))}
+        </div>
+      )}
+      {recentLogs.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
+          <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 4, fontWeight: 600 }}>Recent logs</div>
+          {recentLogs.map((l: any, i: number) => (
+            <div key={i} style={{ fontSize: 10, color: l.level === 'error' ? '#ef4444' : l.level === 'warn' ? '#f59e0b' : 'var(--text-muted)', lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              [{l.module}] {l.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecentOpsSection() {
+  const { data } = useFetch(() => fetchOperationsWithPhases({ limit: '8' }), [], 10_000);
+  const navigate = useNavigate();
+  const [selectedOp, setSelectedOp] = useState<string | null>(null);
+  const operations = data?.operations ?? [];
+  const devMode = isDevModeEnabled();
+
+  if (operations.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>Recent Operations</span>
+        {devMode && (
+          <button
+            className="dkg-btn dkg-btn-secondary"
+            style={{ fontSize: 10, padding: '4px 10px' }}
+            onClick={() => navigate('/settings?tab=observability')}
+          >
+            View All
+          </button>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {operations.map((op: any) => {
+          const dur = op.duration_ms ?? 0;
+          const isError = op.status === 'error';
+          const phases = op.phases ?? [];
+          const isSelected = selectedOp === op.operation_id;
+
+          return (
+            <React.Fragment key={op.operation_id}>
+              <div
+                onClick={() => setSelectedOp(isSelected ? null : op.operation_id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+                  borderRadius: isSelected ? '8px 8px 0 0' : 8,
+                  background: isSelected ? 'rgba(59,130,246,.06)' : 'var(--surface)',
+                  border: '1px solid var(--border)',
+                  borderBottom: isSelected ? '1px solid var(--border)' : undefined,
+                  cursor: 'pointer', transition: 'border-color .15s, background .15s',
+                }}
+                onMouseEnter={e => { if (!isSelected) e.currentTarget.style.borderColor = 'rgba(74,222,128,.3)'; }}
+                onMouseLeave={e => { if (!isSelected) e.currentTarget.style.borderColor = 'var(--border)'; }}
+              >
+                <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', width: 50, flexShrink: 0 }}>
+                  {new Date(op.started_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                </span>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, width: 60, flexShrink: 0,
+                  color: isError ? '#ef4444' : '#22c55e',
+                }}>
+                  {op.operation_name}
+                </span>
+                <DashMiniGantt phases={phases} totalMs={dur} />
+                <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)', width: 50, textAlign: 'right', flexShrink: 0 }}>
+                  {formatDuration(dur)}
+                </span>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: isError ? '#ef4444' : op.status === 'in_progress' ? '#f59e0b' : '#22c55e', flexShrink: 0 }} />
+              </div>
+              {isSelected && (
+                <div style={{ border: '1px solid var(--border)', borderTop: 'none', borderRadius: '0 0 8px 8px', overflow: 'hidden', marginTop: -4 }}>
+                  <OpDetailPanel operationId={op.operation_id} />
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ErrorHotspotsCard() {
+  const { data } = useFetch(() => fetchErrorHotspots(7 * 86_400_000), [], 30_000);
+  const hotspots = (data?.hotspots ?? []).slice(0, 5);
+
+  if (hotspots.length === 0) {
+    return (
+      <div className="paranet-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
+        <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>No errors in 7 days</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="paranet-card" style={{ padding: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red, #ef4444)', marginBottom: 6 }}>Error Hotspots (7d)</div>
+      {hotspots.map((h: any, i: number) => (
+        <div key={`${h.operation_name}-${h.phase}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', color: 'var(--text-muted)' }}>
+          <span>
+            <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>{h.operation_name}</span>
+            <span style={{ color: 'var(--text-dim)', margin: '0 4px' }}>&rsaquo;</span>
+            <span style={{ color: PHASE_COLORS[h.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 500 }}>{h.phase}</span>
+          </span>
+          <span style={{ color: '#ef4444', fontWeight: 700 }}>{h.error_count}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SpendingCard() {
+  const { data } = useFetch(fetchEconomics, [], 60_000);
+  const periods = (data as any)?.periods ?? [];
+  const latest = periods[0];
+
+  if (!latest) return null;
+
+  return (
+    <div className="paranet-card" style={{ padding: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 6 }}>Spending ({latest.label})</div>
+      <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalGasEth?.toFixed(6) ?? '0'}</div>
+          <div>ETH gas</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalTrac?.toFixed(2) ?? '0'}</div>
+          <div>TRAC</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.publishCount ?? 0}</div>
+          <div>publishes</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export function DashboardPage() {
@@ -751,6 +979,15 @@ export function DashboardPage() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Recent operations waterfall */}
+      <RecentOpsSection />
+
+      {/* Health + Spending cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <ErrorHotspotsCard />
+        <SpendingCard />
       </div>
 
       {/* Quick actions */}

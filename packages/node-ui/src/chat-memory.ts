@@ -91,6 +91,7 @@ export interface ImportResult {
 }
 
 const MEMORY_PARANET = 'agent-memory';
+const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
 const MEMORY_NS = 'urn:dkg:memory:';
@@ -98,6 +99,7 @@ const SCHEMA = 'http://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
 
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
@@ -124,18 +126,33 @@ function isSafeIri(value: string): boolean {
 }
 
 function buildSessionRootPattern(sessionUri: string): string {
-  return `{
-    { <${sessionUri}> ?sessionP ?sessionO . BIND(<${sessionUri}> AS ?s) }
-    UNION { ?s <${SCHEMA}isPartOf> <${sessionUri}> }
-    UNION {
+  const clauses = [
+    `{ <${sessionUri}> ?sessionP ?sessionO . BIND(<${sessionUri}> AS ?s) }`,
+    `{ ?s <${SCHEMA}isPartOf> <${sessionUri}> }`,
+    `{
       ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
       ?msg <${DKG_ONT}usedTool> ?s .
-    }
-    UNION {
+    }`,
+    `{
       ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
       ?s <${DKG_ONT}mentionedIn> ?msg .
-    }
-    UNION { ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }
+    }`,
+    `{ ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }`,
+  ];
+
+  if (sessionUri === OPENCLAW_LOCAL_SESSION_URI) {
+    clauses.push(
+      `{ ?s <${RDF_TYPE}> <${DKG_ONT}ImportedMemory> }`,
+      `{ ?s <${RDF_TYPE}> <${DKG_ONT}MemoryImport> }`,
+      `{
+      ?s <${DKG_ONT}extractedFrom> ?batch .
+      ?batch <${RDF_TYPE}> <${DKG_ONT}MemoryImport> .
+      }`,
+    );
+  }
+
+  return `{
+    ${clauses.join('\n    UNION ')}
   }`;
 }
 
@@ -1146,23 +1163,22 @@ export class ChatMemoryManager {
   private async parseMemoriesWithLlm(
     rawText: string,
   ): Promise<Array<{ text: string; category: string }>> {
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     if (!apiKey) return this.parseMemoriesHeuristic(rawText);
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
     try {
+      const body: Record<string, unknown> = {
+        model,
+        messages: [
+          { role: 'system', content: MEMORY_PARSE_PROMPT },
+          { role: 'user', content: rawText },
+        ],
+      };
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: MEMORY_PARSE_PROMPT },
-            { role: 'user', content: rawText },
-          ],
-          temperature: 0,
-          max_tokens: 4096,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) return this.parseMemoriesHeuristic(rawText);
       const data = (await res.json()) as any;
@@ -1208,21 +1224,20 @@ export class ChatMemoryManager {
   ): Promise<{ entityCount: number; tripleCount: number; quads: Array<{ subject: string; predicate: string; object: string }> }> {
     const empty = { entityCount: 0, tripleCount: 0, quads: [] };
     const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
-    const { apiKey, model = 'gpt-4o-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
+    const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
 
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: MEMORY_KG_PROMPT },
+        { role: 'user', content: combined },
+      ],
+    };
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: MEMORY_KG_PROMPT },
-          { role: 'user', content: combined },
-        ],
-        temperature: 0.1,
-        max_tokens: 2048,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) return empty;

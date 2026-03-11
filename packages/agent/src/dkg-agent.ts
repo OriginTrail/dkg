@@ -564,6 +564,7 @@ export class DKGAgent {
   async syncFromPeer(
     remotePeerId: string,
     paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncParanets ?? [])],
+    onPhase?: PhaseCallback,
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
@@ -578,6 +579,7 @@ export class DKGAgent {
         let offset = 0;
         this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
 
+        onPhase?.('fetch', 'start');
         // eslint-disable-next-line no-constant-condition
         while (true) {
           if (Date.now() > deadline) {
@@ -610,15 +612,19 @@ export class DKGAgent {
           this.log.info(ctx, `  page: ${quads.length} triples received (${allQuads.length} total)`);
           if (dataCount < SYNC_PAGE_SIZE) break;
         }
+        onPhase?.('fetch', 'end');
 
         if (allQuads.length === 0) continue;
 
+        onPhase?.('verify', 'start');
         const dataQuads = allQuads.filter(q => q.graph === dataGraph);
         const metaQuads = allQuads.filter(q => q.graph === metaGraph);
 
         const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
         const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
+        onPhase?.('verify', 'end');
 
+        onPhase?.('store', 'start');
         if (verified.data.length > 0) {
           await this.store.insert(verified.data);
           totalSynced += verified.data.length;
@@ -627,6 +633,7 @@ export class DKGAgent {
           await this.store.insert(verified.meta);
           totalSynced += verified.meta.length;
         }
+        onPhase?.('store', 'end');
 
         if (verified.rejected > 0) {
           this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
@@ -789,6 +796,68 @@ export class DKGAgent {
       this.log.warn(ctx, `Workspace sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
+  }
+
+  /**
+   * Catch up a single paranet from currently connected peers that advertise
+   * the sync protocol. Useful after runtime subscribe so historical data is
+   * backfilled immediately (not only future gossip messages).
+   */
+  async syncParanetFromConnectedPeers(
+    paranetId: string,
+    options?: { includeWorkspace?: boolean },
+  ): Promise<{
+    connectedPeers: number;
+    syncCapablePeers: number;
+    peersTried: number;
+    dataSynced: number;
+    workspaceSynced: number;
+  }> {
+    const ctx = createOperationContext('sync');
+    const includeWorkspace = options?.includeWorkspace ?? false;
+
+    // Keep runtime sync scope up to date so future peer:connect syncs include this paranet.
+    this.trackSyncParanet(paranetId);
+
+    const peers = [...new Map(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    let syncCapablePeers = 0;
+    let peersTried = 0;
+    let dataSynced = 0;
+    let workspaceSynced = 0;
+
+    for (const pid of peers) {
+      let hasSync = false;
+      try {
+        const peer = await this.node.libp2p.peerStore.get(pid);
+        hasSync = peer.protocols.includes(PROTOCOL_SYNC);
+      } catch {
+        // Peer metadata might not be available yet; skip silently.
+      }
+      if (!hasSync) continue;
+
+      syncCapablePeers++;
+      peersTried++;
+      const remotePeerId = pid.toString();
+      dataSynced += await this.syncFromPeer(remotePeerId, [paranetId]);
+      if (includeWorkspace) {
+        workspaceSynced += await this.syncWorkspaceFromPeer(remotePeerId, [paranetId]);
+      }
+    }
+
+    this.log.info(
+      ctx,
+      `Catch-up sync for "${paranetId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} workspace=${workspaceSynced}`,
+    );
+
+    return {
+      connectedPeers: peers.length,
+      syncCapablePeers,
+      peersTried,
+      dataSynced,
+      workspaceSynced,
+    };
   }
 
   /**
@@ -993,9 +1062,9 @@ export class DKGAgent {
     paranetId: string,
     quads: Quad[],
     privateQuads?: Quad[],
-    opts?: { onPhase?: PhaseCallback },
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
-    const ctx = createOperationContext('publish');
+    const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting publish to paranet "${paranetId}" with ${quads.length} triples`);
 
@@ -1008,7 +1077,14 @@ export class DKGAgent {
         );
       }
     }
-    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
+    const result = await this.publisher.publish({
+      paranetId,
+      quads,
+      privateQuads,
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      onPhase,
+    });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(paranetId, result, ctx);
@@ -1017,12 +1093,24 @@ export class DKGAgent {
     return result;
   }
 
-  async update(kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[]): Promise<PublishResult> {
-    const ctx = createOperationContext('publish');
+  async update(
+    kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[],
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+  ): Promise<PublishResult> {
+    const ctx = opts?.operationCtx ?? createOperationContext('update');
+    const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
-    const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx });
+    const result = await this.publisher.update(kcId, {
+      paranetId,
+      quads,
+      privateQuads,
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      onPhase,
+    });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
+    onPhase?.('broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
         const dataGraph = `did:dkg:paranet:${paranetId}`;
@@ -1053,6 +1141,7 @@ export class DKGAgent {
         this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    onPhase?.('broadcast', 'end');
 
     return result;
   }
@@ -1062,8 +1151,8 @@ export class DKGAgent {
    * When localOnly is false (default), replicates via GossipSub workspace topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean }): Promise<{ workspaceOperationId: string }> {
-    const ctx = createOperationContext('workspace');
+  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ workspaceOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
@@ -1086,20 +1175,21 @@ export class DKGAgent {
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { clearWorkspaceAfter?: boolean },
+    options?: { clearWorkspaceAfter?: boolean; operationCtx?: OperationContext; onPhase?: PhaseCallback },
   ): Promise<PublishResult> {
     return this.publisher.enshrineFromWorkspace(paranetId, selection, {
-      operationCtx: createOperationContext('enshrine'),
+      operationCtx: options?.operationCtx ?? createOperationContext('enshrine'),
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
+      onPhase: options?.onPhase,
     });
   }
 
   async query(
     sparql: string,
-    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean },
+    options?: string | { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean; operationCtx?: OperationContext },
   ) {
     const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
-    const ctx = createOperationContext('query');
+    const ctx = opts.operationCtx ?? createOperationContext('query');
     this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.paranetId,
@@ -1189,7 +1279,11 @@ export class DKGAgent {
     });
   }
 
-  subscribeToParanet(paranetId: string): void {
+  subscribeToParanet(paranetId: string, options?: { trackSyncScope?: boolean }): void {
+    if (options?.trackSyncScope !== false) {
+      this.trackSyncParanet(paranetId);
+    }
+
     // Idempotent: skip if gossip handlers already installed for this paranet
     if (this.gossipRegistered.has(paranetId)) {
       const existing = this.subscribedParanets.get(paranetId);
@@ -1229,6 +1323,20 @@ export class DKGAgent {
     });
   }
 
+  /**
+   * Add a paranet to runtime sync scope so sync-on-connect includes it.
+   * System paranets are already included by default and are skipped here.
+   */
+  private trackSyncParanet(paranetId: string): void {
+    const systemParanets = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
+    if (systemParanets.has(paranetId)) return;
+
+    const syncSet = new Set<string>(this.config.syncParanets ?? []);
+    if (syncSet.has(paranetId)) return;
+    syncSet.add(paranetId);
+    this.config.syncParanets = [...syncSet];
+  }
+
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {
     if (!this.gossipPublishHandler) {
       this.gossipPublishHandler = new GossipPublishHandler(
@@ -1237,7 +1345,7 @@ export class DKGAgent {
         this.subscribedParanets,
         {
           paranetExists: (id) => this.paranetExists(id),
-          subscribeToParanet: (id) => this.subscribeToParanet(id),
+          subscribeToParanet: (id, options) => this.subscribeToParanet(id, options),
         },
       );
     }
@@ -1751,7 +1859,7 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToParanet(id);
+        this.subscribeToParanet(id, { trackSyncScope: false });
       }
 
       this.log.info(ctx, `Discovered paranet "${name}" (${id}) from store — auto-subscribed`);
@@ -1810,7 +1918,7 @@ export class DKGAgent {
         synced: false,
         onChainId: p.paranetId,
       });
-      this.subscribeToParanet(p.name);
+      this.subscribeToParanet(p.name, { trackSyncScope: false });
       this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }
