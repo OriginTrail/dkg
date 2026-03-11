@@ -100,9 +100,10 @@ export const fetchErrorHotspots = (periodMs?: number) => {
   const qs = periodMs ? `?periodMs=${periodMs}` : '';
   return get<{ hotspots: Array<{ phase: string; error_count: number; last_error: string | null; last_occurred: number | null }> }>(`/api/error-hotspots${qs}`);
 };
-export const fetchFailedOperations = (params: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}) => {
+export const fetchFailedOperations = (params: { phase?: string; operationName?: string; periodMs?: number; q?: string; limit?: number } = {}) => {
   const qs = new URLSearchParams();
   if (params.phase) qs.set('phase', params.phase);
+  if (params.operationName) qs.set('operationName', params.operationName);
   if (params.periodMs) qs.set('periodMs', String(params.periodMs));
   if (params.q) qs.set('q', params.q);
   if (params.limit) qs.set('limit', String(params.limit));

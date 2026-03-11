@@ -429,7 +429,7 @@ export class DashboardDB {
     `).all(cutoff, cutoff) as any[];
   }
 
-  getFailedOperations(opts: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}): {
+  getFailedOperations(opts: { phase?: string; operationName?: string; periodMs?: number; q?: string; limit?: number } = {}): {
     operations: Array<OperationRow & { phase: string; phase_error: string | null; phase_started_at: number; logs: LogRow[] }>;
   } {
     const cutoff = Date.now() - (opts.periodMs ?? 7 * 86_400_000);
@@ -441,6 +441,10 @@ export class DashboardDB {
     if (opts.phase) {
       where += ' AND p.phase = ?';
       params.push(opts.phase);
+    }
+    if (opts.operationName) {
+      where += ' AND o.operation_name = ?';
+      params.push(opts.operationName);
     }
     if (opts.q) {
       where += ' AND (p.details LIKE ? OR o.operation_id LIKE ? OR o.error_message LIKE ?)';

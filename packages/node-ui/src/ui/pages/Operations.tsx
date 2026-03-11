@@ -178,9 +178,9 @@ function HealthTab() {
   const { data } = useFetch(() => fetchErrorHotspots(periodMs), [periodMs], 15_000);
   const hotspots = data?.hotspots ?? [];
 
-  const expandedHotspot = expandedPhase ? hotspots.find((_: any, i: number) => `${_.operation_name}-${_.phase}-${i}` === expandedPhase) : null;
+  const expandedHotspot = expandedPhase ? hotspots.find((_: any) => `${_.operation_name}-${_.phase}` === expandedPhase) : null;
   const { data: failedData } = useFetch(
-    () => expandedHotspot ? fetchFailedOperations({ phase: expandedHotspot.phase, periodMs, q: search || undefined }) : Promise.resolve(null),
+    () => expandedHotspot ? fetchFailedOperations({ phase: expandedHotspot.phase, operationName: expandedHotspot.operation_name, periodMs, q: search || undefined }) : Promise.resolve(null),
     [expandedPhase, periodMs, search],
     10_000,
   );
@@ -212,8 +212,8 @@ function HealthTab() {
               <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last Error</th><th>Last Occurred</th></tr>
             </thead>
             <tbody>
-              {hotspots.map((h: any, idx: number) => {
-                const rowKey = `${h.operation_name}-${h.phase}-${idx}`;
+              {hotspots.map((h: any) => {
+                const rowKey = `${h.operation_name}-${h.phase}`;
                 return (
                 <React.Fragment key={rowKey}>
                   <tr

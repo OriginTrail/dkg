@@ -190,10 +190,11 @@ export async function handleNodeUIRequest(
 
   if (req.method === 'GET' && path === '/api/failed-operations') {
     const phase = url.searchParams.get('phase') ?? undefined;
+    const operationName = url.searchParams.get('operationName') ?? undefined;
     const periodMs = parseInt(url.searchParams.get('periodMs') ?? String(7 * 86_400_000), 10);
     const q = url.searchParams.get('q') ?? undefined;
     const limit = parseInt(url.searchParams.get('limit') ?? '50', 10);
-    const result = db.getFailedOperations({ phase, periodMs, q, limit });
+    const result = db.getFailedOperations({ phase, operationName, periodMs, q, limit });
     return json(res, 200, result);
   }
 
