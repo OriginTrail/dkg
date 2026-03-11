@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 
 const root = createRoot(document.getElementById('root')!);
-const fallbackTimer = setTimeout(() => root.render(<App />), 2000);
+const fallbackTimer = setTimeout(() => root.render(<App key="no-token" />), 2000);
 
 window.addEventListener('message', (e) => {
   if (e.data?.type === 'dkg-nonce' && typeof e.data.nonce === 'string') {
@@ -14,11 +14,11 @@ window.addEventListener('message', (e) => {
       (window as any).__DKG_API_ORIGIN__ = e.data.apiOrigin;
     }
     clearTimeout(fallbackTimer);
-    root.render(<App />);
+    root.render(<App key="authenticated" />);
   }
 });
 
 if ((window as any).__DKG_TOKEN__) {
   clearTimeout(fallbackTimer);
-  root.render(<App />);
+  root.render(<App key="authenticated" />);
 }

@@ -232,7 +232,7 @@ function GraphTab() {
     () => JSON.stringify(
       (paranetData?.paranets ?? [])
         .map((p: any) => ({ id: p.id, uri: p.uri, name: p.name }))
-        .sort((a: any, b: any) => (a.id > b.id ? 1 : -1)),
+        .sort((a: any, b: any) => String(a.id).localeCompare(String(b.id))),
     ),
     [paranetData],
   );

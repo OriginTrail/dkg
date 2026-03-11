@@ -138,9 +138,14 @@ export function RdfGraph({
       }
     };
 
-    loadData().catch((err) => {
+    loadData().then(() => {
+      if (viz && options.autoFitDisabled) {
+        setTimeout(() => viz.zoomToFit(), 300);
+      }
+    }).catch((err) => {
       console.error('[RdfGraph] Error loading data:', err);
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, format, viewConfig]);
 
   // Apply view config changes independently (when data hasn't changed)

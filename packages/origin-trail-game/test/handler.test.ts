@@ -2217,8 +2217,7 @@ describe('V5: Strategy patterns published when game finishes', () => {
       try {
         await coordinator.castVote(swarm.id, action);
       } catch (err: any) {
-        expect(err.message).toMatch(/eliminated|cannot vote/i);
-        swarm.votes.push({ peerId: leaderPeerId, action, turn: swarm.currentTurn, timestamp: Date.now() });
+        if (!/eliminated|cannot vote/i.test(err.message)) throw err;
       }
       await new Promise(r => setTimeout(r, 5));
       if (swarm.status !== 'traveling') break;
