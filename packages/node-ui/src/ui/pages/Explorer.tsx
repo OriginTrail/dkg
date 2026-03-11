@@ -571,6 +571,7 @@ function GraphTab() {
               <RdfGraph
                 data={triples}
                 format="triples"
+                initialFit
                 options={{
                   labelMode: 'humanized',
                   renderer: '2d',

@@ -26,6 +26,8 @@ export interface RdfGraphProps {
   className?: string;
   /** Inline styles for the container div */
   style?: React.CSSProperties;
+  /** Run a single zoomToFit after the first data load (does not affect autoFitDisabled) */
+  initialFit?: boolean;
   /** Child components (can use useRdfGraph hook to access viz instance) */
   children?: ReactNode;
 }
@@ -52,6 +54,7 @@ export function RdfGraph({
   format = 'ntriples',
   options = {},
   viewConfig,
+  initialFit,
   onNodeClick,
   onNodeHover,
   onNodeUnhover,
@@ -139,17 +142,19 @@ export function RdfGraph({
       }
     };
 
+    let cancelled = false;
     let fitTimer: ReturnType<typeof setTimeout> | undefined;
     loadData().then(() => {
-      if (viz && options.autoFitDisabled && !initialFitDoneRef.current) {
+      if (cancelled) return;
+      if (viz && initialFit && !initialFitDoneRef.current) {
         initialFitDoneRef.current = true;
-        fitTimer = setTimeout(() => viz.zoomToFit(), 300);
+        fitTimer = setTimeout(() => { if (!cancelled) viz.zoomToFit(); }, 300);
       }
     }).catch((err) => {
-      console.error('[RdfGraph] Error loading data:', err);
+      if (!cancelled) console.error('[RdfGraph] Error loading data:', err);
     });
 
-    return () => { if (fitTimer) clearTimeout(fitTimer); };
+    return () => { cancelled = true; if (fitTimer) clearTimeout(fitTimer); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, format, viewConfig]);
 
