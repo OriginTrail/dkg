@@ -704,7 +704,12 @@ function mergeOcMessages(existing: OcMessage[], incoming: OcMessage[]): OcMessag
   const seen = new Set<string>();
   const merged: OcMessage[] = [];
   for (const message of [...incoming, ...existing]) {
-    const dedupeKey = `${message.role}\u0000${message.ts}\u0000${message.content}`;
+    // Prefer stable URI/turnId for dedup; fall back to content-based key
+    const id = String(message.id);
+    const hasStableId = id && !id.startsWith('oc-') && !/^\d+$/.test(id);
+    const dedupeKey = hasStableId
+      ? id
+      : `${message.role}\u0000${message.ts}\u0000${message.content}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     merged.push(message);

@@ -606,6 +606,7 @@ export class DkgChannelPlugin {
       .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
 
     // Yield events as they arrive
+    let completed = false;
     try {
       while (true) {
         while (queue.length === 0) await waitForItem();
@@ -613,6 +614,7 @@ export class DkgChannelPlugin {
         if (item.type === 'text_delta') {
           yield item;
         } else if (item.type === 'done') {
+          completed = true;
           break;
         } else if (item.type === 'error') {
           clearTimeout(timer);
@@ -622,15 +624,21 @@ export class DkgChannelPlugin {
     } finally {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
+
+      // Persist turn even if the consumer cancelled early — use accumulated text
+      if (replyText) {
+        const finalText = replyText || '(no response)';
+        this.persistTurn(text, finalText, correlationId).catch(err => {
+          log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
+        });
+      }
     }
 
-    const finalText = replyText || '(no response)';
-    yield { type: 'final', text: finalText, correlationId };
-
-    // Fire-and-forget: persist turn to DKG graph
-    this.persistTurn(text, finalText, correlationId).catch(err => {
-      log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-    });
+    // Only yield final if the stream completed normally (not cancelled)
+    if (completed) {
+      const finalText = replyText || '(no response)';
+      yield { type: 'final', text: finalText, correlationId };
+    }
   }
 
   // ---------------------------------------------------------------------------

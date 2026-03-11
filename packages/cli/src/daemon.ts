@@ -528,7 +528,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
   const authEnabled = config.auth?.enabled !== false;
   const validTokens = await loadTokens(config.auth);
-  const bridgeAuthToken = await loadBridgeAuthToken();
+  const bridgeAuthToken = await loadBridgeAuthToken()
+    ?? (validTokens.size > 0 ? (validTokens.values().next().value as string) : undefined);
   if (authEnabled) {
     log(`API authentication enabled (${validTokens.size} token${validTokens.size !== 1 ? 's' : ''} loaded)`);
     log(`Token file: ${join(dkgDir(), 'auth.token')}`);

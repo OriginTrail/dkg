@@ -31,6 +31,8 @@ export class WriteCapture {
   private readonly syncedMtimes = new Map<string, number>();
   /** Track previous file content for delta computation. */
   private readonly syncedContents = new Map<string, string>();
+  /** Guard against concurrent startWatchers calls. */
+  private startingWatchers: Promise<void> | null = null;
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -154,12 +156,14 @@ export class WriteCapture {
 
   /** Exposed for DkgNodePlugin to call if memoryDir wasn't available at register time. */
   startFileWatcher(memoryDir?: string): void {
-    // If watchers already running, skip
-    if (this.watchers.length > 0) return;
+    // If watchers already running or currently starting, skip
+    if (this.watchers.length > 0 || this.startingWatchers) return;
     if (memoryDir) {
       this.memoryDir = memoryDir;
     }
-    void this.startWatchers();
+    this.startingWatchers = this.startWatchers().finally(() => {
+      this.startingWatchers = null;
+    });
   }
 
   private debouncedSync(fullPath: string): void {

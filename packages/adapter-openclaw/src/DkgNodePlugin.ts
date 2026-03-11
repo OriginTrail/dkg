@@ -36,6 +36,8 @@ export class DkgNodePlugin {
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private writeCapture: WriteCapture | null = null;
+  /** Guard: backlog import runs at most once per plugin lifecycle. */
+  private backlogImportDone: Promise<void> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = {
@@ -101,9 +103,11 @@ export class DkgNodePlugin {
       api.registerHook('session_start', async () => {
         this.writeCapture?.startFileWatcher(memoryDir);
 
-        // Fire-and-forget: backlog import on first-ever install
-        this.runBacklogImportIfNeeded(api, this.client!, effectiveConfig)
-          .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
+        // Fire-and-forget: backlog import on first-ever install (runs at most once)
+        if (!this.backlogImportDone) {
+          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client!, effectiveConfig)
+            .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
+        }
       }, { name: 'dkg-write-watcher-start' });
 
       api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
