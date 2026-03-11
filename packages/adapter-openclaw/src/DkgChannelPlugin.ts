@@ -45,6 +45,8 @@ export class DkgChannelPlugin {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly port: number;
   private useGatewayRoute = false;
+  private inFlight = 0;
+  private readonly maxInFlight = 3;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -432,6 +434,138 @@ export class DkgChannelPlugin {
   }
 
   // ---------------------------------------------------------------------------
+  // Streaming dispatch — yields chunks as they arrive from the agent
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Stream variant of processInbound. Yields events as the agent produces them.
+   * The caller is responsible for writing SSE frames and calling persistTurn after.
+   */
+  async *processInboundStream(
+    text: string,
+    correlationId: string,
+    identity: string,
+  ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
+    if (!this.api || !this.runtime) throw new Error('Channel not registered');
+
+    const log = this.api.logger;
+    const runtime = this.runtime;
+    const cfg = this.cfg;
+    const sdk = this.loadSdk();
+
+    // Resolve route + build context (same as processInbound)
+    const route = runtime.channel.routing.resolveAgentRoute({
+      cfg, channel: CHANNEL_NAME, accountId: 'default',
+      peer: { kind: 'direct', id: identity || 'owner' },
+    });
+    const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
+    const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
+    const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
+      storePath, sessionKey: route.sessionKey,
+    });
+    const formattedBody = runtime.channel.reply.formatAgentEnvelope({
+      channel: 'DKG UI', from: identity || 'Owner', body: text,
+      timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
+    });
+    const ctxPayload = {
+      Body: formattedBody, BodyForAgent: text, RawBody: text,
+      CommandBody: text, BodyForCommands: text,
+      From: identity || 'Owner', To: route.agentId,
+      SessionKey: route.sessionKey, AccountId: 'default',
+      Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
+      CommandAuthorized: true, SenderId: identity || 'owner',
+      SenderName: identity || 'Owner', Timestamp: Date.now(),
+      ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+    };
+
+    // Push-based async queue: deliver() pushes, generator yields
+    const queue: Array<{ type: 'text_delta'; delta: string } | { type: 'done' } | { type: 'error'; error: Error }> = [];
+    let resolve: (() => void) | null = null;
+    const waitForItem = () => new Promise<void>(r => { resolve = r; });
+    const push = (item: typeof queue[0]) => {
+      queue.push(item);
+      if (resolve) { const r = resolve; resolve = null; r(); }
+    };
+
+    const TIMEOUT_MS = 120_000;
+    const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
+
+    const replyChunks: string[] = [];
+    const deliver = async (payload: any) => {
+      const t = payload?.text;
+      if (t) {
+        replyChunks.push(t);
+        push({ type: 'text_delta', delta: t });
+      }
+    };
+
+    // Start dispatch (fire-and-forget — chunks come via deliver callback)
+    const dispatchFn = sdk?.dispatchInboundReplyWithBase
+      ? () => sdk.dispatchInboundReplyWithBase({
+          cfg, channel: CHANNEL_NAME,
+          route: { agentId: route.agentId, sessionKey: route.sessionKey },
+          storePath, ctxPayload,
+          core: {
+            channel: {
+              session: { recordInboundSession: runtime.channel.session.recordInboundSession },
+              reply: { dispatchReplyWithBufferedBlockDispatcher: runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher },
+            },
+          },
+          deliver,
+          onRecordError: (err: any) => log.warn?.(`[dkg-channel] Session record error: ${err}`),
+          onDispatchError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
+        })
+      : () => {
+          try {
+            runtime.channel.session.recordInboundSession({
+              storePath, sessionKey: route.sessionKey, channel: CHANNEL_NAME,
+              chatType: 'direct', peer: { kind: 'direct', id: 'owner' },
+            });
+          } catch (err: any) {
+            log.warn?.(`[dkg-channel] recordInboundSession failed: ${err.message}`);
+          }
+          return runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher(
+            ctxPayload, cfg,
+            {
+              deliver,
+              onError: (err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }),
+            },
+            {},
+          );
+        };
+
+    dispatchFn()
+      .then(() => push({ type: 'done' }))
+      .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
+
+    // Yield events as they arrive
+    try {
+      while (true) {
+        while (queue.length === 0) await waitForItem();
+        const item = queue.shift()!;
+        if (item.type === 'text_delta') {
+          yield item;
+        } else if (item.type === 'done') {
+          break;
+        } else if (item.type === 'error') {
+          clearTimeout(timer);
+          throw item.error;
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const finalText = replyChunks.join('\n') || '(no response)';
+    yield { type: 'final', text: finalText, correlationId };
+
+    // Fire-and-forget: persist turn to DKG graph
+    this.persistTurn(text, finalText, correlationId).catch(err => {
+      log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Outbound reply handling  (OpenClaw session → DKG daemon)
   // ---------------------------------------------------------------------------
 
@@ -486,6 +620,11 @@ export class DkgChannelPlugin {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/inbound/stream') {
+      await this.handleInboundStreamHttp(req, res);
+      return;
+    }
+
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { ...corsHeaders(), 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
@@ -497,32 +636,107 @@ export class DkgChannelPlugin {
   }
 
   private async handleInboundHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    let parsed: { text?: string; correlationId?: string; identity?: string };
-    try {
-      const body = await readBody(req);
-      parsed = JSON.parse(body);
-    } catch {
-      res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+    if (this.inFlight >= this.maxInFlight) {
+      res.writeHead(429, { ...corsHeaders(), 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too many concurrent requests', retryAfter: 5 }));
       return;
     }
 
-    const { text, correlationId, identity } = parsed;
-    if (!text || !correlationId) {
-      res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+    const start = Date.now();
+    this.inFlight++;
+    try {
+      let parsed: { text?: string; correlationId?: string; identity?: string };
+      try {
+        const body = await readBody(req);
+        parsed = JSON.parse(body);
+      } catch (err: any) {
+        if (err.message === 'Request body too large') {
+          res.writeHead(413, { ...corsHeaders(), 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Request body too large' }));
+          return;
+        }
+        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        return;
+      }
+
+      const { text, correlationId, identity } = parsed;
+      if (!text || !correlationId) {
+        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+        return;
+      }
+
+      try {
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+
+        res.writeHead(200, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(reply));
+      } catch (err: any) {
+        const status = err.message === 'Agent response timeout' ? 504 : 500;
+        res.writeHead(status, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    } finally {
+      this.inFlight--;
+      const durationMs = Date.now() - start;
+      this.api?.logger.info?.(`[dkg-channel] handleInboundHttp completed in ${durationMs}ms`);
+    }
+  }
+
+  /** SSE streaming handler — yields events as the agent produces them. */
+  private async handleInboundStreamHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.inFlight >= this.maxInFlight) {
+      res.writeHead(429, { ...corsHeaders(), 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too many concurrent requests', retryAfter: 5 }));
       return;
     }
 
+    const start = Date.now();
+    this.inFlight++;
     try {
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+      let parsed: { text?: string; correlationId?: string; identity?: string };
+      try {
+        const body = await readBody(req);
+        parsed = JSON.parse(body);
+      } catch (err: any) {
+        if (err.message === 'Request body too large') {
+          res.writeHead(413, { ...corsHeaders(), 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Request body too large' }));
+          return;
+        }
+        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        return;
+      }
 
-      res.writeHead(200, { ...corsHeaders(), 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(reply));
-    } catch (err: any) {
-      const status = err.message === 'Agent response timeout' ? 504 : 500;
-      res.writeHead(status, { ...corsHeaders(), 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
+      const { text, correlationId, identity } = parsed;
+      if (!text || !correlationId) {
+        res.writeHead(400, { ...corsHeaders(), 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+        return;
+      }
+
+      // Write SSE headers
+      res.writeHead(200, {
+        ...corsHeaders(),
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+
+      try {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner')) {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        }
+      } catch (err: any) {
+        res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+      }
+      res.end();
+    } finally {
+      this.inFlight--;
+      const durationMs = Date.now() - start;
+      this.api?.logger.info?.(`[dkg-channel] handleInboundStreamHttp completed in ${durationMs}ms`);
     }
   }
 
@@ -572,10 +786,19 @@ function corsHeaders(): Record<string, string> {
   };
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c) => chunks.push(c));
+    let total = 0;
+    req.on('data', (c) => {
+      total += c.length;
+      if (total > maxBytes) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     req.on('error', reject);
   });

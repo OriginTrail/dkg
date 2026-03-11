@@ -13,6 +13,7 @@ import {
   sendPeerMessage,
   fetchMessages,
   sendOpenClawLocalChat,
+  streamOpenClawLocalChat,
   fetchOpenClawLocalHealth,
   fetchOpenClawLocalHistory,
   type MemorySession,
@@ -673,30 +674,73 @@ function OpenClawChatView() {
   const [messages, setMessages] = useState<OcMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendStartedAt, setSendStartedAt] = useState<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const [agentOnline, setAgentOnline] = useState<boolean | null>(null);
+  const [reconnectedAt, setReconnectedAt] = useState<number | null>(null);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [showGraph, setShowGraph] = useState(false);
   const [graphTriples, setGraphTriples] = useState<Triple[] | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Check agent health on mount
+  // Elapsed timer while sending
+  useEffect(() => {
+    if (sendStartedAt == null) { setElapsed(0); return; }
+    setElapsed(Math.floor((Date.now() - sendStartedAt) / 1000));
+    const id = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - sendStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [sendStartedAt]);
+
+  // Abort in-flight request on unmount
+  useEffect(() => {
+    return () => { abortRef.current?.abort(); };
+  }, []);
+
+  // Periodic health polling (every 15s)
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const prevOnline = { current: agentOnline };
+    const poll = async () => {
       try {
         const h = await fetchOpenClawLocalHealth();
-        if (!cancelled) setAgentOnline(h.ok && !!h.bridge?.ok);
+        if (cancelled) return;
+        const online = h.ok && !!h.bridge?.ok;
+        // Detect offline→online transition — reload history + show indicator
+        if (online && prevOnline.current === false) {
+          setReconnectedAt(Date.now());
+          setTimeout(() => setReconnectedAt(prev => prev && Date.now() - prev >= 2900 ? null : prev), 3000);
+          fetchOpenClawLocalHistory(100).then(history => {
+            if (cancelled) return;
+            const loaded: OcMessage[] = history.map(h => ({
+              id: _ocMid++,
+              role: h.author.includes('agent') ? 'assistant' as const : 'user' as const,
+              content: h.text,
+              ts: h.ts ? new Date(h.ts).toLocaleTimeString() : '',
+            }));
+            if (loaded.length > 0) setMessages(loaded);
+          }).catch(() => {});
+        }
+        prevOnline.current = online;
+        setAgentOnline(online);
       } catch {
-        if (!cancelled) setAgentOnline(false);
+        if (!cancelled) {
+          prevOnline.current = false;
+          setAgentOnline(false);
+        }
       }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+    };
+    poll();
+    const id = setInterval(poll, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load chat history from DKG graph
   useEffect(() => {
@@ -778,27 +822,67 @@ function OpenClawChatView() {
     setInput('');
     setMessages(prev => [...prev, { id: _ocMid++, role: 'user', content: text, ts: new Date().toLocaleTimeString() }]);
     setSending(true);
+    setSendStartedAt(Date.now());
+
+    // AbortController with 90s timeout
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const timeout = setTimeout(() => ac.abort(), 90_000);
+
+    // Add empty assistant message — will be progressively filled by stream
+    const assistantMsgId = _ocMid++;
+    setMessages(prev => [...prev, {
+      id: assistantMsgId,
+      role: 'assistant',
+      content: '',
+      ts: new Date().toLocaleTimeString(),
+    }]);
+
     try {
-      const res = await sendOpenClawLocalChat(text);
-      setMessages(prev => [...prev, {
-        id: _ocMid++,
-        role: 'assistant',
-        content: res.text,
-        ts: new Date().toLocaleTimeString(),
-      }]);
+      await streamOpenClawLocalChat(text, {
+        signal: ac.signal,
+        onEvent: (event) => {
+          if (event.type === 'text_delta') {
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMsgId
+                ? { ...m, content: m.content + event.delta }
+                : m,
+            ));
+          } else if (event.type === 'final') {
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMsgId
+                ? { ...m, content: event.text }
+                : m,
+            ));
+          }
+        },
+      });
       // Refresh graph if visible (brief delay for fire-and-forget turn persistence)
       if (showGraph) setTimeout(loadGraph, 1500);
     } catch (err: any) {
-      setMessages(prev => [...prev, {
-        id: _ocMid++,
-        role: 'system',
-        content: `Error: ${err.message}`,
-        ts: new Date().toLocaleTimeString(),
-      }]);
+      // User-friendly error messages
+      let msg: string;
+      if (err.name === 'AbortError') {
+        msg = 'Request timed out after 90 seconds. The agent may be overloaded — try again later.';
+      } else if (agentOnline === false) {
+        msg = 'Agent is offline. Check that the OpenClaw gateway is running.';
+      } else if (err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+        msg = 'Network error — unable to reach the agent. Check your connection.';
+      } else {
+        msg = `Error: ${err.message}`;
+      }
+      setMessages(prev => prev.map(m =>
+        m.id === assistantMsgId
+          ? { ...m, role: 'system' as const, content: msg }
+          : m,
+      ));
     } finally {
+      clearTimeout(timeout);
+      abortRef.current = null;
       setSending(false);
+      setSendStartedAt(null);
     }
-  }, [input, sending, showGraph, loadGraph]);
+  }, [input, sending, agentOnline, showGraph, loadGraph]);
 
   const statusColor = agentOnline === true ? '#4ade80' : agentOnline === false ? '#ef4444' : '#888';
   const statusText = agentOnline === true ? 'Online' : agentOnline === false ? 'Offline' : 'Checking…';
@@ -818,12 +902,13 @@ function OpenClawChatView() {
             <div>
               <div style={{ fontSize: 13, fontWeight: 700 }}>OpenClaw Agent</div>
               <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-                {statusText}
+                {reconnectedAt ? 'Reconnected' : statusText}
                 <span style={{
                   marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 9,
-                  background: 'rgba(74,222,128,.12)', color: 'var(--green)',
+                  background: reconnectedAt ? 'rgba(34,211,238,.12)' : 'rgba(74,222,128,.12)',
+                  color: reconnectedAt ? '#22d3ee' : 'var(--green)',
                 }}>
-                  DKG UI
+                  {reconnectedAt ? 'synced' : 'DKG UI'}
                 </span>
               </div>
             </div>
@@ -882,7 +967,7 @@ function OpenClawChatView() {
           {sending && (
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 16 }}>
               <div style={{ padding: '10px 14px', borderRadius: 12, background: 'rgba(255,255,255,.06)', fontSize: 13, color: 'var(--text-dim)' }}>
-                Thinking…
+                Thinking{elapsed > 0 ? `\u2026 ${elapsed}s` : '\u2026'}
               </div>
             </div>
           )}

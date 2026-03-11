@@ -546,6 +546,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   process.on('SIGTERM', shutdown);
 }
 
+// OpenClaw bridge health cache — avoids hammering the bridge on every /send
+let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
+const HEALTH_CACHE_TTL = 10_000; // 10 seconds
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -787,6 +791,23 @@ async function handleRequest(
     // Determine the adapter channel bridge URL.
     // Priority: config.openclawChannel.bridgeUrl > default localhost:9201
     const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+
+    // --- Bridge connectivity pre-check ---
+    const cacheValid = bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL);
+    if (!(cacheValid && bridgeHealthCache!.ok)) {
+      try {
+        const hRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(3_000) });
+        bridgeHealthCache = { ok: hRes.ok, ts: Date.now() };
+        if (!hRes.ok) {
+          return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+        }
+      } catch {
+        bridgeHealthCache = { ok: false, ts: Date.now() };
+        return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+      }
+    }
+
+    // --- Forward to bridge ---
     try {
       const bridgeRes = await fetch(`${bridgeUrl}/inbound`, {
         method: 'POST',
@@ -794,17 +815,93 @@ async function handleRequest(
         body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
         signal: AbortSignal.timeout(120_000), // 2 min for agent processing
       });
+      if (!bridgeRes.ok) {
+        const details = await bridgeRes.text().catch(() => '');
+        return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
+      }
       const reply = await bridgeRes.json();
-      return jsonResponse(res, bridgeRes.status, reply);
+      return jsonResponse(res, 200, reply);
     } catch (err: any) {
       if (err.name === 'TimeoutError') {
-        return jsonResponse(res, 504, { error: 'Agent response timeout', correlationId: corrId });
+        return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
       }
-      return jsonResponse(res, 503, {
-        error: 'OpenClaw gateway offline or channel bridge not reachable',
-        details: err.message,
-        retryAfter: 5,
+      // Network error (ECONNREFUSED, etc.) — invalidate health cache
+      bridgeHealthCache = { ok: false, ts: Date.now() };
+      return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE', details: err.message });
+    }
+  }
+
+  // POST /api/openclaw-channel/stream  { text, correlationId, identity? }
+  // SSE streaming variant — pipes agent response chunks as they arrive.
+  if (req.method === 'POST' && path === '/api/openclaw-channel/stream') {
+    const body = await readBody(req);
+    let payload: { text?: string; correlationId?: string; identity?: string };
+    try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
+
+    const { text, correlationId, identity } = payload;
+    if (!text) return jsonResponse(res, 400, { error: 'Missing "text"' });
+    const corrId = correlationId ?? crypto.randomUUID();
+
+    const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
+
+    // Bridge connectivity pre-check (reuse cached health)
+    const cacheValid = bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL);
+    if (!(cacheValid && bridgeHealthCache!.ok)) {
+      try {
+        const hRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(3_000) });
+        bridgeHealthCache = { ok: hRes.ok, ts: Date.now() };
+        if (!hRes.ok) {
+          return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+        }
+      } catch {
+        bridgeHealthCache = { ok: false, ts: Date.now() };
+        return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE' });
+      }
+    }
+
+    // Forward to bridge streaming endpoint and pipe SSE through
+    try {
+      const bridgeRes = await fetch(`${bridgeUrl}/inbound/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
+        signal: AbortSignal.timeout(120_000),
       });
+
+      if (!bridgeRes.ok) {
+        const details = await bridgeRes.text().catch(() => '');
+        return jsonResponse(res, 502, { error: 'Bridge error', code: 'BRIDGE_ERROR', details });
+      }
+
+      // Transparent pipe: stream SSE bytes from bridge to frontend
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+
+      if (bridgeRes.body) {
+        const reader = (bridgeRes.body as any).getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+        } catch (err: any) {
+          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+        } finally {
+          reader.releaseLock();
+        }
+      }
+      res.end();
+    } catch (err: any) {
+      if (err.name === 'TimeoutError') {
+        return jsonResponse(res, 504, { error: 'Agent response timeout', code: 'AGENT_TIMEOUT', correlationId: corrId });
+      }
+      bridgeHealthCache = { ok: false, ts: Date.now() };
+      return jsonResponse(res, 503, { error: 'OpenClaw bridge unreachable', code: 'BRIDGE_OFFLINE', details: err.message });
     }
   }
 
@@ -840,12 +937,19 @@ async function handleRequest(
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable
   if (req.method === 'GET' && path === '/api/openclaw-channel/health') {
+    // Return cached result if fresh
+    if (bridgeHealthCache && (Date.now() - bridgeHealthCache.ts < HEALTH_CACHE_TTL)) {
+      return jsonResponse(res, 200, { ok: bridgeHealthCache.ok, cached: true });
+    }
+
     const bridgeUrl = (config as any).openclawChannel?.bridgeUrl ?? 'http://127.0.0.1:9201';
     try {
       const healthRes = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(5_000) });
       const data = await healthRes.json();
+      bridgeHealthCache = { ok: true, ts: Date.now() };
       return jsonResponse(res, 200, { ok: true, bridge: data });
     } catch (err: any) {
+      bridgeHealthCache = { ok: false, ts: Date.now() };
       return jsonResponse(res, 200, { ok: false, error: err.message });
     }
   }
