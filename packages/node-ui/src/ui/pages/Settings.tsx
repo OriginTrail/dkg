@@ -228,6 +228,7 @@ function TelemetrySection() {
   const [pendingRetention, setPendingRetention] = useState<number | null>(null);
   const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [telemetrySaving, setTelemetrySaving] = useState(false);
+  const [showConsentModal, setShowConsentModal] = useState(false);
 
   useEffect(() => {
     if (retentionData?.retentionDays) setRetentionDays(retentionData.retentionDays);
@@ -263,19 +264,32 @@ function TelemetrySection() {
     }
   }, [retentionDays]);
 
-  const toggleTelemetry = useCallback(async () => {
-    const next = !telemetryEnabled;
-    setTelemetryEnabled(next);
+  const toggleTelemetry = useCallback(() => {
+    if (telemetryEnabled) {
+      // Turning OFF — no confirmation needed
+      setTelemetryEnabled(false);
+      setTelemetrySaving(true);
+      updateTelemetrySettings(false)
+        .catch(() => setTelemetryEnabled(true))
+        .finally(() => setTelemetrySaving(false));
+    } else {
+      setShowConsentModal(true);
+    }
+  }, [telemetryEnabled]);
+
+  const confirmTelemetry = useCallback(async () => {
+    setShowConsentModal(false);
+    setTelemetryEnabled(true);
     setTelemetrySaving(true);
     try {
-      await updateTelemetrySettings(next);
+      await updateTelemetrySettings(true);
     } catch (err) {
-      setTelemetryEnabled(!next);
-      console.error('Failed to update telemetry:', err);
+      setTelemetryEnabled(false);
+      console.error('Failed to enable telemetry:', err);
     } finally {
       setTelemetrySaving(false);
     }
-  }, [telemetryEnabled]);
+  }, []);
 
   const storeBytes = (metrics as any)?.store_bytes ?? null;
 
@@ -376,6 +390,66 @@ function TelemetrySection() {
           </div>
         )}
       </div>
+
+      {showConsentModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(0,0,0,.55)', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 12, padding: '24px 28px', maxWidth: 440, width: '90%',
+            boxShadow: '0 8px 32px rgba(0,0,0,.3)',
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
+              Enable Telemetry Streaming?
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
+              When enabled, the following data is streamed to the OriginTrail team:
+            </div>
+            <ul style={{ fontSize: 12, color: 'var(--text)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
+              <li>Operation logs (publish, query, sync, gossip events)</li>
+              <li>Performance metrics (durations, throughput, error rates)</li>
+              <li>Node identity (peer ID, node name, network)</li>
+            </ul>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 12 }}>
+              The following data is <strong style={{ color: 'var(--text)' }}>NEVER</strong> shared via telemetry:
+            </div>
+            <ul style={{ fontSize: 12, color: 'var(--text)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
+              <li>Private keys or wallet credentials</li>
+              <li>Authentication tokens or API keys</li>
+              <li>Private triple content or personal data</li>
+              <li>File system paths or environment variables</li>
+            </ul>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 20, lineHeight: 1.5 }}>
+              You can disable streaming at any time from this page.
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button
+                onClick={() => setShowConsentModal(false)}
+                style={{
+                  padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 600,
+                  cursor: 'pointer', border: '1px solid var(--border)',
+                  background: 'var(--surface)', color: 'var(--text-muted)',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmTelemetry}
+                style={{
+                  padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 700,
+                  cursor: 'pointer', border: '1px solid rgba(74,222,128,.4)',
+                  background: 'rgba(74,222,128,.1)', color: 'var(--green)',
+                }}
+              >
+                Enable Streaming
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
