@@ -1,6 +1,16 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchStatus, fetchLlmSettings, updateLlmSettings, fetchWalletsBalances, fetchApps, shutdownNode } from '../api.js';
+import {
+  fetchStatus,
+  fetchLlmSettings,
+  updateLlmSettings,
+  fetchWalletsBalances,
+  fetchApps,
+  shutdownNode,
+  fetchParanets,
+  fetchCatchupStatus,
+  type CatchupStatusResponse,
+} from '../api.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -245,6 +255,117 @@ function chainLabel(chainId: string | null | undefined): string {
   }
 }
 
+function CatchupStatusSection() {
+  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
+  const paranets = ((paranetData as any)?.paranets ?? []).filter((p: any) => p?.id);
+  const [selectedParanet, setSelectedParanet] = useState('');
+
+  useEffect(() => {
+    if (selectedParanet) return;
+    if (paranets.length === 0) return;
+    const preferred = paranets.find((p: any) => !p.isSystem) ?? paranets[0];
+    setSelectedParanet(preferred.id);
+  }, [selectedParanet, paranets]);
+
+  const {
+    data: catchup,
+    loading,
+    error,
+    refresh,
+  } = useFetch<CatchupStatusResponse | null>(
+    async () => {
+      if (!selectedParanet) return null;
+      try {
+        return await fetchCatchupStatus(selectedParanet);
+      } catch (err: any) {
+        const msg = String(err?.message ?? '');
+        if (msg.includes('No catch-up job found') || msg.includes('HTTP 404')) return null;
+        throw err;
+      }
+    },
+    [selectedParanet],
+    4000,
+  );
+
+  const statusBadgeClass =
+    catchup?.status === 'done'
+      ? 'badge-success'
+      : catchup?.status === 'failed'
+        ? 'badge-warning'
+        : catchup?.status === 'running'
+          ? 'badge-info'
+          : 'badge-info';
+
+  return (
+    <div className="settings-card">
+      <div className="settings-title">Background Sync Status</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        Shows the latest catch-up job for the selected paranet (triggered by subscribe).
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
+        <select
+          className="input"
+          style={{ flex: 1, backgroundImage: 'none', paddingRight: 12 }}
+          value={selectedParanet}
+          onChange={(e) => setSelectedParanet(e.target.value)}
+        >
+          {paranets.length === 0 && <option value="">No paranets available</option>}
+          {paranets.map((p: any) => (
+            <option key={p.id} value={p.id}>{p.id}{p.isSystem ? ' (system)' : ''}</option>
+          ))}
+        </select>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => refresh()}
+          disabled={!selectedParanet || loading}
+        >
+          {loading ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+
+      {!selectedParanet ? (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select a paranet to view sync status.</div>
+      ) : !catchup ? (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No catch-up job recorded yet for this paranet.</div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <span className={`badge ${statusBadgeClass}`}>status: {catchup.status}</span>
+            <span className="badge badge-info">workspace: {catchup.includeWorkspace ? 'on' : 'off'}</span>
+            <span className="badge badge-info">job: {catchup.jobId.slice(0, 10)}...</span>
+          </div>
+
+          {catchup.result && (
+            <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 8 }}>
+              peers {catchup.result.peersTried}/{catchup.result.syncCapablePeers} (connected {catchup.result.connectedPeers}),
+              data {catchup.result.dataSynced}, workspace {catchup.result.workspaceSynced}
+            </div>
+          )}
+
+          <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+            queued {new Date(catchup.queuedAt).toLocaleString()}
+            {catchup.startedAt ? ` · started ${new Date(catchup.startedAt).toLocaleString()}` : ''}
+            {catchup.finishedAt ? ` · finished ${new Date(catchup.finishedAt).toLocaleString()}` : ''}
+          </div>
+
+          {catchup.error && (
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--red)' }}>
+              {catchup.error}
+            </div>
+          )}
+        </>
+      )}
+
+      {error && (
+        <div style={{ marginTop: 8, fontSize: 11, color: 'var(--amber)' }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { data: status } = useFetch(fetchStatus, [], 30_000);
   const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
@@ -337,6 +458,9 @@ export function SettingsPage() {
             </div>
           ) : null}
         </div>
+
+        {/* Sync status */}
+        <CatchupStatusSection />
 
         {/* Privacy & Memory */}
         <div className="settings-card">

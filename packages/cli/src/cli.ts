@@ -665,8 +665,20 @@ program
   .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      await client.subscribe(paranet);
+      const result = await client.subscribe(paranet);
       console.log(`Subscribed to paranet: ${paranet}`);
+      const catchup = result.catchup;
+      if (catchup) {
+        if ('peersTried' in catchup) {
+          console.log(
+            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, workspace ${catchup.workspaceSynced}`,
+          );
+        } else {
+          console.log(
+            `Catch-up sync queued in background (job ${catchup.jobId}, workspace ${catchup.includeWorkspace ? 'enabled' : 'disabled'}).`,
+          );
+        }
+      }
 
       if (opts.save) {
         const config = await loadConfig();
@@ -675,6 +687,41 @@ program
         config.paranets = [...paranets];
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg sync ─────────────────────────────────────────────────────────
+
+const syncCmd = program
+  .command('sync')
+  .description('Sync status helpers');
+
+syncCmd
+  .command('catchup-status <paranet>')
+  .description('Show latest background catch-up status for a paranet')
+  .action(async (paranet: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const status = await client.catchupStatus(paranet);
+
+      console.log(`Paranet:   ${status.paranetId}`);
+      console.log(`Job:       ${status.jobId}`);
+      console.log(`Status:    ${status.status}`);
+      console.log(`Workspace: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+      console.log(`Queued:    ${new Date(status.queuedAt).toISOString()}`);
+      if (status.startedAt) console.log(`Started:   ${new Date(status.startedAt).toISOString()}`);
+      if (status.finishedAt) console.log(`Finished:  ${new Date(status.finishedAt).toISOString()}`);
+      if (status.result) {
+        console.log(
+          `Result:    peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, workspace ${status.result.workspaceSynced}`,
+        );
+      }
+      if (status.error) {
+        console.log(`Error:     ${status.error}`);
       }
     } catch (err: any) {
       console.error(err.message);
