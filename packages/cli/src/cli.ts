@@ -225,12 +225,12 @@ program
       process.exit(1);
     }
 
-    await migrateToBlueGreen((msg) => console.log(msg));
-
     if (opts.foreground) {
       await runDaemon(true);
       return;
     }
+
+    await migrateToBlueGreen((msg) => console.log(msg));
 
     // Spawn detached background process via releases/current symlink
     const rDir = releasesDir();
