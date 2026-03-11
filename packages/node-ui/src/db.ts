@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -28,7 +28,10 @@ export class DashboardDB {
   }
 
   getRetentionDays(): number { return this.retentionDays; }
-  setRetentionDays(days: number): void { this.retentionDays = Math.max(1, Math.min(365, days)); }
+  setRetentionDays(days: number): void {
+    this.retentionDays = Math.max(1, Math.min(365, days));
+    this.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('retentionDays', ?)").run(String(this.retentionDays));
+  }
 
   private migrate(): void {
     const version = this.db.pragma('user_version', { simple: true }) as number;
@@ -204,7 +207,24 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 6) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
+
+    const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
+    if (savedRetention) {
+      const days = Number(savedRetention.value);
+      if (Number.isFinite(days) && days >= 1 && days <= 365) {
+        this.retentionDays = days;
+      }
+    }
   }
 
   prune(): void {
@@ -441,8 +461,9 @@ export class DashboardDB {
 
     const operations = rows.map(row => {
       const logs = this.db.prepare(
-        'SELECT * FROM logs WHERE operation_id = ? ORDER BY ts',
+        'SELECT * FROM logs WHERE operation_id = ? ORDER BY ts DESC LIMIT 20',
       ).all(row.operation_id) as LogRow[];
+      logs.reverse();
       return { ...row, logs };
     });
 
@@ -481,8 +502,16 @@ export class DashboardDB {
     `).run(op);
   }
 
-  failPhase(op: { operation_id: string; duration_ms: number; error_message: string }): void {
+  failPhase(op: { operation_id: string; phase: string; duration_ms: number; error_message: string }): void {
     this.stmt('failPhase', `
+      UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
+        details = @error_message
+      WHERE operation_id = @operation_id AND phase = @phase AND status = 'in_progress'
+    `).run(op);
+  }
+
+  failAllPhases(op: { operation_id: string; duration_ms: number; error_message: string }): void {
+    this.stmt('failAllPhases', `
       UPDATE operation_phases SET status = 'error', duration_ms = @duration_ms,
         details = @error_message
       WHERE operation_id = @operation_id AND status = 'in_progress'

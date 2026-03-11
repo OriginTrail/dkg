@@ -73,7 +73,7 @@ export interface LlmSettingsCallbacks {
 
 export interface TelemetrySettingsCallbacks {
   getTelemetryEnabled: () => boolean;
-  setTelemetryEnabled: (enabled: boolean) => Promise<void>;
+  setTelemetryEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -378,7 +378,8 @@ export async function handleNodeUIRequest(
     if (typeof payload.enabled !== 'boolean') {
       return json(res, 400, { error: 'enabled must be a boolean' });
     }
-    await telemetrySettings.setTelemetryEnabled(payload.enabled);
+    const result = await telemetrySettings.setTelemetryEnabled(payload.enabled);
+    if (!result.ok) return json(res, 422, { error: result.error });
     return json(res, 200, { ok: true, enabled: payload.enabled });
   }
 

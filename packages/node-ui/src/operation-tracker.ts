@@ -63,10 +63,12 @@ export class OperationTracker {
       const prefix = ctx.operationId + ':';
       const activeKeys = [...this.phaseStarts.keys()].filter(k => k.startsWith(prefix));
       for (const key of activeKeys) {
+        const phase = key.slice(prefix.length);
         const phaseStartedAt = this.phaseStarts.get(key);
         this.phaseStarts.delete(key);
         this.db.failPhase({
           operation_id: ctx.operationId,
+          phase,
           duration_ms: phaseStartedAt ? now - phaseStartedAt : 0,
           error_message: message,
         });
@@ -173,6 +175,7 @@ export class OperationTracker {
         try {
           this.db.failPhase({
             operation_id: ctx.operationId,
+            phase,
             duration_ms: startedAt ? Date.now() - startedAt : 0,
             error_message: err instanceof Error ? err.message : String(err),
           });

@@ -329,8 +329,11 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
   let logPusher: LogPushWorker | null = null;
 
-  function startLogPusher(): void {
-    if (logPusher || !syslogEndpoint || !syslogEndpoint.port) return;
+  function startLogPusher(): { ok: boolean; error?: string } {
+    if (logPusher) return { ok: true };
+    if (!syslogEndpoint || !syslogEndpoint.port) {
+      return { ok: false, error: `Telemetry streaming is not available for ${networkKey} (no syslog endpoint configured)` };
+    }
     logPusher = new LogPushWorker({
       host: syslogEndpoint.host,
       port: syslogEndpoint.port,
@@ -340,6 +343,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     });
     logPusher.start();
     log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
+    return { ok: true };
   }
 
   function stopLogPusher(): void {
@@ -350,7 +354,11 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }
 
   if (config.telemetry?.enabled) {
-    startLogPusher();
+    const r = startLogPusher();
+    if (!r.ok) {
+      log(`Telemetry: ${r.error}`);
+      config.telemetry.enabled = false;
+    }
   }
 
   const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -465,11 +473,16 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
 
   const telemetrySettings = {
     getTelemetryEnabled: () => config.telemetry?.enabled ?? false,
-    setTelemetryEnabled: async (enabled: boolean) => {
+    setTelemetryEnabled: async (enabled: boolean): Promise<{ ok: boolean; error?: string }> => {
+      if (enabled) {
+        const r = startLogPusher();
+        if (!r.ok) return r;
+      } else {
+        stopLogPusher();
+      }
       config.telemetry = { ...config.telemetry, enabled };
       await saveConfig(config);
-      if (enabled) startLogPusher();
-      else stopLogPusher();
+      return { ok: true };
     },
   };
 
@@ -864,6 +877,7 @@ async function handleRequest(
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
+      const opDetail = dashDb.getOperation(ctx.operationId);
       return jsonResponse(res, 200, {
         kcId: String(result.kcId),
         status: result.status,
@@ -877,6 +891,8 @@ async function handleRequest(
           batchId: String(result.onChainResult.batchId),
           publisherAddress: result.onChainResult.publisherAddress,
         }),
+        phases: opDetail.phases,
+        serverTotal: Date.now() - serverT0,
       });
     } catch (err) {
       tracker.fail(ctx, err);
@@ -913,11 +929,13 @@ async function handleRequest(
       } else {
         tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
       }
+      const opDetail = dashDb.getOperation(ctx.operationId);
       return jsonResponse(res, 200, {
         kcId: String(result.kcId),
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
+        phases: opDetail.phases,
       });
     } catch (err) {
       tracker.fail(ctx, err);
@@ -942,7 +960,8 @@ async function handleRequest(
         agent.writeToWorkspace(paranetId, quads, { operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
-      return jsonResponse(res, 200, result);
+      const opDetail = dashDb.getOperation(ctx.operationId);
+      return jsonResponse(res, 200, { ...result, phases: opDetail.phases });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;

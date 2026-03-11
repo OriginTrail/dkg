@@ -5,6 +5,9 @@
  * Uses RFC 5424 syslog format with structured data to carry DKG-specific
  * fields (operation_id, operation_name, module, network, node_name).
  * Reconnects automatically on connection loss.
+ *
+ * TODO: upgrade to TLS (RFC 5425) once the Graylog Syslog input is
+ * reconfigured as a "Syslog TLS" input with the domain certificate.
  */
 
 import { Socket } from 'node:net';

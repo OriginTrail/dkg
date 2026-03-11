@@ -582,9 +582,9 @@ export class DKGPublisher implements Publisher {
         this.ownedEntities.get(paranetId)!.add(e.rootEntity);
       }
       this.knownBatchParanets.set(String(onChainResult.batchId), paranetId);
+      onPhase?.('chain:metadata', 'end');
     }
 
-    onPhase?.('chain:metadata', 'end');
     onPhase?.('chain', 'end');
 
     const result: PublishResult = {

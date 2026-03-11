@@ -28,15 +28,14 @@ describe('lobby API type contract', () => {
 });
 
 describe('backward-compatible route redirects', () => {
-  it('App.tsx includes redirects for /network, /operations, /wallet, /integrations', () => {
+  it('App.tsx includes redirects for /network, /operations/*, /wallet, /integrations', () => {
     const app = readFile('App.tsx');
     expect(app).toContain('path="/network"');
-    expect(app).toContain('path="/operations"');
+    expect(app).toContain('path="/operations/*"');
     expect(app).toContain('path="/wallet"');
     expect(app).toContain('path="/integrations"');
-    for (const route of ['/network', '/operations', '/wallet', '/integrations']) {
-      const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`path="${escaped}"[^>]*element=\\{<Navigate`);
+    for (const route of ['/network', '/operations/\\*', '/wallet', '/integrations']) {
+      const pattern = new RegExp(`path="${route}"[^>]*element=\\{<Navigate`);
       expect(app).toMatch(pattern);
     }
   });

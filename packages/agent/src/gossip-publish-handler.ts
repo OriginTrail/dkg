@@ -45,18 +45,22 @@ export class GossipPublishHandler {
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
       phase?.('decode', 'start');
-      const request = decodePublishRequest(data);
+      let request;
+      try {
+        request = decodePublishRequest(data);
 
-      if (!request.paranetId) {
-        request.paranetId = paranetId;
-      } else if (request.paranetId !== paranetId) {
-        this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
-        return;
+        if (!request.paranetId) {
+          request.paranetId = paranetId;
+        } else if (request.paranetId !== paranetId) {
+          this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
+          return;
+        }
+      } finally {
+        phase?.('decode', 'end');
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
-      phase?.('decode', 'end');
 
       if (quads.length === 0 && !request.ual) {
         this.log.warn(ctx, 'Gossip: empty broadcast with no UAL, ignoring');
