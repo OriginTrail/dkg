@@ -791,6 +791,9 @@ function OpenClawChatView() {
   const loadGraph = useCallback(async () => {
     setGraphLoading(true);
     try {
+      // The OpenClaw tab is a single local-memory surface, not a multi-session chat inbox.
+      // Imported memories from files and dkg_memory_import are global to agent-memory, so
+      // include their roots explicitly alongside the OpenClaw chat/session graph.
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
         {
           SELECT ?s ?p ?o WHERE {
@@ -815,18 +818,15 @@ function OpenClawChatView() {
             { ?memory <http://dkg.io/ontology/extractedFrom> <${OC_SESSION_URI}> .
               ?memory ?p ?o . BIND(?memory AS ?s) }
             UNION
-            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
-              ?sessionEntity <http://dkg.io/ontology/mentionedIn> ?msg .
-              ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
-              ?batch a <http://dkg.io/ontology/MemoryImport> .
+            { ?memory a <http://dkg.io/ontology/ImportedMemory> .
+              ?memory ?p ?o . BIND(?memory AS ?s) }
+            UNION
+            { ?batch a <http://dkg.io/ontology/MemoryImport> .
               ?batch ?p ?o . BIND(?batch AS ?s) }
             UNION
-            { ?msg <http://schema.org/isPartOf> <${OC_SESSION_URI}> .
-              ?sessionEntity <http://dkg.io/ontology/mentionedIn> ?msg .
-              ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
+            { ?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch .
               ?batch a <http://dkg.io/ontology/MemoryImport> .
-              ?memory <http://dkg.io/ontology/importBatch> ?batch .
-              ?memory ?p ?o . BIND(?memory AS ?s) }
+              ?sessionEntity ?p ?o . BIND(?sessionEntity AS ?s) }
           }
           ORDER BY ?s ?p ?o
           LIMIT 5000
@@ -1020,7 +1020,7 @@ function OpenClawChatView() {
               </svg>
               <div style={{ fontSize: 13 }}>Send a message to start chatting with your OpenClaw agent.</div>
               <div style={{ fontSize: 11, marginTop: 8 }}>
-                Messages are persisted to the DKG knowledge graph.
+                Messages and imported memories are persisted to the DKG knowledge graph.
               </div>
             </div>
           )}
@@ -2306,7 +2306,7 @@ export function AgentHubPage() {
           </div>
         )}
         <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-          Publish session enshrines the full conversation graph currently in view. New turns remain in workspace until you publish again.
+          Publish session enshrines the OpenClaw conversation and durable memory graph currently in view. New writes remain in workspace until you publish again.
         </div>
       </div>
 
@@ -2325,7 +2325,7 @@ export function AgentHubPage() {
 
         {!graphLoading && graphTriples && graphTriples.length === 0 && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
-            No triples found for this conversation.
+            No triples found for this OpenClaw memory graph yet.
           </div>
         )}
 

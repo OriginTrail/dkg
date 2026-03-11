@@ -269,6 +269,31 @@ describe('ChatMemoryManager', () => {
     expect(status.dataTripleCount).toBe(12);
   });
 
+  it('getSessionRootEntities widens the openclaw local session to imported memory roots', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ bindings: [] }) // ensureInitialized
+      .mockResolvedValueOnce({ bindings: [] }); // root query
+
+    await manager.getSessionRootEntities('openclaw:dkg-ui');
+
+    const query = String(mockQuery.mock.calls[1][0]);
+    expect(query).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/ImportedMemory>');
+    expect(query).toContain('?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/MemoryImport>');
+    expect(query).toContain('?s <http://dkg.io/ontology/extractedFrom> ?batch');
+  });
+
+  it('getSessionRootEntities keeps regular chat sessions scoped to their own graph roots', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ bindings: [] }) // ensureInitialized
+      .mockResolvedValueOnce({ bindings: [] }); // root query
+
+    await manager.getSessionRootEntities('session-regular');
+
+    const query = String(mockQuery.mock.calls[1][0]);
+    expect(query).not.toContain('<http://dkg.io/ontology/ImportedMemory>');
+    expect(query).not.toContain('<http://dkg.io/ontology/MemoryImport>');
+  });
+
   it('publishSession uses derived session root entities when none are provided', async () => {
     const enshrineFromWorkspace = vi.fn().mockResolvedValue({
       status: 'confirmed',

@@ -152,11 +152,10 @@ describe('Agent Hub UI — OpenClaw tab', () => {
     expect(agentHub).toContain('showGraph');
   });
 
-  it('OpenClawChatView scopes imported memory graph branches to the active session', () => {
-    expect(agentHub).toContain('?memory <http://dkg.io/ontology/importBatch> ?batch');
+  it('OpenClawChatView includes durable imported memory roots alongside the local session graph', () => {
+    expect(agentHub).toContain('?memory a <http://dkg.io/ontology/ImportedMemory>');
+    expect(agentHub).toContain('?batch a <http://dkg.io/ontology/MemoryImport>');
     expect(agentHub).toContain('?sessionEntity <http://dkg.io/ontology/extractedFrom> ?batch');
-    expect(agentHub).not.toContain('{ ?s a <http://dkg.io/ontology/ImportedMemory> . ?s ?p ?o }');
-    expect(agentHub).not.toContain('{ ?s a <http://dkg.io/ontology/MemoryImport> . ?s ?p ?o }');
   });
 
   it('OpenClawChatView sends via local channel bridge', () => {
