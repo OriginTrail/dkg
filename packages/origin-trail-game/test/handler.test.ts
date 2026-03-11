@@ -24,11 +24,11 @@ function makeMockAgent(peerId = 'test-peer-1') {
       workspaceWrites.push(quads);
       return { workspaceOperationId: 'test-op' };
     },
-    publish: async (_paranetId: string, quads: any[]) => {
+    publish: async (_paranetId: string, quads: any[]): Promise<any> => {
       published.push(quads);
       return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
-    query: async () => ({ bindings: [] }),
+    query: async (..._args: any[]): Promise<any> => ({ bindings: [] }),
     _published: published,
     _workspaceWrites: workspaceWrites,
     _subscriptions: subscriptions,
@@ -36,7 +36,7 @@ function makeMockAgent(peerId = 'test-peer-1') {
   };
 }
 
-function createMockReq(method: string, path: string, body?: any): IncomingMessage {
+function createMockReq(method: string, path: string, body?: any): IncomingMessage & { url: string } {
   const req = new EventEmitter() as any;
   req.method = method;
   req.url = path;
@@ -372,7 +372,7 @@ describe('Entity exclusivity — no duplicate root entities', () => {
   it('creating then joining a different swarm produces non-overlapping root entities', async () => {
     const { swarmCreatedQuads, playerJoinedQuads } = await import('../src/dkg/rdf.js');
     const createQuads = [
-      ...swarmCreatedQuads('origin-trail-game', 'swarm-X', 'Test', 'peer-1', Date.now()),
+      ...swarmCreatedQuads('origin-trail-game', 'swarm-X', 'Test', 'peer-1', Date.now(), 5),
       ...playerJoinedQuads('origin-trail-game', 'swarm-X', 'peer-1', 'Alice'),
     ];
     const joinQuads = playerJoinedQuads('origin-trail-game', 'swarm-Y', 'peer-1', 'Alice');
@@ -1397,7 +1397,7 @@ describe('Network topology hints (V3)', () => {
     const handle = handlers![0];
     for (const [pid, name] of [['topo-p2', 'P2'], ['topo-p3', 'P3']]) {
       handle('dkg/paranet/topo-test/app', encode({
-        type: 'player:joined',
+        app: 'origin-trail-game', type: 'swarm:joined',
         swarmId: swarm.id,
         peerId: pid,
         playerName: name,
@@ -1842,6 +1842,8 @@ describe('Turn proposal accepts non-deterministic state', () => {
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash, winningAction: 'advance', newStateJson: leaderStateJson,
       resultMessage: leaderResult.message,
+      votes: [{ peerId: leaderPeerId, action: 'advance' }],
+      resolution: 'consensus', deaths: [],
     });
     handle('dkg/paranet/test/app', proposalMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
@@ -1925,6 +1927,8 @@ describe('Turn proposal accepts non-deterministic state', () => {
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
       resultMessage: result.message,
+      votes: [{ peerId: leaderPeerId, action: 'advance' }],
+      resolution: 'consensus', deaths: [],
     }), leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
@@ -1985,6 +1989,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
       peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
       resultMessage: result.message, resolution: 'force-resolved',
+      votes: [{ peerId: leaderPeerId, action: 'advance' }], deaths: [],
     }), leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
@@ -2045,6 +2050,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
       peerId: nonLeaderPeerId, timestamp: Date.now(), turn: 1,
       proposalHash: hash, winningAction: 'advance', newStateJson: stateJson,
       resultMessage: result.message, resolution: 'force-resolved',
+      votes: [{ peerId: nonLeaderPeerId, action: 'advance' }], deaths: [],
     }), nonLeaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
@@ -2206,9 +2212,16 @@ describe('V5: Strategy patterns published when game finishes', () => {
     let maxTurns = 300;
     while (swarm.status === 'traveling' && maxTurns-- > 0) {
       const tokens = swarm.gameState?.trainingTokens ?? 0;
-      const alive = swarm.gameState?.party.filter(m => m.alive).length ?? 3;
+      const alive = swarm.gameState?.party.filter((m: any) => m.alive).length ?? 3;
       const action = tokens >= alive * 5 ? 'advance' : 'syncMemory';
-      await coordinator.castVote(swarm.id, action);
+      try {
+        await coordinator.castVote(swarm.id, action);
+      } catch (err: any) {
+        if (!/eliminated|cannot vote/i.test(err.message)) throw err;
+        // Leader was eliminated; simulate a surviving player's vote so
+        // forceResolveTurn can pick a meaningful action (not just syncMemory).
+        swarm.votes.push({ peerId: 'finish-p2', action, turn: swarm.currentTurn, timestamp: Date.now() });
+      }
       await new Promise(r => setTimeout(r, 5));
       if (swarm.status !== 'traveling') break;
       await coordinator.forceResolveTurn(swarm.id);

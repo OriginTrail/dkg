@@ -425,8 +425,8 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await sleep(1000);
 
     await agentA.createParanet({ id: 'gossip-tent', name: 'GT', description: '' });
-    agentA.subscribeToParanet('gossip-tent');
-    agentB.subscribeToParanet('gossip-tent');
+    agentA.subscribeToParanet('gossip-tent', { trackSyncScope: false });
+    agentB.subscribeToParanet('gossip-tent', { trackSyncScope: false });
     await sleep(500);
 
     await agentA.publish('gossip-tent', [

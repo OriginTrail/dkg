@@ -148,6 +148,28 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 // --- Paranets ---
 export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
 
+// --- Catch-up sync jobs ---
+export interface CatchupStatusResponse {
+  jobId: string;
+  paranetId: string;
+  includeWorkspace: boolean;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  queuedAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  result?: {
+    connectedPeers: number;
+    syncCapablePeers: number;
+    peersTried: number;
+    dataSynced: number;
+    workspaceSynced: number;
+  };
+  error?: string;
+}
+
+export const fetchCatchupStatus = (paranetId: string) =>
+  get<CatchupStatusResponse>(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
+
 // --- Query ---
 export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_workspace') =>
   post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace, graphSuffix });

@@ -700,6 +700,68 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
     await agent.stop().catch(() => {});
   });
 
+  it('adds runtime subscriptions to sync scope', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeSyncScope',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      expect((agent as any).config.syncParanets ?? []).not.toContain('runtime-paranet');
+
+      agent.subscribeToParanet('runtime-paranet');
+
+      expect((agent as any).config.syncParanets ?? []).toContain('runtime-paranet');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not add discovery subscriptions to sync scope when tracking is disabled', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeSyncScopeNoTrack',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+
+      agent.subscribeToParanet('discovered-paranet', { trackSyncScope: false });
+
+      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('syncParanetFromConnectedPeers returns empty stats without peers', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupNoPeers',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToParanet('runtime-paranet');
+      const result = await agent.syncParanetFromConnectedPeers('runtime-paranet', {
+        includeWorkspace: true,
+      });
+
+      expect(result.connectedPeers).toBe(0);
+      expect(result.syncCapablePeers).toBe(0);
+      expect(result.peersTried).toBe(0);
+      expect(result.dataSynced).toBe(0);
+      expect(result.workspaceSynced).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('emits warning when queryAccess.defaultPolicy is explicitly "public"', async () => {
     const { Logger } = await import('@dkg/core');
     const logs: Array<{ level: string; message: string }> = [];

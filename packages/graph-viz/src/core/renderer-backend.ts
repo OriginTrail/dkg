@@ -65,6 +65,9 @@ export interface RendererBackend {
   /** Apply a color palette (background, risk colors, etc.) */
   applyPalette?(palette: ColorPalette): void;
 
+  /** Prevent the renderer from automatically calling zoomToFit when the simulation settles. */
+  autoFitDisabled?: boolean;
+
   /** Configure Knowledge Asset boundary groups (2D only initially) */
   setKaGroups?(groups: Map<string, Set<string>>, enabled: boolean, opacity?: number): void;
 }

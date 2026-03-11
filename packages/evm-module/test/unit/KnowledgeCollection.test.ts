@@ -317,6 +317,112 @@ describe('@unit KnowledgeCollection', () => {
     );
   });
 
+  it('Should revert when all receiver identities are the same', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
+    const kcCreator = getDefaultKCCreator(accounts);
+    const publishingNode = getDefaultPublishingNode(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
+
+    const { identityId: publisherIdentityId } = await createProfile(
+      Profile,
+      publishingNode,
+    );
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+
+    const signaturesData = await getKCSignaturesData(
+      publishingNode,
+      publisherIdentityId,
+      receivingNodes,
+    );
+
+    await Token.connect(kcCreator).increaseAllowance(
+      KnowledgeCollection.getAddress(),
+      ethers.parseEther('100'),
+    );
+
+    // TAMPER: fill all minSigs positions with receiver 0's identity and signature
+    const dupReceiverIds = Array(minSigs).fill(receiverProfiles[0].identityId);
+    const dupReceiverRs = Array(minSigs).fill(signaturesData.receiverRs[0]);
+    const dupReceiverVSs = Array(minSigs).fill(signaturesData.receiverVSs[0]);
+
+    await expect(
+      KnowledgeCollection.connect(kcCreator).createKnowledgeCollection(
+        'test-operation-id',
+        signaturesData.merkleRoot,
+        10,
+        1000,
+        2,
+        ethers.parseEther('100'),
+        false,
+        ethers.ZeroAddress,
+        publisherIdentityId,
+        signaturesData.publisherR,
+        signaturesData.publisherVS,
+        dupReceiverIds,
+        dupReceiverRs,
+        dupReceiverVSs,
+      ),
+    ).to.be.revertedWith('Insufficient unique receiver identities');
+  });
+
+  it('Should accept KC when duplicates exist but enough unique identities remain', async () => {
+    const minSigs = Number(await ParametersStorage.minimumRequiredSignatures());
+    const kcCreator = getDefaultKCCreator(accounts);
+    const publishingNode = getDefaultPublishingNode(accounts);
+    const receivingNodes = getDefaultReceivingNodes(accounts, minSigs);
+
+    const { identityId: publisherIdentityId } = await createProfile(
+      Profile,
+      publishingNode,
+    );
+    const receiverProfiles = await createProfiles(Profile, receivingNodes);
+
+    const signaturesData = await getKCSignaturesData(
+      publishingNode,
+      publisherIdentityId,
+      receivingNodes,
+    );
+
+    await Token.connect(kcCreator).increaseAllowance(
+      KnowledgeCollection.getAddress(),
+      ethers.parseEther('100'),
+    );
+
+    // minSigs+1 entries: receiver 0 duplicated once, all others unique → minSigs unique
+    const mixedReceiverIds = [
+      receiverProfiles[0].identityId,
+      ...receiverProfiles.map((p) => p.identityId),
+    ];
+    const mixedReceiverRs = [
+      signaturesData.receiverRs[0],
+      ...signaturesData.receiverRs,
+    ];
+    const mixedReceiverVSs = [
+      signaturesData.receiverVSs[0],
+      ...signaturesData.receiverVSs,
+    ];
+
+    const tx = await KnowledgeCollection.connect(
+      kcCreator,
+    ).createKnowledgeCollection(
+      'test-operation-id',
+      signaturesData.merkleRoot,
+      10,
+      1000,
+      2,
+      ethers.parseEther('100'),
+      false,
+      ethers.ZeroAddress,
+      publisherIdentityId,
+      signaturesData.publisherR,
+      signaturesData.publisherVS,
+      mixedReceiverIds,
+      mixedReceiverRs,
+      mixedReceiverVSs,
+    );
+    await tx.wait();
+  });
+
   it('Should create KC at ~half-epoch mark and distribute tokens correctly', async () => {
     /* ---------- actors ---------- */
     const kcCreator = getDefaultKCCreator(accounts);

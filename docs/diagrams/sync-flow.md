@@ -240,3 +240,150 @@ OxigraphStore(~/.dkg/store.nq)        OxigraphStore(~/.dkg/store.nq)
   │                                      │  └─ verify + insert + flush
   └─ close() → final flush               └─ close() → final flush
 ```
+
+---
+
+## Build Plan: Inventory Merkle Diff + Targeted Repair (Append)
+
+Goal: make sync exact and efficient by detecting the precise missing KC set,
+then fetching only missing content.
+
+### 1) Scope and modes
+
+- Add reconciliation scopes per paranet:
+  - `confirmed` (chain-finalized KCs)
+  - `tentative` (optional, best-effort)
+  - `workspace` (optional, best-effort)
+- Support two trust modes:
+  - **Trustless mode (recommended):** use chain as source of truth for `confirmed`.
+  - **Trusted-cluster mode:** skip chain checks, rely on multi-peer agreement.
+
+### 2) Canonical inventory leaf format
+
+Define deterministic leaf IDs so all honest nodes build the same tree.
+
+- `confirmed` leaf key: `H(batchId || merkleRoot)`
+- `tentative` leaf key: `H(ual || merkleRoot)`
+- `workspace` leaf key: `H(workspaceOperationId || publishedAt)`
+
+Rules:
+
+- Leaves sorted lexicographically by raw leaf key bytes.
+- Inventory root = Merkle root over sorted leaf keys.
+- Keep one root per `(paranetId, scope)`.
+
+### 3) New protocol: inventory exchange
+
+Add a dedicated protocol (keep `/dkg/sync/1.0.0` for payload transfer):
+
+- `/dkg/sync-inventory/1.0.0`
+
+Message phases:
+
+1. `GetRoot(paranetId, scope)` -> `Root(snapshotId, leafCount, rootHash)`
+2. If roots differ, binary split walk:
+   - `GetRangeHash(snapshotId, start, end)` -> `RangeHash(...)`
+3. When a range is small, request concrete leaves:
+   - `GetLeaves(snapshotId, start, end)` -> `Leaves([{leafKey, batchId?, ual?, ...}])`
+
+`snapshotId` freezes sender view for the reconciliation session.
+
+### 4) Missing-set computation
+
+On connect (or periodic anti-entropy):
+
+1. Compare local and remote inventory roots.
+2. If equal: done.
+3. If not: recurse on ranges until missing leaf keys are isolated.
+4. Produce exact sets:
+   - `missingLocal`
+   - `extraLocal`
+   - `mismatch` (same identity, different root payload)
+
+This replaces blind offset-based full scans for healthy peers.
+
+### 5) Targeted content fetch
+
+Add targeted fetch requests for missing content:
+
+- Preferred for `confirmed`: `SyncByBatchIds(paranetId, batchIds[])`
+- Fallback: existing paginated `/dkg/sync/1.0.0`
+
+Receiver pipeline remains:
+
+1. Parse payload
+2. Recompute KC root from triples
+3. Compare to claimed `dkg:merkleRoot`
+4. Insert verified triples only
+
+### 6) Chain verification integration
+
+For `confirmed` scope in trustless mode:
+
+- Verify every received `(batchId, merkleRoot)` against chain.
+- If peer inventory disagrees with chain, prefer chain.
+- If peers disagree with each other, use chain inventory as tiebreaker.
+
+This is why blockchain still matters in open networks: it gives an objective
+truth anchor for finalized state.
+
+### 7) Subscribe/connect behavior changes
+
+- `subscribe` should trigger immediate reconciliation for that paranet.
+- Startup sync scope must include:
+  - `config.paranets`
+  - `network.defaultParanets`
+- On peer connect, run lightweight root comparison first; only diff when needed.
+
+### 8) CLI/API surface
+
+Add operator-facing controls:
+
+- `dkg sync verify <paranet> [--scope confirmed] [--peer <id>]`
+- `dkg sync repair <paranet> [--scope confirmed] [--peer <id>]`
+- `dkg sync status <paranet>` (local root, peer roots, leaf counts, last sync)
+
+Daemon endpoints:
+
+- `POST /api/sync/verify`
+- `POST /api/sync/repair`
+- `GET /api/sync/status?paranetId=...`
+
+### 9) Persistence and indexing
+
+Persist per `(paranetId, scope)` inventory state:
+
+- current `rootHash`
+- `leafCount`
+- compact leaf index (`leafKey -> batchId/ual/opId`)
+- last reconciled peers and timestamps
+
+Update incrementally on publish, update, sync insert, and cleanup.
+
+### 10) Rollout plan
+
+Phase A (fast reliability win)
+
+1. Fix startup sync scope (`config.paranets U network.defaultParanets`).
+2. Make subscribe trigger catch-up sync.
+3. Add manual repair command using existing pagination.
+
+Phase B (inventory protocol)
+
+1. Implement inventory root/range/leaves protocol.
+2. Implement missing-set diff engine.
+3. Add targeted `SyncByBatchIds` transfer path.
+
+Phase C (trustless hardening)
+
+1. Chain-backed verification for confirmed inventory.
+2. Multi-peer quorum option for no-chain/trusted mode.
+3. Metrics and alerts for divergence.
+
+### 11) Acceptance criteria
+
+- Late-joining node computes exact missing confirmed KCs without full scan.
+- Two honest nodes with same confirmed data converge to identical root hash.
+- Malicious peer cannot inject fake confirmed KC in trustless mode.
+- Subscribe path catches up history (not only future gossip).
+- Operator can run verify/repair and see deterministic missing counts.

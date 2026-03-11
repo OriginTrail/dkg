@@ -55,7 +55,7 @@ export class OpenAICompatibleAdapter implements LlmProviderAdapter {
   }
 
   buildRequestPayload(request: LlmChatRequest, caps: LlmCapabilities): Record<string, unknown> {
-    const model = request.config.model || 'gpt-4o-mini';
+    const model = request.config.model || 'gpt-5-mini';
     const body: Record<string, unknown> = {
       model,
       messages: request.messages,

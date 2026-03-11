@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
-import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
 
 export function ExplorerPage() {
@@ -92,21 +92,6 @@ function triplesWithLiteralsAsNodes(
   return out;
 }
 
-function GraphZoomToFit() {
-  const { viz } = useRdfGraph();
-  useEffect(() => {
-    if (!viz) return;
-    const t = setTimeout(() => {
-      try {
-        viz.zoomToFit(40);
-      } catch {
-        // ignore
-      }
-    }, 800);
-    return () => clearTimeout(t);
-  }, [viz]);
-  return null;
-}
 
 interface NodeDetails {
   uri: string;
@@ -243,7 +228,18 @@ function buildGraphColorsFromMembership(
 
 function GraphTab() {
   const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
-  const paranets = paranetData?.paranets ?? [];
+  const paranetKey = useMemo(
+    () => JSON.stringify(
+      (paranetData?.paranets ?? [])
+        .map((p: any) => ({ id: p.id, uri: p.uri, name: p.name }))
+        .sort((a: any, b: any) => String(a.id).localeCompare(String(b.id))),
+    ),
+    [paranetData],
+  );
+  // Only produce a new reference when paranet metadata actually changes,
+  // not on every 30-second poll cycle.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const paranets = useMemo(() => paranetData?.paranets ?? [], [paranetKey]);
 
   const [triples, setTriples] = useState<Triple[] | null>(null);
   const [allTriples, setAllTriples] = useState<Triple[] | null>(null);
@@ -404,7 +400,7 @@ function GraphTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, refreshKey, selectedParanet, paranets]);
+  }, [limit, refreshKey, selectedParanet?.id, selectedParanet?.uri, paranets]);
 
   // Re-filter when predicates or literals toggle changes
   useEffect(() => {
@@ -575,6 +571,7 @@ function GraphTab() {
               <RdfGraph
                 data={triples}
                 format="triples"
+                initialFit
                 options={{
                   labelMode: 'humanized',
                   renderer: '2d',
@@ -586,13 +583,12 @@ function GraphTab() {
                   },
                   hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
                   focus: { maxNodes: 50000, hops: 999 },
+                  autoFitDisabled: true,
                 }}
                 viewConfig={graphViewConfig}
                 style={{ width: '100%', height: '100%' }}
                 onNodeClick={handleNodeClick}
-              >
-                <GraphZoomToFit />
-              </RdfGraph>
+              />
             </div>
           )}
         </div>

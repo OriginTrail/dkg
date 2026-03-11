@@ -155,7 +155,7 @@ function markStoredMessagesEnshrined(prevMsgs: Message[]): Message[] {
   const next = prevMsgs.map((m) => {
     if (m.role !== 'assistant' || m.persistStatus !== 'stored') return m;
     changed = true;
-    return { ...m, persistStatus: 'enshrined' };
+    return { ...m, persistStatus: 'enshrined' as const };
   });
   return changed ? next : prevMsgs;
 }
@@ -448,6 +448,7 @@ function PeerChatView() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loadingPeers, setLoadingPeers] = useState(true);
+  const [peerSearch, setPeerSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -516,22 +517,50 @@ function PeerChatView() {
   const connectedCount = peers.filter(p => p.connectionStatus === 'connected').length;
   const ALIVE_MS = 5 * 60 * 1000;
 
+  const peerSearchLower = peerSearch.trim().toLowerCase();
+  const matchCount = peerSearchLower
+    ? peers.reduce((n, p) => n + (p.name.toLowerCase().includes(peerSearchLower) || p.peerId.toLowerCase().includes(peerSearchLower) ? 1 : 0), 0)
+    : peers.length;
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
       {/* Peer list sidebar */}
       <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
         <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Network Peers</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700 }}>Network Peers</div>
+            {peerSearchLower && (
+              <div style={{ fontSize: 10, color: 'var(--green)' }}>{matchCount} found</div>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
             {connectedCount} connected · {peers.length} discovered
           </div>
+          <input
+            type="text"
+            value={peerSearch}
+            onChange={ev => setPeerSearch(ev.target.value)}
+            placeholder="Search peers…"
+            style={{
+              width: '100%', padding: '7px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 11, outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--green)'; }}
+            onBlur={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loadingPeers && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading peers…</div>}
           {!loadingPeers && peers.length === 0 && (
             <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers discovered yet.</div>
           )}
+          {!loadingPeers && peers.length > 0 && matchCount === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers match "{peerSearch}"</div>
+          )}
           {peers.map(p => {
+            const isMatch = !peerSearchLower || p.name.toLowerCase().includes(peerSearchLower) || p.peerId.toLowerCase().includes(peerSearchLower);
             const isSelected = selectedPeer?.peerId === p.peerId;
             const isOnline = p.connectionStatus === 'connected' || (p.lastSeen != null && Date.now() - p.lastSeen < ALIVE_MS);
             return (
@@ -543,6 +572,7 @@ function PeerChatView() {
                   background: isSelected ? 'var(--surface)' : 'transparent',
                   border: isSelected ? '1px solid var(--border)' : '1px solid transparent',
                   transition: 'all .15s ease',
+                  display: isMatch ? undefined : 'none',
                 }}
                 onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface)'; }}
                 onMouseLeave={e => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
@@ -674,6 +704,7 @@ function OpenClawChatView() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [agentSearch, setAgentSearch] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -723,15 +754,39 @@ function OpenClawChatView() {
     }
   }, [selectedAgent, input, sending]);
 
+  const agentSearchLower = agentSearch.trim().toLowerCase();
+  const agentMatchCount = agentSearchLower
+    ? agents.reduce((n, ag) => n + (ag.name.toLowerCase().includes(agentSearchLower) || ag.peerId.toLowerCase().includes(agentSearchLower) || (ag.description ?? '').toLowerCase().includes(agentSearchLower) ? 1 : 0), 0)
+    : agents.length;
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', height: '100%', overflow: 'hidden' }}>
       {/* Agent list sidebar */}
       <div style={{ display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border)', background: 'var(--bg)', overflow: 'hidden' }}>
         <div style={{ padding: '16px 14px 12px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>OpenClaw Agents</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700 }}>OpenClaw Agents</div>
+            {agentSearchLower && (
+              <div style={{ fontSize: 10, color: 'var(--green)' }}>{agentMatchCount} found</div>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 10 }}>
             {agents.filter(a => a.connected).length} connected · {agents.length} discovered
           </div>
+          <input
+            type="text"
+            value={agentSearch}
+            onChange={ev => setAgentSearch(ev.target.value)}
+            placeholder="Search agents…"
+            style={{
+              width: '100%', padding: '7px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', background: 'var(--bg-elevated)',
+              color: 'var(--text)', fontSize: 11, outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--green)'; }}
+            onBlur={ev => { (ev.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+          />
         </div>
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loading && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Scanning network…</div>}
@@ -740,7 +795,11 @@ function OpenClawChatView() {
               No OpenClaw agents found on the network. Make sure an OpenClaw agent with the DKG adapter is running and connected.
             </div>
           )}
+          {!loading && agents.length > 0 && agentMatchCount === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No agents match "{agentSearch}"</div>
+          )}
           {agents.map(ag => {
+            const isAgentMatch = !agentSearchLower || ag.name.toLowerCase().includes(agentSearchLower) || ag.peerId.toLowerCase().includes(agentSearchLower) || (ag.description ?? '').toLowerCase().includes(agentSearchLower);
             const isSelected = selectedAgent?.peerId === ag.peerId;
             return (
               <div
@@ -751,6 +810,7 @@ function OpenClawChatView() {
                   cursor: 'pointer', transition: 'background .12s',
                   background: isSelected ? 'rgba(74,222,128,.12)' : 'transparent',
                   border: isSelected ? '1px solid rgba(74,222,128,.25)' : '1px solid transparent',
+                  display: isAgentMatch ? undefined : 'none',
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1074,9 +1134,9 @@ export function AgentHubPage() {
         const nextTotalMs = nextLlmMs + nextStoreMs;
         return {
           ...m,
-          persistStatus: (m.persistStatus === 'enshrined' && event.status === 'stored')
-            ? 'enshrined'
-            : event.status,
+          persistStatus: ((m.persistStatus === 'enshrined' && event.status === 'stored')
+            ? 'enshrined' as const
+            : event.status),
           persistError: event.error,
           persistAttempts: event.attempts,
           persistMaxAttempts: event.maxAttempts,

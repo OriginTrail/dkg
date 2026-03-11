@@ -17,7 +17,7 @@ export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => vo
 
 export interface GossipPublishHandlerCallbacks {
   paranetExists: (id: string) => Promise<boolean>;
-  subscribeToParanet: (id: string) => void;
+  subscribeToParanet: (id: string, options?: { trackSyncScope?: boolean }) => void;
   onPhase?: GossipPhaseCallback;
 }
 
@@ -116,7 +116,7 @@ export class GossipPublishHandler {
               synced: true,
               onChainId: this.subscribedParanets.get(newId)?.onChainId,
             });
-            this.callbacks.subscribeToParanet(newId);
+            this.callbacks.subscribeToParanet(newId, { trackSyncScope: false });
             this.log.info(ctx, `Discovered paranet "${name}" (${newId}) via gossip — auto-subscribed`);
           }
         }

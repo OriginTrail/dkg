@@ -234,6 +234,8 @@ export interface RdfGraphVizConfig {
    * 3D mode requires `3d-force-graph` and `three` as peer dependencies.
    */
   renderer?: '2d' | '3d';
+  /** Disable automatic zoomToFit when the force simulation settles. */
+  autoFitDisabled?: boolean;
 }
 
 // --- Events ---

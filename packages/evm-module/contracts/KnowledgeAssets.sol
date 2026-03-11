@@ -535,12 +535,26 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
             revert KnowledgeAssetsLib.SignaturesSignersMismatch(r.length, vs.length, identityIds.length);
         }
 
-        if (r.length < parametersStorage.minimumRequiredSignatures()) {
-            revert KnowledgeAssetsLib.MinSignaturesRequirementNotMet(
-                parametersStorage.minimumRequiredSignatures(),
-                r.length
-            );
+        uint256 minSigs = parametersStorage.minimumRequiredSignatures();
+
+        if (r.length < minSigs) {
+            revert KnowledgeAssetsLib.MinSignaturesRequirementNotMet(minSigs, r.length);
         }
+        uint256 uniqueCount;
+        for (uint256 i; i < identityIds.length; i++) {
+            bool isDuplicate = false;
+            for (uint256 j; j < i; j++) {
+                if (identityIds[i] == identityIds[j]) {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            if (!isDuplicate) {
+                uniqueCount++;
+                if (uniqueCount >= minSigs) break;
+            }
+        }
+        require(uniqueCount >= minSigs, "Insufficient unique receiver identities");
 
         for (uint256 i; i < identityIds.length; i++) {
             _verifySignature(identityIds[i], messageHash, r[i], vs[i]);
