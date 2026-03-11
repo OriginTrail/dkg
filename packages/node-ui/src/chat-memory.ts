@@ -1,5 +1,4 @@
 import { LlmClient } from './llm/client.js';
-import { resolveCapabilities } from './llm/capability-resolver.js';
 import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
@@ -1151,7 +1150,6 @@ export class ChatMemoryManager {
     if (!apiKey) return this.parseMemoriesHeuristic(rawText);
 
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    const caps = resolveCapabilities({ model, apiKey, baseURL });
     try {
       const body: Record<string, unknown> = {
         model,
@@ -1160,8 +1158,6 @@ export class ChatMemoryManager {
           { role: 'user', content: rawText },
         ],
       };
-      if (caps.supportsTemperature) body.temperature = 0;
-      if (caps.supportsMaxTokens) body.max_tokens = 4096;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -1213,7 +1209,6 @@ export class ChatMemoryManager {
     const combined = memories.map((m, i) => `${i + 1}. ${m.text}`).join('\n');
     const { apiKey, model = 'gpt-5-mini', baseURL = 'https://api.openai.com/v1' } = this.llmConfig;
     const url = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-    const caps = resolveCapabilities({ model, apiKey, baseURL });
 
     const body: Record<string, unknown> = {
       model,
@@ -1222,8 +1217,6 @@ export class ChatMemoryManager {
         { role: 'user', content: combined },
       ],
     };
-    if (caps.supportsTemperature) body.temperature = 0.1;
-    if (caps.supportsMaxTokens) body.max_tokens = 2048;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
