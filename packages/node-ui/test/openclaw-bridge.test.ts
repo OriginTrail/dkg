@@ -16,12 +16,12 @@ function readCliFile(rel: string): string {
 describe('OpenClaw bridge API contract', () => {
   const apiSrc = readUiFile('api.ts');
 
-  it('exports fetchOpenClawAgents', () => {
+  it('exports fetchOpenClawAgents (P2P, legacy)', () => {
     expect(apiSrc).toContain('fetchOpenClawAgents');
     expect(apiSrc).toMatch(/\/api\/openclaw-agents/);
   });
 
-  it('exports sendOpenClawChat', () => {
+  it('exports sendOpenClawChat (P2P, legacy)', () => {
     expect(apiSrc).toContain('sendOpenClawChat');
     expect(apiSrc).toMatch(/\/api\/chat-openclaw/);
   });
@@ -38,6 +38,21 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toMatch(/reply:\s*string\s*\|\s*null/);
     expect(apiSrc).toMatch(/timedOut:\s*boolean/);
     expect(apiSrc).toMatch(/delivered:\s*boolean/);
+  });
+
+  it('exports sendOpenClawLocalChat (local channel bridge)', () => {
+    expect(apiSrc).toContain('sendOpenClawLocalChat');
+    expect(apiSrc).toMatch(/\/api\/openclaw-channel\/send/);
+  });
+
+  it('exports fetchOpenClawLocalHealth', () => {
+    expect(apiSrc).toContain('fetchOpenClawLocalHealth');
+    expect(apiSrc).toMatch(/\/api\/openclaw-channel\/health/);
+  });
+
+  it('exports fetchOpenClawLocalHistory', () => {
+    expect(apiSrc).toContain('fetchOpenClawLocalHistory');
+    expect(apiSrc).toContain('openclaw:dkg-ui');
   });
 });
 
@@ -89,10 +104,10 @@ describe('OpenClaw daemon endpoints', () => {
 describe('Agent Hub UI — OpenClaw tab', () => {
   const agentHub = readUiFile('pages/AgentHub.tsx');
 
-  it('imports OpenClaw API functions', () => {
-    expect(agentHub).toContain('fetchOpenClawAgents');
-    expect(agentHub).toContain('sendOpenClawChat');
-    expect(agentHub).toContain('OpenClawAgent');
+  it('imports local channel API functions', () => {
+    expect(agentHub).toContain('sendOpenClawLocalChat');
+    expect(agentHub).toContain('fetchOpenClawLocalHealth');
+    expect(agentHub).toContain('fetchOpenClawLocalHistory');
   });
 
   it('defines OpenClawChatView component', () => {
@@ -112,28 +127,32 @@ describe('Agent Hub UI — OpenClaw tab', () => {
     expect(agentHub).toMatch(/mode\s*===\s*'openclaw'/);
   });
 
-  it('OpenClawChatView shows agent list sidebar', () => {
-    expect(agentHub).toContain('OpenClaw Agents');
+  it('OpenClawChatView shows agent status header', () => {
+    expect(agentHub).toContain('OpenClaw Agent');
   });
 
-  it('OpenClawChatView handles empty agent list', () => {
-    expect(agentHub).toContain('No OpenClaw agents found');
+  it('OpenClawChatView shows status text', () => {
+    expect(agentHub).toContain('Online');
+    expect(agentHub).toContain('Offline');
   });
 
-  it('OpenClawChatView shows connection status indicator', () => {
-    expect(agentHub).toMatch(/ag\.connected\s*\?/);
+  it('OpenClawChatView checks agent health on mount', () => {
+    expect(agentHub).toContain('fetchOpenClawLocalHealth');
+    expect(agentHub).toContain('agentOnline');
   });
 
-  it('OpenClawChatView handles send with loading state', () => {
-    expect(agentHub).toContain('Waiting for response');
+  it('OpenClawChatView loads chat history from DKG graph', () => {
+    expect(agentHub).toContain('fetchOpenClawLocalHistory');
+    expect(agentHub).toContain('historyLoaded');
   });
 
-  it('OpenClawChatView handles timeout response', () => {
-    expect(agentHub).toContain('did not respond within 30 seconds');
+  it('OpenClawChatView has graph toggle', () => {
+    expect(agentHub).toContain('Knowledge Graph');
+    expect(agentHub).toContain('showGraph');
   });
 
-  it('OpenClawChatView handles delivery failure', () => {
-    expect(agentHub).toContain('Failed to deliver');
+  it('OpenClawChatView sends via local channel bridge', () => {
+    expect(agentHub).toContain('sendOpenClawLocalChat');
   });
 });
 
@@ -290,9 +309,9 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(chatOclawBlock).toContain("timedOut: false");
   });
 
-  it('UI checks reply with != null (not truthy)', () => {
+  it('UI sends via local channel bridge (not P2P)', () => {
     const agentHub = readUiFile('pages/AgentHub.tsx');
-    expect(agentHub).toContain('res.reply != null');
-    expect(agentHub).not.toMatch(/if\s*\(\s*res\.reply\s*\)\s*\{/);
+    expect(agentHub).toContain('sendOpenClawLocalChat');
+    expect(agentHub).toContain('res.text');
   });
 });

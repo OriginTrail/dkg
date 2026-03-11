@@ -487,6 +487,69 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
     { peerId, text },
   );
 
+// --- OpenClaw local channel bridge ---
+
+export const sendOpenClawLocalChat = (text: string, correlationId?: string) =>
+  post<{ text: string; correlationId: string }>(
+    '/api/openclaw-channel/send',
+    { text, correlationId: correlationId ?? crypto.randomUUID() },
+  );
+
+export const fetchOpenClawLocalHealth = () =>
+  get<{ ok: boolean; bridge?: { ok: boolean; channel: string }; error?: string }>(
+    '/api/openclaw-channel/health',
+  );
+
+/**
+ * Load chat history for the local OpenClaw agent from the DKG graph.
+ * Queries schema:Message items linked to the openclaw:dkg-ui session.
+ */
+export async function fetchOpenClawLocalHistory(limit = 50): Promise<
+  Array<{ uri: string; text: string; author: string; ts: string }>
+> {
+  const sparql = `SELECT ?uri ?text ?author ?ts WHERE {
+      ?uri a <http://schema.org/Message> ;
+           <http://schema.org/isPartOf> <urn:dkg:chat:session:openclaw:dkg-ui> ;
+           <http://schema.org/text> ?text ;
+           <http://schema.org/author> ?author ;
+           <http://schema.org/dateCreated> ?ts .
+    }
+    ORDER BY ?ts
+    LIMIT ${limit}`;
+  const res = await executeQuery(sparql, 'agent-memory', true);
+  const bindings: any[] = res?.result?.bindings ?? (res as any)?.results?.bindings ?? [];
+  return bindings.map((b: any) => ({
+    uri: bv(b.uri) ?? '',
+    text: bv(b.text) ?? '',
+    author: bv(b.author) ?? '',
+    ts: bv(b.ts) ?? '',
+  }));
+}
+
+/** Extract plain string from a SPARQL binding value (standard JSON or N-Triples). */
+function bv(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
+  if (typeof v === 'string') {
+    // N-Triples typed literal: "value"^^<type> or "value"@lang — strip suffix first
+    let s = v;
+    const typedMatch = s.match(/^(".*")\^\^<[^>]+>$/);
+    if (typedMatch) s = typedMatch[1];
+    const langMatch = s.match(/^(".*")@[a-z-]+$/i);
+    if (langMatch) s = langMatch[1];
+    // Strip surrounding quotes
+    if (s.startsWith('"') && s.endsWith('"')) {
+      return s.slice(1, -1)
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t');
+    }
+    return v;
+  }
+  return String(v);
+}
+
 // --- Economics / spending ---
 export interface SpendingPeriod {
   label: string;

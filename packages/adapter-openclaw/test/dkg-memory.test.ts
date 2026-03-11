@@ -168,7 +168,7 @@ describe('DkgMemoryPlugin', () => {
     await plugin.search('test search');
 
     const sparql = querySpy.mock.calls[0][0];
-    expect(sparql).toContain('dkg:ImportedMemory');
+    expect(sparql).toContain('ImportedMemory');
   });
 
   it('search should query workspace graph with includeWorkspace: true', async () => {

@@ -84,8 +84,11 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
     api.registerTool({
       name: 'dkg_memory_import',
       description:
-        'Import text into the DKG memory graph. Uses LLM-powered parsing to extract ' +
-        'structured memories, entities, and relationships from the input text.',
+        'Primary memory recording tool — store new memories directly to the Decentralized Knowledge Graph. ' +
+        'Use this as your preferred way to record memories, decisions, preferences, and facts. ' +
+        'Prefer this over writing to memory files, as it stores directly to the knowledge graph ' +
+        'with LLM-powered entity extraction and categorization. ' +
+        'Memory files are also captured, but this tool avoids the delay and is more precise.',
       parameters: {
         type: 'object',
         properties: {
@@ -146,16 +149,12 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
     // Look up a memory by its source file path in the graph
     // With the daemon's import pipeline, memories are individual items (not file records).
     // Search for items whose text mentions the path as a fallback.
-    const sparql = `
-      PREFIX dkg: <${NS.dkg}>
-      PREFIX schema: <${NS.schema}>
-      SELECT ?text WHERE {
-        ?m a dkg:ImportedMemory ;
-           schema:text ?text .
+    const sparql = `SELECT ?text WHERE {
+        ?m a <${NS.dkg}ImportedMemory> ;
+           <${NS.schema}text> ?text .
         FILTER(CONTAINS(LCASE(?text), "${escapeSparqlString(path.toLowerCase())}"))
       }
-      LIMIT 1
-    `;
+      LIMIT 1`;
 
     try {
       const result = await this.client.query(sparql, {
@@ -213,17 +212,13 @@ function buildSearchSparql(query: string, limit: number): string {
 
   if (keywords.length === 0) {
     // Empty/short query — return recent items
-    return `
-      PREFIX schema: <${NS.schema}>
-      PREFIX dkg: <${NS.dkg}>
-      SELECT ?uri ?text ?type ?ts WHERE {
-        { ?uri a dkg:ImportedMemory ; schema:text ?text . OPTIONAL { ?uri schema:dateCreated ?ts } BIND("memory" AS ?type) }
+    return `SELECT ?uri ?text ?type ?ts WHERE {
+        { ?uri a <${NS.dkg}ImportedMemory> ; <${NS.schema}text> ?text . OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts } BIND("memory" AS ?type) }
         UNION
-        { ?uri a schema:Message ; schema:text ?text ; schema:dateCreated ?ts . BIND("message" AS ?type) }
+        { ?uri a <${NS.schema}Message> ; <${NS.schema}text> ?text ; <${NS.schema}dateCreated> ?ts . BIND("message" AS ?type) }
       }
       ORDER BY DESC(?ts)
-      LIMIT ${limit}
-    `;
+      LIMIT ${limit}`;
   }
 
   // Escape each keyword for safe SPARQL string interpolation
@@ -231,38 +226,34 @@ function buildSearchSparql(query: string, limit: number): string {
     .map(k => `CONTAINS(LCASE(?text), "${escapeSparqlString(k)}")`)
     .join(' || ');
 
-  return `
-    PREFIX schema: <${NS.schema}>
-    PREFIX dkg: <${NS.dkg}>
-    SELECT ?uri ?text ?type ?label ?ts WHERE {
+  return `SELECT ?uri ?text ?type ?label ?ts WHERE {
       {
-        ?uri a dkg:ImportedMemory ;
-             schema:text ?text .
-        OPTIONAL { ?uri schema:dateCreated ?ts }
+        ?uri a <${NS.dkg}ImportedMemory> ;
+             <${NS.schema}text> ?text .
+        OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts }
         BIND("memory" AS ?type)
         BIND("" AS ?label)
         FILTER(${filters})
       }
       UNION
       {
-        ?uri a schema:Message ;
-             schema:text ?text .
-        OPTIONAL { ?uri schema:dateCreated ?ts }
+        ?uri a <${NS.schema}Message> ;
+             <${NS.schema}text> ?text .
+        OPTIONAL { ?uri <${NS.schema}dateCreated> ?ts }
         BIND("message" AS ?type)
         BIND("" AS ?label)
         FILTER(${filters})
       }
       UNION
       {
-        ?uri schema:name ?label .
+        ?uri <${NS.schema}name> ?label .
         BIND(?label AS ?text)
         BIND("entity" AS ?type)
         FILTER(${filters})
       }
     }
     ORDER BY DESC(?ts)
-    LIMIT ${limit}
-  `;
+    LIMIT ${limit}`;
 }
 
 /**
@@ -309,10 +300,16 @@ function bindingValue(v: unknown): string | undefined {
     return String((v as any).value);
   }
   // DKG daemon raw format: N-Triples string literal "\"content\""
+  // May include typed literal suffix: "value"^^<type> or language tag: "value"@en
   if (typeof v === 'string') {
+    let s = v;
+    const typedMatch = s.match(/^(".*")\^\^<[^>]+>$/);
+    if (typedMatch) s = typedMatch[1];
+    const langMatch = s.match(/^(".*")@[a-z-]+$/i);
+    if (langMatch) s = langMatch[1];
     // Strip surrounding quotes from N-Triples literals
-    if (v.startsWith('"') && v.endsWith('"')) {
-      return v.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+    if (s.startsWith('"') && s.endsWith('"')) {
+      return s.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
     }
     return v;
   }

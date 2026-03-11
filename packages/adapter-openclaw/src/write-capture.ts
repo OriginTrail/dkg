@@ -15,7 +15,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises';
-import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, readdirSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { DkgDaemonClient } from './dkg-client.js';
 import type { DkgOpenClawConfig, OpenClawPluginApi } from './types.js';
@@ -28,6 +28,8 @@ export class WriteCapture {
   private readonly debounceMs: number;
   /** Track files we've already synced (by mtime) to avoid duplicate work. */
   private readonly syncedMtimes = new Map<string, number>();
+  /** Track previous file content for delta computation. */
+  private readonly syncedContents = new Map<string, string>();
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -57,8 +59,12 @@ export class WriteCapture {
   // File watchers
   // ---------------------------------------------------------------------------
 
-  private startWatchers(): void {
+  private async startWatchers(): Promise<void> {
     const log = this.api?.logger;
+
+    // Seed syncedContents with current file state so we don't reimport
+    // everything on every gateway restart. Only new changes get imported.
+    await this.seedExistingContent();
 
     // Watch 1: memory/ directory (recursive)
     if (this.memoryDir) {
@@ -96,6 +102,61 @@ export class WriteCapture {
           log?.warn?.(`[dkg-write-capture] Failed to watch workspace dir: ${err.message}`);
         }
       }
+    }
+  }
+
+  /**
+   * Seed syncedContents with current file state on startup.
+   * This prevents reimporting the full file on every gateway restart.
+   * Only changes made *after* startup will be imported as deltas.
+   */
+  private async seedExistingContent(): Promise<void> {
+    const log = this.api?.logger;
+    const filesToSeed: string[] = [];
+
+    // Collect MEMORY.md
+    const workspaceDir = this.memoryDir ? dirname(resolve(this.memoryDir)) : null;
+    if (workspaceDir) {
+      const memoryMd = join(workspaceDir, 'MEMORY.md');
+      if (existsSync(memoryMd)) filesToSeed.push(memoryMd);
+    }
+
+    // Collect memory/*.md files
+    if (this.memoryDir) {
+      const absMemDir = resolve(this.memoryDir);
+      if (existsSync(absMemDir)) {
+        try {
+          const entries = readdirSync(absMemDir, { recursive: true });
+          for (const entry of entries) {
+            const name = String(entry);
+            if (name.endsWith('.md')) {
+              filesToSeed.push(join(absMemDir, name));
+            }
+          }
+        } catch (err: any) {
+          log?.warn?.(`[dkg-write-capture] Failed to scan memory dir for seeding: ${err.message}`);
+        }
+      }
+    }
+
+    // Read each file and store its content + mtime without importing
+    for (const filePath of filesToSeed) {
+      try {
+        const [content, stats] = await Promise.all([
+          readFile(filePath, 'utf-8'),
+          stat(filePath),
+        ]);
+        if (content.trim()) {
+          this.syncedContents.set(filePath, content);
+          this.syncedMtimes.set(filePath, stats.mtimeMs);
+        }
+      } catch {
+        // File may have disappeared between scan and read — skip
+      }
+    }
+
+    if (filesToSeed.length > 0) {
+      log?.info?.(`[dkg-write-capture] Seeded ${filesToSeed.length} existing file(s) — only deltas will be imported`);
     }
   }
 
@@ -154,9 +215,24 @@ export class WriteCapture {
 
     if (!content.trim()) return;
 
-    // Import via the daemon's memory pipeline (entity extraction, categorization, etc.)
-    await this.client.importMemories(content, 'other', { useLlm: true });
+    // Compute delta against previous content to avoid reimporting unchanged lines
+    const previousContent = this.syncedContents.get(absPath);
+    const toImport = previousContent ? computeDelta(previousContent, content) : content;
+
+    if (!toImport.trim()) {
+      // No new content — update tracking so we don't re-read next time
+      this.syncedMtimes.set(absPath, mtime);
+      this.syncedContents.set(absPath, content);
+      return;
+    }
+
+    // Import only the delta via the daemon's memory pipeline
+    await this.client.importMemories(toImport, 'other', { useLlm: true });
+
+    // Update tracking only after successful import — on failure, the next
+    // file change will recompute the delta from the old baseline and retry.
     this.syncedMtimes.set(absPath, mtime);
+    this.syncedContents.set(absPath, content);
   }
 
   // ---------------------------------------------------------------------------
@@ -178,6 +254,48 @@ export class WriteCapture {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Compute delta between previous and current file content.
+ * Returns lines in `current` not present in `previous`, with
+ * markdown section headers preserved for context.
+ *
+ * On first sync (no previous content), the caller should pass the
+ * full content directly — this function is only for subsequent edits.
+ */
+export function computeDelta(previous: string, current: string): string {
+  const prevLines = new Set(previous.split('\n').map(l => l.trimEnd()));
+  const currentLines = current.split('\n');
+
+  const deltaLines: string[] = [];
+  let lastHeader = '';
+  let headerEmitted = false;
+
+  for (const line of currentLines) {
+    const trimmed = line.trimEnd();
+
+    // Track markdown headings
+    if (/^#{1,6}\s/.test(trimmed)) {
+      lastHeader = trimmed;
+      headerEmitted = false;
+    }
+
+    // Skip empty or unchanged lines
+    if (!trimmed || prevLines.has(trimmed)) continue;
+
+    // Prepend existing section header for context (once per section)
+    if (lastHeader && !headerEmitted) {
+      if (prevLines.has(lastHeader)) {
+        deltaLines.push(lastHeader);
+      }
+      headerEmitted = true;
+    }
+
+    deltaLines.push(trimmed);
+  }
+
+  return deltaLines.join('\n');
+}
 
 /** Check if a file path targets a memory file. */
 export function isMemoryPath(filePath: unknown, memoryDir: string): boolean {
