@@ -20,6 +20,16 @@ import { migrateToBlueGreen } from './migration.js';
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
 
+function normalizeVersionTagRef(input: string): string {
+  const cleaned = input.trim();
+  if (!cleaned) return cleaned;
+  const bare = cleaned.startsWith('v') ? cleaned.slice(1) : cleaned;
+  if (/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(bare)) {
+    return `refs/tags/v${bare}`;
+  }
+  return cleaned;
+}
+
 function getCliVersion(): string {
   try {
     const path = new URL('../package.json', import.meta.url);
@@ -91,11 +101,16 @@ program
     if (enableAutoUpdate) {
       const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
       const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? false;
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
       const repo = await ask('GitHub repo (owner/name)?', defaultRepo);
       const branch = await ask('Branch?', defaultBranch);
+      const allowPrerelease = (await ask(
+        'Allow pre-release versions? (y/n)',
+        defaultAllowPrerelease ? 'y' : 'n',
+      )).toLowerCase() === 'y';
       const interval = parseInt(await ask('Check interval (minutes)?', String(defaultInterval)), 10);
-      autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
+      autoUpdate = { enabled: true, repo, branch, allowPrerelease, checkIntervalMinutes: interval };
     }
 
     // Chain configuration
@@ -148,7 +163,14 @@ program
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
-    console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
+    console.log(
+      `  autoUpdate: ${
+        config.autoUpdate?.enabled
+          ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
+            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}`
+          : 'disabled'
+      }`,
+    );
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
@@ -1141,10 +1163,12 @@ function sleep(ms: number): Promise<void> {
 // ─── dkg update ──────────────────────────────────────────────────────
 
 program
-  .command('update')
+  .command('update [versionOrRef]')
   .description('Check for and apply DKG node updates (blue-green swap)')
   .option('--check', 'Only check for updates, do not apply')
-  .action(async (opts: ActionOpts) => {
+  .option('--allow-prerelease', 'Allow pre-release target versions')
+  .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
+  .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     await migrateToBlueGreen((msg) => console.log(msg));
     const config = await loadConfig();
     const net = await loadNetworkConfig();
@@ -1155,9 +1179,12 @@ program
       checkIntervalMinutes: 30,
     };
 
+    const refOverride = versionOrRef ? normalizeVersionTagRef(versionOrRef) : undefined;
+    const verifyTagSignature = Boolean(refOverride && refOverride.startsWith('refs/tags/')) && opts.verifyTag !== false;
+
     if (opts.check) {
       console.log('Checking for updates...');
-      const newCommit = await checkForNewCommit(au, (msg) => console.log(msg));
+      const newCommit = await checkForNewCommit(au, (msg) => console.log(msg), refOverride);
       if (newCommit) {
         console.log(`Update available: ${newCommit.slice(0, 8)}`);
       } else {
@@ -1167,7 +1194,11 @@ program
     }
 
     console.log('Checking for updates and applying...');
-    const updated = await performUpdate(au, (msg) => console.log(msg));
+    const updated = await performUpdate(au, (msg) => console.log(msg), {
+      refOverride,
+      allowPrerelease: opts.allowPrerelease ? true : undefined,
+      verifyTagSignature,
+    });
     if (updated) {
       const pid = await readPid();
       if (pid && isProcessRunning(pid)) {

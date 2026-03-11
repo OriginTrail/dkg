@@ -8,6 +8,8 @@ export interface AutoUpdateConfig {
   enabled: boolean;
   repo: string;
   branch: string;
+  /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
+  allowPrerelease?: boolean;
   checkIntervalMinutes: number;
 }
 
@@ -22,6 +24,7 @@ export interface NetworkConfig {
     enabled: boolean;
     repo: string;
     branch: string;
+    allowPrerelease?: boolean;
     checkIntervalMinutes: number;
   };
   chain?: {

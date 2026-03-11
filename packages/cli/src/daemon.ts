@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -1116,6 +1116,41 @@ function normalizeRepo(repo: string): string {
   return t;
 }
 
+function parseTagName(ref: string): string | null {
+  const m = ref.match(/^refs\/tags\/(.+)$/);
+  return m ? m[1] : null;
+}
+
+type PendingUpdateState = {
+  target: 'a' | 'b';
+  commit: string;
+  version?: string;
+  ref: string;
+  createdAt: string;
+};
+
+async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  try {
+    const raw = await readFile(pendingFile, 'utf-8');
+    const parsed = JSON.parse(raw) as PendingUpdateState;
+    if ((parsed.target !== 'a' && parsed.target !== 'b') || !parsed.commit || !parsed.ref) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function clearPendingUpdateState(): Promise<void> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  try { await unlink(pendingFile); } catch { /* ok */ }
+}
+
+async function writePendingUpdateState(state: PendingUpdateState): Promise<void> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  await writeFile(pendingFile, JSON.stringify(state, null, 2));
+}
+
 /**
  * Check GitHub for a new commit on the configured branch.
  * Returns the latest commit SHA if an update is available, null otherwise.
@@ -1123,6 +1158,7 @@ function normalizeRepo(repo: string): string {
 export async function checkForNewCommit(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
+  refOverride?: string,
 ): Promise<string | null> {
   const commitFile = join(dkgDir(), '.current-commit');
   let currentCommit = '';
@@ -1137,13 +1173,13 @@ export async function checkForNewCommit(
   }
 
   const repo = normalizeRepo(au.repo);
-  const branch = au.branch.trim() || 'main';
-  if (!/^[\w.\-/]+$/.test(branch)) {
-    log(`Auto-update: invalid branch name "${branch}"`);
+  const ref = (refOverride ?? au.branch).trim() || 'main';
+  if (!/^[\w.\-/]+$/.test(ref)) {
+    log(`Auto-update: invalid branch/ref "${ref}"`);
     return null;
   }
 
-  const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -1163,6 +1199,7 @@ let _updateInProgress = false;
 async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
   const lockPath = join(releasesDir(), '.update.lock');
   try {
+    await mkdir(releasesDir(), { recursive: true });
     const { openSync, closeSync, writeFileSync } = await import('node:fs');
     const fd = openSync(lockPath, 'wx');
     writeFileSync(fd, String(process.pid));
@@ -1186,10 +1223,9 @@ async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
         }
       } catch { /* can't read lock */ }
     }
-    // Lock acquisition failed for non-EEXIST reasons (e.g., no releases dir yet)
-    // Proceed without lock — performUpdate will bail if slots aren't initialized
-    log(`Auto-update: could not acquire lock (${err.code ?? err.message}), proceeding`);
-    return true;
+    // Fail closed: do not proceed if lock semantics are uncertain.
+    log(`Auto-update: could not acquire lock (${err.code ?? err.message}), skipping`);
+    return false;
   }
 }
 
@@ -1209,6 +1245,7 @@ async function releaseUpdateLock(): Promise<void> {
 export async function performUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean } = {},
 ): Promise<boolean> {
   if (_updateInProgress) {
     log('Auto-update: another update is already in progress, skipping');
@@ -1221,7 +1258,7 @@ export async function performUpdate(
     return false;
   }
   try {
-    return await _performUpdateInner(au, log);
+    return await _performUpdateInner(au, log, opts);
   } finally {
     await releaseUpdateLock();
     _updateInProgress = false;
@@ -1231,6 +1268,7 @@ export async function performUpdate(
 async function _performUpdateInner(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean },
 ): Promise<boolean> {
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? 'a');
@@ -1244,6 +1282,7 @@ async function _performUpdateInner(
   }
 
   const commitFile = join(dkgDir(), '.current-commit');
+  const versionFile = join(dkgDir(), '.current-version');
 
   let currentCommit = '';
   try {
@@ -1258,15 +1297,30 @@ async function _performUpdateInner(
     }
   }
 
-  const repo = normalizeRepo(au.repo);
-  const branch = au.branch.trim() || 'main';
+  const pending = await readPendingUpdateState();
+  if (pending) {
+    const active = await activeSlot();
+    if (active === pending.target) {
+      await writeFile(commitFile, pending.commit);
+      if (pending.version) await writeFile(versionFile, pending.version);
+      await clearPendingUpdateState();
+      currentCommit = pending.commit;
+      log(`Auto-update: recovered pending update state for slot ${pending.target}.`);
+    } else {
+      await clearPendingUpdateState();
+      log('Auto-update: cleared stale pending update state.');
+    }
+  }
 
-  if (!/^[\w.\-/]+$/.test(branch)) {
-    log(`Auto-update: invalid branch name "${branch}"`);
+  const repo = normalizeRepo(au.repo);
+  const ref = (opts.refOverride ?? au.branch).trim() || 'main';
+
+  if (!/^[\w.\-/]+$/.test(ref)) {
+    log(`Auto-update: invalid branch/ref "${ref}"`);
     return false;
   }
 
-  const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -1275,8 +1329,8 @@ async function _performUpdateInner(
   if (!res.ok) {
     if (res.status === 404) {
       log(
-        `Auto-update: GitHub returned 404 for ${repo} branch "${branch}". ` +
-          'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/branch in config.',
+        `Auto-update: GitHub returned 404 for ${repo} ref "${ref}". ` +
+          'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.',
       );
     } else {
       log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
@@ -1288,17 +1342,23 @@ async function _performUpdateInner(
 
   if (latestCommit === currentCommit) return false;
 
-  log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), building in slot ${target}...`);
+  log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
 
   try {
-    await execAsync(`git fetch origin ${branch}`, {
+    await execAsync(`git fetch origin ${ref}`, {
       cwd: targetDir, encoding: 'utf-8', timeout: 120_000,
     });
-    await execAsync(`git checkout --force origin/${branch}`, {
+    const maybeTag = parseTagName(ref);
+    if (opts.verifyTagSignature && maybeTag) {
+      await execAsync(`git verify-tag "${maybeTag}"`, {
+        cwd: targetDir, encoding: 'utf-8', timeout: 30_000,
+      });
+    }
+    await execAsync('git checkout --force FETCH_HEAD', {
       cwd: targetDir, encoding: 'utf-8', timeout: 60_000,
     });
   } catch (fetchErr: any) {
-    log(`Auto-update: git fetch/checkout failed in slot ${target} — ${fetchErr.message}`);
+    log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
     return false;
   }
 
@@ -1320,17 +1380,40 @@ async function _performUpdateInner(
     return false;
   }
 
-  // Write commit before swap so a crash between the two doesn't trigger a re-build
-  await writeFile(commitFile, latestCommit);
+  let nextVersion = '';
+  try {
+    const pkgRaw = await readFile(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
+    nextVersion = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+  } catch {
+    // Version is optional metadata for operators; commit SHA remains source of truth.
+  }
+  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? false;
+  if (nextVersion && !allowPrerelease && /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)) {
+    log(`Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`);
+    return false;
+  }
+
+  await writePendingUpdateState({
+    target,
+    commit: latestCommit,
+    version: nextVersion || undefined,
+    ref,
+    createdAt: new Date().toISOString(),
+  });
   try {
     await swapSlot(target);
+    await writeFile(commitFile, latestCommit);
+    if (nextVersion) await writeFile(versionFile, nextVersion);
+    await clearPendingUpdateState();
   } catch (swapErr: any) {
-    // Restore old commit to allow retry on next cycle
-    await writeFile(commitFile, currentCommit);
+    await clearPendingUpdateState();
     log(`Auto-update: symlink swap failed — ${swapErr.message}`);
     return false;
   }
-  log(`Auto-update: build succeeded in slot ${target}. Swapped symlink. Restarting...`);
+  log(
+    `Auto-update: build succeeded in slot ${target}` +
+      `${nextVersion ? ` (version ${nextVersion})` : ''}. Swapped symlink. Restarting...`,
+  );
   return true;
 }
 

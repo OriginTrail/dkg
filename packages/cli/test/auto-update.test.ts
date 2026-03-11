@@ -281,18 +281,22 @@ describe('blue-green checkForUpdate', () => {
     makeFetchOk('new-commit');
 
     const callOrder: string[] = [];
-    mockedWriteFile.mockImplementation(async () => { callOrder.push('writeFile'); });
+    mockedWriteFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.includes('.update-pending.json')) callOrder.push('writePending');
+      else if (p.includes('.current-commit')) callOrder.push('writeCommit');
+    });
     mockedSwapSlot.mockImplementation(async () => { callOrder.push('swapSlot'); });
 
     await performUpdate(AU, vi.fn());
 
-    const writeIdx = callOrder.indexOf('writeFile');
+    const writeIdx = callOrder.indexOf('writePending');
     const swapIdx = callOrder.indexOf('swapSlot');
     expect(writeIdx).toBeGreaterThanOrEqual(0);
     expect(swapIdx).toBeGreaterThan(writeIdx);
   });
 
-  it('restores commit file if swap fails', async () => {
+  it('clears pending file if swap fails', async () => {
     const oldCommit = 'old-sha-111';
     const newCommit = 'new-sha-222';
     mockedReadFile.mockResolvedValueOnce(oldCommit as any);
@@ -304,11 +308,9 @@ describe('blue-green checkForUpdate', () => {
     const result = await performUpdate(AU, log);
     expect(result).toBe(false);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
-
-    // commit file should be restored to old commit
-    const writeFileCalls = mockedWriteFile.mock.calls;
-    const lastWrite = writeFileCalls[writeFileCalls.length - 1];
-    expect(lastWrite[1]).toBe(oldCommit);
+    // commit file should not be rewritten to the new commit on failed swap
+    const commitWrites = mockedWriteFile.mock.calls.filter((c) => String(c[0]).includes('.current-commit'));
+    expect(commitWrites.length).toBe(0);
   });
 
   it('checkForNewCommit is read-only — does not build, swap, or modify files', async () => {
@@ -337,5 +339,49 @@ describe('blue-green checkForUpdate', () => {
 
     expect(result).toBeNull();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
+  });
+
+  it('supports explicit tag refs for version-targeted updates', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(AU, vi.fn(), { refOverride: 'refs/tags/v9.0.5', verifyTagSignature: true });
+    expect(result).toBe(true);
+    const allCmds = getExecCalls().map((c) => c.cmd);
+    expect(allCmds.some((c) => c.includes('git fetch origin refs/tags/v9.0.5'))).toBe(true);
+    expect(allCmds.some((c) => c.includes('git verify-tag "v9.0.5"'))).toBe(true);
+    expect(allCmds.some((c) => c.includes('git checkout --force FETCH_HEAD'))).toBe(true);
+  });
+
+  it('blocks pre-release versions unless allowPrerelease is true', async () => {
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111' as any;
+      if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
+      throw new Error(`Unexpected readFile path: ${p}`);
+    });
+    makeFetchOk('rcsha123');
+
+    const log = vi.fn();
+    const result = await performUpdate({ ...AU, allowPrerelease: false }, log);
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('pre-release'));
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('allows pre-release versions when allowPrerelease=true', async () => {
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return 'aaa111' as any;
+      if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
+      throw new Error(`Unexpected readFile path: ${p}`);
+    });
+    makeFetchOk('rcsha999');
+
+    const result = await performUpdate({ ...AU, allowPrerelease: true }, vi.fn());
+    expect(result).toBe(true);
+    expect(mockedSwapSlot).toHaveBeenCalled();
   });
 });
