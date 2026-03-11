@@ -104,4 +104,40 @@ describe('slot helpers', () => {
     expect(typeof dir).toBe('string');
     expect(dir.length).toBeGreaterThan(0);
   });
+
+  // -------------------------------------------------------------------
+  // Regression tests for bugs found during PR review cycles
+  // -------------------------------------------------------------------
+
+  it('activeSlot() reads symlink target even when it is an absolute path', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const { activeSlot, releasesDir } = await importHelpers();
+    const rDir = releasesDir();
+    await mkdir(rDir, { recursive: true });
+    await mkdir(join(rDir, 'b'), { recursive: true });
+    // Create symlink with absolute target instead of relative "b"
+    await symlink(join(rDir, 'b'), join(rDir, 'current'));
+    expect(await activeSlot()).toBe('b');
+  });
+
+  it('activeSlot() prefers symlink over active file when both exist', async () => {
+    const { symlink } = await import('node:fs/promises');
+    const { activeSlot, releasesDir } = await importHelpers();
+    const rDir = releasesDir();
+    await mkdir(rDir, { recursive: true });
+    await mkdir(join(rDir, 'a'), { recursive: true });
+    await mkdir(join(rDir, 'b'), { recursive: true });
+    // Symlink points to b, but active file says a — symlink wins
+    await symlink('b', join(rDir, 'current'));
+    await writeFile(join(rDir, 'active'), 'a');
+    expect(await activeSlot()).toBe('b');
+  });
+
+  it('repoDir() walks up to find repo root with package.json + packages/', async () => {
+    const { repoDir } = await importHelpers();
+    const dir = repoDir();
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(join(dir, 'package.json'))).toBe(true);
+    expect(existsSync(join(dir, 'packages'))).toBe(true);
+  });
 });

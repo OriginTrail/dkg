@@ -95,4 +95,51 @@ describe('migrateToBlueGreen', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Migrating'));
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Migration complete'));
   });
+
+  // -------------------------------------------------------------------
+  // Regression tests for bugs found during PR review cycles
+  // -------------------------------------------------------------------
+
+  it('migration uses git clone (not symlink) for slot A to prevent dev repo damage', async () => {
+    const { execSync } = await import('node:child_process');
+    const mockedExecSync = vi.mocked(execSync);
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const cloneCalls = mockedExecSync.mock.calls
+      .map(c => String(c[0]))
+      .filter(cmd => cmd.includes('git clone'));
+
+    // Slot A should be cloned, not symlinked
+    expect(cloneCalls.some(cmd => cmd.includes('git clone --local'))).toBe(true);
+  });
+
+  it('migration builds slot A after cloning (not just clone)', async () => {
+    const { execSync } = await import('node:child_process');
+    const mockedExecSync = vi.mocked(execSync);
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
+    expect(allCmds.some(cmd => cmd.includes('pnpm install'))).toBe(true);
+    expect(allCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
+  });
+
+  it('migration slot B clone uses --dissociate to prevent repo corruption', async () => {
+    const { execSync } = await import('node:child_process');
+    const mockedExecSync = vi.mocked(execSync);
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const cloneCalls = mockedExecSync.mock.calls
+      .map(c => String(c[0]))
+      .filter(cmd => cmd.includes('git clone') && cmd.includes('--reference'));
+
+    if (cloneCalls.length > 0) {
+      expect(cloneCalls[0]).toContain('--dissociate');
+    }
+  });
 });

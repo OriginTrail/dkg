@@ -61,4 +61,42 @@ describe('rollback (swapSlot)', () => {
     const target = await readlink(join(rDir, 'current'));
     expect(target).toBe('a');
   });
+
+  // -------------------------------------------------------------------
+  // Regression: CLI rollback command verifies target slot has build
+  // -------------------------------------------------------------------
+
+  it('swapSlot works even if target slot is empty (low-level)', async () => {
+    const rDir = join(tmpDir, 'releases');
+    await mkdir(rDir, { recursive: true });
+    await mkdir(join(rDir, 'a'), { recursive: true });
+    // b exists but has no build output — swapSlot is a low-level operation
+    // The CLI rollback command checks for cli.js before calling swapSlot
+    await mkdir(join(rDir, 'b'), { recursive: true });
+
+    const { swapSlot } = await import('../src/config.js');
+    await swapSlot('b');
+
+    const target = await readlink(join(rDir, 'current'));
+    expect(target).toBe('b');
+  });
+
+  it('activeSlot + inactiveSlot are consistent after rollback', async () => {
+    const rDir = join(tmpDir, 'releases');
+    await mkdir(rDir, { recursive: true });
+    await mkdir(join(rDir, 'a'), { recursive: true });
+    await mkdir(join(rDir, 'b'), { recursive: true });
+    await symlink('a', join(rDir, 'current'));
+    await writeFile(join(rDir, 'active'), 'a');
+
+    const { swapSlot, activeSlot, inactiveSlot } = await import('../src/config.js');
+
+    expect(await activeSlot()).toBe('a');
+    expect(await inactiveSlot()).toBe('b');
+
+    await swapSlot('b');
+
+    expect(await activeSlot()).toBe('b');
+    expect(await inactiveSlot()).toBe('a');
+  });
 });

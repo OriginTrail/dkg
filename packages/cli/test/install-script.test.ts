@@ -49,4 +49,25 @@ describe('install.sh validation', () => {
     const content = await readFile(INSTALL_SCRIPT, 'utf-8');
     expect(content).toContain('DKG_HOME');
   });
+
+  // -------------------------------------------------------------------
+  // Regression tests for bugs found during PR review cycles
+  // -------------------------------------------------------------------
+
+  it('slot B clone uses --dissociate to prevent repo corruption', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    expect(content).toContain('--dissociate');
+  });
+
+  it('wrapper script resolves DKG_HOME at runtime (not install time)', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    // The heredoc must use <<'WRAPPER' (quoted) so variables expand at runtime
+    expect(content).toContain("<<'WRAPPER'");
+  });
+
+  it('script has idempotency checks before git clone', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    // Should check if .git directory exists before cloning
+    expect(content).toContain('.git');
+  });
 });

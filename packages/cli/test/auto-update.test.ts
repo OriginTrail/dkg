@@ -226,4 +226,116 @@ describe('blue-green checkForUpdate', () => {
     const secondBuildCwds = getExecCalls().map(c => c.cwd).filter(Boolean);
     expect(secondBuildCwds.some((cwd: string) => cwd.includes('/a'))).toBe(true);
   });
+
+  // -------------------------------------------------------------------
+  // Regression tests for bugs found during PR review cycles
+  // -------------------------------------------------------------------
+
+  it('rejects branch names with shell injection characters', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    const log = vi.fn();
+
+    const malicious: AutoUpdateConfig = {
+      ...AU,
+      branch: 'main; rm -rf /',
+    };
+    const result = await performUpdate(malicious, log);
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
+    expect(mockedExec).not.toHaveBeenCalled();
+  });
+
+  it('aborts swap when build output (cli.js) is missing', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('newcommit');
+
+    // existsSync returns true for dirs but false for cli.js entry file
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.includes('cli.js')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
+  });
+
+  it('skips when target slot has no .git directory (empty dir from failed migration)', async () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.includes('.git')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('slots not initialized'));
+  });
+
+  it('commit file is written before swap (crash safety)', async () => {
+    mockedReadFile.mockResolvedValueOnce('old-commit' as any);
+    makeFetchOk('new-commit');
+
+    const callOrder: string[] = [];
+    mockedWriteFile.mockImplementation(async () => { callOrder.push('writeFile'); });
+    mockedSwapSlot.mockImplementation(async () => { callOrder.push('swapSlot'); });
+
+    await performUpdate(AU, vi.fn());
+
+    const writeIdx = callOrder.indexOf('writeFile');
+    const swapIdx = callOrder.indexOf('swapSlot');
+    expect(writeIdx).toBeGreaterThanOrEqual(0);
+    expect(swapIdx).toBeGreaterThan(writeIdx);
+  });
+
+  it('restores commit file if swap fails', async () => {
+    const oldCommit = 'old-sha-111';
+    const newCommit = 'new-sha-222';
+    mockedReadFile.mockResolvedValueOnce(oldCommit as any);
+    makeFetchOk(newCommit);
+
+    mockedSwapSlot.mockRejectedValueOnce(new Error('symlink failed'));
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('symlink swap failed'));
+
+    // commit file should be restored to old commit
+    const writeFileCalls = mockedWriteFile.mock.calls;
+    const lastWrite = writeFileCalls[writeFileCalls.length - 1];
+    expect(lastWrite[1]).toBe(oldCommit);
+  });
+
+  it('checkForNewCommit is read-only — does not build, swap, or modify files', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    makeFetchOk('new-sha');
+
+    const log = vi.fn();
+    const result = await checkForNewCommit(AU, log);
+
+    expect(result).toBe('new-sha');
+    expect(mockedExec).not.toHaveBeenCalled();
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(mockedWriteFile).not.toHaveBeenCalled();
+  });
+
+  it('checkForNewCommit also validates branch names', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    const log = vi.fn();
+
+    const result = await checkForNewCommit({
+      ...AU,
+      branch: '$(whoami)',
+    }, log);
+
+    expect(result).toBeNull();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
+  });
 });
