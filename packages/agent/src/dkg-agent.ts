@@ -1249,8 +1249,10 @@ export class DKGAgent {
     });
   }
 
-  subscribeToParanet(paranetId: string): void {
-    this.trackSyncParanet(paranetId);
+  subscribeToParanet(paranetId: string, options?: { trackSyncScope?: boolean }): void {
+    if (options?.trackSyncScope !== false) {
+      this.trackSyncParanet(paranetId);
+    }
 
     // Idempotent: skip if gossip handlers already installed for this paranet
     if (this.gossipRegistered.has(paranetId)) {
@@ -1313,7 +1315,7 @@ export class DKGAgent {
         this.subscribedParanets,
         {
           paranetExists: (id) => this.paranetExists(id),
-          subscribeToParanet: (id) => this.subscribeToParanet(id),
+          subscribeToParanet: (id, options) => this.subscribeToParanet(id, options),
         },
       );
     }
@@ -1827,7 +1829,7 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToParanet(id);
+        this.subscribeToParanet(id, { trackSyncScope: false });
       }
 
       this.log.info(ctx, `Discovered paranet "${name}" (${id}) from store — auto-subscribed`);
@@ -1886,7 +1888,7 @@ export class DKGAgent {
         synced: false,
         onChainId: p.paranetId,
       });
-      this.subscribeToParanet(p.name);
+      this.subscribeToParanet(p.name, { trackSyncScope: false });
       this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }

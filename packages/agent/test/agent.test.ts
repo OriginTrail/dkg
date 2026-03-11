@@ -719,6 +719,25 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
     }
   });
 
+  it('does not add discovery subscriptions to sync scope when tracking is disabled', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeSyncScopeNoTrack',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+
+      agent.subscribeToParanet('discovered-paranet', { trackSyncScope: false });
+
+      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('syncParanetFromConnectedPeers returns empty stats without peers', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoPeers',
