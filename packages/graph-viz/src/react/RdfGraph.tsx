@@ -61,6 +61,7 @@ export function RdfGraph({
 }: RdfGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const vizRef = useRef<RdfGraphViz | null>(null);
+  const initialFitDoneRef = useRef(false);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
 
@@ -138,13 +139,17 @@ export function RdfGraph({
       }
     };
 
+    let fitTimer: ReturnType<typeof setTimeout> | undefined;
     loadData().then(() => {
-      if (viz && options.autoFitDisabled) {
-        setTimeout(() => viz.zoomToFit(), 300);
+      if (viz && options.autoFitDisabled && !initialFitDoneRef.current) {
+        initialFitDoneRef.current = true;
+        fitTimer = setTimeout(() => viz.zoomToFit(), 300);
       }
     }).catch((err) => {
       console.error('[RdfGraph] Error loading data:', err);
     });
+
+    return () => { if (fitTimer) clearTimeout(fitTimer); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, format, viewConfig]);
 
