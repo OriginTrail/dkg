@@ -48,11 +48,12 @@ else
   (cd "$SLOT_A" && pnpm build)
 
   info "Cloning slot b (shared objects with a) ..."
-  git clone --reference "$SLOT_A" --branch "$BRANCH" "$REPO_URL" "$SLOT_B"
+  git clone --reference "$SLOT_A" --dissociate --branch "$BRANCH" "$REPO_URL" "$SLOT_B"
   (cd "$SLOT_B" && pnpm install --frozen-lockfile && pnpm build)
 
-  # Create current → a symlink and active file
-  ln -sfn a "$RELEASES_DIR/current"
+  # Atomic symlink: create tmp then rename
+  ln -sfn a "$RELEASES_DIR/current.tmp"
+  mv "$RELEASES_DIR/current.tmp" "$RELEASES_DIR/current" 2>/dev/null || mv -T "$RELEASES_DIR/current.tmp" "$RELEASES_DIR/current"
   echo "a" > "$RELEASES_DIR/active"
 
   green "Slots created: a (active), b (standby)"
@@ -64,9 +65,10 @@ DKG_BIN="$BIN_DIR/dkg"
 CLI_ENTRY="$RELEASES_DIR/current/packages/cli/dist/cli.js"
 
 if [ -f "$CLI_ENTRY" ]; then
-  cat > "$DKG_BIN" <<WRAPPER
+  cat > "$DKG_BIN" <<'WRAPPER'
 #!/bin/sh
-exec node "$CLI_ENTRY" "\$@"
+DKG_HOME="${DKG_HOME:-$HOME/.dkg}"
+exec node "$DKG_HOME/releases/current/packages/cli/dist/cli.js" "$@"
 WRAPPER
   chmod +x "$DKG_BIN"
   info "Created $DKG_BIN"

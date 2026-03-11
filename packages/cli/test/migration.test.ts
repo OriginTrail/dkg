@@ -7,9 +7,8 @@ import { existsSync } from 'node:fs';
 vi.mock('node:child_process', async () => {
   const { mkdirSync } = await import('node:fs');
   return {
-    execSync: vi.fn((cmd: string, opts?: any) => {
+    execSync: vi.fn((cmd: string) => {
       const cmdStr = String(cmd);
-      // Simulate git clone by creating the target directory
       if (cmdStr.startsWith('git clone')) {
         const parts = cmdStr.split('"');
         const target = parts[parts.length - 2];

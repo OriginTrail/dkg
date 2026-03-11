@@ -14,7 +14,8 @@ import {
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon, performUpdate } from './daemon.js';
+import { runDaemon, performUpdate, checkForNewCommit } from './daemon.js';
+import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
@@ -223,6 +224,8 @@ program
       console.error(`Daemon already running (PID ${pid}). Use "dkg stop" first.`);
       process.exit(1);
     }
+
+    await migrateToBlueGreen((msg) => console.log(msg));
 
     if (opts.foreground) {
       await runDaemon(true);
@@ -1153,8 +1156,12 @@ program
 
     if (opts.check) {
       console.log('Checking for updates...');
-      const updated = await performUpdate(au, (msg) => console.log(msg));
-      if (!updated) console.log('No updates available.');
+      const newCommit = await checkForNewCommit(au, (msg) => console.log(msg));
+      if (newCommit) {
+        console.log(`Update available: ${newCommit.slice(0, 8)}`);
+      } else {
+        console.log('No updates available.');
+      }
       return;
     }
 
@@ -1163,8 +1170,13 @@ program
     if (updated) {
       const pid = await readPid();
       if (pid && isProcessRunning(pid)) {
-        console.log('Restarting daemon...');
+        console.log('Stopping daemon...');
         process.kill(pid, 'SIGTERM');
+        for (let i = 0; i < 20; i++) {
+          await sleep(500);
+          if (!isProcessRunning(pid)) break;
+        }
+        console.log('Update applied. Run "dkg start" to start with the new version.');
       } else {
         console.log('Update applied. Start the daemon with: dkg start');
       }
@@ -1197,8 +1209,13 @@ program
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {
-      console.log('Restarting daemon...');
+      console.log('Stopping daemon...');
       process.kill(pid, 'SIGTERM');
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        if (!isProcessRunning(pid)) break;
+      }
+      console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
     } else {
       console.log('Daemon not running. Start with: dkg start');
     }

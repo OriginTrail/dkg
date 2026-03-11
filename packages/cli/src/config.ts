@@ -127,23 +127,30 @@ export function dkgDir(): string {
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
  */
 export function repoDir(): string {
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-  return resolve(thisDir, '..', '..', '..');
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
+    dir = dirname(dir);
+  }
+  // Fallback: assume packages/cli/dist/
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 }
 
 export function releasesDir(): string {
   return join(dkgDir(), 'releases');
 }
 
-/** Read the active slot name from the `releases/active` file. Returns null if not yet migrated. */
+/** Read the active slot from the `releases/current` symlink. Falls back to the `active` file. */
 export async function activeSlot(): Promise<'a' | 'b' | null> {
+  try {
+    const target = await readlink(join(releasesDir(), 'current'));
+    if (target === 'a' || target === 'b') return target;
+  } catch { /* symlink doesn't exist */ }
   try {
     const raw = (await readFile(join(releasesDir(), 'active'), 'utf-8')).trim();
     if (raw === 'a' || raw === 'b') return raw;
-    return null;
-  } catch {
-    return null;
-  }
+  } catch { /* file doesn't exist */ }
+  return null;
 }
 
 export async function inactiveSlot(): Promise<'a' | 'b'> {

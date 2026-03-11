@@ -1114,11 +1114,66 @@ function normalizeRepo(repo: string): string {
 }
 
 /**
+ * Check GitHub for a new commit on the configured branch.
+ * Returns the latest commit SHA if an update is available, null otherwise.
+ */
+export async function checkForNewCommit(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<string | null> {
+  const commitFile = join(dkgDir(), '.current-commit');
+  let currentCommit = '';
+  try {
+    currentCommit = (await readFile(commitFile, 'utf-8')).trim();
+  } catch {
+    const active = await activeSlot();
+    const activeDir = join(releasesDir(), active ?? 'a');
+    try {
+      currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
+    } catch { return null; }
+  }
+
+  const repo = normalizeRepo(au.repo);
+  const branch = au.branch.trim() || 'main';
+  const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+  const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
+  const token = process.env.GITHUB_TOKEN;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) {
+    log(`Auto-update: GitHub API returned ${res.status}`);
+    return null;
+  }
+  const data = await res.json() as { sha: string };
+  if (data.sha === currentCommit) return null;
+  return data.sha;
+}
+
+let _updateInProgress = false;
+
+/**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
  */
 export async function performUpdate(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  if (_updateInProgress) {
+    log('Auto-update: another update is already in progress, skipping');
+    return false;
+  }
+  _updateInProgress = true;
+  try {
+    return await _performUpdateInner(au, log);
+  } finally {
+    _updateInProgress = false;
+  }
+}
+
+async function _performUpdateInner(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<boolean> {
@@ -1149,12 +1204,18 @@ export async function performUpdate(
 
   const repo = normalizeRepo(au.repo);
   const branch = au.branch.trim() || 'main';
+
+  if (!/^[\w.\-/]+$/.test(branch)) {
+    log(`Auto-update: invalid branch name "${branch}"`);
+    return false;
+  }
+
   const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
   const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(url, { headers });
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   if (!res.ok) {
     if (res.status === 404) {
       log(
@@ -1175,10 +1236,10 @@ export async function performUpdate(
 
   try {
     execSync(`git fetch origin ${branch}`, {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe',
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
     });
     execSync(`git checkout --force origin/${branch}`, {
-      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe',
+      cwd: targetDir, encoding: 'utf-8', stdio: 'pipe', timeout: 60_000,
     });
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout failed in slot ${target} — ${fetchErr.message}`);
@@ -1194,6 +1255,12 @@ export async function performUpdate(
     });
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
+    return false;
+  }
+
+  const entryFile = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
+  if (!existsSync(entryFile)) {
+    log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
     return false;
   }
 
