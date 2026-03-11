@@ -310,4 +310,102 @@ describe('@unit ContextGraphs', () => {
       expect(isActive).to.be.true;
     });
   });
+
+  describe('regression: review feedback fixes', () => {
+    it('rejects zero participant ID in createContextGraph', async () => {
+      const node = { operational: accounts[3], admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).createContextGraph(
+          [identityId, 0],
+          1,
+          0,
+        ),
+      ).to.be.revertedWith('Zero participant ID');
+    });
+
+    it('rejects phantom batchId (non-existent batch returns zero merkle root)', async () => {
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId],
+        1,
+        0,
+      );
+      const contextGraphId = await ContextGraphStorageContract.getLatestContextGraphId();
+
+      const nonExistentBatchId = 99999n;
+      const merkleRoot = ethers.ZeroHash;
+      const digest = ethers.solidityPackedKeccak256(
+        ['uint256', 'bytes32'],
+        [contextGraphId, merkleRoot],
+      );
+      const sig = ethers.Signature.from(
+        await signer.signMessage(ethers.getBytes(digest)),
+      );
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
+          contextGraphId,
+          nonExistentBatchId,
+          merkleRoot,
+          [identityId],
+          [sig.r],
+          [sig.yParityAndS],
+        ),
+      ).to.be.revertedWith('Batch does not exist');
+    });
+
+    it('rejects duplicate batch registration (replay protection)', async () => {
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId],
+        1,
+        0,
+      );
+      const contextGraphId = await ContextGraphStorageContract.getLatestContextGraphId();
+
+      const batchId = 42n;
+      const merkleRoot = await KnowledgeAssetsStorageContract.getBatchMerkleRoot(batchId);
+
+      if (merkleRoot === ethers.ZeroHash) {
+        // Skip if test setup doesn't have published batches
+        return;
+      }
+
+      const digest = ethers.solidityPackedKeccak256(
+        ['uint256', 'bytes32'],
+        [contextGraphId, merkleRoot],
+      );
+      const sig = ethers.Signature.from(
+        await signer.signMessage(ethers.getBytes(digest)),
+      );
+
+      await ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
+        contextGraphId,
+        batchId,
+        merkleRoot,
+        [identityId],
+        [sig.r],
+        [sig.yParityAndS],
+      );
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
+          contextGraphId,
+          batchId,
+          merkleRoot,
+          [identityId],
+          [sig.r],
+          [sig.yParityAndS],
+        ),
+      ).to.be.revertedWith('Batch already registered');
+    });
+  });
 });

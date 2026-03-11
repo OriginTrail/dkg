@@ -59,6 +59,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         uint8 requiredSignatures,
         uint256 metadataBatchId
     ) external returns (uint256 contextGraphId) {
+        for (uint256 i; i < participantIdentityIds.length; i++) {
+            require(participantIdentityIds[i] != 0, "Zero participant ID");
+        }
         contextGraphId = contextGraphStorage.createContextGraph(
             msg.sender,
             participantIdentityIds,
@@ -78,6 +81,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      * @param signatureRs           ECDSA signature R values
      * @param signatureVss          ECDSA compact signature (v << 255 | s) values
      */
+    mapping(uint256 => mapping(uint256 => bool)) private _batchRegistered;
+
     function addBatchToContextGraph(
         uint256 contextGraphId,
         uint256 batchId,
@@ -86,9 +91,12 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32[] calldata signatureRs,
         bytes32[] calldata signatureVss
     ) external {
+        require(!_batchRegistered[contextGraphId][batchId], "Batch already registered");
         _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
         bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
+        require(onChainRoot != bytes32(0), "Batch does not exist");
         require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
+        _batchRegistered[contextGraphId][batchId] = true;
         contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
     }
 
