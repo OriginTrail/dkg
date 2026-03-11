@@ -233,6 +233,96 @@ describe('explorer graph query safety', () => {
   });
 });
 
+describe('SPARQL helper cards', () => {
+  const explorer = readFile('pages/Explorer.tsx');
+
+  it('includes required helper cards', () => {
+    const helperBlockMatch = explorer.match(
+      /const QUERY_HELPERS:\s*Array<\{[^}]+\}>\s*=\s*\[([\s\S]*?)\n\];/,
+    );
+    expect(helperBlockMatch).not.toBeNull();
+    const helperBlock = helperBlockMatch?.[1] ?? '';
+    expect(helperBlock).toContain("title: 'All triples + provenance'");
+    expect(helperBlock).toContain("title: 'Agent Registry Snapshot'");
+    expect(helperBlock).toContain("title: 'Ontology Paranet Concepts'");
+  });
+
+  it('includes agents template as direct SPO query on agents paranet graph', () => {
+    expect(explorer).toContain('GRAPH <did:dkg:paranet:agents>');
+    expect(explorer).toContain('SELECT ?s ?p ?o WHERE');
+  });
+
+  it('runs helper query immediately on card click', () => {
+    expect(explorer).toContain('runQuery(helper.query)');
+  });
+
+  it('auto-runs default query on first page load', () => {
+    expect(explorer).toContain('if (autoRan) return;');
+    expect(explorer).toContain('runQuery(sparql)');
+  });
+
+  it('derives triples from executed query, not live editor text', () => {
+    expect(explorer).toContain('const [executedQuery, setExecutedQuery] = useState(initialQuery);');
+    expect(explorer).toContain('setExecutedQuery(query);');
+    expect(explorer).toContain('deriveGraphTriples(result, executedQuery)');
+  });
+
+  it('uses token-aware SPARQL comment stripping (keeps # inside IRIs)', () => {
+    expect(explorer).toContain("from '../sparql-utils.js'");
+    expect(explorer).not.toContain("sparql.replace(/#[^\\n\\r]*/g, ' ')");
+  });
+
+  it('expands triples to one row per (s,p,o,g) when provenance exists', () => {
+    expect(explorer).toContain('buildTripleRowsWithProvenance(triples, rows)');
+    expect(explorer).not.toContain('No provenance metadata found in named graphs for these triples');
+  });
+
+  it('does not double-encode already serialized RDF terms in VALUES/N-Quads rendering', () => {
+    expect(explorer).toContain('function isSerializedRdfTerm');
+    expect(explorer).toContain('if (isSerializedRdfTerm(value)) return value;');
+  });
+
+  it('normalizes quoted source literals and keeps EVM addresses when present', () => {
+    expect(explorer).toContain('const literalMatch = v.match(');
+    expect(explorer).toContain('/^0x[a-fA-F0-9]{40}$/');
+  });
+
+  it('uses separate metadata source variables instead of reusing ?source', () => {
+    expect(explorer).toContain('SELECT ?g ?metaGraph ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp');
+    expect(explorer).toContain('?workspaceOwner');
+    expect(explorer).toContain('?publisherPeerId');
+  });
+
+  it('queries provenance from companion meta graphs mapped per data graph', () => {
+    expect(explorer).toContain('metaGraphsForDataGraph');
+    expect(explorer).toContain('VALUES (?g ?metaGraph)');
+    expect(explorer).toContain('GRAPH ?metaGraph');
+  });
+
+  it('uses _workspace suffix when deriving companion meta graphs', () => {
+    expect(explorer).toContain("g.endsWith('/_workspace')");
+    expect(explorer).not.toContain("g.endsWith('/workspace')");
+  });
+
+  it('guards runQuery state updates against out-of-order responses', () => {
+    expect(explorer).toContain('const runSeqRef = useRef(0);');
+    expect(explorer).toContain('if (runSeq !== runSeqRef.current) return;');
+  });
+
+  it('falls back to generic row rendering for non-triple query results', () => {
+    expect(explorer).toContain('function ResultBindingsFallback');
+    expect(explorer).toContain('if (!triples.length) return <ResultBindingsFallback result={result} />;');
+    expect(explorer).toContain('<ResultJsonLd triples={derivedTriples} rawResult={result} />');
+    expect(explorer).toContain('<ResultNQuads triples={derivedTriples} rawResult={result} />');
+  });
+
+  it('parses serialized RDF literals for JSON-LD output', () => {
+    expect(explorer).toContain('function parseSerializedRdfLiteral');
+    expect(explorer).toContain("literalNode['@language']");
+    expect(explorer).toContain("literalNode['@type']");
+  });
+});
+
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 

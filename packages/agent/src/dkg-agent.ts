@@ -1077,7 +1077,14 @@ export class DKGAgent {
         );
       }
     }
-    const result = await this.publisher.publish({ paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
+    const result = await this.publisher.publish({
+      paranetId,
+      quads,
+      privateQuads,
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      onPhase,
+    });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
     await this.broadcastPublish(paranetId, result, ctx);
@@ -1093,7 +1100,14 @@ export class DKGAgent {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
-    const result = await this.publisher.update(kcId, { paranetId, quads, privateQuads, operationCtx: ctx, onPhase });
+    const result = await this.publisher.update(kcId, {
+      paranetId,
+      quads,
+      privateQuads,
+      publisherPeerId: this.node.peerId.toString(),
+      operationCtx: ctx,
+      onPhase,
+    });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');

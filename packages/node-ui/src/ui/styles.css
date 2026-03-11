@@ -146,6 +146,36 @@ input::placeholder{color:#475569}
 .prov-field-value{font-size:11px;color:var(--text);background:rgba(255,255,255,.03);padding:6px 10px;border-radius:6px;border:1px solid var(--border);word-break:break-all;margin-bottom:12px;font-family:'JetBrains Mono',monospace}
 .sparql-editor{padding:16px 18px;margin:0;font-size:12px;line-height:1.7;color:var(--text);background:#080d16;min-height:240px;overflow:auto;white-space:pre;font-family:'JetBrains Mono',monospace;border:1px solid var(--border);border-radius:10px;resize:vertical;outline:none;width:100%;box-sizing:border-box;transition:border-color .15s}
 .sparql-editor:focus{border-color:rgba(74,222,128,.4)}
+.sparql-editor-cm{margin-top:0;background:#080d16;border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s}
+.sparql-editor-cm:focus-within{border-color:rgba(74,222,128,.4)}
+.sparql-editor-cm .cm-editor{min-height:240px;background:transparent;color:var(--text);font-family:'JetBrains Mono',monospace}
+.sparql-editor-cm .cm-focused{outline:none}
+.sparql-editor-cm .cm-scroller{min-height:240px;padding:16px 18px;font-size:12px;line-height:1.7}
+.sparql-editor-cm .cm-content{white-space:pre-wrap}
+.sparql-editor-cm .cm-line{padding:0}
+.sparql-editor-cm .cm-activeLine{background:rgba(255,255,255,.03)}
+.sparql-editor-cm .cm-selectionBackground,.sparql-editor-cm .cm-content ::selection{background:rgba(74,222,128,.22)!important}
+.sparql-editor-cm .cm-keyword{color:#7dd3fc}
+.sparql-editor-cm .cm-operator{color:#c4b5fd}
+.sparql-editor-cm .cm-string{color:#86efac}
+.sparql-editor-cm .cm-number{color:#fdba74}
+.sparql-editor-cm .cm-variableName,.sparql-editor-cm .cm-variableName2{color:#f9a8d4}
+.sparql-stack-layout{display:flex;flex-direction:column;gap:12px;min-height:calc(100vh - 220px);width:100%}
+.sparql-query-composer{display:flex;gap:12px;width:100%;min-height:260px}
+.sparql-query-editor-pane{flex:1 1 50%;min-width:0}
+.sparql-helper-grid{flex:1 1 50%;min-width:0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sparql-helper-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px;text-align:left;transition:border-color .15s,background .15s}
+.sparql-helper-card:hover{border-color:rgba(74,222,128,.45);background:rgba(74,222,128,.06)}
+.sparql-helper-title{font-size:12px;font-weight:700;color:var(--text)}
+.sparql-helper-desc{font-size:11px;color:var(--text-muted);line-height:1.4}
+.sparql-helper-code{font-size:10px;color:var(--text-dim);white-space:pre-wrap;word-break:break-word;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:6px;padding:6px;max-height:88px;overflow:auto}
+.sparql-results-pane{margin-top:12px;flex:0 0 auto;min-height:320px;max-height:460px;overflow:auto}
+.sparql-graph-pane{width:100%;flex:1 1 auto;min-height:320px;display:flex;overflow:hidden}
+.sparql-graph-pane .card{width:100%}
+.sparql-cell-with-copy{position:relative;padding-right:48px!important}
+.sparql-copy-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);opacity:0;pointer-events:none;background:var(--surface-alt);border:1px solid var(--border);color:var(--text-muted);font-size:10px;padding:2px 6px;border-radius:5px;transition:opacity .12s ease}
+.sparql-cell-with-copy:hover .sparql-copy-btn{opacity:1;pointer-events:auto}
+.sparql-cell-link{background:none;border:none;color:var(--blue);font:inherit;text-align:left;padding:0;cursor:pointer;text-decoration:underline}
 
 /* Floating ChatPanel (Node Assistant) */
 .chat-fab{position:fixed;bottom:24px;right:24px;width:52px;height:52px;border-radius:50%;background:var(--green);color:var(--bg);border:none;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 20px rgba(74,222,128,.3);z-index:1000}
