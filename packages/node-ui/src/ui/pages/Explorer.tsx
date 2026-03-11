@@ -1,9 +1,13 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
-import { RdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
+import { EditorState, type Extension } from '@codemirror/state';
+import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view';
+import { sql } from '@codemirror/lang-sql';
+import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
 
 export function ExplorerPage() {
   return (
@@ -660,39 +664,96 @@ function GraphTab() {
 }
 
 const TEMPLATES: Record<string, string> = {
-  'All triples (limit 100)': 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 100',
-  'All agents': `SELECT ?name ?peerId WHERE {
-  ?agent <urn:dkg:agentName> ?name ;
-         <urn:dkg:peerId> ?peerId .
-}`,
-  'KCs in a paranet': `SELECT ?kc ?status WHERE {
-  GRAPH ?meta {
-    ?kc a <urn:dkg:KC> ;
-        <urn:dkg:status> ?status .
-  }
-} LIMIT 50`,
-  'Count triples per graph': `SELECT ?g (COUNT(*) AS ?count) WHERE {
+  'All triples + provenance (SPOG, limit 100)': `SELECT ?s ?p ?o ?g WHERE {
   GRAPH ?g { ?s ?p ?o }
-} GROUP BY ?g ORDER BY DESC(?count)`,
+} LIMIT 100`,
+  'Named graph triples (SPO)': `SELECT ?s ?p ?o WHERE {
+  GRAPH ?g { ?s ?p ?o }
+} LIMIT 100`,
+  'Network subject triples (SPO)': `SELECT ?s ?p ?o WHERE {
+  BIND(<did:dkg:network:v9-testnet> AS ?s)
+  ?s ?p ?o .
+} LIMIT 100`,
+  'Type + properties (SPO)': `SELECT ?s ?p ?o WHERE {
+  ?s a ?type .
+  ?s ?p ?o .
+} LIMIT 100`,
 };
+
+const QUERY_HELPERS: Array<{ title: string; description: string; query: string }> = [
+  {
+    title: 'All triples + provenance',
+    description: 'Reads triples from named graphs with graph URI included.',
+    query: `SELECT ?s ?p ?o ?g WHERE {
+  GRAPH ?g { ?s ?p ?o }
+} LIMIT 100`,
+  },
+  {
+    title: 'OriginTrail Game Events',
+    description: 'Explore gameplay/activity triples from the game paranet.',
+    query: `SELECT ?s ?p ?o ?g WHERE {
+  GRAPH ?g {
+    ?s ?p ?o .
+    FILTER(CONTAINS(LCASE(STR(?g)), "origin-trail-game"))
+  }
+} LIMIT 100`,
+  },
+  {
+    title: 'Agent Registry Snapshot',
+    description: 'Raw triples from the agents paranet graph.',
+    query: `SELECT ?s ?p ?o WHERE {
+  GRAPH <did:dkg:paranet:agents> {
+    ?s ?p ?o
+  }
+} LIMIT 100`,
+  },
+  {
+    title: 'Ontology Paranet Concepts',
+    description: 'Browse classes/properties and related ontology triples.',
+    query: `SELECT ?s ?p ?o ?g WHERE {
+  GRAPH ?g {
+    ?s ?p ?o .
+    FILTER(
+      CONTAINS(LCASE(STR(?g)), "ontology")
+      || CONTAINS(LCASE(STR(?s)), "ontology")
+      || CONTAINS(LCASE(STR(?o)), "ontology")
+    )
+  }
+} LIMIT 100`,
+  },
+];
 
 function SparqlTab() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialQuery = searchParams.get('q') || TEMPLATES['All triples (limit 100)'];
+  const initialQuery = searchParams.get('q') || TEMPLATES['All triples + provenance (SPOG, limit 100)'];
   const [sparql, setSparql] = useState(initialQuery);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<'table' | 'json' | 'graph'>('table');
   const [execTime, setExecTime] = useState<number | null>(null);
   const [autoRan, setAutoRan] = useState(false);
+  const [resultsTab, setResultsTab] = useState<'triples' | 'jsonld' | 'nquads'>('triples');
+  const [provenanceRows, setProvenanceRows] = useState<Array<{
+    s: string;
+    p: string;
+    o: string;
+    g: string;
+    graphType: string;
+    paranet: string;
+    source: string;
+    ual: string;
+    txHash: string;
+    timestamp: string;
+  }>>([]);
+  const [provenanceLoading, setProvenanceLoading] = useState(false);
+  const [focusedSubject, setFocusedSubject] = useState<string | null>(null);
 
-  const run = useCallback(async () => {
+  const runQuery = useCallback(async (query: string) => {
     setLoading(true);
     setError(null);
     const start = performance.now();
     try {
-      const res = await executeQuery(sparql);
+      const res = await executeQuery(query);
       const duration = Math.round(performance.now() - start);
       setExecTime(duration);
       const raw = res.result;
@@ -703,106 +764,254 @@ function SparqlTab() {
     } finally {
       setLoading(false);
     }
-  }, [sparql]);
+  }, []);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault();
-      run();
-    }
-  }, [run]);
+  const run = useCallback(async () => {
+    await runQuery(sparql);
+  }, [runQuery, sparql]);
 
   useEffect(() => {
-    if (searchParams.has('q') && !autoRan) {
-      setAutoRan(true);
+    if (autoRan) return;
+    setAutoRan(true);
+    if (searchParams.has('q')) {
       setSearchParams((prev) => { prev.delete('q'); return prev; }, { replace: true });
-      run();
     }
-  }, [searchParams, autoRan, run, setSearchParams]);
+    runQuery(sparql);
+  }, [searchParams, autoRan, runQuery, setSearchParams, sparql]);
+
+  const derivedTriples = useMemo(
+    () => deriveGraphTriples(result, sparql),
+    [result, sparql],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadProvenance = async () => {
+      if (derivedTriples.length === 0) {
+        setProvenanceRows([]);
+        setProvenanceLoading(false);
+        return;
+      }
+      setProvenanceLoading(true);
+      try {
+        const uniqueTriples = dedupeTriples(derivedTriples).slice(0, 100);
+        const values = uniqueTriples
+          .map((t) => `(${toSparqlTerm(t.s)} ${toSparqlTerm(t.p)} ${toSparqlTerm(t.o)})`)
+          .join('\n');
+        const provenanceQuery = `SELECT ?s ?p ?o ?g WHERE {
+  VALUES (?s ?p ?o) {
+${values}
+  }
+  GRAPH ?g { ?s ?p ?o }
+}`;
+        const res = await executeQuery(provenanceQuery);
+        const rows = Array.isArray(res?.result?.bindings) ? res.result.bindings : [];
+        const graphUris = Array.from(new Set(rows.map((r: any) => String(r.g ?? '')).filter(Boolean)));
+        let graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
+        if (graphUris.length > 0) {
+          const graphValues = graphUris.map((g) => `<${g}>`).join(' ');
+          const metaQuery = `SELECT ?g ?source ?ual ?txHash ?timestamp WHERE {
+  VALUES ?g { ${graphValues} }
+  OPTIONAL {
+    GRAPH ?g {
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/workspaceOwner> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/creator> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherPeerId> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherAddress> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisher> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/ual> ?ual }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/partOf> ?ual }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/txHash> ?txHash }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/transactionHash> ?txHash }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/timestamp> ?timestamp }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publishedAt> ?timestamp }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/createdAt> ?timestamp }
+    }
+  }
+}`;
+          try {
+            const metaRes = await executeQuery(metaQuery);
+            const metaRows = Array.isArray(metaRes?.result?.bindings) ? metaRes.result.bindings : [];
+            graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
+            for (const r of metaRows) {
+              const g = String(r.g ?? '');
+              if (!g) continue;
+              const existing = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
+              const candidate = normalizeNodeSource(String(r.source ?? ''));
+              graphMeta.set(g, {
+                source: existing.source || candidate,
+                ual: existing.ual || String(r.ual ?? ''),
+                txHash: existing.txHash || String(r.txHash ?? ''),
+                timestamp: existing.timestamp || String(r.timestamp ?? ''),
+              });
+            }
+          } catch {
+            graphMeta = new Map();
+          }
+        }
+        if (cancelled) return;
+        setProvenanceRows(rows.map((r: any) => {
+          const g = String(r.g ?? '');
+          const meta = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
+          const paranet = g.startsWith('did:dkg:paranet:') ? g.replace('did:dkg:paranet:', '').split('/')[0] : 'unknown';
+          const source = meta.source || 'unknown';
+          return {
+            s: String(r.s ?? ''),
+            p: String(r.p ?? ''),
+            o: String(r.o ?? ''),
+            g,
+            graphType: g.endsWith('/workspace') || g.includes('_workspace') ? 'workspace' : 'data',
+            paranet,
+            source,
+            ual: meta.ual,
+            txHash: meta.txHash,
+            timestamp: meta.timestamp,
+          };
+        }));
+      } catch {
+        if (!cancelled) setProvenanceRows([]);
+      } finally {
+        if (!cancelled) setProvenanceLoading(false);
+      }
+    };
+    loadProvenance();
+    return () => { cancelled = true; };
+  }, [derivedTriples]);
 
   return (
-    <div>
-      <div className="toolbar">
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select
-            className="input"
-            style={{ width: 'auto', minWidth: 200 }}
-            onChange={(e) => { if (e.target.value) setSparql(e.target.value); }}
-            defaultValue=""
-          >
-            <option value="" disabled>Templates...</option>
-            {Object.entries(TEMPLATES).map(([name, q]) => (
-              <option key={name} value={q}>{name}</option>
-            ))}
-          </select>
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {execTime != null && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{execTime}ms</span>}
-          <button className="btn btn-primary" onClick={run} disabled={loading}>
-            {loading ? 'Running...' : 'Run Query'}
-          </button>
-        </div>
-      </div>
-
-      <textarea
-        className="sparql-editor"
-        value={sparql}
-        onChange={(e) => setSparql(e.target.value)}
-        onKeyDown={handleKeyDown}
-        rows={8}
-        placeholder="Enter SPARQL query... (Ctrl+Enter to run)"
-        spellCheck={false}
-      />
-
-      {error && (
-        <div className="card" style={{ borderColor: 'var(--error)', marginTop: 12 }}>
-          <div style={{ color: 'var(--error)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>{error}</div>
-        </div>
-      )}
-
-      {result && (
-        <div style={{ marginTop: 16 }}>
-          <div className="result-tabs">
-            <button className={`result-tab ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')}>Table</button>
-            <button className={`result-tab ${viewMode === 'graph' ? 'active' : ''}`} onClick={() => setViewMode('graph')}>Graph</button>
-            <button className={`result-tab ${viewMode === 'json' ? 'active' : ''}`} onClick={() => setViewMode('json')}>JSON</button>
+    <div className="sparql-stack-layout">
+        <div className="sparql-query-composer">
+          <div className="sparql-query-editor-pane">
+            <SparqlCodeEditor
+              value={sparql}
+              onChange={setSparql}
+              onRun={run}
+            />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'flex-end', marginTop: 8 }}>
+              {execTime != null && <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{execTime}ms</span>}
+              <button className="btn btn-primary" onClick={run} disabled={loading}>
+                {loading ? 'Running...' : 'Run Query'}
+              </button>
+            </div>
           </div>
-
-          {viewMode === 'table' && <ResultTable result={result} />}
-          {viewMode === 'graph' && <ResultGraph result={result} />}
-          {viewMode === 'json' && <div className="json-view">{JSON.stringify(result, null, 2)}</div>}
+          <div className="sparql-helper-grid">
+            {QUERY_HELPERS.map((helper) => (
+              <button
+                key={helper.title}
+                type="button"
+                className="sparql-helper-card"
+                onClick={() => {
+                  setSparql(helper.query);
+                  runQuery(helper.query);
+                }}
+                title="Use this query"
+              >
+                <div className="sparql-helper-title">{helper.title}</div>
+                <div className="sparql-helper-desc">{helper.description}</div>
+                <pre className="sparql-helper-code mono">{helper.query}</pre>
+              </button>
+            ))}
+          </div>
         </div>
-      )}
+
+        {error && (
+          <div className="card" style={{ borderColor: 'var(--error)', marginTop: 12 }}>
+            <div style={{ color: 'var(--error)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>{error}</div>
+          </div>
+        )}
+
+        <div className="sparql-results-pane">
+          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <strong style={{ fontSize: 13 }}>Query Results</strong>
+              <div className="result-tabs" style={{ marginBottom: 0 }}>
+                <button className={`result-tab ${resultsTab === 'triples' ? 'active' : ''}`} onClick={() => setResultsTab('triples')}>Triples</button>
+                <button className={`result-tab ${resultsTab === 'jsonld' ? 'active' : ''}`} onClick={() => setResultsTab('jsonld')}>JSON-LD</button>
+                <button className={`result-tab ${resultsTab === 'nquads' ? 'active' : ''}`} onClick={() => setResultsTab('nquads')}>N-Quads</button>
+              </div>
+            </div>
+            <div style={{ minHeight: 280, maxHeight: 420, overflow: 'auto' }}>
+              {resultsTab === 'triples' && (
+                <ResultTriples
+                  result={result}
+                  sparql={sparql}
+                  rows={provenanceRows}
+                  loading={provenanceLoading}
+                  onFocusSubject={setFocusedSubject}
+                />
+              )}
+              {resultsTab === 'jsonld' && <ResultJsonLd triples={derivedTriples} />}
+              {resultsTab === 'nquads' && <ResultNQuads triples={derivedTriples} />}
+            </div>
+          </div>
+        </div>
+      <div className="sparql-graph-pane">
+        <ResultGraph result={result} sparql={sparql} focusedSubject={focusedSubject} />
+      </div>
     </div>
   );
 }
 
-function ResultTable({ result }: { result: any }) {
-  if (!Array.isArray(result) || result.length === 0) {
-    return <div className="empty-state">No results</div>;
-  }
-
-  const columns = Object.keys(result[0]);
+function ResultTriples({
+  result,
+  sparql,
+  rows,
+  loading,
+  onFocusSubject,
+}: {
+  result: any;
+  sparql: string;
+  rows: Array<{
+    s: string;
+    p: string;
+    o: string;
+    g: string;
+    graphType: string;
+    paranet: string;
+    source: string;
+    ual: string;
+    txHash: string;
+    timestamp: string;
+  }>;
+  loading: boolean;
+  onFocusSubject: (subject: string) => void;
+}) {
+  if (!Array.isArray(result) || result.length === 0) return <div className="empty-state">Run a query to see triples</div>;
+  const triples = deriveGraphTriples(result, sparql);
+  if (!triples.length) return <div className="empty-state">No triple-shaped rows in this result set</div>;
+  if (loading) return <div className="empty-state">Loading provenance metadata…</div>;
+  if (!rows.length) return <div className="empty-state">No provenance metadata found in named graphs for these triples</div>;
 
   return (
-    <div className="card" style={{ padding: 0, overflow: 'auto' }}>
-      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)' }}>
-        {result.length} result{result.length !== 1 ? 's' : ''}
-      </div>
+    <div style={{ overflow: 'auto' }}>
       <table className="data-table">
         <thead>
-          <tr>{columns.map(c => <th key={c}>{c}</th>)}</tr>
+          <tr>
+            <th>Subject</th>
+            <th>Predicate</th>
+            <th>Object</th>
+            <th>Graph</th>
+            <th>Graph Type</th>
+            <th>Paranet</th>
+            <th>Source</th>
+            <th>UAL</th>
+            <th>Transaction Hash</th>
+            <th>Timestamp</th>
+          </tr>
         </thead>
         <tbody>
-          {result.map((row: any, i: number) => (
-            <tr key={i}>
-              {columns.map(c => (
-                <td key={c} className="mono" style={{ fontSize: 12 }}>
-                  {typeof row[c] === 'string' && row[c].length > 80
-                    ? <span title={row[c]}>{row[c].slice(0, 80)}...</span>
-                    : String(row[c] ?? '')}
-                </td>
-              ))}
+          {rows.map((t, i) => (
+            <tr key={`${t.s}-${t.p}-${t.o}-${i}`}>
+              <CellWithCopy value={t.s} clickable onClick={() => onFocusSubject(t.s)} />
+              <CellWithCopy value={t.p} />
+              <CellWithCopy value={t.o} />
+              <CellWithCopy value={t.g} />
+              <td style={{ fontSize: 12 }}>{t.graphType || '-'}</td>
+              <CellWithCopy value={t.paranet} />
+              <CellWithCopy value={t.source} />
+              <CellWithCopy value={t.ual} />
+              <CellWithCopy value={t.txHash} />
+              <CellWithCopy value={t.timestamp} />
             </tr>
           ))}
         </tbody>
@@ -811,97 +1020,335 @@ function ResultTable({ result }: { result: any }) {
   );
 }
 
-function ResultGraph({ result }: { result: any }) {
-  if (!Array.isArray(result) || result.length === 0) {
-    return <div className="graph-container">No data to visualize</div>;
-  }
+function SparqlCodeEditor({
+  value,
+  onChange,
+  onRun,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onRun: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const onChangeRef = useRef(onChange);
+  const onRunRef = useRef(onRun);
 
-  const hasTripleShape = result[0] && ('s' in result[0]) && ('p' in result[0]) && ('o' in result[0]);
-  if (!hasTripleShape) {
-    return <div className="graph-container">Graph view requires SELECT ?s ?p ?o queries</div>;
-  }
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
-  const nodesMap = new Map<string, { id: string; label: string; type: string }>();
-  const edges: Array<{ source: string; target: string; label: string }> = [];
+  useEffect(() => {
+    onRunRef.current = onRun;
+  }, [onRun]);
 
-  for (const row of result) {
-    const s = String(row.s);
-    const p = String(row.p);
-    const o = String(row.o);
+  useEffect(() => {
+    if (!hostRef.current) return;
+    const extensions: Extension[] = [
+      EditorView.lineWrapping,
+      drawSelection(),
+      highlightActiveLine(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      sql(),
+      keymap.of([
+        {
+          key: 'Mod-Enter',
+          run: () => {
+            onRunRef.current();
+            return true;
+          },
+        },
+      ]),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          onChangeRef.current(update.state.doc.toString());
+        }
+      }),
+    ];
 
-    if (!nodesMap.has(s)) {
-      nodesMap.set(s, { id: s, label: shortLabel(s), type: 'resource' });
-    }
+    const state = EditorState.create({
+      doc: value,
+      extensions,
+    });
+    const view = new EditorView({
+      state,
+      parent: hostRef.current,
+    });
+    viewRef.current = view;
 
-    const isLiteral = !o.startsWith('http') && !o.startsWith('urn:');
-    if (!isLiteral) {
-      if (!nodesMap.has(o)) {
-        nodesMap.set(o, { id: o, label: shortLabel(o), type: 'resource' });
-      }
-      edges.push({ source: s, target: o, label: shortLabel(p) });
-    } else {
-      const litId = `${s}__${p}__lit`;
-      nodesMap.set(litId, { id: litId, label: o.length > 30 ? o.slice(0, 30) + '...' : o, type: 'literal' });
-      edges.push({ source: s, target: litId, label: shortLabel(p) });
-    }
-  }
-
-  const nodes = Array.from(nodesMap.values());
-  const nodeRadius = 6;
-  const width = 800;
-  const height = 400;
-
-  const positions = nodes.map((_, i) => {
-    const angle = (2 * Math.PI * i) / nodes.length;
-    const r = Math.min(width, height) * 0.35;
-    return {
-      x: width / 2 + r * Math.cos(angle),
-      y: height / 2 + r * Math.sin(angle),
+    return () => {
+      view.destroy();
+      viewRef.current = null;
     };
-  });
+  }, []);
 
-  const nodeIndex = new Map(nodes.map((n, i) => [n.id, i]));
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current === value) return;
+    view.dispatch({
+      changes: { from: 0, to: current.length, insert: value },
+    });
+  }, [value]);
 
   return (
-    <div className="card" style={{ overflow: 'auto' }}>
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-        {nodes.length} nodes, {edges.length} edges
+    <div
+      ref={hostRef}
+      className="sparql-editor-cm"
+      aria-label="SPARQL editor"
+    />
+  );
+}
+
+function isLikelyResource(value: string): boolean {
+  return value.startsWith('http://') || value.startsWith('https://') || value.startsWith('urn:') || value.startsWith('did:') || value.startsWith('_:');
+}
+
+function toNQuadTerm(value: string): string {
+  if (value.startsWith('_:')) return value;
+  if (isLikelyResource(value)) return `<${value}>`;
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  return `"${escaped}"`;
+}
+
+function toSparqlTerm(value: string): string {
+  if (value.startsWith('_:')) return value;
+  if (isLikelyResource(value)) return `<${value}>`;
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  return `"${escaped}"`;
+}
+
+function dedupeTriples(triples: Array<{ s: string; p: string; o: string }>): Array<{ s: string; p: string; o: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ s: string; p: string; o: string }> = [];
+  for (const t of triples) {
+    const key = `${t.s}\u0000${t.p}\u0000${t.o}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+function normalizeNodeSource(raw: string): string {
+  const v = (raw || '').trim();
+  if (!v) return '';
+  if (v.startsWith('did:dkg:agent:')) return v.replace('did:dkg:agent:', '');
+  if (/^12D3[A-Za-z0-9]+/.test(v)) return v;
+  if (/^Qm[A-Za-z0-9]+/.test(v)) return v; // legacy peer id style
+  return '';
+}
+
+function buildJsonLd(triples: Array<{ s: string; p: string; o: string }>): any[] {
+  const bySubject = new Map<string, Record<string, any>>();
+  for (const t of triples) {
+    if (!bySubject.has(t.s)) bySubject.set(t.s, { '@id': t.s });
+    const node = bySubject.get(t.s)!;
+    const values = Array.isArray(node[t.p]) ? node[t.p] : [];
+    values.push(isLikelyResource(t.o) ? { '@id': t.o } : { '@value': t.o });
+    node[t.p] = values;
+  }
+  return Array.from(bySubject.values());
+}
+
+function ResultJsonLd({ triples }: { triples: Array<{ s: string; p: string; o: string }> }) {
+  if (!triples.length) return <div className="empty-state">No triple-shaped rows to convert</div>;
+  return <div className="json-view">{JSON.stringify(buildJsonLd(triples), null, 2)}</div>;
+}
+
+function ResultNQuads({ triples }: { triples: Array<{ s: string; p: string; o: string }> }) {
+  if (!triples.length) return <div className="empty-state">No triple-shaped rows to convert</div>;
+  const nquads = triples.map((t) => `${toNQuadTerm(t.s)} ${toNQuadTerm(t.p)} ${toNQuadTerm(t.o)} .`).join('\n');
+  return <div className="json-view">{nquads}</div>;
+}
+
+function CellWithCopy({
+  value,
+  clickable = false,
+  onClick,
+}: {
+  value: string;
+  clickable?: boolean;
+  onClick?: () => void;
+}) {
+  const text = value || '-';
+  const copy = useCallback(async () => {
+    try {
+      if (value) await navigator.clipboard.writeText(value);
+    } catch {
+      // ignore clipboard errors
+    }
+  }, [value]);
+
+  return (
+    <td className="mono sparql-cell-with-copy" style={{ fontSize: 12 }}>
+      {clickable ? (
+        <button type="button" className="sparql-cell-link" onClick={onClick} title="Focus node in graph">
+          {text}
+        </button>
+      ) : (
+        <span>{text}</span>
+      )}
+      {value && (
+        <button type="button" className="sparql-copy-btn" onClick={copy} title="Copy value">
+          Copy
+        </button>
+      )}
+    </td>
+  );
+}
+
+type TriplePattern = { s: string; p: string; o: string };
+
+function parseTriplePatternFromQuery(sparql: string): TriplePattern | null {
+  const withoutComments = sparql.replace(/#[^\n\r]*/g, ' ');
+  const whereMatch = withoutComments.match(/where\s*\{([\s\S]+)\}/i);
+  const source = whereMatch ? whereMatch[1] : withoutComments;
+  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|[A-Za-z][\w+.-]*:[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?)`;
+  const tripleRegex = new RegExp(`(${term})\\s+(${term})\\s+(${term})\\s*\\.?`, 'ig');
+  const match = tripleRegex.exec(source);
+  if (!match) return null;
+  return { s: match[1], p: match[2], o: match[3] };
+}
+
+function normalizeSparqlToken(token: string): string {
+  const trimmed = token.trim().replace(/[.;]$/, '');
+  if (trimmed === 'a') return RDF_TYPE;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function coerceBindingValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (value && typeof value === 'object' && 'value' in (value as Record<string, unknown>)) {
+    return coerceBindingValue((value as Record<string, unknown>).value);
+  }
+  return String(value);
+}
+
+function resolveTermValue(row: Record<string, unknown>, token: string): string | null {
+  if (token.startsWith('?')) {
+    return coerceBindingValue(row[token.slice(1)]);
+  }
+  return normalizeSparqlToken(token);
+}
+
+function deriveGraphTriples(result: any, sparql: string): Array<{ s: string; p: string; o: string }> {
+  if (!Array.isArray(result) || result.length === 0) return [];
+
+  if ('s' in result[0] && 'p' in result[0] && 'o' in result[0]) {
+    return result
+      .map((row: any) => ({
+        s: coerceBindingValue(row.s),
+        p: coerceBindingValue(row.p),
+        o: coerceBindingValue(row.o),
+      }))
+      .filter((row: any) => row.s && row.p && row.o);
+  }
+  if ('subject' in result[0] && 'predicate' in result[0] && 'object' in result[0]) {
+    return result
+      .map((row: any) => ({
+        s: coerceBindingValue(row.subject),
+        p: coerceBindingValue(row.predicate),
+        o: coerceBindingValue(row.object),
+      }))
+      .filter((row: any) => row.s && row.p && row.o);
+  }
+
+  const triplePattern = parseTriplePatternFromQuery(sparql);
+  if (!triplePattern) return [];
+
+  return result
+    .map((row: any) => ({
+      s: resolveTermValue(row, triplePattern.s),
+      p: resolveTermValue(row, triplePattern.p),
+      o: resolveTermValue(row, triplePattern.o),
+    }))
+    .filter((row: any) => row.s && row.p && row.o);
+}
+
+function GraphFocusBridge({ focusedSubject }: { focusedSubject: string | null }) {
+  const { viz } = useRdfGraph();
+  useEffect(() => {
+    if (!viz || !focusedSubject) return;
+    viz.centerOnNode(focusedSubject, { durationMs: 500, zoomLevel: 2.5 });
+  }, [viz, focusedSubject]);
+  return null;
+}
+
+function ResultGraph({ result, sparql, focusedSubject }: { result: any; sparql: string; focusedSubject: string | null }) {
+  if (!Array.isArray(result) || result.length === 0) {
+    return <div className="graph-container">Run a query to visualize graph data</div>;
+  }
+
+  const triples = deriveGraphTriples(result, sparql);
+  if (triples.length === 0) {
+    return <div className="graph-container">Graph view needs a triple pattern with variables (for example: <code>?s ?p ?o</code> or <code>{'<subject>'} ?p ?o</code>).</div>;
+  }
+  const uniqueTriples = dedupeTriples(triples);
+  const displayTriples = uniqueTriples;
+  const graphTriples = triplesWithLiteralsAsNodes(
+    displayTriples.map((t) => ({
+      subject: t.s,
+      predicate: t.p,
+      object: t.o,
+    })),
+  );
+  const graphViewConfig: ViewConfig = {
+    name: 'SPARQL Result Graph',
+    palette: 'dark',
+    paletteOverrides: {
+      edgeColor: DEFAULT_EDGE,
+      particleColor: 'rgba(34, 211, 238, 0.5)',
+    },
+    animation: {
+      fadeIn: true,
+      linkParticles: false,
+      linkParticleCount: 0,
+      linkParticleSpeed: 0.005,
+      linkParticleColor: 'rgba(34, 211, 238, 0.5)',
+      linkParticleWidth: 0.8,
+      drift: false,
+      hoverTrace: false,
+    },
+  };
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden', height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)' }}>
+        {displayTriples.length.toLocaleString()} shown of {uniqueTriples.length.toLocaleString()} unique triples from {triples.length.toLocaleString()} rows
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" style={{ background: 'var(--bg-input)', borderRadius: 'var(--radius)' }}>
-        <defs>
-          <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
-            <polygon points="0 0, 6 2, 0 4" fill="#6b7280" />
-          </marker>
-        </defs>
-
-        {edges.map((e, i) => {
-          const si = nodeIndex.get(e.source);
-          const ti = nodeIndex.get(e.target);
-          if (si == null || ti == null) return null;
-          const s = positions[si];
-          const t = positions[ti];
-          const mx = (s.x + t.x) / 2;
-          const my = (s.y + t.y) / 2;
-          return (
-            <g key={i}>
-              <line x1={s.x} y1={s.y} x2={t.x} y2={t.y}
-                stroke="#374151" strokeWidth={1} markerEnd="url(#arrowhead)" />
-              <text x={mx} y={my - 4} textAnchor="middle" fontSize={8} fill="#6b7280">{e.label}</text>
-            </g>
-          );
-        })}
-
-        {nodes.map((n, i) => {
-          const p = positions[i];
-          const fill = n.type === 'literal' ? '#f59e0b' : '#3b82f6';
-          return (
-            <g key={n.id}>
-              <circle cx={p.x} cy={p.y} r={nodeRadius} fill={fill} />
-              <text x={p.x} y={p.y + nodeRadius + 12} textAnchor="middle" fontSize={9} fill="#e5e7eb">{n.label}</text>
-            </g>
-          );
-        })}
-      </svg>
+      <div style={{ width: '100%', flex: 1, minHeight: 0 }}>
+        <RdfGraph
+          data={graphTriples}
+          format="triples"
+          initialFit
+          options={{
+            labelMode: 'humanized',
+            renderer: '2d',
+            style: {
+              defaultNodeColor: DEFAULT_NODE,
+              defaultEdgeColor: DEFAULT_EDGE,
+              edgeWidth: 0.9,
+            },
+            hexagon: { baseSize: 3, minSize: 2, maxSize: 5, scaleWithDegree: true },
+            focus: { maxNodes: 50000, hops: 999 },
+            autoFitDisabled: true,
+          }}
+          viewConfig={graphViewConfig}
+          style={{ width: '100%', height: '100%' }}
+        >
+          <GraphFocusBridge focusedSubject={focusedSubject} />
+        </RdfGraph>
+      </div>
     </div>
   );
 }
@@ -919,7 +1366,7 @@ function ParanetsTab() {
         <div className="paranet-list">
           {paranets.map((p: any) => (
             <div key={p.id} className="paranet-card" onClick={() => {
-              navigate('/explorer');
+              navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`);
             }}>
               <h3>{p.name}</h3>
               <p>{p.description || p.uri}</p>

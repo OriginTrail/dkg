@@ -233,6 +233,30 @@ describe('explorer graph query safety', () => {
   });
 });
 
+describe('SPARQL helper cards', () => {
+  const explorer = readFile('pages/Explorer.tsx');
+
+  it('defines exactly 4 query helper cards', () => {
+    const titleMatches = explorer.match(/title:\s*'/g) ?? [];
+    // QUERY_HELPERS contains the 4 clickable cards shown in UI.
+    expect(titleMatches.length).toBe(4);
+  });
+
+  it('includes agents template as direct SPO query on agents paranet graph', () => {
+    expect(explorer).toContain('GRAPH <did:dkg:paranet:agents>');
+    expect(explorer).toContain('SELECT ?s ?p ?o WHERE');
+  });
+
+  it('runs helper query immediately on card click', () => {
+    expect(explorer).toContain('runQuery(helper.query)');
+  });
+
+  it('auto-runs default query on first page load', () => {
+    expect(explorer).toContain('if (autoRan) return;');
+    expect(explorer).toContain('runQuery(sparql)');
+  });
+});
+
 describe('Apps.tsx iframe embedding', () => {
   const apps = readFile('pages/Apps.tsx');
 
