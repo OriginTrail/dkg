@@ -1,111 +1,148 @@
-# Setting Up DKG V9 with OpenClaw
+# DKG V9 OpenClaw Adapter
 
-Turn your OpenClaw agent into a DKG V9 node. Your agent gets a persistent identity on a decentralized P2P network, can publish and query knowledge, discover other agents by skill, and invoke remote capabilities — all through native OpenClaw tools.
+`@dkg/adapter-openclaw` connects an existing OpenClaw agent to DKG V9.
 
-## Architecture Overview
+The main goal is to give the agent verifiable memory through DKG V9.
 
-The DKG plugin uses **three configuration layers**. Understanding these prevents the most common setup mistakes.
+In practice, the DKG V9 provides Open Claw agents with:
 
-| Layer | File | What it controls |
-|-------|------|-----------------|
-| **OpenClaw config** | `~/.openclaw/openclaw.json` | Plugin loading and enable/disable — `plugins.load.paths` and `plugins.entries` |
-| **Workspace config** | `WORKSPACE_DIR/config.json` | All DKG node settings (name, relayPeers, chainConfig, etc.) under a `"dkg-node"` key |
-| **Environment** | `~/.openclaw/.env` | Secrets (`DKG_EVM_PRIVATE_KEY`) |
+- a local OpenClaw chat surface in DKG V9 Agent Hub through the OpenClaw bridge
+- DKG-backed memory recall/import plus file-watcher sync for `MEMORY.md` and `memory/*.md`
+- a broader DKG tool surface inside OpenClaw, including `dkg_status`, `dkg_publish`, and `dkg_query` tools for interaction with the DKG
 
-**Key rules:**
-- `plugins.entries` only accepts `{ enabled: boolean }` — never put DKG settings there.
-- All DKG settings go in the workspace `config.json` under the `"dkg-node"` key.
-- To find your workspace directory, look for `agents.defaults.workspace` in `~/.openclaw/openclaw.json`.
+If you want the end result to be:
 
-## Quick Setup (5 steps)
+`Setup complete, DKG V9 UI accessible at http://127.0.0.1:9200/ui`
 
-> **For agents:** Each step includes exact commands. Before starting, read `~/.openclaw/openclaw.json` to find the workspace directory (`agents.defaults.workspace`). When editing JSON config files, always **merge** new keys into the existing content — never overwrite the file.
+then you need both the OpenClaw plugin and the DKG daemon running on the same machine.
 
-### 1. Install the package
+## What Is Running Where
 
-Install `@dkg/adapter-openclaw` inside your workspace directory (the path from `agents.defaults.workspace` in `~/.openclaw/openclaw.json`):
+The current integration uses two config roots and two runtimes:
+
+| Surface | File | Purpose |
+| --- | --- | --- |
+| OpenClaw gateway | `~/.openclaw/openclaw.json` | Loads the adapter plugin by path and enables it by plugin ID |
+| OpenClaw workspace | `WORKSPACE_DIR/config.json` under `"dkg-node"` | Configures the adapter's embedded DKG node plus the recommended `memory` and `channel` integrations |
+| OpenClaw secrets | `~/.openclaw/.env` | Optional `DKG_EVM_PRIVATE_KEY` for the adapter's embedded node |
+| DKG daemon | `~/.dkg/config.json` | Configures the daemon, Node UI, auth, and local OpenClaw bridge routing |
+| DKG daemon auth | `~/.dkg/auth.token` | Auto-generated bearer token used by the adapter's daemon client and bridge |
+
+Important: the OpenClaw adapter and the DKG daemon are separate processes today.
+
+- The adapter's classic DKG tools run against the embedded node configured in `WORKSPACE_DIR/config.json`.
+- The Node UI, OpenClaw local bridge, and `agent-memory` graph run through the daemon configured in `~/.dkg/config.json`.
+- For most OpenClaw users, the second path is the main value: durable, verifiable memory capture and retrieval through Agent Hub plus `dkg_memory_*` tools.
+
+## Recommended Setup
+
+This is the recommended path if you want an agent to take a repo URL and perform the install end to end.
+
+### 1. Clone and build this repo
 
 ```bash
-cd WORKSPACE_DIR
-npm install @dkg/adapter-openclaw
+git clone https://github.com/OriginTrail/dkg-v9.git
+cd dkg-v9
+pnpm install
+pnpm build
 ```
 
-This places the plugin at `WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/`.
+Use a stable checkout path because OpenClaw will load the adapter directly from this repo path.
 
-### 2. Enable the plugin in openclaw.json
+### 2. Configure and start the DKG daemon
 
-Edit `~/.openclaw/openclaw.json` to add the DKG plugin. You must **merge** the following into the existing `plugins` section — do NOT replace the entire file or remove existing plugin entries.
-
-**Add these two things inside the `plugins` section:**
-
-1. A `load.paths` entry pointing to the installed package using a `~/` prefix path
-2. An `entries` entry with key `adapter-openclaw` set to `{ "enabled": true }`
-
-**How to construct the `load.paths` value:** Take the workspace path from `agents.defaults.workspace`, replace the `$HOME` prefix (e.g. `/home/user`) with `~`, and append `/node_modules/@dkg/adapter-openclaw`.
-
-For example, if your workspace is `/home/user/my-openclaw/workspace`, the load path is `~/my-openclaw/workspace/node_modules/@dkg/adapter-openclaw`.
-
-> **Why `~/`?** OpenClaw's gateway runs as a system service whose working directory varies by platform (`$HOME` on Linux, `/` on macOS). Relative paths break across platforms. The `~/` prefix is expanded to `$HOME` by OpenClaw before path resolution, making it portable across Linux and macOS.
-
-**Example — if your openclaw.json currently has:**
+Create or update `~/.dkg/config.json` with at least:
 
 ```json
 {
-  "agents": { "defaults": { "workspace": "/home/user/my-openclaw/workspace" } },
-  "plugins": {
-    "entries": {
-      "telegram": { "enabled": true }
-    }
+  "name": "dkg-openclaw-daemon",
+  "apiPort": 9200,
+  "nodeRole": "edge",
+  "relay": "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj",
+  "chain": {
+    "type": "evm",
+    "rpcUrl": "https://sepolia.base.org",
+    "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
+    "chainId": "base:84532"
+  },
+  "auth": {
+    "enabled": true
   }
 }
 ```
 
-**Change the `plugins` section to:**
+Then start the daemon from the repo root:
+
+```bash
+pnpm dkg start
+```
+
+Or run it in the foreground while validating setup:
+
+```bash
+pnpm dkg start -f
+```
+
+What this gives you:
+
+- local API at `http://127.0.0.1:9200`
+- Node UI at `http://127.0.0.1:9200/ui` by default
+- an auth token in `~/.dkg/auth.token`
+- the OpenClaw bridge endpoints under `/api/openclaw-channel/*`
+
+### 3. Enable the adapter in OpenClaw
+
+Edit `~/.openclaw/openclaw.json` and merge in the adapter path plus plugin entry.
+
+Example:
 
 ```json
 {
-  "agents": { "defaults": { "workspace": "/home/user/my-openclaw/workspace" } },
   "plugins": {
     "load": {
-      "paths": ["~/my-openclaw/workspace/node_modules/@dkg/adapter-openclaw"]
+      "paths": [
+        "~/dkg-v9/packages/adapter-openclaw"
+      ]
     },
     "entries": {
-      "telegram": { "enabled": true },
-      "adapter-openclaw": { "enabled": true }
+      "adapter-openclaw": {
+        "enabled": true
+      }
     }
   }
 }
 ```
 
-**What was added:**
-- `plugins.load.paths` — the path to the installed plugin directory, using the `~/` prefix for cross-platform portability. Constructed by replacing `$HOME` with `~` in the workspace path and appending `/node_modules/@dkg/adapter-openclaw`.
-- `plugins.entries["adapter-openclaw"]` — enables the plugin. The key `adapter-openclaw` is the plugin's manifest ID (not the npm package name `@dkg/adapter-openclaw`).
+Rules:
 
-**Common mistakes:**
-- Using a bare relative path in `load.paths` (e.g. `node_modules/...`) — the gateway's working directory varies by platform, so relative paths break. Use `~/` prefix paths instead.
-- Using the npm package name `@dkg/adapter-openclaw` as the entries key — use `adapter-openclaw` instead.
-- Replacing the entire `plugins` block and losing existing entries like `telegram`.
-- Putting DKG config (relayPeers, chainConfig, etc.) in this file — those go in the workspace `config.json`.
+- The plugin entry key must be `adapter-openclaw`.
+- Do not put DKG runtime config in `plugins.entries`.
+- Keep your existing plugin entries; merge this in instead of replacing the whole `plugins` block.
 
-### 3. Configure the DKG node
+If your environment already installs the packaged adapter under `WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw`, you can point `plugins.load.paths` there instead.
 
-Create or edit `config.json` **inside the workspace directory** (the path from `agents.defaults.workspace` in `openclaw.json`).
+### 4. Configure the adapter in the OpenClaw workspace
 
-Add a `"dkg-node"` key with your network settings. The two fields that determine **which network** you join are:
-- **`relayPeers`** — the relay node your agent connects through (determines which P2P swarm)
-- **`chainConfig`** — the RPC endpoint and Hub contract (determines which chain for on-chain finality)
+Find the OpenClaw workspace directory from `agents.defaults.workspace` in `~/.openclaw/openclaw.json`.
 
-**Testnet config** (the only network available today):
+Create or update `WORKSPACE_DIR/config.json` and add a `"dkg-node"` block:
 
 ```json
 {
   "dkg-node": {
     "name": "my-openclaw-agent",
-    "description": "An AI agent on the DKG testnet",
+    "description": "OpenClaw agent with DKG V9",
     "dataDir": ".dkg/openclaw",
     "relayPeers": [
       "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
     ],
+    "daemonUrl": "http://127.0.0.1:9200",
+    "memory": {
+      "enabled": true
+    },
+    "channel": {
+      "enabled": true
+    },
     "chainConfig": {
       "rpcUrl": "https://sepolia.base.org",
       "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6"
@@ -114,157 +151,197 @@ Add a `"dkg-node"` key with your network settings. The two fields that determine
 }
 ```
 
-If the file already exists with other config, **merge** the `"dkg-node"` key into it — don't overwrite the file.
+Notes:
 
-If the file doesn't exist, create it with the content above.
+- `daemonUrl` defaults to `http://127.0.0.1:9200`, but it is better to set it explicitly.
+- `memory.enabled: true` enables `dkg_memory_search`, `dkg_memory_import`, first-run backlog import, and file watching for:
+  - `WORKSPACE_DIR/MEMORY.md`
+  - `WORKSPACE_DIR/memory/**/*.md`
+- `channel.enabled: true` enables the local DKG UI <-> OpenClaw bridge used by Agent Hub.
+- For the intended OpenClaw UX, treat `memory.enabled` and `channel.enabled` as required, even though they are technically config flags.
+- `chainConfig` is optional for read/query/messaging workflows, but recommended if you want the adapter's embedded node ready for publish flows.
 
-See the [Networks](#networks) section for relay and chain values per network.
+### 5. Optional: add an EVM key for the adapter's embedded node
 
-### 4. Set up on-chain publishing (optional)
-
-For publishing knowledge with on-chain finality, add your EVM private key to `~/.openclaw/.env`:
+If you want the OpenClaw agent's embedded node to publish on-chain through `dkg_publish`, put the private key in `~/.openclaw/.env`:
 
 ```bash
 DKG_EVM_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
 ```
 
-If `~/.openclaw/.env` already exists, append this line — don't overwrite the file.
+Behavior:
 
-If you don't have a `chainConfig` block in your `config.json`, testnet defaults (Base Sepolia RPC + Hub) are applied automatically when the env var is detected — so for the testnet, just the env var is enough.
+- If `DKG_EVM_PRIVATE_KEY` is set and `chainConfig` is missing, the adapter fills in Base Sepolia defaults automatically.
+- If the env var is not set, the adapter still supports local graph queries, peer discovery, messaging, and daemon-backed memory/channel features.
 
-Without a private key, the node still works for P2P networking, querying, and receiving replicated data. On-chain operations (publishing with finality) require a funded wallet on the target chain. For the testnet, get free Base Sepolia ETH from [Alchemy](https://www.alchemy.com/faucets/base-sepolia) or [Coinbase](https://portal.cdp.coinbase.com/products/faucet).
+This key is only for the adapter's embedded node. The DKG daemon uses its own operational wallets in `~/.dkg/wallets.json`.
 
-### 5. Copy the SKILL.md and restart
+### 6. Optional: copy the bundled skill file into the workspace
 
-The SKILL.md file teaches your agent how to use the DKG tools. Copy it from the installed package into the workspace's skills directory.
+The package ships `skills/dkg-node/SKILL.md`. It is still relevant because it teaches the agent when to use DKG memory tools versus the classic node/network tools. Some OpenClaw setups auto-surface plugin skills; some rely on workspace skills.
 
-```bash
-# WORKSPACE_DIR = the value of agents.defaults.workspace from openclaw.json
-
-mkdir -p "$WORKSPACE_DIR/skills/dkg-node"
-cp "$WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/skills/dkg-node/SKILL.md" \
-   "$WORKSPACE_DIR/skills/dkg-node/SKILL.md"
-```
-
-Then restart the gateway:
+If you want the conservative, explicit path, copy it into the workspace:
 
 ```bash
-openclaw gateway restart
+mkdir -p WORKSPACE_DIR/skills/dkg-node
+cp ~/dkg-v9/packages/adapter-openclaw/skills/dkg-node/SKILL.md WORKSPACE_DIR/skills/dkg-node/SKILL.md
 ```
 
-### Verify
+### 7. Restart the OpenClaw gateway
 
-Ask your agent to call `dkg_status`. If the node starts successfully, you'll see the peer ID, multiaddrs, and connected peers.
+Restart the OpenClaw gateway using your normal service command so it reloads the plugin and workspace config.
 
-The DKG node starts **lazily** — it boots on the first tool call, not just on `session_start`. This means the plugin works even if added to a running gateway with existing sessions.
+## Verification
 
-## Configuration Reference
+A setup is healthy when all of the following are true.
 
-These keys go inside `"dkg-node"` in your workspace `config.json`.
+### Embedded adapter node
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `name` | string | `"openclaw-agent"` | Agent display name on the network |
-| `description` | string | — | Agent description |
-| `dataDir` | string | `".dkg/openclaw"` | Persistent state directory (keys, triple store) |
-| `listenPort` | number | random | TCP port for P2P connections |
-| `relayPeers` | string[] | — | Relay multiaddrs — **determines which P2P network** (see [Networks](#networks)) |
-| `bootstrapPeers` | string[] | — | Additional bootstrap peer multiaddrs |
-| `chainConfig.rpcUrl` | string | `"https://sepolia.base.org"` | EVM RPC URL — **determines which chain** (defaults to testnet when env var is set) |
-| `chainConfig.hubAddress` | string | `"0xC056e67D..."` | DKG Hub contract address (defaults to testnet when env var is set) |
+Ask the OpenClaw agent to call:
 
-## Available Tools
+- `dkg_status`
 
-Once enabled, your agent can use these tools:
+Expected result:
 
-| Tool | What it does |
-|------|-------------|
-| `dkg_status` | Show node status: peer ID, connected peers, multiaddrs |
-| `dkg_publish` | Publish RDF triples (N-Quads) to a DKG paranet |
-| `dkg_query` | Run a SPARQL query against the local knowledge graph |
-| `dkg_find_agents` | Discover agents by framework or skill type |
-| `dkg_send_message` | Send an encrypted chat message to another agent |
-| `dkg_invoke_skill` | Call a remote agent's skill over the network |
+- either `status: "running"` with a peer ID and connected peers
+- or a config/error payload that tells you exactly what the adapter could not start with
 
-## Identity & Wallets
+### Node UI and local bridge
 
-**P2P identity:** On first start, an Ed25519 master key is generated and saved to `<dataDir>/agent-key.bin`. This gives your agent a stable PeerId across sessions. Other agents can always reach you at the same address.
+Check the daemon UI:
 
-**EVM wallet:** The on-chain operational wallet comes from `DKG_EVM_PRIVATE_KEY` — it is **not** derived from the master key. You can change your EVM wallet without affecting your peer ID or network identity. The private key lives only in the env var and process memory; the adapter never writes it to disk.
+- open `http://127.0.0.1:9200/ui`
 
-## Programmatic Access
+Then open Agent Hub and use the `OpenClaw` tab.
 
-If you need to interact with the DKG agent directly (outside of tool calls):
+Expected result:
 
-```typescript
-import { DkgNodePlugin } from '@dkg/adapter-openclaw';
+- the tab reports the local bridge as healthy
+- sending a message produces a reply from the OpenClaw agent
+- the chat appears in the local DKG graph-backed history
 
-const dkg = new DkgNodePlugin({ /* config */ });
-dkg.register(api);
+### Memory integration
 
-// Later, after the node has started:
-const agent = dkg.getAgent();
+If `memory.enabled` is on, verify at least one of these:
 
-// Publish knowledge
-await agent.publish('my-paranet', [
-  { subject: 'http://ex.org/alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
-]);
+- ask the agent to call `dkg_memory_import`
+- ask the agent to call `dkg_memory_search`
+- append text to `WORKSPACE_DIR/MEMORY.md` and wait for the watcher/import path to pick it up
 
-// Query
-const results = await agent.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10');
+Expected result:
 
-// Discover
-const agents = await agent.findAgents({ framework: 'ElizaOS' });
+- imported memories become searchable in the daemon-backed `agent-memory` graph
 
-// Send a message
-await agent.sendChat(agents[0].peerId, 'Hello from OpenClaw!');
-```
+## Tools Exposed By The Adapter
 
-## Networks
+Always available when the adapter is enabled:
 
-Which network you join is determined by `relayPeers` and `chainConfig` in your workspace `config.json`. Use the values below for each network.
+| Tool | Purpose |
+| --- | --- |
+| `dkg_status` | Start or inspect the embedded DKG node and show connectivity info |
+| `dkg_list_paranets` | List paranets known to the embedded node |
+| `dkg_publish` | Publish N-Quads through the embedded node |
+| `dkg_query` | Run a local SPARQL query through the embedded node |
+| `dkg_find_agents` | Discover agents or skill offerings on the DKG network |
+| `dkg_send_message` | Send encrypted peer-to-peer messages from the embedded node |
+| `dkg_invoke_skill` | Invoke a remote DKG skill |
 
-### Testnet (active)
+Only available when `memory.enabled` is true:
 
-| Component | Value |
-|-----------|-------|
-| **Relay** | `/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj` |
-| **Chain** | Base Sepolia (Chain ID 84532) |
-| **RPC** | `https://sepolia.base.org` |
-| **Hub** | `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` |
-| **Faucets** | [Alchemy](https://www.alchemy.com/faucets/base-sepolia), [Coinbase](https://portal.cdp.coinbase.com/products/faucet) |
+| Tool | Purpose |
+| --- | --- |
+| `dkg_memory_search` | Search the daemon-backed `agent-memory` graph |
+| `dkg_memory_import` | Import memory text directly into the daemon-backed graph |
 
-These are the default values used when `DKG_EVM_PRIVATE_KEY` is set without explicit `chainConfig`.
+## Key Config Fields
 
-### Mainnet (coming soon)
+These keys live under `"dkg-node"` in `WORKSPACE_DIR/config.json`.
 
-Mainnet relay and chain values will be published here when available. The config structure is the same — just swap `relayPeers` and `chainConfig` values.
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `dataDir` | `.dkg/openclaw` | Persistent state for the adapter's embedded DKG node |
+| `listenPort` | random | TCP listen port for the embedded node |
+| `relayPeers` | none | Relay multiaddrs for the embedded node |
+| `bootstrapPeers` | none | Additional bootstrap peers for the embedded node |
+| `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon API used by memory/channel integrations |
+| `memory.enabled` | `false` | Enables `dkg_memory_*` tools and file-watcher/backlog import |
+| `memory.memoryDir` | `WORKSPACE_DIR/memory` | Overrides the watched memory directory |
+| `memory.watchDebounceMs` | `1500` | Debounce window for file watcher imports |
+| `channel.enabled` | `false` | Enables the Agent Hub <-> OpenClaw local bridge |
+| `channel.port` | `9201` | Standalone bridge port when gateway route registration is unavailable |
+| `chainConfig.rpcUrl` | Base Sepolia | On-chain RPC for the embedded node |
+| `chainConfig.hubAddress` | Base Sepolia hub | Hub contract for the embedded node |
+
+## Agent Runbook
+
+If another agent is performing the setup, these are the exact steps it should follow:
+
+1. Read `~/.openclaw/openclaw.json` and discover `agents.defaults.workspace`.
+2. Clone this repo to a stable path such as `~/dkg-v9`, then run `pnpm install` and `pnpm build`.
+3. Ensure `~/.dkg/config.json` exists, start the daemon, and confirm the UI is reachable at `http://127.0.0.1:9200/ui` or the configured host/port.
+4. Merge the adapter load path and `adapter-openclaw` entry into `~/.openclaw/openclaw.json`.
+5. Merge the `"dkg-node"` block into `WORKSPACE_DIR/config.json` with `daemonUrl`, `memory.enabled`, and `channel.enabled`.
+6. Optionally add `DKG_EVM_PRIVATE_KEY` to `~/.openclaw/.env`.
+7. Optionally copy `skills/dkg-node/SKILL.md` into `WORKSPACE_DIR/skills/dkg-node/SKILL.md`.
+8. Restart the OpenClaw gateway.
+9. Verify:
+   - `dkg_status` works
+   - `http://127.0.0.1:9200/ui` loads
+   - Agent Hub -> OpenClaw bridge is healthy
+10. Report back with:
+   - `Setup complete, DKG V9 UI accessible at http://127.0.0.1:9200/ui`
+
+Replace the URL if your daemon binds to a different host or port.
 
 ## Troubleshooting
 
-**"plugin not found" or "plugin id mismatch":**
-- The `plugins.entries` key must be `adapter-openclaw` (the manifest ID), not the npm package name `@dkg/adapter-openclaw`.
-- `plugins.load.paths` must use a `~/` prefix path (not a bare relative path).
-- Verify the package is installed: `ls $WORKSPACE_DIR/node_modules/@dkg/adapter-openclaw/openclaw.plugin.json` should exist.
+### `dkg_status` returns an error payload
 
-**"plugin path not found":**
-- The path in `load.paths` must start with `~/`. Bare relative paths (e.g. `node_modules/...`) resolve from the gateway's working directory, which varies by platform (`$HOME` on Linux, `/` on macOS).
-- Construct the path by replacing `$HOME` with `~` in your workspace path, then appending `/node_modules/@dkg/adapter-openclaw`.
-- Check the error message — it shows the absolute path OpenClaw tried to load from.
+The adapter loaded, but the embedded node could not start.
 
-**"DKG node not started" / tools fail:**
-- Call `dkg_status` first — it returns diagnostic config info even when the node can't start.
-- Check that `dataDir` is writable.
-- Check that the relay peer multiaddr is correct.
+Check:
 
-**On-chain publishing fails:**
-- Verify `DKG_EVM_PRIVATE_KEY` is set in `~/.openclaw/.env`.
-- Ensure the wallet has Base Sepolia ETH (use the faucets above).
-- P2P publishing still works without a key — data just stays "tentative".
+- `WORKSPACE_DIR/config.json` contains the `"dkg-node"` block
+- `relayPeers` is valid for the network you expect
+- `dataDir` is writable
+- `DKG_EVM_PRIVATE_KEY` is set if you expect on-chain publish flows
 
-**Plugin loaded twice / duplicate tools:**
-- Ensure the plugin path appears only once in `plugins.load.paths`.
+### Node UI works, but Agent Hub -> OpenClaw is offline
 
-**No agents discovered:**
-- Wait 30 seconds — profile discovery uses GossipSub which takes a cycle to propagate.
-- Verify relay connectivity via `dkg_status`.
+This usually means the daemon is up but the OpenClaw bridge is not reachable.
+
+Check:
+
+- `channel.enabled` is set to `true`
+- the OpenClaw gateway was restarted after config changes
+- the daemon is still using the current token from `~/.dkg/auth.token`
+- if your gateway does not expose adapter HTTP routes, make sure the standalone bridge port is reachable on `127.0.0.1`
+
+### `dkg_memory_search` or `dkg_memory_import` is missing
+
+`memory.enabled` is off, or the plugin did not reload after config changes.
+
+### Memory tools exist but return nothing
+
+The daemon is reachable, but the `agent-memory` graph has no relevant content yet.
+
+Try:
+
+- `dkg_memory_import`
+- editing `WORKSPACE_DIR/MEMORY.md`
+- editing a Markdown file under `WORKSPACE_DIR/memory/`
+
+### Advanced daemon routing
+
+For non-default layouts, the daemon also supports explicit OpenClaw bridge hints in `~/.dkg/config.json`:
+
+```json
+{
+  "openclawChannel": {
+    "bridgeUrl": "http://127.0.0.1:9201",
+    "gatewayUrl": "http://127.0.0.1:3000/api/dkg-channel"
+  }
+}
+```
+
+Use this only if the daemon cannot autodetect the local bridge/gateway path you want.

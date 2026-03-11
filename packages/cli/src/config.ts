@@ -74,6 +74,11 @@ export interface DkgConfig {
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
   store?: { backend: string; options?: Record<string, unknown> };
+  /** Optional OpenClaw bridge/gateway routing hints for the local channel transport. */
+  openclawChannel?: {
+    bridgeUrl?: string;
+    gatewayUrl?: string;
+  };
   /**
    * API authentication. When enabled, all non-public endpoints require
    * a Bearer token in the Authorization header. A token is auto-generated

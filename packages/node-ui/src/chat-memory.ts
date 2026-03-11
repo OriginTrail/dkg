@@ -91,6 +91,7 @@ export interface ImportResult {
 }
 
 const MEMORY_PARANET = 'agent-memory';
+const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
 const MEMORY_NS = 'urn:dkg:memory:';
@@ -98,6 +99,7 @@ const SCHEMA = 'http://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
 
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
@@ -124,18 +126,33 @@ function isSafeIri(value: string): boolean {
 }
 
 function buildSessionRootPattern(sessionUri: string): string {
-  return `{
-    { <${sessionUri}> ?sessionP ?sessionO . BIND(<${sessionUri}> AS ?s) }
-    UNION { ?s <${SCHEMA}isPartOf> <${sessionUri}> }
-    UNION {
+  const clauses = [
+    `{ <${sessionUri}> ?sessionP ?sessionO . BIND(<${sessionUri}> AS ?s) }`,
+    `{ ?s <${SCHEMA}isPartOf> <${sessionUri}> }`,
+    `{
       ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
       ?msg <${DKG_ONT}usedTool> ?s .
-    }
-    UNION {
+    }`,
+    `{
       ?msg <${SCHEMA}isPartOf> <${sessionUri}> .
       ?s <${DKG_ONT}mentionedIn> ?msg .
-    }
-    UNION { ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }
+    }`,
+    `{ ?s <${DKG_ONT}extractedFrom> <${sessionUri}> }`,
+  ];
+
+  if (sessionUri === OPENCLAW_LOCAL_SESSION_URI) {
+    clauses.push(
+      `{ ?s <${RDF_TYPE}> <${DKG_ONT}ImportedMemory> }`,
+      `{ ?s <${RDF_TYPE}> <${DKG_ONT}MemoryImport> }`,
+      `{
+      ?s <${DKG_ONT}extractedFrom> ?batch .
+      ?batch <${RDF_TYPE}> <${DKG_ONT}MemoryImport> .
+      }`,
+    );
+  }
+
+  return `{
+    ${clauses.join('\n    UNION ')}
   }`;
 }
 

@@ -552,6 +552,187 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
     { peerId, text },
   );
 
+// --- OpenClaw local channel bridge ---
+
+export async function sendOpenClawLocalChat(
+  text: string,
+  opts?: { correlationId?: string; signal?: AbortSignal },
+): Promise<{ text: string; correlationId: string }> {
+  const body = { text, correlationId: opts?.correlationId ?? crypto.randomUUID() };
+  const res = await fetch('/api/openclaw-channel/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export type OpenClawStreamEvent =
+  | { type: 'text_delta'; delta: string }
+  | { type: 'final'; text: string; correlationId: string }
+  | { type: 'error'; error: string };
+
+/**
+ * SSE streaming variant of sendOpenClawLocalChat.
+ * Yields text deltas as the agent produces them.
+ */
+export async function streamOpenClawLocalChat(
+  text: string,
+  opts: {
+    correlationId?: string;
+    signal?: AbortSignal;
+    onEvent?: (event: OpenClawStreamEvent) => void;
+  } = {},
+): Promise<{ text: string; correlationId: string }> {
+  const body = { text, correlationId: opts.correlationId ?? crypto.randomUUID() };
+  const res = await fetch('/api/openclaw-channel/stream', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+  }
+
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+
+  // Fallback: if server didn't return SSE, treat as JSON
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    const data = await res.json() as { text: string; correlationId: string };
+    opts.onEvent?.({ type: 'final', ...data });
+    return data;
+  }
+
+  // Read SSE stream
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalPayload: { text: string; correlationId: string } | undefined;
+  let streamError: Error | undefined;
+
+  const handleEvent = (event: OpenClawStreamEvent): void => {
+    opts.onEvent?.(event);
+    if (event.type === 'error') {
+      streamError = new Error(event.error || 'Stream failed');
+    } else if (event.type === 'final') {
+      finalPayload = { text: event.text, correlationId: event.correlationId };
+    }
+  };
+
+  const processLines = (finalFlush: boolean): void => {
+    let lineEnd = buffer.indexOf('\n');
+    while (lineEnd !== -1) {
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      lineEnd = buffer.indexOf('\n');
+      if (!line.startsWith('data:')) continue;
+      const dataLine = line.slice(5).trim();
+      if (!dataLine) continue;
+      try {
+        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+      } catch { /* ignore malformed frames */ }
+      if (streamError) return;
+    }
+    if (finalFlush && buffer.trim().startsWith('data:')) {
+      const dataLine = buffer.trim().slice(5).trim();
+      if (!dataLine) return;
+      try {
+        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+      } catch { /* ignore malformed frames */ }
+      buffer = '';
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    processLines(false);
+    if (streamError) break;
+  }
+  buffer += decoder.decode();
+  processLines(true);
+
+  if (streamError) throw streamError;
+  if (!finalPayload) throw new Error('Stream ended without final payload');
+  return finalPayload;
+}
+
+export const fetchOpenClawLocalHealth = () =>
+  get<{
+    ok: boolean;
+    target?: 'bridge' | 'gateway';
+    bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
+    gateway?: { ok: boolean; channel?: string; error?: string };
+    error?: string;
+  }>(
+    '/api/openclaw-channel/health',
+  );
+
+/**
+ * Load chat history for the local OpenClaw agent from the DKG graph.
+ * Queries schema:Message items linked to the openclaw:dkg-ui session.
+ */
+export async function fetchOpenClawLocalHistory(limit = 50): Promise<
+  Array<{ uri: string; text: string; author: string; ts: string }>
+> {
+  const sparql = `SELECT ?uri ?text ?author ?ts WHERE {
+      ?uri a <http://schema.org/Message> ;
+           <http://schema.org/isPartOf> <urn:dkg:chat:session:openclaw:dkg-ui> ;
+           <http://schema.org/text> ?text ;
+           <http://schema.org/author> ?author ;
+           <http://schema.org/dateCreated> ?ts .
+    }
+    ORDER BY DESC(?ts)
+    LIMIT ${limit}`;
+  const res = await executeQuery(sparql, 'agent-memory', true);
+  const bindings: any[] = res?.result?.bindings ?? (res as any)?.results?.bindings ?? [];
+  const history = bindings.map((b: any) => ({
+    uri: bv(b.uri) ?? '',
+    text: bv(b.text) ?? '',
+    author: bv(b.author) ?? '',
+    ts: bv(b.ts) ?? '',
+  }));
+  history.reverse();
+  return history;
+}
+
+/** Extract plain string from a SPARQL binding value (standard JSON or N-Triples). */
+function bv(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
+  if (typeof v === 'string') {
+    // N-Triples typed literal: "value"^^<type> or "value"@lang — strip suffix first
+    let s = v;
+    const typedMatch = s.match(/^(".*")\^\^<[^>]+>$/);
+    if (typedMatch) s = typedMatch[1];
+    const langMatch = s.match(/^(".*")@[a-z-]+$/i);
+    if (langMatch) s = langMatch[1];
+    // Strip surrounding quotes
+    if (s.startsWith('"') && s.endsWith('"')) {
+      return s.slice(1, -1)
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .replace(/\\r/g, '\r')
+        .replace(/\\t/g, '\t');
+    }
+    return v;
+  }
+  return String(v);
+}
+
 // --- Economics / spending ---
 export interface SpendingPeriod {
   label: string;
