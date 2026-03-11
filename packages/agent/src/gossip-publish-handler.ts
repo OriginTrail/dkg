@@ -41,13 +41,16 @@ export class GossipPublishHandler {
   }
 
   async handlePublishMessage(data: Uint8Array, paranetId: string, onPhase?: GossipPhaseCallback): Promise<void> {
-    const ctx = createOperationContext('gossip');
+    let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
       phase?.('decode', 'start');
       let request;
       try {
         request = decodePublishRequest(data);
+        if (request.operationId) {
+          ctx = createOperationContext('gossip', request.operationId);
+        }
 
         if (!request.paranetId) {
           request.paranetId = paranetId;

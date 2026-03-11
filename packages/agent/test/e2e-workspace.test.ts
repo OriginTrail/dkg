@@ -108,7 +108,7 @@ describe('Workspace E2E (2 nodes)', () => {
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
   }, 15000);
 
-  it('node A sees enshrined data in data graph (enshrine does not broadcast; only publisher has it until sync)', async () => {
+  it('node A sees enshrined data in data graph', async () => {
     const dataGraphResult = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
       PARANET,
