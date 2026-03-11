@@ -66,7 +66,7 @@ function parseTriplePatternFromQuery(sparql: string): TriplePattern | null {
   const withoutComments = stripSparqlComments(sparql);
   const whereMatch = withoutComments.match(/where\s*\{([\s\S]+)\}/i);
   const source = whereMatch ? whereMatch[1] : withoutComments;
-  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|[A-Za-z][\w+.-]*:[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?)`;
+  const term = String.raw`(?:<[^>]+>|_:[A-Za-z][\w-]*|\?[A-Za-z_][\w-]*|[A-Za-z][\w+.-]*:[^\s{};,.]+|a|"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|[A-Za-z][\w+.-]*:[^\s{};,.]+))?)`;
   const tripleRegex = new RegExp(`(${term})\\s+(${term})\\s+(${term})\\s*\\.?`, 'ig');
   const match = tripleRegex.exec(source);
   if (!match) return null;
@@ -91,9 +91,20 @@ function normalizeSparqlToken(token: string, prefixes: PrefixMap): string {
     return trimmed.slice(1, -1);
   }
 
-  const literalMatch = trimmed.match(/^"((?:[^"\\]|\\.)*)"(?:@[A-Za-z-]+|\^\^(?:<[^>]+>|[A-Za-z][\w+.-]*:[^\s]+))?$/);
+  const literalMatch = trimmed.match(/^"((?:[^"\\]|\\.)*)"(?:(@[A-Za-z-]+)|\^\^(<[^>]+>|[A-Za-z][\w+.-]*:[^\s]+))?$/);
   if (literalMatch) {
-    return literalMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    const lexical = literalMatch[1];
+    const langTag = literalMatch[2] ?? '';
+    const datatype = literalMatch[3] ?? '';
+    if (langTag) return `"${lexical}"${langTag}`;
+    if (!datatype) return `"${lexical}"`;
+    if (datatype.startsWith('<') && datatype.endsWith('>')) return `"${lexical}"^^${datatype}`;
+    const curieMatch = datatype.match(/^([A-Za-z][\w-]*):(.+)$/);
+    if (curieMatch) {
+      const iriBase = prefixes.get(curieMatch[1]);
+      if (iriBase) return `"${lexical}"^^<${iriBase}${curieMatch[2]}>`;
+    }
+    return `"${lexical}"^^${datatype}`;
   }
 
   const curieMatch = trimmed.match(/^([A-Za-z][\w-]*):(.+)$/);

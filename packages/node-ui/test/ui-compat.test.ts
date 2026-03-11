@@ -285,6 +285,12 @@ describe('SPARQL helper cards', () => {
     expect(explorer).toContain('const literalMatch = v.match(');
     expect(explorer).toContain('/^0x[a-fA-F0-9]{40}$/');
   });
+
+  it('uses separate metadata source variables instead of reusing ?source', () => {
+    expect(explorer).toContain('SELECT ?g ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp');
+    expect(explorer).toContain('?workspaceOwner');
+    expect(explorer).toContain('?publisherPeerId');
+  });
 });
 
 describe('Apps.tsx iframe embedding', () => {

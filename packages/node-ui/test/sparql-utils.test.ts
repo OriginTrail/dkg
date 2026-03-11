@@ -35,7 +35,33 @@ SELECT ?s WHERE {
       {
         s: 'did:dkg:agent:12D3KooWExample',
         p: 'http://schema.org/name',
-        o: 'Alice',
+        o: '"Alice"',
+      },
+    ]);
+  });
+
+  it('preserves language-tagged and CURIE-typed literal constants', () => {
+    const queryWithLang = `SELECT ?s WHERE {
+  ?s <http://schema.org/name> "chat"@en
+}`;
+    const queryWithTyped = `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT ?s WHERE {
+  ?s <http://schema.org/dateCreated> "2026-03-11T00:00:00Z"^^xsd:dateTime
+}`;
+    const row = [{ s: { value: 'did:dkg:agent:12D3KooWExample' } }];
+
+    expect(deriveGraphTriples(row, queryWithLang)).toEqual([
+      {
+        s: 'did:dkg:agent:12D3KooWExample',
+        p: 'http://schema.org/name',
+        o: '"chat"@en',
+      },
+    ]);
+    expect(deriveGraphTriples(row, queryWithTyped)).toEqual([
+      {
+        s: 'did:dkg:agent:12D3KooWExample',
+        p: 'http://schema.org/dateCreated',
+        o: '"2026-03-11T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
       },
     ]);
   });

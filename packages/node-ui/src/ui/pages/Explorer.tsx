@@ -813,15 +813,15 @@ ${values}
         let graphMeta = new Map<string, { source: string; ual: string; txHash: string; timestamp: string }>();
         if (graphUris.length > 0) {
           const graphValues = graphUris.map((g) => `<${g}>`).join(' ');
-          const metaQuery = `SELECT ?g ?source ?ual ?txHash ?timestamp WHERE {
+          const metaQuery = `SELECT ?g ?workspaceOwner ?creator ?publisherPeerId ?publisherAddress ?publisher ?ual ?txHash ?timestamp WHERE {
   VALUES ?g { ${graphValues} }
   OPTIONAL {
     GRAPH ?g {
-      OPTIONAL { ?metaEntity <http://dkg.io/ontology/workspaceOwner> ?source }
-      OPTIONAL { ?metaEntity <http://dkg.io/ontology/creator> ?source }
-      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherPeerId> ?source }
-      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherAddress> ?source }
-      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisher> ?source }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/workspaceOwner> ?workspaceOwner }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/creator> ?creator }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherPeerId> ?publisherPeerId }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisherAddress> ?publisherAddress }
+      OPTIONAL { ?metaEntity <http://dkg.io/ontology/publisher> ?publisher }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/ual> ?ual }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/partOf> ?ual }
       OPTIONAL { ?metaEntity <http://dkg.io/ontology/txHash> ?txHash }
@@ -840,7 +840,12 @@ ${values}
               const g = String(r.g ?? '');
               if (!g) continue;
               const existing = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
-              const candidate = normalizeNodeSource(String(r.source ?? ''));
+              const candidate =
+                normalizeNodeSource(String(r.publisherPeerId ?? '')) ||
+                normalizeNodeSource(String(r.creator ?? '')) ||
+                normalizeNodeSource(String(r.workspaceOwner ?? '')) ||
+                normalizeNodeSource(String(r.publisher ?? '')) ||
+                normalizeNodeSource(String(r.publisherAddress ?? ''));
               graphMeta.set(g, {
                 source: existing.source || candidate,
                 ual: existing.ual || String(r.ual ?? ''),
