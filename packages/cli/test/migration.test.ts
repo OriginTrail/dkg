@@ -45,7 +45,12 @@ describe('migrateToBlueGreen', () => {
   it('skips migration when releases/current already exists', async () => {
     const rDir = join(dkgHome, 'releases');
     await mkdir(rDir, { recursive: true });
-    await mkdir(join(rDir, 'a'), { recursive: true });
+    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
+    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
+    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
     await symlink('a', join(rDir, 'current'));
 
     const { migrateToBlueGreen } = await import('../src/migration.js');
@@ -165,5 +170,28 @@ describe('migrateToBlueGreen', () => {
     expect(gitCalls.some(call => call.args.includes('--local'))).toBe(true);
     const allCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
     expect(allCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
+  });
+
+  it('repairs incomplete slots even when current symlink exists', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
+    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await mkdir(join(rDir, 'b'), { recursive: true }); // incomplete slot b
+    await symlink('a', join(rDir, 'current'));
+
+    const { execFileSync, execSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    const mockedExecSync = vi.mocked(execSync);
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const gitCloneCalls = mockedExecFileSync.mock.calls
+      .map(c => ({ binary: String(c[0]), args: c[1] as string[] }))
+      .filter(call => call.binary === 'git' && call.args[0] === 'clone');
+    expect(gitCloneCalls.some(call => String(call.args[call.args.length - 1]).endsWith('/b'))).toBe(true);
+    const buildCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
+    expect(buildCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
   });
 });

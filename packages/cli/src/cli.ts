@@ -3,10 +3,11 @@
 import { Command } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -1243,6 +1244,11 @@ program
 
     console.log('Checking for updates and applying...');
     try {
+      const pendingCommit = await checkForNewCommit(au, (msg) => console.log(msg), refOverride);
+      if (!pendingCommit) {
+        console.log('No update needed — already on latest.');
+        return;
+      }
       const updated = await performUpdate(au, (msg) => console.log(msg), {
         refOverride,
         allowPrerelease: opts.allowPrerelease ? true : undefined,
@@ -1262,7 +1268,8 @@ program
           console.log('Update applied. Start the daemon with: dkg start');
         }
       } else {
-        console.log('No update needed — already on latest.');
+        console.error('Update failed before activation. Check logs and retry.');
+        process.exit(1);
       }
     } catch (err: any) {
       console.error(`Update failed: ${err?.message ?? String(err)}`);
@@ -1295,6 +1302,25 @@ program
     }
 
     await swapSlot(target);
+    const commitFile = join(dkgDir(), '.current-commit');
+    const versionFile = join(dkgDir(), '.current-version');
+    try {
+      const commit = execSync('git rev-parse HEAD', {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+      await writeFile(commitFile, commit);
+    } catch (err: any) {
+      console.warn(`Warning: failed to update rollback commit metadata: ${err?.message ?? String(err)}`);
+    }
+    try {
+      const pkgRaw = readFileSync(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
+      const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+      if (version) await writeFile(versionFile, version);
+    } catch (err: any) {
+      console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
+    }
     console.log(`Rolled back: current → slot ${target}`);
 
     const pid = await readPid();

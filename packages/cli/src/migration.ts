@@ -11,8 +11,7 @@ import { releasesDir, repoDir, swapSlot } from './config.js';
 export async function migrateToBlueGreen(log: (msg: string) => void = console.log): Promise<void> {
   const rDir = releasesDir();
   const currentLink = join(rDir, 'current');
-
-  if (existsSync(currentLink)) return;
+  const hadCurrentLink = existsSync(currentLink);
 
   const repo = repoDir();
   if (!existsSync(join(repo, '.git'))) {
@@ -20,13 +19,16 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
     return;
   }
 
-  log('Migrating to blue-green release slots...');
   await mkdir(rDir, { recursive: true });
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
   const slotEntry = (slotDir: string) => join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
   const slotReady = (slotDir: string) => existsSync(join(slotDir, '.git')) && existsSync(slotEntry(slotDir));
+  if (hadCurrentLink && slotReady(slotA) && slotReady(slotB)) return;
+
+  log('Migrating to blue-green release slots...');
+
   const git = (args: string[], cwd?: string): string =>
     String(execFileSync('git', args, {
       encoding: 'utf-8',
@@ -61,6 +63,11 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
     }
   }
 
-  await swapSlot('a');
-  log('Migration complete: releases/current → a');
+  if (!hadCurrentLink) {
+    await swapSlot('a');
+    log('Migration complete: releases/current → a');
+    return;
+  }
+
+  log('Migration complete: repaired incomplete blue-green slots');
 }
