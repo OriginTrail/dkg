@@ -340,10 +340,10 @@ export async function handleNodeUIRequest(
     const body = await readBody(req);
     const payload = JSON.parse(body ?? '{}') as { retentionDays?: number };
     const days = payload.retentionDays;
-    if (typeof days !== 'number' || days < 1 || days > 365) {
-      return json(res, 400, { error: 'retentionDays must be 1-365' });
+    if (days == null || !Number.isInteger(days) || days < 1 || days > 365) {
+      return json(res, 400, { error: 'retentionDays must be an integer 1-365' });
     }
-    db.setRetentionDays(days);
+    db.setRetentionDays(days as number);
     db.prune();
     return json(res, 200, { ok: true, retentionDays: db.getRetentionDays() });
   }

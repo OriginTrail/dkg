@@ -670,7 +670,7 @@ function RecentOpsSection() {
         <button
           className="dkg-btn dkg-btn-secondary"
           style={{ fontSize: 10, padding: '4px 10px' }}
-          onClick={() => navigate('/operations')}
+          onClick={() => navigate('/settings?tab=observability')}
         >
           View All
         </button>
@@ -684,7 +684,7 @@ function RecentOpsSection() {
           return (
             <div
               key={op.operation_id}
-              onClick={() => navigate('/operations')}
+              onClick={() => navigate('/settings?tab=observability')}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
                 borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--border)',

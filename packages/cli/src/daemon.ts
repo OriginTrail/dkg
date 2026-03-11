@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { appendFile, readFile, writeFile, truncate } from 'node:fs/promises';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -334,7 +334,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         if (newlineIdx > 0) {
           await writeFile(logFile, tail.slice(newlineIdx + 1));
         } else {
-          await truncate(logFile, Math.floor(MAX_LOG_BYTES * 0.7));
+          await writeFile(logFile, tail.slice(keepFrom));
         }
         log(`Rotated daemon.log (was ${(st.size / 1024 / 1024).toFixed(1)} MB)`);
       }

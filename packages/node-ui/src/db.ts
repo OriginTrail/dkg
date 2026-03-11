@@ -394,13 +394,16 @@ export class DashboardDB {
       SELECT
         phase,
         COUNT(*) as error_count,
-        MAX(details) as last_error,
+        (SELECT p2.details FROM operation_phases p2
+         WHERE p2.phase = operation_phases.phase
+           AND p2.status = 'error' AND p2.started_at >= ?
+         ORDER BY p2.started_at DESC LIMIT 1) as last_error,
         MAX(started_at) as last_occurred
       FROM operation_phases
       WHERE status = 'error' AND started_at >= ?
       GROUP BY phase
       ORDER BY error_count DESC
-    `).all(cutoff) as any[];
+    `).all(cutoff, cutoff) as any[];
   }
 
   getFailedOperations(opts: { phase?: string; periodMs?: number; q?: string; limit?: number } = {}): {
