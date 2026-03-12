@@ -13,6 +13,7 @@ import {
   generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
   generateOwnershipQuads,
+  toHex,
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
@@ -895,6 +896,8 @@ export class DKGPublisher implements Publisher {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
     }
+
+    await this.updateMetaMerkleRoot(paranetId, kcId, kcMerkleRoot);
     onPhase?.('store', 'end');
 
     const result: PublishResult = {
@@ -915,6 +918,32 @@ export class DKGPublisher implements Publisher {
 
     this.eventBus.emit(DKGEvent.KA_UPDATED, result);
     return result;
+  }
+
+  private async updateMetaMerkleRoot(paranetId: string, batchId: bigint, newMerkleRoot: Uint8Array): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const metaGraph = this.graphManager.metaGraphUri(paranetId);
+    const ual = await this.resolveUalByBatchId(metaGraph, batchId);
+    if (!ual) return;
+
+    await this.store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+    await this.store.insert([{
+      subject: ual,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${toHex(newMerkleRoot)}"`,
+      graph: metaGraph,
+    }]);
+  }
+
+  private async resolveUalByBatchId(metaGraph: string, batchId: bigint): Promise<string | undefined> {
+    const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const result = await this.store.query(
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    return result.bindings[0]['ual'] ?? undefined;
   }
 
   setIdentityId(id: bigint): void {

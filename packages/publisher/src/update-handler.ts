@@ -7,6 +7,7 @@ import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
 import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
+import { toHex } from './metadata.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -181,6 +182,8 @@ export class UpdateHandler {
       // Binding was already established from a trusted source (local publish or metadata lookup).
       // Do NOT set from gossip — that would allow first-message-wins paranet spoofing.
 
+      await this.updateMetaMerkleRoot(paranetId, BigInt(batchId), computedRoot);
+
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 
       this.eventBus.emit(DKGEvent.KA_UPDATED, {
@@ -220,6 +223,26 @@ export class UpdateHandler {
       if (base.startsWith(prefix)) return base.slice(prefix.length);
     }
     return undefined;
+  }
+
+  private async updateMetaMerkleRoot(paranetId: string, batchId: bigint, newMerkleRoot: Uint8Array): Promise<void> {
+    const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    const metaGraph = this.graphManager.metaGraphUri(paranetId);
+    const result = await this.store.query(
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+    const ual = result.bindings[0]['ual'];
+    if (!ual) return;
+
+    await this.store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+    await this.store.insert([{
+      subject: ual,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${toHex(newMerkleRoot)}"`,
+      graph: metaGraph,
+    }]);
   }
 
   /**
