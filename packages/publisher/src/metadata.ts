@@ -17,6 +17,8 @@ export interface KCMetadata {
   merkleRoot: Uint8Array;
   kaCount: number;
   publisherPeerId: string;
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers?: string[];
   timestamp: Date;
 }
 
@@ -54,6 +56,8 @@ export function generateKCMetadata(
     mq(meta.ual, `${RDF}type`, `${DKG}KnowledgeCollection`, metaGraph),
     mq(meta.ual, `${DKG}merkleRoot`, lit(toHex(meta.merkleRoot)), metaGraph),
     mq(meta.ual, `${DKG}kaCount`, intLit(meta.kaCount), metaGraph),
+    mq(meta.ual, `${DKG}accessPolicy`, lit(meta.accessPolicy ?? 'public'), metaGraph),
+    mq(meta.ual, `${DKG}publisherPeerId`, lit(meta.publisherPeerId || 'unknown'), metaGraph),
     mq(
       meta.ual,
       `${PROV}wasAttributedTo`,
@@ -68,6 +72,14 @@ export function generateKCMetadata(
     ),
     mq(meta.ual, `${DKG}paranet`, `did:dkg:paranet:${meta.paranetId}`, metaGraph),
   );
+
+  if (meta.allowedPeers?.length) {
+    for (const peerId of meta.allowedPeers) {
+      quads.push(
+        mq(meta.ual, `${DKG}allowedPeer`, lit(peerId), metaGraph),
+      );
+    }
+  }
 
   // KA metadata
   for (const ka of kaEntries) {

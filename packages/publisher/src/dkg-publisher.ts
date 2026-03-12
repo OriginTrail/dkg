@@ -315,8 +315,34 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false, onPhase } = options;
+    const {
+      paranetId,
+      quads,
+      privateQuads = [],
+      publisherPeerId = '',
+      accessPolicy,
+      allowedPeers,
+      operationCtx,
+      entityProofs = false,
+      onPhase,
+    } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
+    const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
+    const normalizedPublisherPeerId = publisherPeerId.trim();
+
+    if (effectiveAccessPolicy !== 'public' && normalizedPublisherPeerId.length === 0) {
+      throw new Error(
+        `Publish rejected: accessPolicy "${effectiveAccessPolicy}" requires a non-empty "publisherPeerId"`,
+      );
+    }
+
+    if (effectiveAccessPolicy === 'allowList' && normalizedAllowedPeers.length === 0) {
+      throw new Error('Publish rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
+    }
+    if (effectiveAccessPolicy !== 'allowList' && normalizedAllowedPeers.length > 0) {
+      throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
+    }
 
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:ensureParanet', 'start');
@@ -529,7 +555,9 @@ export class DKGPublisher implements Publisher {
             paranetId,
             merkleRoot: kcMerkleRoot,
             kaCount,
-            publisherPeerId: options.publisherPeerId ?? 'unknown',
+            publisherPeerId: normalizedPublisherPeerId || 'unknown',
+            accessPolicy: effectiveAccessPolicy,
+            allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
           },
           kaMetadata,
@@ -564,7 +592,9 @@ export class DKGPublisher implements Publisher {
           paranetId,
           merkleRoot: kcMerkleRoot,
           kaCount,
-          publisherPeerId: options.publisherPeerId ?? 'unknown',
+          publisherPeerId: normalizedPublisherPeerId || 'unknown',
+          accessPolicy: effectiveAccessPolicy,
+          allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),
         },
         kaMetadata,

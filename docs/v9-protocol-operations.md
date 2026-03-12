@@ -68,6 +68,10 @@ sequenceDiagram
     Note over Agent: /dkg/access/1.0.0 — private data access
     Note over Agent: /dkg/message/1.0.0 — agent messaging
 
+    Note over Agent: /dkg/query and /dkg/access are separate paths
+    Note over Agent: query is deny-by-default (queryAccess)
+    Note over Agent: access checks KA/KC metadata policy for private triples
+
     opt Chain available (chainId ≠ "none")
         Agent->>Chain: ensureProfile() → identityId
     end
@@ -226,6 +230,8 @@ Optional private content marker:
     dkg:kaCount           "2"^^xsd:integer ;
     dkg:status            "confirmed" ;
     dkg:paranet           <did:dkg:paranet:{paranetId}> ;
+    dkg:accessPolicy      "ownerOnly" ;
+    dkg:publisherPeerId   "12D3KooW..." ;
     prov:wasAttributedTo  "12D3KooW..." ;
     dkg:publishedAt       "2026-03-08T11:00:00Z"^^xsd:dateTime ;
     dkg:transactionHash   "0xdef..." ;
@@ -641,6 +647,28 @@ queries ARE supported at the protocol and HTTP layers:
 > to another peer's local engine — they do not provide query federation or cross-store
 > joins.
 
+### Private Access (cross-agent)
+
+Private triple retrieval uses a separate protocol and policy path from remote query.
+
+- **Protocol:** `/dkg/access/1.0.0` — requester sends KA UAL + signature; provider
+  returns private N-Quads if access is granted.
+- **Handler:** `AccessHandler` checks KA/KC metadata (`dkg:accessPolicy`,
+  `dkg:publisherPeerId`, `dkg:allowedPeer`) before returning private triples.
+- **Client:** `AccessClient` verifies returned triples against `privateMerkleRoot`
+  when available.
+
+Effective policy rules:
+
+- `ownerOnly` -> only publisher peer may access.
+- `allowList` -> only peers listed by KC metadata `dkg:allowedPeer` may access.
+- `allowList` with missing or empty `dkg:allowedPeer` entries -> access denied.
+- `public` -> any peer may request private triples for that KA.
+
+> **Security note:** `/dkg/query/2.0.0` and `/dkg/access/1.0.0` are independent.
+> A denied remote query does not imply denied private access. Access behavior is
+> controlled by KC/KA access metadata.
+
 ---
 
 ## 8. Peer Sync
@@ -859,6 +887,11 @@ graph TB
 | `did:dkg:paranet:{id}/context/{ctxId}` | `.../context/swarm-abc123` | Context graph data |
 | `did:dkg:paranet:{id}/context/{ctxId}/_meta` | `.../context/swarm-abc123/_meta` | Context graph meta |
 
+`_private` graph behavior:
+
+- Not included in normal peer sync (`/dkg/sync/1.0.0`) or standard query replication.
+- Retrieved only through `/dkg/access/1.0.0` when access policy permits.
+
 ---
 
 ## 12. Merkle Tree & Proof System
@@ -953,6 +986,13 @@ Compare kcRoot === metadata.merkleRoot ✓
 | Private triples | Private graph | NEVER propagated (publisher only) |
 | Workspace data | Workspace graph | GossipSub workspace topic |
 | App messages | In-memory | GossipSub app topic |
+
+Access-policy linkage (off-chain):
+
+- Access control for private triples is encoded in KC/KA metadata in `_meta`
+  (e.g., `dkg:accessPolicy`, `dkg:publisherPeerId`).
+- Registry-level paranet `accessPolicy` on-chain governs paranet registration/discovery
+  semantics and should not be treated as a substitute for KA private data access checks.
 
 ### What Gets Linked (and What Doesn't)
 
