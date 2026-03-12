@@ -442,6 +442,7 @@ describe('Access protocol round-trip', () => {
 
     const result = await publisherA.publish({
       paranetId: PARANET,
+      publisherPeerId: nodeA.peerId.toString(),
       quads: [
         { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:paranet:${PARANET}` },
       ],
@@ -452,6 +453,24 @@ describe('Access protocol round-trip', () => {
     });
 
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
+
+    // Stabilize policy for this round-trip test: ensure KC access policy is explicitly public.
+    // Without this, concurrent test suites that mutate mock-chain/paranet state can make this
+    // check flaky (ownerOnly would deny requests from nodeB).
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    await storeA.deleteByPattern({
+      graph: metaGraph,
+      subject: result.ual,
+      predicate: 'http://dkg.io/ontology/accessPolicy',
+    });
+    await storeA.insert([
+      {
+        subject: result.ual,
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: '"public"',
+        graph: metaGraph,
+      },
+    ]);
 
     // Register access handler on A
     const accessHandler = new AccessHandler(storeA, busA);

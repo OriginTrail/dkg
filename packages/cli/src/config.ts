@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { join, dirname } from 'node:path';
+import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { join, dirname, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,12 @@ export interface AutoUpdateConfig {
   enabled: boolean;
   repo: string;
   branch: string;
+  /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
+  allowPrerelease?: boolean;
+  /** Optional SSH private key path for git-based update fetches/clones. */
+  sshKeyPath?: string;
+  /** Optional raw GIT_SSH_COMMAND override for git-based update fetches/clones. */
+  sshCommand?: string;
   checkIntervalMinutes: number;
 }
 
@@ -22,6 +28,9 @@ export interface NetworkConfig {
     enabled: boolean;
     repo: string;
     branch: string;
+    allowPrerelease?: boolean;
+    sshKeyPath?: string;
+    sshCommand?: string;
     checkIntervalMinutes: number;
   };
   chain?: {
@@ -143,6 +152,110 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 
 export function dkgDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+}
+
+/**
+ * Resolve the repo root from the compiled code location.
+ * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
+ */
+export function findRepoDir(startDir: string): string | null {
+  let dir = resolve(startDir);
+  while (true) {
+    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+export function repoDir(): string | null {
+  return findRepoDir(dirname(fileURLToPath(import.meta.url)));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function gitCommandEnv(autoUpdate?: Pick<AutoUpdateConfig, 'sshKeyPath' | 'sshCommand'> | null): NodeJS.ProcessEnv {
+  const sshCommand = process.env.DKG_GIT_SSH_COMMAND?.trim() || autoUpdate?.sshCommand?.trim();
+  const sshKeyPath = process.env.DKG_SSH_KEY_PATH?.trim() || autoUpdate?.sshKeyPath?.trim();
+  const env = { ...process.env };
+
+  if (sshCommand) {
+    env.GIT_SSH_COMMAND = sshCommand;
+    return env;
+  }
+
+  if (sshKeyPath) {
+    env.GIT_SSH_COMMAND = `ssh -i ${shellQuote(sshKeyPath)} -o IdentitiesOnly=yes`;
+  }
+
+  return env;
+}
+
+function githubHttpsRepo(repoUrl: string | undefined): boolean {
+  if (!repoUrl) return false;
+  return /^https:\/\/github\.com\//i.test(repoUrl.trim());
+}
+
+export function gitCommandArgs(
+  repoUrl?: string,
+  autoUpdate?: Pick<AutoUpdateConfig, 'sshKeyPath' | 'sshCommand'> | null,
+): string[] {
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const sshCommand = process.env.DKG_GIT_SSH_COMMAND?.trim() || autoUpdate?.sshCommand?.trim();
+  const sshKeyPath = process.env.DKG_SSH_KEY_PATH?.trim() || autoUpdate?.sshKeyPath?.trim();
+  if (!token || sshCommand || sshKeyPath || !githubHttpsRepo(repoUrl)) return [];
+
+  const basic = Buffer.from(`x-access-token:${token}`, 'utf-8').toString('base64');
+  return ['-c', `http.extraHeader=Authorization: Basic ${basic}`];
+}
+
+export function releasesDir(): string {
+  return join(dkgDir(), 'releases');
+}
+
+/** Read the active slot from the `releases/current` symlink. Falls back to the `active` file. */
+export async function activeSlot(): Promise<'a' | 'b' | null> {
+  try {
+    const raw = await readlink(join(releasesDir(), 'current'));
+    const target = basename(raw);
+    if (target === 'a' || target === 'b') return target;
+  } catch { /* symlink doesn't exist */ }
+  try {
+    const raw = (await readFile(join(releasesDir(), 'active'), 'utf-8')).trim();
+    if (raw === 'a' || raw === 'b') return raw;
+  } catch { /* file doesn't exist */ }
+  return null;
+}
+
+export async function inactiveSlot(): Promise<'a' | 'b'> {
+  const active = await activeSlot();
+  return (active ?? 'a') === 'a' ? 'b' : 'a';
+}
+
+/**
+ * Atomically swap the `releases/current` symlink to point to `target` slot.
+ * Uses tmp-symlink + rename to avoid any window where the symlink is broken.
+ */
+export async function swapSlot(target: 'a' | 'b'): Promise<void> {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current');
+  const tmpLink = join(rDir, 'current.tmp');
+
+  // Check if already pointing to target
+  try {
+    const dest = await readlink(currentLink);
+    if (dest === target) {
+      await writeFile(join(rDir, 'active'), target);
+      return;
+    }
+  } catch { /* link doesn't exist yet */ }
+
+  try { await unlink(tmpLink); } catch { /* ok if missing */ }
+  await symlink(target, tmpLink);
+  await rename(tmpLink, currentLink);
+  await writeFile(join(rDir, 'active'), target);
 }
 
 export function configPath(): string {

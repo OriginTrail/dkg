@@ -1,23 +1,40 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig,
+  loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon } from './daemon.js';
+import {
+  runDaemon,
+  performUpdateWithStatus,
+  checkForNewCommitWithStatus,
+  DAEMON_EXIT_CODE_RESTART,
+} from './daemon.js';
+import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
 type ActionOpts = Record<string, any>;
+
+function normalizeVersionTagRef(input: string): string {
+  const cleaned = input.trim();
+  if (!cleaned) return cleaned;
+  const bare = cleaned.startsWith('v') ? cleaned.slice(1) : cleaned;
+  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bare)) {
+    return `refs/tags/v${bare}`;
+  }
+  return cleaned;
+}
 
 function getCliVersion(): string {
   try {
@@ -26,6 +43,46 @@ function getCliVersion(): string {
     return pkg.version ?? '0.0.0';
   } catch {
     return '0.0.0';
+  }
+}
+
+function resolveDaemonEntryPoint(): string {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(rDir) && existsSync(currentLink)
+    ? currentLink
+    : fileURLToPath(import.meta.url);
+}
+
+async function runDaemonSupervisor(): Promise<void> {
+  const maxCrashRestarts = 5;
+  let crashRestartCount = 0;
+
+  while (true) {
+    const child = spawn(
+      process.execPath,
+      [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-worker'],
+      {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        env: process.env,
+      },
+    );
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child.once('exit', (code) => resolve(code));
+    });
+
+    if (exitCode === DAEMON_EXIT_CODE_RESTART) {
+      crashRestartCount = 0;
+      await sleep(250);
+      continue;
+    }
+
+    if (exitCode === 0) return;
+
+    crashRestartCount += 1;
+    if (crashRestartCount >= maxCrashRestarts) return;
+    await sleep(1000);
   }
 }
 
@@ -82,7 +139,7 @@ program
 
     const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
     const enableAutoUpdate = (await ask(
-      'Enable auto-update from GitHub (y/n)',
+      'Enable git-based auto-update (y/n)',
       autoUpdateDefault ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
@@ -90,11 +147,25 @@ program
     if (enableAutoUpdate) {
       const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
       const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? false;
+      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
-      const repo = await ask('GitHub repo (owner/name)', defaultRepo);
+      const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
       const branch = await ask('Branch', defaultBranch);
+      const allowPrerelease = (await ask(
+        'Allow pre-release versions? (y/n)',
+        defaultAllowPrerelease ? 'y' : 'n',
+      )).toLowerCase() === 'y';
+      const sshKeyPath = (await ask('SSH private key path (optional; blank uses agent/default SSH config)', defaultSshKeyPath)).trim();
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
-      autoUpdate = { enabled: true, repo, branch, checkIntervalMinutes: interval };
+      autoUpdate = {
+        enabled: true,
+        repo,
+        branch,
+        allowPrerelease,
+        sshKeyPath: sshKeyPath || undefined,
+        checkIntervalMinutes: interval,
+      };
     }
 
     // Chain configuration
@@ -147,7 +218,15 @@ program
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
-    console.log(`  autoUpdate: ${config.autoUpdate?.enabled ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` : 'disabled'}`);
+    console.log(
+      `  autoUpdate: ${
+        config.autoUpdate?.enabled
+          ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
+            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}` +
+            `${config.autoUpdate.sshKeyPath ? ` (ssh key: ${config.autoUpdate.sshKeyPath})` : ''}`
+          : 'disabled'
+      }`,
+    );
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
@@ -209,6 +288,20 @@ authCmd
 // ─── dkg start ───────────────────────────────────────────────────────
 
 program
+  .command('daemon-worker', { hidden: true })
+  .description('Internal: run daemon worker process')
+  .action(async () => {
+    await runDaemon(false);
+  });
+
+program
+  .command('daemon-supervisor', { hidden: true })
+  .description('Internal: supervise daemon worker restarts')
+  .action(async () => {
+    await runDaemonSupervisor();
+  });
+
+program
   .command('start')
   .description('Start the DKG daemon')
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
@@ -224,15 +317,19 @@ program
       process.exit(1);
     }
 
+    // Keep blue-green slots initialized for both foreground and daemonized start.
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
+
     if (opts.foreground) {
       await runDaemon(true);
       return;
     }
 
-    // Spawn detached background process
+    // Spawn detached background supervisor via releases/current symlink
+    const entryPoint = resolveDaemonEntryPoint();
     const child = spawn(
       process.execPath,
-      [...process.execArgv, fileURLToPath(import.meta.url), 'start', '--foreground'],
+      [...process.execArgv, entryPoint, 'daemon-supervisor'],
       {
         detached: true,
         stdio: ['ignore', 'ignore', 'ignore'],
@@ -1196,5 +1293,147 @@ function stripQuotes(s: string): string {
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
+
+// ─── dkg update ──────────────────────────────────────────────────────
+
+program
+  .command('update [versionOrRef]')
+  .description('Check for and apply DKG node updates (blue-green swap)')
+  .option('--check', 'Only check for updates, do not apply')
+  .option('--allow-prerelease', 'Allow pre-release target versions')
+  .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
+  .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
+    const config = await loadConfig();
+    const net = await loadNetworkConfig();
+    const au = config.autoUpdate ?? net?.autoUpdate ?? {
+      enabled: true,
+      repo: 'OriginTrail/dkg-v9',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+    };
+
+    const refOverride = versionOrRef ? normalizeVersionTagRef(versionOrRef) : undefined;
+    const verifyTagSignature = Boolean(refOverride && refOverride.startsWith('refs/tags/')) && opts.verifyTag !== false;
+
+    if (opts.check) {
+      console.log('Checking for updates...');
+      const check = await checkForNewCommitWithStatus(au, (msg) => console.log(msg), refOverride);
+      if (check.status === 'available' && check.commit) {
+        console.log(`Update available: ${check.commit.slice(0, 8)}`);
+      } else if (check.status === 'up-to-date') {
+        console.log('No updates available.');
+      } else {
+        console.error('Update check failed. See logs above for details.');
+        process.exit(1);
+      }
+      return;
+    }
+
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
+    console.log('Checking for updates and applying...');
+    try {
+      const updateStatus = await performUpdateWithStatus(au, (msg) => console.log(msg), {
+        refOverride,
+        allowPrerelease: opts.allowPrerelease ? true : undefined,
+        verifyTagSignature,
+      });
+      if (updateStatus === 'updated') {
+        const pid = await readPid();
+        if (pid && isProcessRunning(pid)) {
+          console.log('Stopping daemon...');
+          try {
+            process.kill(pid, 'SIGTERM');
+          } catch (err: any) {
+            if (err?.code !== 'ESRCH') throw err;
+          }
+          for (let i = 0; i < 20; i++) {
+            await sleep(500);
+            if (!isProcessRunning(pid)) break;
+          }
+          if (isProcessRunning(pid)) {
+            console.error('Update applied but daemon is still running after SIGTERM. Stop it manually before restarting.');
+            process.exit(1);
+          }
+          console.log('Update applied. Run "dkg start" to start with the new version.');
+        } else {
+          console.log('Update applied. Start the daemon with: dkg start');
+        }
+      } else if (updateStatus === 'up-to-date') {
+        console.log('No update needed — already on latest.');
+      } else {
+        console.error('Update failed before activation. Check logs and retry.');
+        process.exit(1);
+      }
+    } catch (err: any) {
+      console.error(`Update failed: ${err?.message ?? String(err)}`);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg rollback ────────────────────────────────────────────────────
+
+program
+  .command('rollback')
+  .description('Roll back to the previous release slot and stop the daemon')
+  .action(async () => {
+    const current = await activeSlot();
+    if (!current) {
+      console.error('Blue-green slots not initialized. Nothing to roll back.');
+      process.exit(1);
+    }
+
+    const target = current === 'a' ? 'b' : 'a';
+    const targetDir = join(releasesDir(), target);
+    if (!existsSync(targetDir)) {
+      console.error(`Slot ${target} does not exist. Cannot roll back.`);
+      process.exit(1);
+    }
+    const targetEntry = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
+    if (!existsSync(targetEntry)) {
+      console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
+      process.exit(1);
+    }
+
+    const pid = await readPid();
+    if (pid && isProcessRunning(pid)) {
+      console.log('Stopping daemon...');
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (err: any) {
+        if (err?.code !== 'ESRCH') throw err;
+      }
+      for (let i = 0; i < 20; i++) {
+        await sleep(500);
+        if (!isProcessRunning(pid)) break;
+      }
+      if (isProcessRunning(pid)) {
+        console.error('Rollback aborted: daemon is still running after SIGTERM. Stop it manually and retry.');
+        process.exit(1);
+      }
+    }
+
+    await swapSlot(target);
+    const commitFile = join(dkgDir(), '.current-commit');
+    const versionFile = join(dkgDir(), '.current-version');
+    try {
+      const commit = execSync('git rev-parse HEAD', {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+      await writeFile(commitFile, commit);
+    } catch (err: any) {
+      console.warn(`Warning: failed to update rollback commit metadata: ${err?.message ?? String(err)}`);
+    }
+    try {
+      const pkgRaw = readFileSync(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
+      const version = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+      if (version) await writeFile(versionFile, version);
+    } catch (err: any) {
+      console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
+    }
+    console.log(`Rolled back: current → slot ${target}`);
+    console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
+  });
 
 program.parse();

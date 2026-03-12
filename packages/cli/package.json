@@ -1,6 +1,6 @@
 {
   "name": "@dkg/cli",
-  "version": "9.0.0",
+  "version": "9.0.0-beta.2",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
