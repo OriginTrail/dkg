@@ -1885,6 +1885,11 @@ type PendingUpdateState = {
   createdAt: string;
 };
 
+export type CommitCheckStatus = {
+  status: 'available' | 'up-to-date' | 'error';
+  commit?: string;
+};
+
 async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
   const pendingFile = join(dkgDir(), '.update-pending.json');
   try {
@@ -1916,6 +1921,15 @@ export async function checkForNewCommit(
   log: (msg: string) => void,
   refOverride?: string,
 ): Promise<string | null> {
+  const result = await checkForNewCommitWithStatus(au, log, refOverride);
+  return result.status === 'available' ? (result.commit ?? null) : null;
+}
+
+export async function checkForNewCommitWithStatus(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  refOverride?: string,
+): Promise<CommitCheckStatus> {
   const commitFile = join(dkgDir(), '.current-commit');
   let currentCommit = '';
   try {
@@ -1925,14 +1939,14 @@ export async function checkForNewCommit(
     const activeDir = join(releasesDir(), active ?? 'a');
     try {
       currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
-    } catch { return null; }
+    } catch { return { status: 'error' }; }
   }
 
   const repo = normalizeRepo(au.repo);
   const ref = (refOverride ?? au.branch).trim() || 'main';
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
-    return null;
+    return { status: 'error' };
   }
   const apiRef = ref
     .replace(/^refs\/heads\//, '')
@@ -1948,17 +1962,17 @@ export async function checkForNewCommit(
     if (!res.ok) {
       if (res.status === 422 && ref.startsWith('refs/tags/')) {
         log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
-        return null;
+        return { status: 'error' };
       }
       log(`Auto-update: GitHub API returned ${res.status}`);
-      return null;
+      return { status: 'error' };
     }
     const data = await res.json() as { sha: string };
-    if (data.sha === currentCommit) return null;
-    return data.sha;
+    if (data.sha === currentCommit) return { status: 'up-to-date' };
+    return { status: 'available', commit: data.sha };
   } catch (err: any) {
     log(`Auto-update: failed to check for new commit (${err?.message ?? String(err)})`);
-    return null;
+    return { status: 'error' };
   }
 }
 

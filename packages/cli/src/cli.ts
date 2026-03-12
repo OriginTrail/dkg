@@ -15,7 +15,7 @@ import {
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon, performUpdateWithStatus, checkForNewCommit } from './daemon.js';
+import { runDaemon, performUpdateWithStatus, checkForNewCommitWithStatus } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
@@ -25,7 +25,7 @@ function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
   if (!cleaned) return cleaned;
   const bare = cleaned.startsWith('v') ? cleaned.slice(1) : cleaned;
-  if (/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(bare)) {
+  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(bare)) {
     return `refs/tags/v${bare}`;
   }
   return cleaned;
@@ -1232,16 +1232,19 @@ program
 
     if (opts.check) {
       console.log('Checking for updates...');
-      const newCommit = await checkForNewCommit(au, (msg) => console.log(msg), refOverride);
-      if (newCommit) {
-        console.log(`Update available: ${newCommit.slice(0, 8)}`);
-      } else {
+      const check = await checkForNewCommitWithStatus(au, (msg) => console.log(msg), refOverride);
+      if (check.status === 'available' && check.commit) {
+        console.log(`Update available: ${check.commit.slice(0, 8)}`);
+      } else if (check.status === 'up-to-date') {
         console.log('No updates available.');
+      } else {
+        console.error('Update check failed. See logs above for details.');
+        process.exit(1);
       }
       return;
     }
 
-    await migrateToBlueGreen((msg) => console.log(msg));
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
     console.log('Checking for updates and applying...');
     try {
       const updateStatus = await performUpdateWithStatus(au, (msg) => console.log(msg), {

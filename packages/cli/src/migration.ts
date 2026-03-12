@@ -8,7 +8,10 @@ import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig } from '.
  * One-time migration from old single-directory layout to blue-green slots.
  * Called before `dkg start` if `~/.dkg/releases/current` doesn't exist.
  */
-export async function migrateToBlueGreen(log: (msg: string) => void = console.log): Promise<void> {
+export async function migrateToBlueGreen(
+  log: (msg: string) => void = console.log,
+  opts: { allowRemoteBootstrap?: boolean } = {},
+): Promise<void> {
   const rDir = releasesDir();
   const currentLink = join(rDir, 'current');
   const hadCurrentLink = existsSync(currentLink);
@@ -40,6 +43,10 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
       ?? network?.autoUpdate?.branch
       ?? 'main'
     ).trim() || 'main';
+    if (!opts.allowRemoteBootstrap) {
+      log('Migration: local repo has no .git; skipping remote bootstrap in this mode.');
+      return;
+    }
     log(`Migration: local repo has no .git, bootstrapping from ${sourceRepo}@${sourceBranch}`);
   }
 
