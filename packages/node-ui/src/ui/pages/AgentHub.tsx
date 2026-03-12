@@ -2351,9 +2351,6 @@ export function AgentHubPage() {
             {visiblePublishNotice}
           </div>
         )}
-        <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>
-          Publish session enshrines the OpenClaw conversation and durable memory graph currently in view. New writes remain in workspace until you publish again.
-        </div>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
