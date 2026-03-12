@@ -91,6 +91,20 @@ On first start, the daemon auto-generates:
 
 **Present wallet addresses to the user.** Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots.
 
+**Fund the wallets.** Use the [V9 Testnet Faucet](../../docs/setup/TESTNET_FAUCET.md) to get both Base Sepolia ETH and TRAC in one call:
+
+```bash
+curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen || date +%s)" \
+  --data-raw '{
+    "mode": "v9_base_sepolia",
+    "wallets": ["0xWALLET1", "0xWALLET2", "0xWALLET3"]
+  }'
+```
+
+Replace the wallet addresses with the ones from `wallets.json`. Each wallet receives ETH (for gas) and TRAC (for on-chain operations). See the [full faucet reference](../../docs/setup/TESTNET_FAUCET.md) for rate limits, dry-run, and error handling.
+
 What the running daemon provides:
 - Local API at `http://127.0.0.1:9200`
 - Node UI at `http://127.0.0.1:9200/ui`
@@ -237,7 +251,7 @@ If another agent is performing the setup, these are the exact steps:
 4. Read the agent name from `WORKSPACE_DIR/IDENTITY.md`.
 5. Write `~/.dkg/config.json` programmatically using the agent name and network defaults.
 6. Run `pnpm dkg start` — wallets, auth token, and identity key are auto-generated on first start.
-7. Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots.
+7. Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots. Fund the wallets by calling `POST https://euphoria.origin-trail.network/faucet/fund` with `{"mode": "v9_base_sepolia", "wallets": ["0xADDR1", "0xADDR2", "0xADDR3"]}`. Include an `Idempotency-Key` header. See [Testnet Faucet](../../docs/setup/TESTNET_FAUCET.md) for details.
 8. Merge into `~/.openclaw/openclaw.json`: add `"adapter-openclaw"` to `plugins.allow`, add the adapter path to `plugins.load.paths`, and add `adapter-openclaw` to `plugins.entries`.
 9. Write the `"dkg-node"` block into `WORKSPACE_DIR/config.json` with `daemonUrl`, `memory.enabled`, and `channel.enabled`.
 10. Copy `skills/dkg-node/SKILL.md` into `WORKSPACE_DIR/skills/dkg-node/SKILL.md`.

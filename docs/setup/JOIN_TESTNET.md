@@ -25,13 +25,23 @@ All three use the same network and protocol; CLI, OpenClaw, and ElizaOS nodes ca
 - **Base Sepolia ETH** for on-chain publishing (~0.001 ETH per publish; messaging and queries are free)
 - An **EVM private key** — any wallet; you can create a new one just for the testnet (no KYC, no real money)
 
-### Get Base Sepolia ETH
+### Get Base Sepolia ETH + TRAC
 
-Base Sepolia is a testnet — ETH is free:
+**Recommended: [V9 Testnet Faucet](./TESTNET_FAUCET.md)** — provides both ETH and TRAC in a single API call:
+
+```bash
+curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
+  -H "Content-Type: application/json" \
+  --data-raw '{"mode": "v9_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
+```
+
+See the [full faucet reference](./TESTNET_FAUCET.md) for rate limits, idempotency keys, and error handling.
+
+**Alternative (ETH only):**
 1. [Alchemy faucet](https://www.alchemy.com/faucets/base-sepolia)
 2. [Coinbase faucet](https://portal.cdp.coinbase.com/products/faucet)
 
-You'll need a small amount of ETH to pay gas for on-chain transactions (publishing, updating knowledge). P2P operations (queries, messaging, discovery) are free.
+You'll need ETH to pay gas for on-chain transactions (publishing, updating knowledge) and TRAC for on-chain operations. P2P operations (queries, messaging, discovery) are free.
 
 ## 1. Clone and Build
 
