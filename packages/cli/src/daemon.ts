@@ -1874,7 +1874,18 @@ function parseTagName(ref: string): string | null {
 }
 
 function isValidRef(ref: string): boolean {
-  return /^[\w.\-/]+$/.test(ref) && !ref.startsWith('-');
+  return /^[\w./+\-]+$/.test(ref) && !ref.startsWith('-');
+}
+
+function repoToFetchUrl(repo: string): string {
+  const trimmed = repo.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('/') || trimmed.includes('://') || trimmed.startsWith('git@')) return trimmed;
+  const normalized = normalizeRepo(trimmed);
+  if (/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    return `https://github.com/${normalized}.git`;
+  }
+  return trimmed;
 }
 
 type PendingUpdateState = {
@@ -2165,7 +2176,8 @@ async function _performUpdateInner(
     const fetchRef = maybeTag
       ? `${ref}:${ref}`
       : ref;
-    await execFileAsync('git', ['fetch', 'origin', fetchRef], {
+    const fetchUrl = repoToFetchUrl(au.repo);
+    await execFileAsync('git', ['fetch', fetchUrl, fetchRef], {
       cwd: targetDir,
       encoding: 'utf-8',
       timeout: 120_000,

@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
@@ -14,7 +14,19 @@ export async function migrateToBlueGreen(
 ): Promise<void> {
   const rDir = releasesDir();
   const currentLink = join(rDir, 'current');
-  const hadCurrentLink = existsSync(currentLink);
+  let hadCurrentLink = false;
+  if (existsSync(currentLink)) {
+    try {
+      hadCurrentLink = lstatSync(currentLink).isSymbolicLink();
+      if (!hadCurrentLink) {
+        log('Migration: found non-symlink releases/current; removing and recreating symlink.');
+        await rm(currentLink, { recursive: true, force: true });
+      }
+    } catch {
+      hadCurrentLink = false;
+      await rm(currentLink, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 
   const repo = repoDir();
   const hasLocalRepo = existsSync(join(repo, '.git'));

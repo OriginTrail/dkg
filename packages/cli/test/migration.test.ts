@@ -227,4 +227,22 @@ describe('migrateToBlueGreen', () => {
     expect(buildCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
   });
 
+  it('repairs non-symlink releases/current by recreating current symlink', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
+    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
+    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
+    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeFile(join(rDir, 'active'), 'b');
+    await mkdir(join(rDir, 'current'), { recursive: true }); // legacy broken state: directory instead of symlink
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const target = await readlink(join(rDir, 'current'));
+    expect(target).toBe('b');
+  });
+
 });

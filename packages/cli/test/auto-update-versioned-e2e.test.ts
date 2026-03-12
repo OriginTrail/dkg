@@ -100,7 +100,7 @@ describe.sequential('auto-update versioned e2e', () => {
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,
-      repo: 'fixture/repo',
+      repo: bareRepo,
       branch: 'main',
       checkIntervalMinutes: 30,
     };
@@ -120,7 +120,7 @@ describe.sequential('auto-update versioned e2e', () => {
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,
-      repo: 'fixture/repo',
+      repo: bareRepo,
       branch: 'main',
       allowPrerelease: false,
       checkIntervalMinutes: 30,
@@ -139,7 +139,7 @@ describe.sequential('auto-update versioned e2e', () => {
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,
-      repo: 'fixture/repo',
+      repo: bareRepo,
       branch: 'main',
       allowPrerelease: true,
       checkIntervalMinutes: 30,

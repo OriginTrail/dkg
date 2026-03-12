@@ -390,9 +390,24 @@ describe('blue-green checkForUpdate', () => {
     expect(fetchUrl).toContain('/commits/v9.0.5');
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch origin refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
+  });
+
+  it('accepts refs containing build metadata (+) for tag checks', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    makeFetchOk('new-sha');
+    const log = vi.fn();
+
+    const result = await checkForNewCommit(
+      { ...AU, branch: 'refs/tags/v1.2.3+build.5' },
+      log,
+    );
+
+    expect(result).toBe('new-sha');
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('invalid branch/ref'));
   });
 
   it('logs clear error when requested tag does not exist', async () => {
