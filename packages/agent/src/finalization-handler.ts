@@ -136,23 +136,31 @@ export class FinalizationHandler {
 
   private async getPrivateRootsFromMeta(paranetId: string, rootEntities: string[]): Promise<Uint8Array[]> {
     const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+    const safeRoots = rootEntities.filter(isSafeIri);
+    if (safeRoots.length === 0) return [];
+
+    const values = safeRoots.map(r => `<${r}>`).join(' ');
+    const sparql = `SELECT ?entity ?root WHERE {
+      GRAPH <${wsMetaGraph}> {
+        VALUES ?entity { ${values} }
+        ?entity <${DKG_NS}privateMerkleRoot> ?root .
+      }
+    }`;
+
     const roots: Uint8Array[] = [];
-    for (const rootEntity of rootEntities) {
-      const sparql = `SELECT ?root WHERE {
-        GRAPH <${wsMetaGraph}> { ?ka <${DKG_NS}rootEntity> <${rootEntity}> . ?ka <${DKG_NS}privateMerkleRoot> ?root }
-      } LIMIT 1`;
-      try {
-        const result = await this.store.query(sparql);
-        if (result.type === 'bindings' && result.bindings.length > 0) {
-          const hex = (result.bindings[0]['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
+    try {
+      const result = await this.store.query(sparql);
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          const hex = (row['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
           if (hex.length === 64) {
             const bytes = new Uint8Array(32);
             for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
             roots.push(bytes);
           }
         }
-      } catch { /* metadata may not exist for all entities */ }
-    }
+      }
+    } catch { /* metadata may not exist */ }
     return roots;
   }
 
