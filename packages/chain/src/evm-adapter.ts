@@ -1,4 +1,4 @@
-import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
+import { ethers, JsonRpcProvider, Wallet, Contract, Interface } from 'ethers';
 import { createRequire } from 'node:module';
 import type {
   ChainAdapter,
@@ -26,6 +26,65 @@ const require = createRequire(import.meta.url);
 
 function loadAbi(contractName: string): ethers.InterfaceAbi {
   return require(`@dkg/evm-module/abi/${contractName}.json`);
+}
+
+const ERROR_ABI_CONTRACTS = [
+  'KnowledgeAssets', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
+  'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
+  'ParanetV9Registry', 'Paranet', 'Profile', 'Identity', 'IdentityStorage',
+  'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
+  'Paymaster', 'ShardingTable', 'ParametersStorage',
+];
+
+let _errorInterface: Interface | null = null;
+
+function getErrorInterface(): Interface {
+  if (_errorInterface) return _errorInterface;
+  const errorFragments: string[] = [];
+  for (const name of ERROR_ABI_CONTRACTS) {
+    try {
+      const abi = loadAbi(name) as any[];
+      for (const entry of abi) {
+        if (entry.type === 'error') {
+          const params = (entry.inputs ?? []).map((i: any) => `${i.type} ${i.name}`).join(', ');
+          errorFragments.push(`error ${entry.name}(${params})`);
+        }
+      }
+    } catch { /* ABI not available */ }
+  }
+  _errorInterface = new Interface([...new Set(errorFragments)]);
+  return _errorInterface;
+}
+
+/**
+ * Decode an EVM custom error selector into a human-readable string.
+ * Returns null if the selector doesn't match any known contract error.
+ */
+export function decodeEvmError(data: string | Uint8Array): { name: string; args: ethers.Result } | null {
+  try {
+    const hex = typeof data === 'string' ? data : ethers.hexlify(data);
+    if (hex.length < 10) return null;
+    const parsed = getErrorInterface().parseError(hex);
+    return parsed ? { name: parsed.name, args: parsed.args } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enrich a caught EVM error with a decoded custom error name.
+ * Modifies the error message in-place and returns the decoded name (if any).
+ */
+export function enrichEvmError(err: unknown): string | null {
+  if (!(err instanceof Error)) return null;
+  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
+  if (!match) return null;
+  const decoded = decodeEvmError(match[1]);
+  if (!decoded) return null;
+  const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
+  const decodedStr = `${decoded.name}${argsStr}`;
+  err.message = err.message.replace('unknown custom error', decodedStr);
+  return decoded.name;
 }
 
 export interface EVMAdapterConfig {

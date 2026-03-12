@@ -261,14 +261,19 @@ interface W3CAskResponse {
   boolean: boolean;
 }
 
+function escapeNQuadsLiteral(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
 function w3cTermToString(t: W3CTerm): string {
   if (t.type === 'bnode') return `_:${t.value}`;
   if (t.type === 'literal' || t.type === 'typed-literal') {
-    if (t['xml:lang']) return `"${t.value}"@${t['xml:lang']}`;
+    const escaped = escapeNQuadsLiteral(t.value);
+    if (t['xml:lang']) return `"${escaped}"@${t['xml:lang']}`;
     if (t.datatype && t.datatype !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${t.value}"^^<${t.datatype}>`;
+      return `"${escaped}"^^<${t.datatype}>`;
     }
-    return `"${t.value}"`;
+    return `"${escaped}"`;
   }
   return t.value;
 }

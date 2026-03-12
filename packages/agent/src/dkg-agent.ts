@@ -11,11 +11,11 @@ import {
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
-import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
-  computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeTripleHash, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
@@ -1582,8 +1582,9 @@ export class DKGAgent {
         onChainId = result.paranetId;
         this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
+        const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           this.log.info(ctx, `Paranet "${opts.id}" already registered on-chain — creating local definition`);
         } else {
           this.log.warn(ctx, `On-chain paranet registration failed: ${msg} — creating locally without chain finality`);
@@ -1716,8 +1717,9 @@ export class DKGAgent {
         onChainId = result.paranetId;
         this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
+        const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           alreadyOnChain = true;
           onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
           this.log.info(ctx, `Paranet "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
@@ -1911,6 +1913,30 @@ export class DKGAgent {
 
   get peerId(): string {
     return this.node.peerId;
+  }
+
+  get identityId(): bigint {
+    return this.publisher.getIdentityId();
+  }
+
+  /**
+   * Sign the context graph participant digest: keccak256(contextGraphId, merkleRoot).
+   * Returns the caller's identity ID and compact ECDSA (r, vs) values that the
+   * ContextGraphs contract can verify via ecrecover.
+   */
+  async signContextGraphDigest(
+    contextGraphId: bigint,
+    merkleRoot: Uint8Array,
+  ): Promise<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> {
+    if (typeof this.chain.signMessage !== 'function') {
+      throw new Error('Chain adapter does not support signMessage');
+    }
+    const digest = ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32'],
+      [contextGraphId, ethers.hexlify(merkleRoot)],
+    );
+    const sig = await this.chain.signMessage(ethers.getBytes(digest));
+    return { identityId: this.identityId, ...sig };
   }
 
   get multiaddrs(): string[] {
@@ -2357,33 +2383,17 @@ function verifySyncedData(
         allQuadsForKC.push(...quads);
       }
 
-      // Try flat mode first (publisher default: single merkle over all triple hashes)
       const flatHashes = allQuadsForKC.map(computeTripleHash);
       const flatRoot = new MerkleTree(flatHashes).root;
       const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
-        continue;
-      }
-
-      // Try entity-proofs mode (two-level: per-entity KA roots → KC root)
-      const kaRoots: Uint8Array[] = [];
-      for (const re of rootEntities) {
-        const quads = partitioned.get(re) ?? [];
-        const publicRoot = computePublicRoot(quads);
-        kaRoots.push(computeKARoot(publicRoot, undefined));
-      }
-      const epRoot = computeKCRoot(kaRoots);
-      const epHex = Array.from(epRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-
-      if (epHex === claimedHex) {
-        verifiedKcUals.add(kcUal);
       } else if (acceptUnverified) {
-        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;
       } else {
-        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;
       }
     } catch {

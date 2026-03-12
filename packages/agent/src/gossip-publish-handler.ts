@@ -6,11 +6,12 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeTripleHash, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   validatePublishRequest,
   type KAMetadata,
 } from '@dkg/publisher';
+import { MerkleTree } from '@dkg/core';
 import { ethers } from 'ethers';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -168,17 +169,14 @@ export class GossipPublishHandler {
       }
 
       if (request.ual) {
+        const allHashes = normalized.map(computeTripleHash);
+        const merkleRoot = new MerkleTree(allHashes).root;
+
         const partitioned = autoPartition(normalized);
-        const kaRoots: Uint8Array[] = [];
         const kaMetadata: KAMetadata[] = [];
 
         for (const [rootEntity, entityQuads] of partitioned) {
-          const publicRoot = computePublicRoot(entityQuads);
           const kaEntry = request.kas?.find((ka) => ka.rootEntity === rootEntity);
-          const privateRoot = kaEntry?.privateMerkleRoot?.length
-            ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined;
-          kaRoots.push(computeKARoot(publicRoot, privateRoot));
-
           const tokenId = kaEntry ? protoToNumber(kaEntry.tokenId) : 0;
           kaMetadata.push({
             rootEntity,
@@ -186,11 +184,10 @@ export class GossipPublishHandler {
             tokenId: BigInt(tokenId),
             publicTripleCount: entityQuads.length,
             privateTripleCount: kaEntry?.privateTripleCount ?? 0,
-            privateMerkleRoot: privateRoot,
+            privateMerkleRoot: kaEntry?.privateMerkleRoot?.length
+              ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined,
           });
         }
-
-        const merkleRoot = computeKCRoot(kaRoots);
 
         const kcMeta = {
           ual: request.ual,

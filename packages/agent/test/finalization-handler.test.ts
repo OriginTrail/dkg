@@ -9,9 +9,8 @@ import {
   Logger,
 } from '@dkg/core';
 import { OxigraphStore, GraphManager, type Quad } from '@dkg/storage';
-import {
-  autoPartition, computePublicRoot, computeKARoot, computeKCRoot,
-} from '@dkg/publisher';
+import { computeTripleHash } from '@dkg/publisher';
+import { MerkleTree } from '@dkg/core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
 const PARANET = 'test-finalization';
@@ -34,14 +33,9 @@ function computeMerkleForQuads(quads: Quad[], paranetId: string): Uint8Array {
   return computeMerkleForQuadsWithGraph(quads, dataGraph);
 }
 
-function computeMerkleForQuadsWithGraph(quads: Quad[], dataGraph: string): Uint8Array {
-  const normalized = quads.map(q => ({ ...q, graph: dataGraph }));
-  const partitioned = autoPartition(normalized);
-  const kaRoots: Uint8Array[] = [];
-  for (const [, entityQuads] of partitioned) {
-    kaRoots.push(computeKARoot(computePublicRoot(entityQuads), undefined));
-  }
-  return computeKCRoot(kaRoots);
+function computeMerkleForQuadsWithGraph(quads: Quad[], _dataGraph: string): Uint8Array {
+  const hashes = quads.map(computeTripleHash);
+  return new MerkleTree(hashes).root;
 }
 
 function makeFinalizationMsg(opts: {
@@ -436,5 +430,60 @@ describe('FinalizationHandler', () => {
       `SELECT ?s WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
     );
     expect(dataResult.type === 'bindings' ? dataResult.bindings.length : 0).toBe(0);
+  });
+
+  it('multi-entity workspace: flat merkle matches publisher root (regression for entity-proofs mismatch)', async () => {
+    const store = new OxigraphStore();
+    const gm = new GraphManager(store);
+    await gm.ensureParanet(PARANET);
+
+    const rootA = 'http://example.org/entity/A';
+    const rootB = 'http://example.org/entity/B';
+    const wsGraph = paranetWorkspaceGraphUri(PARANET);
+
+    const quadsA = makeQuads(rootA, 3, wsGraph);
+    const quadsB = makeQuads(rootB, 3, wsGraph);
+    const allQuads = [...quadsA, ...quadsB];
+    await store.insert(allQuads);
+
+    // Compute the merkle root the way the publisher would (flat: hash all triples)
+    const publisherRoot = computeMerkleForQuads(allQuads, PARANET);
+    const merkleHex = '0x' + Array.from(publisherRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const mockChain = {
+      chainId: 'mock:31337',
+      listenForEvents: async function* () {
+        yield {
+          type: 'KnowledgeBatchCreated',
+          blockNumber: 100,
+          data: {
+            txHash: '0xabc123',
+            merkleRoot: merkleHex,
+            publisherAddress: '0x1111111111111111111111111111111111111111',
+            startKAId: '1',
+            endKAId: '1',
+          },
+        };
+      },
+    } as any;
+
+    const handler = new FinalizationHandler(store, mockChain);
+
+    const data = makeFinalizationMsg({
+      kcMerkleRoot: publisherRoot,
+      rootEntities: [rootA, rootB],
+    });
+    await handler.handleFinalizationMessage(data, PARANET);
+
+    // If the merkle matched, data should be promoted to canonical.
+    // Before the flat-mode fix, the finalization handler used entity-proofs
+    // (autoPartition → per-entity roots → KC root) which would produce a
+    // different root from the publisher's flat mode, causing a mismatch.
+    const result = await store.query(
+      `SELECT ?s WHERE { GRAPH <${paranetDataGraphUri(PARANET)}> { ?s ?p ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    const bindings = result.type === 'bindings' ? result.bindings : [];
+    expect(bindings.length).toBeGreaterThan(0);
   });
 });

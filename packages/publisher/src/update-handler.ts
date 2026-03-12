@@ -6,7 +6,8 @@ import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computePublicRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computeTripleHash } from './merkle.js';
+import { MerkleTree } from '@dkg/core';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -129,13 +130,16 @@ export class UpdateHandler {
         }
       }
 
-      // Merkle root integrity: recompute from the received payload
+      // Merkle root integrity: recompute from the received payload (flat mode)
       await this.graphManager.ensureParanet(paranetId);
       const dataGraph = this.graphManager.dataGraphUri(paranetId);
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
-      const partitioned = autoPartition(quads);
 
+      const allHashes = quads.map(computeTripleHash);
+      const computedRoot = new MerkleTree(allHashes).root;
+
+      const partitioned = autoPartition(quads);
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));
       for (const payloadRoot of partitioned.keys()) {
         if (!manifestRoots.has(payloadRoot)) {
@@ -143,15 +147,6 @@ export class UpdateHandler {
           return;
         }
       }
-
-      const kaRoots: Uint8Array[] = [];
-      for (const m of manifest) {
-        const entityQuads = partitioned.get(m.rootEntity) ?? [];
-        const pubRoot = computePublicRoot(entityQuads);
-        const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-        kaRoots.push(computeKARoot(pubRoot, privRoot));
-      }
-      const computedRoot = computeKCRoot(kaRoots);
 
       const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
       if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {

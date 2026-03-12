@@ -1,6 +1,6 @@
 import {
   decodeFinalizationMessage,
-  paranetWorkspaceGraphUri, paranetDataGraphUri, paranetWorkspaceMetaGraphUri,
+  paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
   Logger, createOperationContext,
   type OperationContext,
@@ -8,10 +8,11 @@ import {
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
-  computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeTripleHash, autoPartition,
   generateConfirmedFullMetadata,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@dkg/publisher';
+import { MerkleTree } from '@dkg/core';
 import { ethers } from 'ethers';
 
 export class FinalizationHandler {
@@ -127,20 +128,9 @@ export class FinalizationHandler {
     return result.type === 'quads' ? result.quads : [];
   }
 
-  private verifyMerkleMatch(workspaceQuads: Quad[], paranetId: string, expectedMerkleRoot: Uint8Array, ctxGraphId?: string): boolean {
-    const dataGraph = ctxGraphId
-      ? contextGraphDataUri(paranetId, ctxGraphId)
-      : paranetDataGraphUri(paranetId);
-    const normalized = workspaceQuads.map(q => ({ ...q, graph: dataGraph }));
-    const partitioned = autoPartition(normalized);
-
-    const kaRoots: Uint8Array[] = [];
-    for (const [, entityQuads] of partitioned) {
-      const publicRoot = computePublicRoot(entityQuads);
-      kaRoots.push(computeKARoot(publicRoot, undefined));
-    }
-
-    const computedRoot = computeKCRoot(kaRoots);
+  private verifyMerkleMatch(workspaceQuads: Quad[], _paranetId: string, expectedMerkleRoot: Uint8Array, _ctxGraphId?: string): boolean {
+    const allHashes = workspaceQuads.map(computeTripleHash);
+    const computedRoot = new MerkleTree(allHashes).root;
     return ethers.hexlify(computedRoot) === ethers.hexlify(expectedMerkleRoot);
   }
 
@@ -234,17 +224,17 @@ export class FinalizationHandler {
     const canonicalQuads = workspaceQuads.map(q => ({ ...q, graph: dataGraph }));
     await this.store.insert(canonicalQuads);
 
+    const allHashes = canonicalQuads.map(computeTripleHash);
+    const merkleRoot = new MerkleTree(allHashes).root;
+
     const partitioned = autoPartition(canonicalQuads);
     const rootEntities = [...partitioned.keys()].sort();
     const kaMetadata: KAMetadata[] = [];
-    const kaRoots: Uint8Array[] = [];
 
     for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
       const rootEntity = rootEntities[tokenIdx];
       const entityQuads = partitioned.get(rootEntity) ?? [];
       if (entityQuads.length === 0) continue;
-      const publicRoot = computePublicRoot(entityQuads);
-      kaRoots.push(computeKARoot(publicRoot, undefined));
       kaMetadata.push({
         rootEntity,
         kcUal: ual,
@@ -254,8 +244,6 @@ export class FinalizationHandler {
         privateMerkleRoot: undefined,
       });
     }
-
-    const merkleRoot = computeKCRoot(kaRoots);
 
     const kcMeta: KCMetadata = {
       ual,

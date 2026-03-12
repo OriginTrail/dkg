@@ -6,7 +6,7 @@ import { GraphManager, PrivateContentStore } from '@dkg/storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHash, computePublicRoot, computePrivateRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computeTripleHash, computePrivateRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
@@ -498,12 +498,12 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const { paranetId, quads, privateQuads = [], operationCtx, entityProofs = false, onPhase } = options;
+    const { paranetId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
 
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:ensureParanet', 'start');
-    this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private (entityProofs=${entityProofs})`);
+    this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private`);
     await this.graphManager.ensureParanet(paranetId);
     onPhase?.('prepare:ensureParanet', 'end');
 
@@ -515,11 +515,6 @@ export class DKGPublisher implements Publisher {
     const kaMetadata: KAMetadata[] = [];
 
     onPhase?.('prepare:manifest', 'start');
-    let privateMerkleRoot: Uint8Array | undefined;
-    if (privateQuads.length > 0) {
-      privateMerkleRoot = computePrivateRoot(privateQuads);
-    }
-
     let tokenCounter = 1n;
     for (const [rootEntity, publicQuads] of kaMap) {
       const entityPrivateQuads = privateQuads.filter(
@@ -561,35 +556,9 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:validate', 'end');
 
     onPhase?.('prepare:merkle', 'start');
-    let kcMerkleRoot: Uint8Array;
     const allPublicHashes = allSkolemizedQuads.map(computeTripleHash);
-
-    if (privateMerkleRoot) {
-      // Anchor privateMerkleRoot as a synthetic public triple hash
-      const syntheticTripleHash = computeTripleHash({
-        subject: `urn:dkg:kc`,
-        predicate: 'http://dkg.io/ontology/privateContentRoot',
-        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
-        graph: '',
-      });
-      allPublicHashes.push(syntheticTripleHash);
-    }
-
-    if (entityProofs) {
-      // Per-entity kaRoots → Merkle tree
-      const kaRoots: Uint8Array[] = [];
-      for (const [rootEntity, publicQuads] of kaMap) {
-        const pubRoot = computePublicRoot(publicQuads);
-        kaRoots.push(pubRoot ?? new Uint8Array(32));
-      }
-      kcMerkleRoot = computeKCRoot(kaRoots);
-      this.log.info(ctx, `Computed kcMerkleRoot (entityProofs) for ${kaRoots.length} KAs`);
-    } else {
-      // Flat hash over all public triples + synthetic anchor
-      const tree = new MerkleTree(allPublicHashes);
-      kcMerkleRoot = tree.root;
-      this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
-    }
+    const kcMerkleRoot = new MerkleTree(allPublicHashes).root;
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allPublicHashes.length} triple hashes`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -598,16 +567,6 @@ export class DKGPublisher implements Publisher {
 
     const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(paranetId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
-
-    // Store synthetic triple anchoring privateMerkleRoot in the data graph
-    if (privateMerkleRoot) {
-      normalizedQuads.push({
-        subject: 'urn:dkg:kc',
-        predicate: 'http://dkg.io/ontology/privateContentRoot',
-        object: `"0x${Buffer.from(privateMerkleRoot).toString('hex')}"`,
-        graph: dataGraph,
-      });
-    }
 
     this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
@@ -664,10 +623,11 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:sign', 'start');
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
 
-      const tokenAmount =
+      let tokenAmount =
         typeof this.chain.getRequiredPublishTokenAmount === 'function'
           ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, 1)
           : 1n;
+      if (tokenAmount <= 0n) tokenAmount = 1n;
 
       // Publisher signature: sign keccak256(abi.encodePacked(uint72 identityId, bytes32 merkleRoot))
       const pubMsgHash = ethers.solidityPackedKeccak256(
@@ -826,7 +786,6 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:partition', 'end');
 
     onPhase?.('prepare:manifest', 'start');
-    const kaRoots: Uint8Array[] = [];
     const manifestEntries: KAManifestEntry[] = [];
     const entityPrivateMap = new Map<string, Quad[]>();
 
@@ -837,22 +796,20 @@ export class DKGPublisher implements Publisher {
       );
       entityPrivateMap.set(rootEntity, entityPrivateQuads);
 
-      const pubRoot = computePublicRoot(publicQuads);
-      const privRoot = entityPrivateQuads.length > 0 ? computePrivateRoot(entityPrivateQuads) : undefined;
-
-      kaRoots.push(computeKARoot(pubRoot, privRoot));
       manifestEntries.push({
         tokenId: tokenCounter++,
         rootEntity,
-        privateMerkleRoot: privRoot,
+        privateMerkleRoot: entityPrivateQuads.length > 0
+          ? computePrivateRoot(entityPrivateQuads) : undefined,
         privateTripleCount: entityPrivateQuads.length,
       });
     }
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:merkle', 'start');
-    const kcMerkleRoot = computeKCRoot(kaRoots);
     const allSkolemizedQuads = [...kaMap.values()].flat();
+    const allHashes = allSkolemizedQuads.map(computeTripleHash);
+    const kcMerkleRoot = new MerkleTree(allHashes).root;
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 

@@ -5,9 +5,7 @@ import { Logger, createOperationContext } from '@dkg/core';
 import type { PhaseCallback } from './publisher.js';
 import { decodeWorkspacePublishRequest } from '@dkg/core';
 import { validatePublishRequest } from './validation.js';
-import { computePublicRoot, computeKARoot } from './merkle.js';
 import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
-import { autoPartition } from './auto-partition.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
 
@@ -89,15 +87,6 @@ export class WorkspaceHandler {
       if (!validation.valid) {
         this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
         return;
-      }
-
-      const partitioned = autoPartition(quads);
-      for (const m of manifestForValidation) {
-        const publicQuads = partitioned.get(m.rootEntity) ?? [];
-        const publicRoot = computePublicRoot(publicQuads);
-        const kaEntry = manifest?.find((e) => e.rootEntity === m.rootEntity);
-        const privateRoot = kaEntry?.privateMerkleRoot?.length ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined;
-        computeKARoot(publicRoot, privateRoot);
       }
 
       onPhase?.('validate', 'end');
