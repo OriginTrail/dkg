@@ -580,7 +580,12 @@ export class DKGPublisher implements Publisher {
       } catch (err) {
         onPhase?.('collect_signatures', 'end');
         const msg = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Receiver signature collection failed: ${msg}`);
+        this.log.warn(ctx, `Receiver signature collection failed, rolling back stored data: ${msg}`);
+        try {
+          await this.store.delete(normalizedQuads);
+        } catch (rollbackErr) {
+          this.log.warn(ctx, `Rollback after signature failure failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`);
+        }
         throw new Error(`Publish aborted: receiverSignatureProvider failed and no fallback is configured. ${msg}`);
       }
       onPhase?.('collect_signatures', 'end');

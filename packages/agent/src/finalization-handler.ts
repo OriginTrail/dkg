@@ -9,7 +9,7 @@ import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
 import { type ChainAdapter, type EventFilter } from '@dkg/chain';
 import {
   computeTripleHash, autoPartition,
-  generateConfirmedFullMetadata,
+  generateConfirmedFullMetadata, getTentativeStatusQuad,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@dkg/publisher';
 import { MerkleTree } from '@dkg/core';
@@ -280,6 +280,11 @@ export class FinalizationHandler {
       batchId,
       chainId: this.chain?.chainId ?? 'unknown',
     };
+
+    // Remove any existing tentative status for this UAL before inserting confirmed metadata
+    try {
+      await this.store.delete([getTentativeStatusQuad(ual, paranetId)]);
+    } catch { /* tentative status may not exist */ }
 
     let metaQuads = generateConfirmedFullMetadata(kcMeta, kaMetadata, provenance);
     if (ctxGraphId) {

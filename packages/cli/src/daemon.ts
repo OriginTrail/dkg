@@ -1570,12 +1570,14 @@ async function handleRequest(
         tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
       }
       tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0 });
-      return jsonResponse(res, 200, {
+      const httpStatus = result.contextGraphError ? 207 : 200;
+      return jsonResponse(res, httpStatus, {
         kcId: String(result.kcId),
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
         ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),
+        ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
       });
     } catch (err) {
       tracker.fail(ctx, err);
@@ -1613,6 +1615,11 @@ async function handleRequest(
     try {
       const sortedUniqueIds = [...new Set(participantIdentityIds.map((id: number | string) => BigInt(id)))]
         .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      if (requiredSignatures > sortedUniqueIds.length) {
+        return jsonResponse(res, 400, {
+          error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
+        });
+      }
       const result = await agent.createContextGraph({
         participantIdentityIds: sortedUniqueIds,
         requiredSignatures,
