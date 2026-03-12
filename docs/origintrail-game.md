@@ -1,7 +1,7 @@
 # OriginTrail Game — Protocol & Knowledge Graph Reference
 
-> How the game uses the DKG V9 protocol: sequence diagrams, RDF triples,
-> consensus flow, and identified improvement opportunities.
+> How the game uses the DKG V9 protocol: context graph integration,
+> sequence diagrams, RDF triples, and consensus flow.
 
 ---
 
@@ -9,21 +9,138 @@
 
 The game runs as an installable DKG app (`dkg-app-origin-trail-game`).
 Each node loads the game coordinator, which bridges the game engine with the
-DKG network using three DKG primitives:
+DKG network using four DKG primitives:
 
 | Primitive | When used | Persistence |
 |-----------|-----------|-------------|
 | **GossipSub** (app topic) | Real-time coordination (create, join, vote, propose, approve) | Ephemeral — in-memory only |
 | **Workspace** writes | Swarm creation, player joins, vote records | Node-local, replicated via gossip, no chain |
-| **Publish** | Turn results → context graph, player profiles | Permanent, on-chain anchored (merkle root + KA NFTs) |
+| **Context Graph** | On-chain bounded subgraph created per game; turn results enshrined into it | Permanent, M/N signature-gated, on-chain anchored |
+| **enshrineFromWorkspace** | Promote workspace quads to context graph with merkle root + KC batch | Permanent, chain-anchored (merkle root + KA NFTs) |
 
-All messages flow through a single topic: `dkg/paranet/origin-trail-game/app`.
+All gossipsub messages flow through a single topic: `dkg/paranet/origin-trail-game/app`.
 
 ---
 
-## 2. Game Lifecycle — Full Sequence
+## 2. Context Graph Integration
 
-### 2.1 Create Swarm + Join
+### 2.1 One Game = One Context Graph
+
+Each game (wagon/swarm) gets its own on-chain **context graph**, created when the
+expedition launches. The context graph:
+
+- Lists all player identity IDs as **participants**
+- Requires **M = ceil(2N/3)** on-chain participant signatures (e.g. M=2 for 3 players)
+- Peers sign the context graph digest (`keccak256(contextGraphId, merkleRoot)`) as part of their `turn:approve` message
+- The `ContextGraphs` contract verifies each signature belongs to a registered participant and that at least M are present
+- Only consensus-resolved turn results are enshrined to the context graph; force-resolved turns and ancillary data (strategy patterns, leaderboard) use plain publish
+
+### 2.2 Context Graph Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Leader as Node A (Leader)
+    participant Peer as Nodes B, C
+    participant Chain as Base Sepolia
+    participant CG as ContextGraphs Contract
+    participant KA as KnowledgeAssetsStorage
+
+    Note over Leader,CG: Expedition Launch
+
+    Leader->>Chain: createContextGraph({participantIds: [A,B,C], requiredSigs: 2})
+    Chain->>CG: Store context graph #42 with M=2, N=3
+    CG-->>Leader: contextGraphId = 42
+
+    Note over Leader,KA: Each Consensus Turn Resolution
+
+    Leader->>Leader: Compute turnQuads + merkleRoot
+    Leader->>Leader: Sign keccak256(42, merkleRoot)
+    Leader->>Peer: turn:proposal {merkleRoot, contextGraphId}
+    Peer->>Peer: Verify proposal, sign digest
+    Peer->>Leader: turn:approve {identityId, signatureR, signatureVS}
+
+    Note over Leader: M=2 signatures collected (leader + 1 peer)
+
+    Leader->>Leader: writeToWorkspace(turnQuads)
+    Leader->>Chain: enshrineFromWorkspace(rootEntities, contextGraphId=42, sigs=[A, B])
+    Chain->>KA: publishKnowledgeAssets(merkleRoot) → batchId
+    Chain->>CG: addBatchToContextGraph(42, batchId, merkleRoot, sigs)
+    CG->>CG: Verify sigs.length >= M, ecrecover matches participants
+    CG-->>Leader: batch linked to context graph
+
+    Note over Leader,CG: Game Over / Force Resolve
+
+    Leader->>Chain: publish(strategyPatterns + leaderboard) — plain KC, no context graph
+```
+
+### 2.3 Data Flow: Workspace → Context Graph → Chain
+
+```mermaid
+graph LR
+    subgraph "Ephemeral (Workspace)"
+        V[Votes]
+        L[Lobby / Swarm State]
+        E[Expedition Launch]
+    end
+
+    subgraph "Context Graph (M/N-gated)"
+        TR[Turn Results]
+        CA[Consensus Attestations]
+    end
+
+    subgraph "Plain Publish (leader-only)"
+        SP[Strategy Patterns]
+        LB[Leaderboard Entries]
+        SM[SyncMemory Events]
+        FR[Force-Resolved Turns]
+    end
+
+    subgraph "On-Chain"
+        CG[Context Graph Contract]
+        KC_CG[KC Batches — context graph]
+        KC_PLAIN[KC Batches — standalone]
+        KA[KA NFTs]
+    end
+
+    V -->|multi-party signing| TR
+    TR -->|enshrineFromWorkspace + M sigs| KC_CG
+    CA -->|enshrineFromWorkspace + M sigs| KC_CG
+    KC_CG -->|addBatchToContextGraph| CG
+
+    SP -->|publish| KC_PLAIN
+    LB -->|publish| KC_PLAIN
+    SM -->|publish| KC_PLAIN
+    FR -->|publish| KC_PLAIN
+    KC_CG --> KA
+    KC_PLAIN --> KA
+
+    style CG fill:#2d1b4e,color:#e6edf3
+    style KC_CG fill:#2d1b4e,color:#e6edf3
+    style KC_PLAIN fill:#1b2d4e,color:#e6edf3
+    style KA fill:#2d1b4e,color:#e6edf3
+```
+
+### 2.4 On-Chain Multi-Party Verification
+
+The context graph uses a single, unified consensus mechanism:
+
+1. **Gossip transport** — peers exchange votes, proposals, and signatures over GossipSub (sub-second, no gas)
+2. **On-chain verification** — the `ContextGraphs` contract enforces that `M` of `N` registered participants cryptographically signed the merkle root before accepting a KC batch
+
+| Aspect | Detail |
+|--------|--------|
+| **M value** | `ceil(2N/3)` — same threshold used for gossip approval |
+| **What is signed** | `keccak256(contextGraphId, merkleRoot)` — ties the signature to both the context graph and the specific data batch |
+| **Verification** | `ecrecover` on each signature, matched against participant identity IDs stored on the context graph |
+| **Force-resolved turns** | Use plain `publish()` (not context graph) since multi-party consensus was not achieved |
+
+This ensures that no single node can unilaterally enshrine data to the context graph — the blockchain enforces the same quorum the protocol requires.
+
+---
+
+## 3. Game Lifecycle — Full Sequence
+
+### 3.1 Create Swarm + Join
 
 ```mermaid
 sequenceDiagram
@@ -36,53 +153,58 @@ sequenceDiagram
     A->>DKG_A: POST /create {playerName: "Alice", swarmName: "Pioneer"}
     DKG_A->>DKG_A: Create SwarmState in memory
     DKG_A->>DKG_A: writeToWorkspace(swarmCreatedQuads + playerJoinedQuads)
-    DKG_A->>GS: publish("swarm:created") {swarmId, playerName, maxPlayers}
-    DKG_A->>DKG_A: publish(playerProfileQuads) [async, fire-and-forget]
+    DKG_A->>GS: publish("swarm:created") {swarmId, playerName, maxPlayers, identityId}
     DKG_A-->>A: {status: "recruiting", playerCount: 1}
 
     GS-->>B: swarm:created
-    B->>B: Store remote swarm in memory
+    B->>B: Store remote swarm (with leader's identityId)
     GS-->>C: swarm:created
-    C->>C: Store remote swarm in memory
+    C->>C: Store remote swarm
 
     B->>B: POST /join {swarmId, playerName: "Bob"}
     B->>B: writeToWorkspace(playerJoinedQuads)
-    B->>GS: publish("swarm:joined") {swarmId, playerName: "Bob"}
-    B->>B: publish(playerProfileQuads) [async]
+    B->>GS: publish("swarm:joined") {swarmId, playerName, identityId}
     GS-->>A: swarm:joined
-    A->>A: Add Bob to swarm.players
+    A->>A: Add Bob to swarm.players (with identityId)
 
     C->>C: POST /join {swarmId, playerName: "Charlie"}
     C->>C: writeToWorkspace(playerJoinedQuads)
-    C->>GS: publish("swarm:joined") {swarmId, playerName: "Charlie"}
+    C->>GS: publish("swarm:joined") {swarmId, playerName, identityId}
     GS-->>A: swarm:joined
     GS-->>B: swarm:joined
 ```
 
-### 2.2 Start Journey
+### 3.2 Launch Expedition (creates context graph with M/N)
 
 ```mermaid
 sequenceDiagram
     participant A as Node A (Leader)
+    participant Chain as Base Sepolia
     participant GS as GossipSub
     participant B as Node B
     participant C as Node C
 
     A->>A: POST /start {swarmId}
     A->>A: gameEngine.createGame(["Alice","Bob","Charlie"])
+    A->>A: M = signatureThreshold(3) = 2
+
+    A->>Chain: createContextGraph({participantIds: [idA, idB, idC], requiredSigs: 2})
+    Chain-->>A: contextGraphId = 42
+
+    A->>A: swarm.contextGraphId = "42", swarm.requiredSignatures = 2
     A->>A: swarm.status = "traveling", currentTurn = 1
-    A->>GS: publish("expedition:launched") {gameStateJson}
+    A->>GS: publish("expedition:launched") {gameStateJson, contextGraphId: "42"}
 
     GS-->>B: expedition:launched
-    B->>B: Parse gameStateJson, set status = "traveling"
+    B->>B: Parse gameState, set contextGraphId = "42"
 
     GS-->>C: expedition:launched
-    C->>C: Parse gameStateJson, set status = "traveling"
+    C->>C: Parse gameState, set contextGraphId = "42"
 
-    Note over A,C: All nodes now have identical initial game state<br/>30-second turn deadline starts
+    Note over A,C: All nodes share identical game state + context graph ID (M=2)
 ```
 
-### 2.3 Voting + Turn Resolution (Consensus)
+### 3.3 Voting + Turn Resolution (Multi-Party Signing → Context Graph)
 
 ```mermaid
 sequenceDiagram
@@ -94,78 +216,72 @@ sequenceDiagram
 
     Note over A,C: Turn 1 — All players vote
 
-    A->>A: POST /vote {action: "advance", params: {intensity: 2}}
+    A->>A: POST /vote {action: "advance"}
     A->>A: writeToWorkspace(voteCastQuads)
     A->>GS: publish("vote:cast") {turn:1, action:"advance"}
 
-    B->>B: POST /vote {action: "advance"}
-    B->>B: writeToWorkspace(voteCastQuads)
     B->>GS: publish("vote:cast") {turn:1, action:"advance"}
-
-    C->>C: POST /vote {action: "syncMemory"}
-    C->>C: writeToWorkspace(voteCastQuads)
     C->>GS: publish("vote:cast") {turn:1, action:"syncMemory"}
 
     Note over A: Leader sees all 3 votes → triggers proposal
 
-    A->>A: tallyVotes() → "advance" wins (2/3 majority)
+    A->>A: tallyVotes() → "advance" wins (2/3)
     A->>A: gameEngine.executeAction(state, {type:"advance"})
-    A->>A: hashProposal(swarmId, turn, newStateJson)
-    A->>GS: publish("turn:proposal") {turn:1, proposalHash, winningAction, newStateJson}
+    A->>A: Compute turnQuads + merkleRoot
+    A->>A: Sign keccak256(contextGraphId=42, merkleRoot)
+    A->>GS: publish("turn:proposal") {hash, merkleRoot, contextGraphId, ...}
 
     GS-->>B: turn:proposal
-    B->>B: Verify: hashProposal matches, tallyVotes matches
-    B->>B: pendingProposal.approvals = {A, B}
-    B->>GS: publish("turn:approve") {turn:1, proposalHash}
+    B->>B: Verify hash + tally
+    B->>B: Sign keccak256(42, merkleRoot) with identity key
+    B->>GS: publish("turn:approve") {hash, identityId, signatureR, signatureVS}
 
     GS-->>C: turn:proposal
     C->>C: Verify hash + tally
-    C->>C: pendingProposal.approvals = {A, C}
-    C->>GS: publish("turn:approve") {turn:1, proposalHash}
+    C->>C: Sign keccak256(42, merkleRoot)
+    C->>GS: publish("turn:approve") {hash, identityId, signatureR, signatureVS}
 
-    Note over A: Leader collects approvals
+    Note over A: Leader collects M=2 crypto signatures (own + B's)
 
-    GS-->>A: turn:approve from B
-    A->>A: approvals = {A, B} — threshold = ceil(2×3/3) = 2 ✓
-
-    Note over A: Threshold reached → finalize turn
-
-    A->>A: Apply newState, push to turnHistory
-    A->>A: agent.publish(turnResolvedQuads) → DKG context graph
-    A->>Chain: publishKnowledgeAssets(merkleRoot, nquads)
-    Chain-->>A: KnowledgeBatchCreated {txHash, batchId, startKAId}
+    A->>A: writeToWorkspace(turnQuads + attestationQuads)
+    A->>Chain: enshrineFromWorkspace(rootEntities, contextGraphId=42, sigs=[A,B])
+    Chain->>Chain: ecrecover each sig, verify participant, check count >= M
+    Chain-->>A: batch linked to context graph 42
     A->>GS: publish("turn:resolved") {turn:1, proposalHash}
 
-    GS-->>B: turn:resolved
-    B->>B: Apply proposal, advance to turn 2
-
-    GS-->>C: turn:resolved
-    C->>C: Apply proposal, advance to turn 2
+    GS-->>B: turn:resolved → advance to turn 2
+    GS-->>C: turn:resolved → advance to turn 2
 ```
 
-### 2.4 Force Resolve (Deadline Expired)
+### 3.4 Force Resolve (Deadline Expired — No Multi-Party Consensus)
 
 ```mermaid
 sequenceDiagram
     participant A as Node A (Leader)
     participant GS as GossipSub
-    participant B as Node B
+    participant Chain as Base Sepolia
 
-    Note over A,B: Turn deadline (30s) expires, not all votes in
+    Note over A: Turn deadline (30s) expires, not all votes in
 
     A->>A: POST /force-resolve {swarmId}
-    A->>A: If no votes: inject synthetic vote {action:"syncMemory"}
-    A->>A: tallyVotes() → run engine → create proposal
-    A->>GS: publish("turn:proposal") {proposalHash, winningAction, newStateJson}
+    A->>A: If no votes: inject synthetic {action:"syncMemory"}
+    A->>A: tallyVotes() → execute → create proposal
+    A->>GS: publish("turn:proposal") {resolution: "force-resolved"}
 
-    Note over A,B: Same approval flow as normal turn
+    Note over A: No multi-party signing — use plain publish
+
+    A->>Chain: publish(turnQuads) — standalone KC batch, NOT linked to context graph
+    Chain-->>A: batch published (no context graph link)
+    A->>GS: publish("turn:resolved")
+
+    Note over A: Data is chain-anchored but not M/N-gated
 ```
 
 ---
 
-## 3. RDF Triples Created at Each Step
+## 4. RDF Triples Created at Each Step
 
-### 3.1 Workspace Writes (ephemeral, no chain)
+### 4.1 Workspace Writes (ephemeral, no chain)
 
 **Graph:** `did:dkg:paranet:origin-trail-game` (workspace)
 
@@ -175,7 +291,8 @@ sequenceDiagram
                        ot:name           "Pioneer Express" ;
                        ot:orchestrator   <ot:player/{leaderPeerId}> ;
                        ot:createdAt      "1709901234000"^^xsd:decimal ;
-                       ot:status         "recruiting" .
+                       ot:status         "recruiting" ;
+                       ot:maxPlayers     "3"^^xsd:decimal .
 ```
 
 #### Player Joined
@@ -197,9 +314,12 @@ sequenceDiagram
     ot:params   "{\"intensity\":2}" .
 ```
 
-### 3.2 Published Data (permanent, on-chain anchored)
+### 4.2 Context Graph Data (permanent, enshrined on-chain)
 
 **Graph:** `did:dkg:paranet:origin-trail-game/context/{swarmId}`
+
+These quads are written to workspace first, then promoted to the on-chain
+context graph via `enshrineFromWorkspace`.
 
 #### Turn Resolved
 ```turtle
@@ -213,176 +333,163 @@ sequenceDiagram
     ot:approvedBy      <ot:player/{peerId_B}> .
 ```
 
-#### Player Profile
+#### Consensus Attestation
 ```turtle
-<did:dkg:game:player:{peerId}>
-    rdf:type        ot:Player ;
-    schema:name     "Alice" ;
-    dkg:peerId      "12D3KooW..." ;
-    prov:atTime     "2026-03-08T11:15:22.000Z" .
+<urn:dkg:attestation:{swarmId}:turn1:{proposalHash}>
+    rdf:type          ot:ConsensusAttestationBatch ;
+    ot:forTurn        <ot:swarm/{swarmId}/turn/1> ;
+    ot:resolution     "consensus" ;
+    ot:hasAttestation <ot:swarm/{swarmId}/turn/1/attestation/{hash}/{peerId}> .
+
+<ot:swarm/{swarmId}/turn/1/attestation/{hash}/{peerId}>
+    rdf:type          ot:ConsensusAttestation ;
+    ot:signer         <ot:player/{peerId}> ;
+    ot:proposalHash   "a92ab6cb..." ;
+    ot:approved       "true"^^xsd:boolean ;
+    ot:attestedAt     "1709901265000"^^xsd:decimal .
 ```
 
-### 3.3 DKG Metadata (auto-generated by publisher)
-
-**Graph:** `did:dkg:paranet:origin-trail-game/_meta`
-
+#### Strategy Pattern (game over)
 ```turtle
-<did:dkg:base:84532/{publisherAddr}/{startKAId}>
-    rdf:type              dkg:KnowledgeCollection ;
-    dkg:merkleRoot        "0xabc123..." ;
-    dkg:kaCount           "1"^^xsd:integer ;
-    dkg:status            "confirmed" ;
-    dkg:transactionHash   "0xdef456..." ;
-    dkg:blockNumber       "12345678"^^xsd:integer ;
-    dkg:publisherAddress  "0x1234..." ;
-    dkg:chainId           "base:84532" ;
-    dkg:paranet           did:dkg:paranet:origin-trail-game ;
-    prov:wasAttributedTo  "12D3KooW..." ;
-    dkg:publishedAt       "2026-03-08T..."^^xsd:dateTime .
+<ot:strategy/{swarmId}/{peerId}>
+    rdf:type           ot:StrategyPattern ;
+    ot:player          <ot:player/{peerId}> ;
+    ot:swarm           <ot:swarm/{swarmId}> ;
+    ot:totalVotes      "8"^^xsd:decimal ;
+    ot:favoriteAction  "advance" ;
+    ot:turnsSurvived   "12"^^xsd:decimal .
+```
+
+#### Leaderboard Entry (game over)
+```turtle
+<ot:swarm/{swarmId}/leaderboard/{peerId}>
+    rdf:type       ot:LeaderboardEntry ;
+    ot:player      <ot:player/{peerId}> ;
+    ot:score       "2450"^^xsd:decimal ;
+    ot:outcome     "won" ;
+    ot:epochs      "200"^^xsd:decimal ;
+    ot:survivors   "2"^^xsd:decimal ;
+    ot:partySize   "3"^^xsd:decimal .
 ```
 
 ---
 
-## 4. GossipSub Message Types
+## 5. GossipSub Message Types
 
-| Message | Sender | Payload | Purpose |
-|---------|--------|---------|---------|
-| `swarm:created` | Leader | swarmId, swarmName, playerName, maxPlayers | Announce new swarm to network |
-| `swarm:joined` | Joiner | swarmId, playerName | Announce player joined |
+| Message | Sender | Key Payload | Purpose |
+|---------|--------|-------------|---------|
+| `swarm:created` | Leader | swarmId, playerName, maxPlayers, **identityId** | Announce new swarm |
+| `swarm:joined` | Joiner | swarmId, playerName, **identityId** | Announce player joined |
 | `swarm:left` | Leaver | swarmId | Announce player left |
-| `expedition:launched` | Leader | swarmId, gameStateJson | Broadcast initial game state |
-| `vote:cast` | Voter | swarmId, turn, action, params | Broadcast vote (+ heartbeat every 5s) |
-| `turn:proposal` | Leader | swarmId, turn, proposalHash, winningAction, newStateJson, resultMessage | Propose turn resolution |
-| `turn:approve` | Verifier | swarmId, turn, proposalHash | Approve proposal |
-| `turn:resolved` | Leader | swarmId, turn, proposalHash | Notify turn finalized |
+| `expedition:launched` | Leader | gameStateJson, partyOrder, **contextGraphId** | Broadcast game state + context graph |
+| `vote:cast` | Voter | turn, action, params | Broadcast vote |
+| `turn:proposal` | Leader | proposalHash, winningAction, newStateJson, **merkleRoot**, **contextGraphId** | Propose turn + share digest for signing |
+| `turn:approve` | Verifier | turn, proposalHash, **identityId**, **signatureR**, **signatureVS** | Approve proposal with crypto signature |
+| `turn:resolved` | Leader | turn, proposalHash | Notify turn finalized |
 
-**Topic:** `dkg/paranet/origin-trail-game/app` (shared with all paranet subscribers)
-
----
-
-## 5. What's Missing from the Knowledge Graph
-
-### 5.1 Chain Provenance on Turn Results
-
-**Current state:** `turnResolvedQuads` does NOT include tx hash, block number, batch ID,
-or UAL — even though the publisher generates all of this when it calls `agent.publish()`.
-The data is available in the meta graph (`_meta`) but not linked to the turn result itself.
-
-> **REVIEW: This is a significant gap.** An agent querying the context graph for turn
-> history has no way to verify on-chain anchoring without cross-referencing the meta
-> graph by merkle root. The turn result should include:
->
-> ```turtle
-> <ot:swarm/{swarmId}/turn/1>
->     ot:transactionHash  "0x..."  ;
->     ot:blockNumber      "12345678"^^xsd:integer ;
->     ot:ual              "did:dkg:base:84532/0x.../42" ;
->     ot:batchId          "7"^^xsd:integer .
-> ```
->
-> **Fix:** After `agent.publish()` resolves, extract `result.ual`, `result.onChainResult.txHash`,
-> etc. and write supplementary triples to the context graph.
-
-### 5.2 No Signature Data in Graph
-
-**Current state:** Approvals are recorded as `ot:approvedBy <peerId>`, but there's no
-cryptographic proof. The proposal hash is computed via SHA-256 over `swarmId:turn:stateJson`
-but never published to the graph.
-
-> **REVIEW: High-value addition for agent trust scoring.** Adding:
->
-> ```turtle
-> <ot:swarm/{swarmId}/turn/1>
->     ot:proposalHash    "a92ab6cb..." ;
->     ot:consensusType   "gossipsub-2/3-majority" ;
->     ot:signatureCount  "2"^^xsd:integer ;
->     ot:signatureThreshold "2"^^xsd:integer .
-> ```
->
-> Would enable agents to audit which nodes are reliable consensus participants.
-
-### 5.3 No Result Message in Graph
-
-**Current state:** `resultMessage` (e.g. "Advanced 16 epochs. Arrived at GPU Depot!")
-is only in the GossipSub message and in-memory `turnHistory`. It's NOT in the RDF.
-
-> **REVIEW:** This is useful context for the knowledge graph. Add
-> `ot:resultMessage "Advanced 16 epochs."` to `turnResolvedQuads`.
-
-### 5.4 No Game Events in Graph
-
-**Current state:** Random events (hallucination cascade, model collapse, abandoned weights)
-are embedded in `gameStateJson` as `lastEvent` but not as first-class RDF entities.
-
-> **REVIEW:** Events are valuable knowledge. Consider:
->
-> ```turtle
-> <ot:swarm/{swarmId}/turn/1/event>
->     rdf:type          ot:GameEvent ;
->     ot:eventType      "ai_failure" ;
->     ot:description    "Bob is experiencing a hallucination cascade" ;
->     ot:affectedMember <ot:player/{peerId}> ;
->     ot:damage         "30"^^xsd:integer .
-> ```
-
-### 5.5 No Resource Deltas in Graph
-
-**Current state:** The full `gameStateJson` blob is stored per turn, but resource changes
-(tokens spent, health lost) are not extractable without JSON parsing.
-
-> **REVIEW:** Structured resource snapshots per turn would be far more queryable:
->
-> ```turtle
-> <ot:swarm/{swarmId}/turn/1>
->     ot:epochsAfter       "16"^^xsd:integer ;
->     ot:tokensAfter        "485"^^xsd:integer ;
->     ot:partyAliveCount    "3"^^xsd:integer .
-> ```
-
-### 5.6 Missing Fields in Graph Sync
-
-| Field | Stored in workspace? | Stored in context graph? | Issue |
-|-------|---------------------|-------------------------|-------|
-| `maxPlayers` | No | No | Restored as hardcoded `3` |
-| `joinedAt` per member | No (uses `createdAt`) | No | All members get swarm creation time |
-| Vote history | Workspace only | No | Lost after node restart |
-| `expedition:launched` | No RDF | No | Only GossipSub; game state lost on late join |
-| `swarm:left` | No RDF | No | Only GossipSub |
-| `resultMessage` | No | No | Only in-memory turnHistory |
+**Topic:** `dkg/paranet/origin-trail-game/app`
 
 ---
 
-## 6. Consensus Mechanism — Analysis
+## 6. Consensus Mechanism
 
-### Current Design
+### Threshold
 
-- **Threshold:** `ceil(2n/3)` where n = player count. For 3 players: 2 approvals needed.
-- **Verification:** Receivers verify `proposalHash` (SHA-256 of `swarmId:turn:stateJson`)
-  and that `winningAction` matches their local vote tally.
-- **Non-determinism:** The game engine uses `Math.random()` — receivers do NOT replay the
-  engine. They trust the leader's state output and verify only the action choice.
+`M = ceil(2n/3)` where n = player count. For 3 players: M=2 signatures needed.
 
-> **REVIEW: Protocol-level considerations:**
->
-> 1. **Leader trust:** The leader controls the random seed and could manipulate event
->    outcomes. This is acceptable for a game but would be a vulnerability in a financial
->    context. A VRF (Verifiable Random Function) seeded by collective input would fix this.
->
-> 2. **No rejection path:** If a verifier disagrees with the proposal, it simply doesn't
->    approve — but there's no explicit rejection message. A stuck proposal blocks the game
->    until force-resolve. Consider adding `turn:reject` with a reason.
->
-> 3. **Proposal replay:** `turn:resolved` triggers finalization on nodes that received
->    the proposal but haven't reached threshold locally. This is a useful catch-up
->    mechanism, but depends on the leader being honest about which proposal was approved.
->
-> 4. **Vote heartbeat:** Every 5 seconds, each voter re-broadcasts their vote. This is
->    essential for GossipSub reliability but creates O(n × turns × 6) messages per turn.
->    For 3 players this is fine; for 8 it's ~48 messages per 30-second window.
+### Gossip Verification
+
+Receivers verify `proposalHash` (SHA-256 of `swarmId:turn:stateJson`)
+and that `winningAction` matches their local vote tally.
+
+### Cryptographic Signing
+
+After verifying the proposal, each peer signs `keccak256(contextGraphId, merkleRoot)`
+using their identity key and includes the signature (r, vs) in their `turn:approve` message.
+
+### On-Chain Verification
+
+The `ContextGraphs` contract:
+1. Checks `signatures.length >= M`
+2. Runs `ecrecover` on each signature to recover the signer address
+3. Verifies each signer is a registered participant of the context graph
+4. Only then links the KC batch to the context graph
+
+### Non-determinism
+
+The game engine uses `Math.random()` — receivers do NOT replay the
+engine. They trust the leader's state output and verify only the action choice.
+
+### Resolution modes
+
+| Mode | When | Quorum | On-Chain |
+|------|------|--------|----------|
+| `consensus` | Majority wins cleanly | M crypto signatures | Enshrined to context graph |
+| `leader-tiebreak` | Tie broken by leader's vote | M crypto signatures | Enshrined to context graph |
+| `force-resolved` | Deadline expired | Leader only | Plain publish (no context graph) |
 
 ---
 
-## 7. Graph-based Lobby Sync — Analysis
+## 7. Data Flow Summary
+
+```mermaid
+graph TD
+    subgraph "Game UI (Browser)"
+        UI[React App]
+    end
+
+    subgraph "DKG Node"
+        API[HTTP API /api/apps/origin-trail-game/*]
+        COORD[OriginTrailGameCoordinator]
+        ENGINE[GameEngine]
+        RDF[RDF Quad Generators]
+    end
+
+    subgraph "DKG Agent"
+        WS[Workspace Handler]
+        PUB[Publisher + enshrineFromWorkspace]
+        GOSSIP[GossipSub Manager]
+        STORE[Triple Store - Oxigraph]
+        QUERY[Query Engine]
+    end
+
+    subgraph "Network"
+        GS_MESH[GossipSub Mesh]
+        RELAY[Circuit Relay]
+    end
+
+    subgraph "Base Sepolia"
+        CG_CONTRACT[ContextGraphs Contract]
+        KA_STORE[KnowledgeAssetsStorage]
+    end
+
+    UI -->|REST| API
+    API --> COORD
+    COORD --> ENGINE
+    COORD --> RDF
+
+    RDF -->|workspace quads| WS
+    WS -->|insert| STORE
+
+    RDF -->|enshrine quads| PUB
+    PUB -->|merkle root + KC batch| KA_STORE
+    PUB -->|addBatchToContextGraph| CG_CONTRACT
+
+    COORD -->|encode + broadcast| GOSSIP
+    GOSSIP -->|libp2p| GS_MESH
+    GS_MESH -->|via| RELAY
+
+    QUERY -->|SPARQL| STORE
+
+    style UI fill:#1a1a2e,color:#e6edf3
+    style CG_CONTRACT fill:#2d1b4e,color:#e6edf3
+    style KA_STORE fill:#2d1b4e,color:#e6edf3
+    style GS_MESH fill:#0d3a0d,color:#e6edf3
+```
+
+---
+
+## 8. Graph-based Lobby Sync
 
 When a node starts (or restarts), `loadLobbyFromGraph` runs after 5 seconds:
 
@@ -405,76 +512,4 @@ sequenceDiagram
     end
 
     Note over Node: Only "recruiting" swarms restored.<br/>Traveling/finished swarms are lost on restart.
-```
-
-> **REVIEW: Significant limitations:**
->
-> 1. **No traveling swarm recovery:** If a node crashes mid-game, it cannot recover the
->    game state. The `gameStateJson` from `expedition:launched` is gossip-only; it's never
->    written to workspace or published until a turn resolves.
->
-> 2. **Fix:** Write `expeditionLaunchedQuads` to workspace when the journey starts, and
->    update swarm status in workspace from `"recruiting"` to `"traveling"`. Then
->    `loadLobbyFromGraph` can restore mid-game swarms.
->
-> 3. **maxPlayers hardcoded to 3** during sync — the workspace doesn't record it.
->    Add `ot:maxPlayers` to `swarmCreatedQuads`.
-
----
-
-## 8. Data Flow Summary
-
-```mermaid
-graph TD
-    subgraph "Game UI (Browser)"
-        UI[React App]
-    end
-
-    subgraph "DKG Node"
-        API[HTTP API /api/apps/origin-trail-game/*]
-        COORD[OriginTrailGameCoordinator]
-        ENGINE[GameEngine]
-        RDF[RDF Quad Generators]
-    end
-
-    subgraph "DKG Agent"
-        WS[Workspace Handler]
-        PUB[Publisher]
-        GOSSIP[GossipSub Manager]
-        STORE[Triple Store - Oxigraph]
-        QUERY[Query Engine]
-    end
-
-    subgraph "Network"
-        GS_MESH[GossipSub Mesh]
-        RELAY[Circuit Relay]
-    end
-
-    subgraph "Base Sepolia"
-        HUB[Hub Contract]
-        KA_STORE[KnowledgeAssetsStorage]
-    end
-
-    UI -->|REST| API
-    API --> COORD
-    COORD --> ENGINE
-    COORD --> RDF
-
-    RDF -->|workspace quads| WS
-    WS -->|insert| STORE
-
-    RDF -->|publish quads| PUB
-    PUB -->|insert + merkle| STORE
-    PUB -->|tx| HUB
-    HUB --> KA_STORE
-
-    COORD -->|encode + broadcast| GOSSIP
-    GOSSIP -->|libp2p| GS_MESH
-    GS_MESH -->|via| RELAY
-
-    QUERY -->|SPARQL| STORE
-
-    style UI fill:#1a1a2e,color:#e6edf3
-    style HUB fill:#2d1b4e,color:#e6edf3
-    style GS_MESH fill:#0d3a0d,color:#e6edf3
 ```

@@ -98,6 +98,42 @@ contract KnowledgeCollectionStorage is
         uint96 tokenAmount,
         bool isImmutable
     ) external onlyContracts returns (uint256) {
+        return _createKnowledgeCollection(
+            publisher, publishOperationId, merkleRoot, knowledgeAssetsAmount,
+            byteSize, startEpoch, endEpoch, tokenAmount, isImmutable, bytes32(0)
+        );
+    }
+
+    function createKnowledgeCollectionWithDisclosureRoot(
+        address publisher,
+        string calldata publishOperationId,
+        bytes32 merkleRoot,
+        uint256 knowledgeAssetsAmount,
+        uint88 byteSize,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable,
+        bytes32 selectiveDisclosureMerkleRoot
+    ) external onlyContracts returns (uint256) {
+        return _createKnowledgeCollection(
+            publisher, publishOperationId, merkleRoot, knowledgeAssetsAmount,
+            byteSize, startEpoch, endEpoch, tokenAmount, isImmutable, selectiveDisclosureMerkleRoot
+        );
+    }
+
+    function _createKnowledgeCollection(
+        address publisher,
+        string calldata publishOperationId,
+        bytes32 merkleRoot,
+        uint256 knowledgeAssetsAmount,
+        uint88 byteSize,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable,
+        bytes32 selectiveDisclosureMerkleRoot
+    ) internal returns (uint256) {
         uint256 knowledgeCollectionId = ++_knowledgeCollectionsCounter;
 
         KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[knowledgeCollectionId];
@@ -108,6 +144,9 @@ contract KnowledgeCollectionStorage is
         kc.endEpoch = endEpoch;
         kc.tokenAmount = tokenAmount;
         kc.isImmutable = isImmutable;
+        if (selectiveDisclosureMerkleRoot != bytes32(0)) {
+            kc.selectiveDisclosureMerkleRoot = selectiveDisclosureMerkleRoot;
+        }
 
         unchecked {
             _totalTokenAmount += tokenAmount;
@@ -282,6 +321,14 @@ contract KnowledgeCollectionStorage is
         knowledgeCollections[id].merkleRoots.pop();
 
         emit KnowledgeCollectionMerkleRootRemoved(id, latestMerkleRoot);
+    }
+
+    function getSelectiveDisclosureMerkleRoot(uint256 id) external view returns (bytes32) {
+        return knowledgeCollections[id].selectiveDisclosureMerkleRoot;
+    }
+
+    function setSelectiveDisclosureMerkleRoot(uint256 id, bytes32 root) external onlyContracts {
+        knowledgeCollections[id].selectiveDisclosureMerkleRoot = root;
     }
 
     function getMinted(uint256 id) external view returns (uint256) {

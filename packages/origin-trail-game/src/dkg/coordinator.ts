@@ -12,6 +12,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { MerkleTree, hashTriple } from '@dkg/core';
+import { ethers } from 'ethers';
 import { gameEngine, GameEngine } from '../engine/game-engine.js';
 import type { GameState, ActionResult } from '../game/types.js';
 import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-train.js';
@@ -26,6 +28,7 @@ interface DKGPublishReturn {
 
 interface DKGAgent {
   peerId: string;
+  identityId: bigint;
   gossip: {
     subscribe(topic: string): void;
     publish(topic: string, data: Uint8Array): Promise<void>;
@@ -34,6 +37,23 @@ interface DKGAgent {
   };
   writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
   publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
+  enshrineFromWorkspace(
+    paranetId: string,
+    selection: 'all' | { rootEntities: string[] },
+    options?: {
+      clearWorkspaceAfter?: boolean;
+      contextGraphId?: string | bigint;
+      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+    },
+  ): Promise<DKGPublishReturn | undefined>;
+  createContextGraph(params: {
+    participantIdentityIds: bigint[];
+    requiredSignatures: number;
+  }): Promise<{ contextGraphId: bigint; success: boolean }>;
+  signContextGraphDigest(
+    contextGraphId: bigint,
+    merkleRoot: Uint8Array,
+  ): Promise<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   query(sparql: string, options?: any): Promise<any>;
 }
 
@@ -46,6 +66,7 @@ export interface SwarmMember {
   displayName: string;
   joinedAt: number;
   isLeader: boolean;
+  identityId?: string;
 }
 
 export interface Vote {
@@ -54,6 +75,12 @@ export interface Vote {
   params?: Record<string, any>;
   turn: number;
   timestamp: number;
+}
+
+export interface ParticipantSignature {
+  identityId: bigint;
+  r: Uint8Array;
+  vs: Uint8Array;
 }
 
 export interface TurnProposal {
@@ -69,6 +96,9 @@ export interface TurnProposal {
   deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
   actionSuccess?: boolean;
+  turnQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+  merkleRoot?: Uint8Array;
+  participantSignatures: Map<string, ParticipantSignature>;
 }
 
 export interface SwarmState {
@@ -86,6 +116,8 @@ export interface SwarmState {
   turnHistory: ResolvedTurn[];
   createdAt: number;
   playerIndexMap: Map<string, number>;
+  contextGraphId?: string;
+  requiredSignatures?: number;
 }
 
 export interface ResolvedTurn {
@@ -237,18 +269,18 @@ export class OriginTrailGameCoordinator {
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
       if (bindings.length > 0) {
-        this.log(`Player profile for "${displayName}" already exists, skipping publish`);
+        this.log(`Player profile for "${displayName}" already exists, skipping`);
         return;
       }
     } catch {
-      // If query fails, try publishing anyway
+      // If query fails, try writing anyway
     }
     const quads = rdf.playerProfileQuads(this.paranetId, this.myPeerId, displayName);
     try {
-      await this.agent.publish(this.paranetId, quads);
-      this.log(`Published player profile for "${displayName}" to game paranet`);
+      await this.agent.writeToWorkspace(this.paranetId, quads);
+      this.log(`Player profile for "${displayName}" written to workspace`);
     } catch (err: any) {
-      this.log(`Failed to publish player profile: ${err.message}`);
+      this.log(`Failed to write player profile: ${err.message}`);
     }
   }
 
@@ -362,7 +394,7 @@ export class OriginTrailGameCoordinator {
                   <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
           OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
         }`,
-        { paranetId: this.paranetId },
+        { paranetId: this.paranetId, includeWorkspace: true },
       );
 
       return (result.bindings ?? []).map((row: any) => ({
@@ -386,6 +418,8 @@ export class OriginTrailGameCoordinator {
     const swarmId = `swarm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const now = Date.now();
 
+    const myIdentityId = this.agent.identityId > 0n ? String(this.agent.identityId) : undefined;
+
     const swarm: SwarmState = {
       id: swarmId,
       name: swarmName,
@@ -396,6 +430,7 @@ export class OriginTrailGameCoordinator {
         displayName: playerName,
         joinedAt: now,
         isLeader: true,
+        identityId: myIdentityId,
       }],
       status: 'recruiting',
       gameState: null,
@@ -426,6 +461,7 @@ export class OriginTrailGameCoordinator {
       swarmName,
       playerName,
       maxPlayers: swarm.maxPlayers,
+      identityId: myIdentityId,
     };
     await this.broadcast(msg);
     this.log(`Swarm created: ${swarmName} (${swarmId})`);
@@ -440,11 +476,13 @@ export class OriginTrailGameCoordinator {
     if (swarm.players.some(p => p.peerId === this.myPeerId)) throw new Error('You are already in this swarm');
 
     const now = Date.now();
+    const myIdentityId = this.agent.identityId > 0n ? String(this.agent.identityId) : undefined;
     swarm.players.push({
       peerId: this.myPeerId,
       displayName: playerName,
       joinedAt: now,
       isLeader: false,
+      identityId: myIdentityId,
     });
 
     const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
@@ -458,6 +496,7 @@ export class OriginTrailGameCoordinator {
       peerId: this.myPeerId,
       timestamp: now,
       playerName,
+      identityId: myIdentityId,
     };
     await this.broadcast(msg);
     this.log(`Joined swarm ${swarmId} as ${playerName}`);
@@ -513,6 +552,31 @@ export class OriginTrailGameCoordinator {
       this.log(`Failed to persist expedition state: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // Create on-chain context graph with all participant identity IDs.
+    // M = ceil(2N/3): matches the gossip consensus threshold so the
+    // contract enforces the same quorum that the game protocol requires.
+    try {
+      const participantIdentityIds = swarm.players
+        .map(p => p.identityId)
+        .filter((id): id is string => id != null && id !== '0')
+        .map(id => BigInt(id));
+
+      if (participantIdentityIds.length > 0) {
+        const M = signatureThreshold(participantIdentityIds.length);
+        const result = await this.agent.createContextGraph({
+          participantIdentityIds,
+          requiredSignatures: M,
+        });
+        if (result.success) {
+          swarm.contextGraphId = String(result.contextGraphId);
+          swarm.requiredSignatures = M;
+          this.log(`Context graph ${swarm.contextGraphId} created for swarm ${swarmId} (M=${M}, ${participantIdentityIds.length} participants)`);
+        }
+      }
+    } catch (err) {
+      this.log(`Context graph creation failed (game proceeds without on-chain anchoring): ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     swarm.gameState = newGameState;
     swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     swarm.status = 'traveling';
@@ -528,6 +592,7 @@ export class OriginTrailGameCoordinator {
       timestamp: now,
       gameStateJson,
       partyOrder: swarm.players.map(p => p.peerId),
+      contextGraphId: swarm.contextGraphId,
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
@@ -655,6 +720,39 @@ export class OriginTrailGameCoordinator {
     const deaths = detectDeaths(swarm.gameState, result.newState, event);
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
+    // Pre-compute turn quads and merkle root so peers can sign the digest
+    const attestations: rdf.ConsensusAttestation[] = swarm.votes.map(v => ({
+      peerId: v.peerId,
+      proposalHash: hash,
+      approved: true,
+      timestamp: v.timestamp,
+    }));
+    const turnQuads = [
+      ...rdf.turnResolvedQuads(
+        this.paranetId, swarm.id, swarm.currentTurn,
+        winningAction, newStateJson,
+        swarm.votes.map(v => v.peerId),
+      ),
+      ...rdf.consensusAttestationQuads(
+        this.paranetId, swarm.id, swarm.currentTurn, attestations, resolution, hash,
+      ),
+    ];
+    const tripleHashes = turnQuads.map(q => hashTriple(q.subject, q.predicate, q.object));
+    const merkleRoot = new MerkleTree(tripleHashes).root;
+
+    // Leader self-signs the context graph participant digest
+    const leaderSigs = new Map<string, ParticipantSignature>();
+    let merkleRootHex: string | undefined;
+    if (swarm.contextGraphId && this.agent.identityId > 0n) {
+      try {
+        const sig = await this.agent.signContextGraphDigest(
+          BigInt(swarm.contextGraphId), merkleRoot,
+        );
+        leaderSigs.set(this.myPeerId, sig);
+        merkleRootHex = ethers.hexlify(merkleRoot);
+      } catch { /* chain adapter may not support signing */ }
+    }
+
     swarm.pendingProposal = {
       turn: swarm.currentTurn,
       hash,
@@ -668,6 +766,9 @@ export class OriginTrailGameCoordinator {
       deaths,
       event: turnEvent,
       actionSuccess: result.success,
+      turnQuads,
+      merkleRoot,
+      participantSignatures: leaderSigs,
     };
 
     const msg: proto.TurnProposalMsg = {
@@ -685,6 +786,8 @@ export class OriginTrailGameCoordinator {
       resolution,
       deaths,
       event: turnEvent,
+      merkleRoot: merkleRootHex,
+      contextGraphId: swarm.contextGraphId,
     };
     await this.broadcast(msg);
     this.log(`Turn ${swarm.currentTurn} proposal broadcast for ${swarm.id} (hash=${hash.slice(0, 8)})`);
@@ -692,12 +795,53 @@ export class OriginTrailGameCoordinator {
     await this.checkProposalThreshold(swarm);
   }
 
+  /**
+   * Write quads to workspace and enshrine them to the swarm's context graph.
+   * Falls back to plain publish if no context graph is configured.
+   *
+   * Quads are normalized to the workspace graph before staging because
+   * the workspace validator enforces graph URI === paranet workspace graph.
+   * The on-chain context graph linkage is handled by the contextGraphId
+   * parameter passed to enshrineFromWorkspace, not the quad's graph URI.
+   */
+  private async enshrineToContextGraph(
+    swarm: SwarmState,
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    label: string,
+    contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>,
+  ): Promise<DKGPublishReturn | undefined> {
+    const wsGraph = rdf.workspaceGraph(this.paranetId);
+    const normalized = quads.map(q => ({ ...q, graph: wsGraph }));
+
+    await this.agent.writeToWorkspace(this.paranetId, normalized);
+    const rootEntities = [...new Set(normalized.map(q => q.subject))];
+
+    if (swarm.contextGraphId) {
+      const result = await this.agent.enshrineFromWorkspace(
+        this.paranetId,
+        { rootEntities },
+        { contextGraphId: swarm.contextGraphId, contextGraphSignatures },
+      );
+      this.log(`${label} enshrined to context graph ${swarm.contextGraphId}`);
+      return result;
+    }
+
+    const result = await this.agent.publish(this.paranetId, normalized);
+    this.log(`${label} published (no context graph)`);
+    return result;
+  }
+
   private async checkProposalThreshold(swarm: SwarmState): Promise<void> {
     const proposal = swarm.pendingProposal;
     if (!proposal) return;
 
-    const threshold = signatureThreshold(swarm.players.length);
-    if (proposal.approvals.size < threshold) return;
+    // When a context graph exists, require M crypto signatures.
+    // Without a context graph, fall back to gossip approval count.
+    const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
+    const readyCount = swarm.contextGraphId
+      ? proposal.participantSignatures.size
+      : proposal.approvals.size;
+    if (readyCount < threshold) return;
 
     const isLeader = swarm.leaderPeerId === this.myPeerId;
     const opsSnapshot = isLeader ? [...(this.workspaceOps.get(swarm.id) ?? [])] : [];
@@ -731,25 +875,11 @@ export class OriginTrailGameCoordinator {
 
     if (isLeader) {
       try {
-        const attestations: rdf.ConsensusAttestation[] = [...proposal.approvals].map(pid => ({
-          peerId: pid,
-          proposalHash: proposal.hash,
-          approved: true,
-          timestamp: proposal.approvalTimestamps.get(pid) ?? Date.now(),
-        }));
-        const turnQuads = [
-          ...rdf.turnResolvedQuads(
-            this.paranetId, swarm.id, proposal.turn,
-            proposal.winningAction, proposal.newStateJson,
-            [...proposal.approvals],
-          ),
-          ...rdf.consensusAttestationQuads(
-            this.paranetId, swarm.id, proposal.turn, attestations, proposal.resolution, proposal.hash,
-          ),
-        ];
-        const publishResult = await this.agent.publish(this.paranetId, turnQuads);
-        this.log(`Turn ${proposal.turn} published to context graph for ${swarm.id}`);
-        this.log(`Consensus attestations published for turn ${proposal.turn}`);
+        const collectedSigs = [...proposal.participantSignatures.values()];
+        const turnQuads = proposal.turnQuads ?? [];
+        const publishResult = await this.enshrineToContextGraph(
+          swarm, turnQuads, `Turn ${proposal.turn}`, collectedSigs,
+        );
 
         const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
         await this.publishProvenanceChain(turnEntity, publishResult);
@@ -857,6 +987,8 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
 
+    // Force-resolve uses plain publish (not context graph enshrinement) because
+    // multi-party consensus was not achieved — only the leader signed.
     try {
       const attestations: rdf.ConsensusAttestation[] = [{
         peerId: this.myPeerId,
@@ -864,6 +996,7 @@ export class OriginTrailGameCoordinator {
         approved: true,
         timestamp: Date.now(),
       }];
+      const baseGraph = rdf.workspaceGraph(this.paranetId);
       const turnQuads = [
         ...rdf.turnResolvedQuads(
           this.paranetId, swarm.id, turnNumber,
@@ -872,10 +1005,9 @@ export class OriginTrailGameCoordinator {
         ...rdf.consensusAttestationQuads(
           this.paranetId, swarm.id, turnNumber, attestations, 'force-resolved', hash,
         ),
-      ];
+      ].map(q => ({ ...q, graph: baseGraph }));
       const publishResult = await this.agent.publish(this.paranetId, turnQuads);
-      this.log(`Force-resolve: turn ${turnNumber} published for ${swarm.id}`);
-      this.log(`Force-resolve: attestation published for turn ${turnNumber}`);
+      this.log(`Force-resolve turn ${turnNumber} published (plain, no context graph)`);
 
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
       await this.publishProvenanceChain(turnEntity, publishResult);
@@ -998,6 +1130,7 @@ export class OriginTrailGameCoordinator {
         displayName: msg.playerName,
         joinedAt: msg.timestamp,
         isLeader: true,
+        identityId: msg.identityId,
       }],
       status: 'recruiting',
       gameState: null,
@@ -1027,6 +1160,7 @@ export class OriginTrailGameCoordinator {
       displayName: msg.playerName,
       joinedAt: msg.timestamp,
       isLeader: false,
+      identityId: msg.identityId,
     });
     this.pushNotification({
       type: 'player_joined', swarmId: msg.swarmId, swarmName: swarm.name,
@@ -1075,16 +1209,14 @@ export class OriginTrailGameCoordinator {
     swarm.currentTurn = 1;
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
-
-    // Leader persists launch state via workspace write; followers receive it
-    // through workspace gossip replication (Rule 4: don't write to leader-owned root).
+    if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
 
     this.pushNotification({
       type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,
       peerId: msg.peerId, timestamp: msg.timestamp,
       message: `Expedition launched for "${swarm.name}"!`,
     });
-    this.log(`Journey started for ${msg.swarmId} (remote)`);
+    this.log(`Journey started for ${msg.swarmId} (remote)${swarm.contextGraphId ? ` [contextGraph=${swarm.contextGraphId}]` : ''}`);
   }
 
   private isValidPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
@@ -1206,6 +1338,25 @@ export class OriginTrailGameCoordinator {
     }
 
     const receivedAt = Date.now();
+    const peerSigs = new Map<string, ParticipantSignature>();
+
+    // Sign the context graph participant digest if merkle root was provided
+    let myIdentityIdStr: string | undefined;
+    let mySignatureR: string | undefined;
+    let mySignatureVS: string | undefined;
+    if (msg.merkleRoot && msg.contextGraphId && this.agent.identityId > 0n) {
+      try {
+        const merkleRootBytes = ethers.getBytes(msg.merkleRoot);
+        const sig = await this.agent.signContextGraphDigest(
+          BigInt(msg.contextGraphId), merkleRootBytes,
+        );
+        peerSigs.set(this.myPeerId, sig);
+        myIdentityIdStr = String(sig.identityId);
+        mySignatureR = ethers.hexlify(sig.r);
+        mySignatureVS = ethers.hexlify(sig.vs);
+      } catch { /* chain adapter may not support signing */ }
+    }
+
     swarm.pendingProposal = {
       turn: msg.turn,
       hash: msg.proposalHash,
@@ -1218,6 +1369,7 @@ export class OriginTrailGameCoordinator {
       resolution,
       deaths,
       event: msg.event,
+      participantSignatures: peerSigs,
     };
 
     const approveMsg: proto.TurnApproveMsg = {
@@ -1228,6 +1380,9 @@ export class OriginTrailGameCoordinator {
       timestamp: Date.now(),
       turn: msg.turn,
       proposalHash: msg.proposalHash,
+      identityId: myIdentityIdStr,
+      signatureR: mySignatureR,
+      signatureVS: mySignatureVS,
     };
     await this.broadcast(approveMsg);
     this.log(`Approved proposal for ${msg.swarmId} turn ${msg.turn}`);
@@ -1243,7 +1398,17 @@ export class OriginTrailGameCoordinator {
 
     swarm.pendingProposal.approvals.add(msg.peerId);
     swarm.pendingProposal.approvalTimestamps.set(msg.peerId, Date.now());
-    this.log(`Approval from ${msg.peerId.slice(0, 8)} for turn ${msg.turn} (${swarm.pendingProposal.approvals.size}/${signatureThreshold(swarm.players.length)} needed)`);
+
+    if (msg.identityId && msg.signatureR && msg.signatureVS) {
+      swarm.pendingProposal.participantSignatures.set(msg.peerId, {
+        identityId: BigInt(msg.identityId),
+        r: ethers.getBytes(msg.signatureR),
+        vs: ethers.getBytes(msg.signatureVS),
+      });
+    }
+
+    const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
+    this.log(`Approval from ${msg.peerId.slice(0, 8)} for turn ${msg.turn} (sigs=${swarm.pendingProposal.participantSignatures.size}/${threshold} needed)`);
 
     await this.checkProposalThreshold(swarm);
   }
@@ -1340,6 +1505,7 @@ export class OriginTrailGameCoordinator {
       playerCount: swarm.players.length,
       minPlayers: MIN_PLAYERS,
       signatureThreshold: signatureThreshold(swarm.players.length),
+      contextGraphId: swarm.contextGraphId ?? null,
       players: swarm.players.map(p => ({ id: p.peerId, name: p.displayName, isLeader: p.isLeader })),
       status: swarm.status,
       currentTurn: swarm.currentTurn,

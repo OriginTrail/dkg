@@ -559,6 +559,9 @@ importers:
       '@dkg/storage':
         specifier: workspace:*
         version: link:../storage
+      ethers:
+        specifier: ^6
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
       uuid:
         specifier: ^9.0.0
         version: 9.0.1

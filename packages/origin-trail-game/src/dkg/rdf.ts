@@ -284,7 +284,7 @@ export function strategyPatternQuads(
   peerId: string,
   stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number },
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const s = otUri(`strategy/${swarmId}/${peerId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('StrategyPattern'), g),
@@ -316,7 +316,7 @@ export function leaderboardEntryQuads(
   partySize: number,
   finishedAt: number,
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const entry = otUri(`swarm/${swarmId}/leaderboard/${peerId}`);
   return [
     quad(entry, `${RDF}type`, otUri('LeaderboardEntry'), g),
@@ -339,7 +339,7 @@ export function syncMemoryDkgQuads(
   peerId: string,
   tracSpent: number,
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const s = otUri(`swarm/${swarmId}/turn/${turn}/sync/${peerId}`);
   return [
     quad(s, `${RDF}type`, otUri('SyncMemoryViaDKG'), g),

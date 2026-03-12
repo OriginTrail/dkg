@@ -135,6 +135,28 @@ deploy_contracts() {
   fi
 
   echo "$hub_addr" > "$DEVNET_DIR/hardhat/hub_address"
+
+  # Lower minimumRequiredSignatures to 1 for devnet (default is 3, but the
+  # agent doesn't yet collect peer receiver signatures).
+  local ps_addr
+  ps_addr=$(node -e "
+    try{const d=JSON.parse(require('fs').readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+    console.log(d.contracts.ParametersStorage?.evmAddress||'')}catch{console.log('')}
+  " 2>/dev/null || echo "")
+
+  if [ -n "$ps_addr" ]; then
+    node -e "
+      const { ethers } = require('ethers');
+      (async () => {
+        const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+        const signer = await provider.getSigner(0);
+        const ps = new ethers.Contract('$ps_addr', ['function setMinimumRequiredSignatures(uint256)'], signer);
+        await (await ps.setMinimumRequiredSignatures(1)).wait();
+        console.log('minimumRequiredSignatures set to 1');
+      })();
+    " 2>&1 | while read -r line; do log "$line"; done
+  fi
+
   touch "$marker"
   log "Contracts deployed. Hub address: $hub_addr"
 }
@@ -341,9 +363,28 @@ EOCONF
     wallets.slice(1).forEach(w => console.log(w.address));
   ")
 
-  # Fund each additional wallet via Hardhat's hardhat_setBalance RPC
+  # Fund each additional wallet with ETH (gas) and TRAC (publish payments).
+  local token_addr
+  token_addr=$(node -e "
+    try{const d=JSON.parse(require('fs').readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+    console.log(d.contracts.Token?.evmAddress||'')}catch{console.log('')}
+  " 2>/dev/null || echo "")
+
   while IFS= read -r addr; do
-    [ -n "$addr" ] && fund_wallet "$addr"
+    [ -n "$addr" ] || continue
+    fund_wallet "$addr"
+    # Mint 1M TRAC to operational wallet (deployer = Hardhat account 0 has mint rights)
+    if [ -n "$token_addr" ]; then
+      cd "$REPO_ROOT/packages/evm-module" && node -e "
+        const { ethers } = require('ethers');
+        (async () => {
+          const p = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+          const deployer = await p.getSigner(0);
+          const token = new ethers.Contract('$token_addr', ['function mint(address,uint256)'], deployer);
+          await (await token.mint('$addr', ethers.parseEther('1000000'))).wait();
+        })();
+      " 2>/dev/null
+    fi
   done <<< "$extra_addrs"
 
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
@@ -468,6 +509,95 @@ cmd_start() {
   for i in $(seq 2 "$NUM_NODES"); do
     start_node "$i"
   done
+
+  # Wait for all nodes to create on-chain identities, then set up staking + ask prices.
+  # This ensures stakeWeightedAverageAsk > 0 so publish tokenAmount doesn't revert.
+  log "Waiting for nodes to register on-chain identities..."
+  sleep 10
+
+  local contracts_json="$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
+
+  cd "$REPO_ROOT/packages/evm-module" && node -e "
+    const { ethers } = require('ethers');
+    const fs = require('fs');
+    (async () => {
+      const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+      const contracts = JSON.parse(fs.readFileSync('$contracts_json', 'utf8'));
+      const c = (name) => contracts.contracts[name]?.evmAddress;
+
+      const token    = new ethers.Contract(c('Token'),          ['function mint(address,uint256)', 'function approve(address,uint256)'], provider);
+      const identity = new ethers.Contract(c('IdentityStorage'), ['function getIdentityId(address) view returns (uint72)'], provider);
+      const staking  = new ethers.Contract(c('Staking'),         ['function stake(uint72,uint96)'], provider);
+      const profile  = new ethers.Contract(c('Profile'),         ['function updateAsk(uint72,uint96)'], provider);
+
+      const stakingAddr = c('Staking');
+      const signers = await provider.listAccounts();
+      const n = Math.min(signers.length, $NUM_NODES);
+
+      // Wait up to 30s for at least the first node to have an identity
+      for (let attempt = 0; attempt < 15; attempt++) {
+        const id0 = await identity.getIdentityId(signers[0].address);
+        if (id0 > 0n) break;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      let staked = 0, asked = 0;
+      for (let i = 0; i < n; i++) {
+        const signer = signers[i];
+        const idId = await identity.getIdentityId(signer.address);
+        if (idId === 0n) { console.log('Node ' + (i+1) + ': no identity yet, skipping'); continue; }
+
+        const stakeAmount = ethers.parseEther('50000');
+        const askAmount = ethers.parseEther('1');
+        try {
+          const deployer = await provider.getSigner(0);
+          await (await token.connect(deployer).mint(signer.address, stakeAmount)).wait();
+          await (await token.connect(signer).approve(stakingAddr, stakeAmount)).wait();
+          await (await staking.connect(signer).stake(idId, stakeAmount)).wait();
+          staked++;
+        } catch (e) { console.log('Stake failed for node ' + (i+1) + ': ' + e.message); }
+
+        // Set ask price
+        try {
+          await (await profile.connect(signer).updateAsk(idId, askAmount)).wait();
+          asked++;
+        } catch (e) { console.log('Ask failed for node ' + (i+1) + ': ' + e.message); }
+      }
+      console.log('Staked 50k TRAC for ' + staked + '/' + n + ' node(s), ask set for ' + asked + '/' + n);
+    })();
+  " 2>&1 | while read -r line; do log "$line"; done
+
+  # Register paranets once from the deployer account so nodes don't each attempt it
+  log "Registering paranets on-chain..."
+  cd "$REPO_ROOT/packages/evm-module" && node -e "
+    const { ethers } = require('ethers');
+    const fs = require('fs');
+    (async () => {
+      const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+      const deployer = await provider.getSigner(0);
+      const contracts = JSON.parse(fs.readFileSync('$contracts_json', 'utf8'));
+      const registryAddr = contracts.contracts.ParanetV9Registry?.evmAddress;
+      if (!registryAddr) { console.log('ParanetV9Registry not deployed, skipping'); return; }
+      const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ParanetV9Registry.json', 'utf8'));
+      const registry = new ethers.Contract(registryAddr, abi, deployer);
+      const paranets = ['devnet-test', 'origin-trail-game'];
+      for (const name of paranets) {
+        const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
+        try {
+          const tx = await registry.createParanetV9(onChainId, 0);
+          await tx.wait();
+          console.log('Registered paranet: ' + name + ' (' + onChainId.slice(0, 16) + '...)');
+        } catch (e) {
+          const data = e.data || e.message?.match(/data=\"(0x[0-9a-f]+)\"/)?.[1];
+          if (data === '0x8f53dc71' || e.message?.includes('ParanetAlreadyExists')) {
+            console.log('Paranet already exists: ' + name);
+          } else {
+            console.log('Failed to register ' + name + ': ' + e.message);
+          }
+        }
+      }
+    })();
+  " 2>&1 | while read -r line; do log "$line"; done
 
   log ""
   log "=== Devnet Ready ==="
