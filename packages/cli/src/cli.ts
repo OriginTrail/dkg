@@ -249,7 +249,7 @@ program
     }
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
-    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
+    await migrateToBlueGreen((msg) => console.log(msg));
 
     if (opts.foreground) {
       await runDaemon(true);
@@ -1256,7 +1256,11 @@ program
         const pid = await readPid();
         if (pid && isProcessRunning(pid)) {
           console.log('Stopping daemon...');
-          process.kill(pid, 'SIGTERM');
+          try {
+            process.kill(pid, 'SIGTERM');
+          } catch (err: any) {
+            if (err?.code !== 'ESRCH') throw err;
+          }
           for (let i = 0; i < 20; i++) {
             await sleep(500);
             if (!isProcessRunning(pid)) break;
@@ -1308,7 +1312,11 @@ program
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {
       console.log('Stopping daemon...');
-      process.kill(pid, 'SIGTERM');
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch (err: any) {
+        if (err?.code !== 'ESRCH') throw err;
+      }
       for (let i = 0; i < 20; i++) {
         await sleep(500);
         if (!isProcessRunning(pid)) break;

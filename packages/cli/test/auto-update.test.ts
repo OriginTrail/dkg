@@ -365,6 +365,24 @@ describe('blue-green checkForUpdate', () => {
     expect(mockedWriteFile).not.toHaveBeenCalled();
   });
 
+  it('checkForNewCommit supports non-GitHub repos via git ls-remote', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    (mockedExecFile as any).mockImplementation((file: string, args: string[], _opts: any, cb: Function) => {
+      if (file === 'git' && args[0] === 'ls-remote') {
+        return cb(null, 'abcdef1234567890abcdef1234567890abcdef12\trefs/heads/main\n', '');
+      }
+      return cb(null, '', '');
+    });
+    const log = vi.fn();
+
+    const result = await checkForNewCommit({ ...AU, repo: 'ssh://git.example.com/non-github.git' }, log);
+
+    expect(result).toBe('abcdef1234567890abcdef1234567890abcdef12');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('failed to check for new commit'));
+  });
+
   it('checkForNewCommit also validates branch names', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
     mockedReadFile.mockResolvedValueOnce('current-sha' as any);

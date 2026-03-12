@@ -1907,6 +1907,89 @@ function repoToFetchUrl(repo: string): string {
   return trimmed;
 }
 
+function githubRepoForApi(repo: string): string | null {
+  const trimmed = repo.trim().replace(/\.git$/i, '');
+  if (!trimmed) return null;
+  const urlMatch = trimmed.match(/github\.com[/:]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/|$)/i);
+  if (urlMatch) return urlMatch[1];
+  // Treat plain owner/name as GitHub shorthand; explicit paths should use ./ or / prefixes.
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+async function resolveRemoteCommitSha(
+  repoSpec: string,
+  ref: string,
+  log: (msg: string) => void,
+): Promise<string | null> {
+  let fetchUrl = '';
+  try {
+    fetchUrl = repoToFetchUrl(repoSpec);
+  } catch (err: any) {
+    log(`Auto-update: ${err?.message ?? 'invalid autoUpdate.repo'}`);
+    return null;
+  }
+  const githubRepo = githubRepoForApi(repoSpec);
+  const apiRef = ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
+
+  // Fast path for GitHub repos to preserve token-authenticated checks.
+  if (githubRepo) {
+    const url = `https://api.github.com/repos/${githubRepo}/commits/${encodeURIComponent(apiRef)}`;
+    const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
+    const token = process.env.GITHUB_TOKEN;
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      if (res.status === 422 && ref.startsWith('refs/tags/')) {
+        log(`Auto-update: tag "${apiRef}" not found in ${githubRepo}`);
+        return null;
+      }
+      if (res.status === 404) {
+        log(
+          `Auto-update: GitHub returned 404 for ${githubRepo} ref "${ref}". ` +
+            'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.',
+        );
+      } else {
+        log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
+      }
+      return null;
+    }
+    const data = await res.json() as { sha?: string };
+    return data.sha ? String(data.sha).trim() : null;
+  }
+
+  // Generic path for local/non-GitHub repositories.
+  const queryRefs = ref.startsWith('refs/tags/')
+    ? [ref, `${ref}^{}`]
+    : [ref];
+  try {
+    const raw = await execFileAsync('git', ['ls-remote', fetchUrl, ...queryRefs], {
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+    const stdout = typeof raw === 'string' ? raw : String((raw as any)?.stdout ?? '');
+    const lines = String(stdout).trim().split('\n').filter(Boolean);
+    if (lines.length === 0) {
+      log(`Auto-update: ref "${ref}" not found in ${fetchUrl}`);
+      return null;
+    }
+    const peeledTagRef = `${ref}^{}`;
+    const parsed = lines
+      .map((line) => line.split(/\s+/))
+      .filter((parts) => parts.length >= 2)
+      .map(([sha, remoteRef]) => ({ sha: sha.trim(), remoteRef: remoteRef.trim() }))
+      .filter((entry) => /^[0-9a-f]{7,40}$/i.test(entry.sha));
+    const peeled = parsed.find((entry) => entry.remoteRef === peeledTagRef);
+    if (peeled) return peeled.sha;
+    const exact = parsed.find((entry) => entry.remoteRef === ref);
+    if (exact) return exact.sha;
+    return parsed[0]?.sha ?? null;
+  } catch (err: any) {
+    log(`Auto-update: failed to resolve remote ref ${ref} from ${fetchUrl} (${err?.message ?? String(err)})`);
+    return null;
+  }
+}
+
 type PendingUpdateState = {
   target: 'a' | 'b';
   commit: string;
@@ -1975,34 +2058,19 @@ export async function checkForNewCommitWithStatus(
     }
   }
 
-  const repo = normalizeRepo(au.repo);
   const ref = (refOverride ?? au.branch).trim() || 'main';
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return { status: 'error' };
   }
-  const apiRef = ref
-    .replace(/^refs\/heads\//, '')
-    .replace(/^refs\/tags\//, '');
-
-  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(apiRef)}`;
-  const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
-  const token = process.env.GITHUB_TOKEN;
-  if (token) headers.Authorization = `Bearer ${token}`;
 
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) {
-      if (res.status === 422 && ref.startsWith('refs/tags/')) {
-        log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
-        return { status: 'error' };
-      }
-      log(`Auto-update: GitHub API returned ${res.status}`);
+    const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log);
+    if (!latestCommit) {
       return { status: 'error' };
     }
-    const data = await res.json() as { sha: string };
-    if (data.sha === currentCommit) return { status: 'up-to-date' };
-    return { status: 'available', commit: data.sha };
+    if (latestCommit === currentCommit) return { status: 'up-to-date' };
+    return { status: 'available', commit: latestCommit };
   } catch (err: any) {
     log(`Auto-update: failed to check for new commit (${err?.message ?? String(err)})`);
     return { status: 'error' };
@@ -2150,40 +2218,14 @@ async function _performUpdateInner(
     }
   }
 
-  const repo = normalizeRepo(au.repo);
   const ref = (opts.refOverride ?? au.branch).trim() || 'main';
-  const apiRef = ref
-    .replace(/^refs\/heads\//, '')
-    .replace(/^refs\/tags\//, '');
 
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return 'failed';
   }
-
-  const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(apiRef)}`;
-  const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
-  const token = process.env.GITHUB_TOKEN;
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) {
-    if (res.status === 422 && ref.startsWith('refs/tags/')) {
-      log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
-      return 'failed';
-    }
-    if (res.status === 404) {
-      log(
-        `Auto-update: GitHub returned 404 for ${repo} ref "${ref}". ` +
-          'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.',
-      );
-    } else {
-      log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
-    }
-    return 'failed';
-  }
-  const data = await res.json() as { sha: string };
-  const latestCommit = data.sha;
+  const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log);
+  if (!latestCommit) return 'failed';
 
   if (latestCommit === currentCommit) return 'up-to-date';
 
