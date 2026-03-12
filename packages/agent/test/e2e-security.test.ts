@@ -442,6 +442,7 @@ describe('Access protocol round-trip', () => {
 
     const result = await publisherA.publish({
       paranetId: PARANET,
+      publisherPeerId: nodeA.peerId.toString(),
       quads: [
         { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:paranet:${PARANET}` },
       ],
