@@ -17,6 +17,19 @@ console.log(status.peerId);
 
 const paranets = await dkg.paranet.list();
 console.log(paranets.paranets.length);
+
+const published = await dkg.publish.quads({
+  paranetId: 'dev-coordination',
+  quads: [
+    {
+      subject: 'urn:entity:test',
+      predicate: 'http://schema.org/name',
+      object: '"SDK test"',
+      graph: 'did:dkg:paranet:dev-coordination',
+    },
+  ],
+});
+console.log(published.kcId);
 ```
 
 ## Current Resources
@@ -27,5 +40,8 @@ console.log(paranets.paranets.length);
 - `dkg.paranet.exists(id)`
 - `dkg.paranet.subscribe(paranetId, { includeWorkspace? })`
 - `dkg.paranet.catchupStatus(paranetId)`
+- `dkg.publish.quads({ paranetId, quads, privateQuads?, accessPolicy?, allowedPeers? })`
+- `dkg.publish.workspaceWrite({ paranetId, quads })`
+- `dkg.publish.workspaceEnshrine({ paranetId, selection?, clearAfter? })`
 
-This is the initial SDK foundation. More resource groups (`publish`, `query`, `agent`) will be added incrementally.
+This is the initial SDK foundation. More resource groups (`query`, `agent`) will be added incrementally.

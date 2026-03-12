@@ -34,6 +34,65 @@ export interface DKGSDK {
     subscribe(paranetId: string, options?: SubscribeParanetOptions): Promise<SubscribeParanetResponse>;
     catchupStatus(paranetId: string): Promise<CatchupStatusResponse>;
   };
+  publish: {
+    quads(input: PublishQuadsInput): Promise<PublishResult>;
+    workspaceWrite(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult>;
+    workspaceEnshrine(input: WorkspaceEnshrineInput): Promise<WorkspaceEnshrineResult>;
+  };
+}
+
+export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+export interface KARef {
+  tokenId: string;
+  rootEntity: string;
+}
+
+export interface PublishResult {
+  kcId: string;
+  status: 'tentative' | 'confirmed';
+  kas: KARef[];
+  txHash?: string;
+  blockNumber?: number;
+  batchId?: string;
+  publisherAddress?: string;
+}
+
+export interface PublishQuadsInput {
+  paranetId: string;
+  quads: Quad[];
+  privateQuads?: Quad[];
+  accessPolicy?: AccessPolicy;
+  allowedPeers?: string[];
+}
+
+export interface WorkspaceWriteInput {
+  paranetId: string;
+  quads: Quad[];
+}
+
+export interface WorkspaceWriteResult {
+  workspaceOperationId: string;
+  paranetId: string;
+  graph: string;
+  triplesWritten: number;
+  skolemizedBlankNodes?: number;
+}
+
+export type WorkspaceSelection = 'all' | { rootEntities: string[] };
+
+export interface WorkspaceEnshrineInput {
+  paranetId: string;
+  selection?: WorkspaceSelection;
+  clearAfter?: boolean;
+}
+
+export interface WorkspaceEnshrineResult {
+  kcId: string;
+  status: 'tentative' | 'confirmed';
+  kas: KARef[];
+  txHash?: string;
+  blockNumber?: number;
 }
 
 export interface ParanetSummary {

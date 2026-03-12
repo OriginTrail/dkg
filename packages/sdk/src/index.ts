@@ -1,8 +1,10 @@
 export { createDKG } from './client.js';
 export { DKGSDKError } from './errors.js';
 export type {
+  AccessPolicy,
   CatchupResult,
   CatchupStatusResponse,
+  KARef,
   CreateParanetInput,
   CreateParanetResponse,
   DKGClientOptions,
@@ -11,8 +13,15 @@ export type {
   NodeStatus,
   ParanetExistsResponse,
   ParanetSummary,
+  PublishQuadsInput,
+  PublishResult,
   Quad,
   QueuedCatchup,
   SubscribeParanetOptions,
   SubscribeParanetResponse,
+  WorkspaceEnshrineInput,
+  WorkspaceEnshrineResult,
+  WorkspaceSelection,
+  WorkspaceWriteInput,
+  WorkspaceWriteResult,
 } from './types.js';
