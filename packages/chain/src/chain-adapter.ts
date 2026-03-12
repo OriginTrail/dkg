@@ -137,6 +137,30 @@ export interface FairSwapPurchaseInfo {
   state: number; // 0=None, 1=Initiated, 2=Fulfilled, 3=KeyRevealed, 4=Completed, 5=Disputed, 6=Refunded, 7=Expired
 }
 
+// ----- Context Graph types -----
+
+export interface CreateContextGraphParams {
+  participantIdentityIds: bigint[];
+  requiredSignatures: number;
+  metadataBatchId?: bigint;
+}
+
+export interface CreateContextGraphResult extends TxResult {
+  contextGraphId: bigint;
+}
+
+export interface AddBatchToContextGraphParams {
+  contextGraphId: bigint;
+  batchId: bigint;
+  merkleRoot?: Uint8Array;
+  signerSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
+export interface PublishToContextGraphParams extends PublishParams {
+  contextGraphId: bigint;
+  participantSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
 // ----- Permanent Publishing types -----
 
 export interface PermanentPublishParams {
@@ -264,6 +288,17 @@ export interface ChainAdapter {
   // Staking Conviction
   stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
   getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
+
+  /**
+   * Sign an arbitrary message hash using the node's primary operational key.
+   * Used for self-signing as receiver or context graph participant.
+   */
+  signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+
+  // Context Graphs
+  createContextGraph?(params: CreateContextGraphParams): Promise<CreateContextGraphResult>;
+  addBatchToContextGraph?(params: AddBatchToContextGraphParams): Promise<TxResult>;
+  publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

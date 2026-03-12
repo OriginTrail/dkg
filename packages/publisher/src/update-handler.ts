@@ -6,7 +6,7 @@ import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computePublicRoot, computeKARoot, computeKCRoot } from './merkle.js';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -57,9 +57,12 @@ export class UpdateHandler {
   }
 
   async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
-    const ctx = createOperationContext('ka-update');
+    let ctx = createOperationContext('ka-update');
     try {
       const request = decodeKAUpdateRequest(data);
+      if (request.operationId) {
+        ctx = createOperationContext('ka-update', request.operationId);
+      }
       const {
         paranetId,
         batchId,
@@ -126,13 +129,15 @@ export class UpdateHandler {
         }
       }
 
-      // Merkle root integrity: recompute from the received payload
+      // Merkle root integrity: recompute from the received payload (flat mode)
       await this.graphManager.ensureParanet(paranetId);
       const dataGraph = this.graphManager.dataGraphUri(paranetId);
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
-      const partitioned = autoPartition(quads);
 
+      const computedRoot = computeFlatKCRoot(quads, []);
+
+      const partitioned = autoPartition(quads);
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));
       for (const payloadRoot of partitioned.keys()) {
         if (!manifestRoots.has(payloadRoot)) {
@@ -140,15 +145,6 @@ export class UpdateHandler {
           return;
         }
       }
-
-      const kaRoots: Uint8Array[] = [];
-      for (const m of manifest) {
-        const entityQuads = partitioned.get(m.rootEntity) ?? [];
-        const pubRoot = computePublicRoot(entityQuads);
-        const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-        kaRoots.push(computeKARoot(pubRoot, privRoot));
-      }
-      const computedRoot = computeKCRoot(kaRoots);
 
       const referenceRoot = verifiedMerkleRoot ?? request.newMerkleRoot;
       if (!referenceRoot || referenceRoot.length !== EXPECTED_MERKLE_ROOT_LEN) {

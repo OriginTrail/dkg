@@ -11,6 +11,25 @@ export interface KAManifestEntry {
 
 export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
+export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
+
+/**
+ * Callback that collects receiver signatures from peers.
+ * Called AFTER data preparation, BEFORE on-chain tx.
+ */
+export type ReceiverSignatureProvider = (
+  merkleRoot: string,
+  publicByteSize: bigint,
+) => Promise<ReceiverSignature[]>;
+
+/**
+ * Callback that collects participant signatures for context graph governance.
+ */
+export type ParticipantSignatureProvider = (
+  contextGraphId: bigint,
+  merkleRoot: string,
+) => Promise<ReceiverSignature[]>;
+
 export interface PublishOptions {
   paranetId: string;
   quads: Quad[];
@@ -32,6 +51,16 @@ export interface PublishOptions {
   entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
+  /** Override the data graph URI (used for context graph enshrinement). */
+  targetGraphUri?: string;
+  /** Override the meta graph URI (used for context graph enshrinement). */
+  targetMetaGraphUri?: string;
+  /**
+   * If provided, publisher calls this to collect receiver signatures
+   * from peers BEFORE the on-chain tx (replicate-then-publish).
+   * If absent, falls back to self-signing (legacy behavior).
+   */
+  receiverSignatureProvider?: ReceiverSignatureProvider;
 }
 
 export interface PublishResult {
@@ -44,6 +73,8 @@ export interface PublishResult {
   onChainResult?: OnChainPublishResult;
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];
+  /** Set when KC is confirmed on-chain but context-graph registration failed. */
+  contextGraphError?: string;
 }
 
 export interface Publisher {

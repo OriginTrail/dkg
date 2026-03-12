@@ -12,7 +12,7 @@ import {
 import type { ChainAdapter } from '@dkg/chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash, computePublicRoot, computeKCRoot, computeKARoot } from './merkle.js';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
@@ -133,6 +133,15 @@ export class PublishHandler {
     const pending = this.pendingPublishes.get(ual);
     if (!pending) return false;
 
+    // Dedup guard: if already confirmed (e.g. by FinalizationHandler), skip
+    if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+      this.log.info(opCtx, `Publish ${ual} already confirmed, skipping duplicate confirmation`);
+      clearTimeout(pending.timeout);
+      this.pendingPublishes.delete(ual);
+      this.persistJournal();
+      return true;
+    }
+
     if (onChainData) {
       if (onChainData.publisherAddress.toLowerCase() !== pending.expectedPublisherAddress.toLowerCase()) {
         this.log.warn(opCtx,
@@ -205,24 +214,13 @@ export class PublishHandler {
         return this.rejectAck(validation.errors.join('; '));
       }
 
-      // ── Merkle verification ──
+      // ── Merkle verification (flat mode: triple hashes + private root anchors) ──
+      const privateRoots = (request.kas ?? [])
+        .filter(ka => ka.privateMerkleRoot?.length)
+        .map(ka => new Uint8Array(ka.privateMerkleRoot));
+      const computedMerkleRoot = computeFlatKCRoot(quads, privateRoots);
+
       const partitioned = autoPartition(quads);
-      const kaRoots: Uint8Array[] = [];
-
-      for (const m of manifest) {
-        const publicQuads = partitioned.get(m.rootEntity) ?? [];
-        const publicRoot = computePublicRoot(publicQuads);
-
-        const kaEntry = request.kas.find((ka) => ka.rootEntity === m.rootEntity);
-        const privateRoot =
-          kaEntry?.privateMerkleRoot?.length
-            ? new Uint8Array(kaEntry.privateMerkleRoot)
-            : undefined;
-
-        kaRoots.push(computeKARoot(publicRoot, privateRoot));
-      }
-
-      const computedMerkleRoot = computeKCRoot(kaRoots);
 
       // ── UAL consistency ──
       const startKAId = protoToBigInt(request.startKAId);

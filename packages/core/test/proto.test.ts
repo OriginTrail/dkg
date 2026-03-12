@@ -10,6 +10,10 @@ import {
   decodeAccessResponse,
   encodeWorkspacePublishRequest,
   decodeWorkspacePublishRequest,
+  encodeFinalizationMessage,
+  decodeFinalizationMessage,
+  encodeKAUpdateRequest,
+  decodeKAUpdateRequest,
 } from '../src/index.js';
 
 describe('Protobuf: PublishRequest round-trip', () => {
@@ -121,5 +125,144 @@ describe('Protobuf: AccessResponse round-trip', () => {
     expect(new Uint8Array(decoded.privateMerkleRoot)).toEqual(
       original.privateMerkleRoot,
     );
+  });
+});
+
+describe('Protobuf: FinalizationMessage round-trip', () => {
+  it('encodes and decodes correctly', () => {
+    const original = {
+      ual: 'did:dkg:base:8453/0xKCS/42',
+      paranetId: 'test-finalization',
+      kcMerkleRoot: new Uint8Array(32).fill(0xab),
+      txHash: '0x1234567890abcdef',
+      blockNumber: 12345,
+      batchId: 42,
+      startKAId: 100,
+      endKAId: 103,
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+      rootEntities: ['http://example.org/entity/1', 'http://example.org/entity/2'],
+      timestampMs: Date.now(),
+    };
+    const encoded = encodeFinalizationMessage(original);
+    expect(encoded).toBeInstanceOf(Uint8Array);
+    expect(encoded.length).toBeGreaterThan(0);
+
+    const decoded = decodeFinalizationMessage(encoded);
+    expect(decoded.ual).toBe(original.ual);
+    expect(decoded.paranetId).toBe(original.paranetId);
+    expect(decoded.txHash).toBe(original.txHash);
+    expect(decoded.publisherAddress).toBe(original.publisherAddress);
+    expect(decoded.rootEntities).toEqual(original.rootEntities);
+    expect(new Uint8Array(decoded.kcMerkleRoot)).toEqual(original.kcMerkleRoot);
+  });
+
+  it('handles empty rootEntities array', () => {
+    const original = {
+      ual: 'did:dkg:base:8453/0xKCS/1',
+      paranetId: 'test',
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: '0xabc',
+      blockNumber: 1,
+      batchId: 1,
+      startKAId: 1,
+      endKAId: 1,
+      publisherAddress: '0x0',
+      rootEntities: [],
+      timestampMs: 1000,
+    };
+    const decoded = decodeFinalizationMessage(encodeFinalizationMessage(original));
+    expect(decoded.rootEntities).toEqual([]);
+  });
+});
+
+describe('Protobuf: operationId propagation round-trip', () => {
+  const OP_ID = '550e8400-e29b-41d4-a716-446655440000';
+
+  it('PublishRequest preserves operationId', () => {
+    const original = {
+      ual: 'did:dkg:base:8453/0xKCS/1',
+      nquads: new TextEncoder().encode('<s> <p> <o> .'),
+      paranetId: 'test',
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: '0x0',
+      startKAId: 0,
+      endKAId: 0,
+      chainId: 'test',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      operationId: OP_ID,
+    };
+    const decoded = decodePublishRequest(encodePublishRequest(original));
+    expect(decoded.operationId).toBe(OP_ID);
+  });
+
+  it('PublishRequest without operationId decodes as empty string', () => {
+    const original = {
+      ual: 'did:dkg:base:8453/0xKCS/1',
+      nquads: new TextEncoder().encode('<s> <p> <o> .'),
+      paranetId: 'test',
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: '0x0',
+      startKAId: 0,
+      endKAId: 0,
+      chainId: 'test',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    };
+    const decoded = decodePublishRequest(encodePublishRequest(original));
+    expect(decoded.operationId).toBeFalsy();
+  });
+
+  it('WorkspacePublishRequest preserves operationId', () => {
+    const original = {
+      paranetId: 'test',
+      nquads: new TextEncoder().encode('<s> <p> <o> .'),
+      manifest: [],
+      publisherPeerId: '12D3KooWTest',
+      workspaceOperationId: 'ws-123',
+      timestampMs: Date.now(),
+      operationId: OP_ID,
+    };
+    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    expect(decoded.operationId).toBe(OP_ID);
+  });
+
+  it('FinalizationMessage preserves operationId', () => {
+    const original = {
+      ual: 'did:dkg:base:8453/0xKCS/42',
+      paranetId: 'test',
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: '0xabc',
+      blockNumber: 1,
+      batchId: 1,
+      startKAId: 1,
+      endKAId: 1,
+      publisherAddress: '0x0',
+      rootEntities: ['http://example.org/e'],
+      timestampMs: Date.now(),
+      operationId: OP_ID,
+    };
+    const decoded = decodeFinalizationMessage(encodeFinalizationMessage(original));
+    expect(decoded.operationId).toBe(OP_ID);
+  });
+
+  it('KAUpdateRequest preserves operationId', () => {
+    const original = {
+      paranetId: 'test',
+      batchId: 1,
+      nquads: new TextEncoder().encode('<s> <p> <o> .'),
+      manifest: [{ rootEntity: 'urn:e', privateTripleCount: 0 }],
+      publisherPeerId: 'peer1',
+      publisherAddress: '0x0',
+      txHash: '0xabc',
+      blockNumber: 1,
+      newMerkleRoot: new Uint8Array(32),
+      timestampMs: Date.now(),
+      operationId: OP_ID,
+    };
+    const decoded = decodeKAUpdateRequest(encodeKAUpdateRequest(original));
+    expect(decoded.operationId).toBe(OP_ID);
   });
 });

@@ -15,6 +15,7 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('publisherPeerId', 4, 'string'))
   .add(new Field('workspaceOperationId', 5, 'string'))
   .add(new Field('timestampMs', 6, 'uint64'))
+  .add(new Field('operationId', 7, 'string'))
   .add(WorkspaceManifestEntrySchema);
 
 export interface WorkspaceManifestEntryMsg {
@@ -30,6 +31,8 @@ export interface WorkspacePublishRequestMsg {
   publisherPeerId: string;
   workspaceOperationId: string;
   timestampMs: number | bigint;
+  /** Originator's operation ID for cross-node log correlation. */
+  operationId?: string;
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

@@ -60,6 +60,10 @@ export function paranetUpdateTopic(paranetId: string): string {
   return `dkg/paranet/${paranetId}/update`;
 }
 
+export function paranetFinalizationTopic(paranetId: string): string {
+  return `dkg/paranet/${paranetId}/finalization`;
+}
+
 export function paranetSessionsTopic(paranetId: string): string {
   return `dkg/paranet/${paranetId}/sessions`;
 }

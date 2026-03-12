@@ -253,17 +253,22 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
   };
 }
 
+function escapeNQuadsLiteral(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
 function termToString(t: OxTerm): string {
   if (t.termType === 'Literal') {
     const lit = t as oxigraph.Literal;
-    if (lit.language) return `"${lit.value}"@${lit.language}`;
+    const escaped = escapeNQuadsLiteral(lit.value);
+    if (lit.language) return `"${escaped}"@${lit.language}`;
     if (
       lit.datatype &&
       lit.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string'
     ) {
-      return `"${lit.value}"^^<${lit.datatype.value}>`;
+      return `"${escaped}"^^<${lit.datatype.value}>`;
     }
-    return `"${lit.value}"`;
+    return `"${escaped}"`;
   }
   if (t.termType === 'BlankNode') return `_:${t.value}`;
   return t.value;

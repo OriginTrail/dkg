@@ -62,7 +62,7 @@ describe('Publish → Query (single agent)', () => {
     expect(names[1]).toContain('Bob');
   }, 15000);
 
-  it('publishes with private triples and anchors synthetic root', async () => {
+  it('publishes with private triples and stores private root in manifest', async () => {
     const agent = await DKGAgent.create({
       name: 'PrivateBot',
       listenPort: 0,
@@ -81,14 +81,17 @@ describe('Publish → Query (single agent)', () => {
     );
 
     expect(result.status).toBe('confirmed');
+    expect(result.kaManifest).toHaveLength(1);
+    expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
+    expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
 
-    // The synthetic privateMerkleRoot triple should be queryable
+    // Public triple should be queryable
     const qr = await agent.query(
-      'SELECT ?root WHERE { <urn:dkg:kc> <http://dkg.io/ontology/privateContentRoot> ?root }',
+      'SELECT ?name WHERE { <did:dkg:test:Secret> <http://schema.org/name> ?name }',
       'priv-test',
     );
     expect(qr.bindings.length).toBe(1);
-    expect(qr.bindings[0]['root']).toMatch(/0x[0-9a-f]+/);
+    expect(qr.bindings[0]['name']).toContain('SecretBot');
   }, 15000);
 });
 

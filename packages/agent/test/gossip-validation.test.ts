@@ -189,7 +189,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       epochs: 1,
       tokenAmount: 1n,
       publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [],
+      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
     });
 
     expect(publishResult.txHash).toBeTruthy();
@@ -267,7 +267,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       epochs: 1,
       tokenAmount: 1n,
       publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [],
+      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
     });
     const result2 = await chain.publishKnowledgeAssets({
       kaCount: 1,
@@ -277,7 +277,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
       epochs: 1,
       tokenAmount: 1n,
       publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [],
+      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
     });
 
     const eventsBlock1: { blockNumber: number; txHash: unknown }[] = [];

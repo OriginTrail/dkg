@@ -22,6 +22,7 @@ export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('blockNumber', 8, 'uint64'))
   .add(new Field('newMerkleRoot', 9, 'bytes'))
   .add(new Field('timestampMs', 10, 'uint64'))
+  .add(new Field('operationId', 11, 'string'))
   .add(KAUpdateManifestEntrySchema);
 
 type Long = { low: number; high: number; unsigned: boolean };
@@ -44,6 +45,8 @@ export interface KAUpdateRequestMsg {
   blockNumber: number | bigint;
   newMerkleRoot: Uint8Array;
   timestampMs: number | bigint;
+  /** Originator's operation ID for cross-node log correlation. */
+  operationId?: string;
 }
 
 function toBigInt(v: number | bigint | Long | unknown): bigint {

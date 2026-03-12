@@ -5,11 +5,12 @@ export {
   computeTripleHash,
   computePublicRoot,
   computePrivateRoot,
+  computeFlatKCRoot,
   computeKARoot,
   computeKCRoot,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, type KCMetadata, type KAMetadata } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, type KCMetadata, type KAMetadata, type OnChainProvenance } from './metadata.js';
 export {
   DKGPublisher,
   type DKGPublisherConfig,

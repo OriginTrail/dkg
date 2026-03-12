@@ -22,6 +22,7 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('publisherSignatureVs', 11, 'bytes'))
   .add(new Field('txHash', 12, 'string'))
   .add(new Field('blockNumber', 13, 'uint64'))
+  .add(new Field('operationId', 14, 'string'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -56,6 +57,8 @@ export interface PublishRequestMsg {
   txHash?: string;
   /** Block number of the on-chain publish transaction. */
   blockNumber?: number | Long;
+  /** Originator's operation ID for cross-node log correlation. */
+  operationId?: string;
 }
 
 export interface PublishAckMsg {

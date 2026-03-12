@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import { MockChainAdapter } from '@dkg/chain';
@@ -144,11 +144,12 @@ describe('Workspace: writeToWorkspace', () => {
 describe('Workspace: enshrineFromWorkspace', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
+  let chain: MockChainAdapter;
   const wallet = ethers.Wallet.createRandom();
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain = new MockChainAdapter('mock:31337', wallet.address);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
@@ -245,6 +246,69 @@ describe('Workspace: enshrineFromWorkspace', () => {
     await expect(
       publisher.enshrineFromWorkspace(PARANET, { rootEntities: [] }),
     ).rejects.toThrow(/No rootEntities provided/);
+  });
+
+  it('enshrineFromWorkspace with contextGraphId remaps quads to context graph URIs', async () => {
+    const ctxId = '1';
+    const ctxDataGraph = `did:dkg:paranet:${PARANET}/context/${ctxId}`;
+    const ctxMetaGraph = `did:dkg:paranet:${PARANET}/context/${ctxId}/_meta`;
+
+    await chain.createContextGraph!({
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    });
+
+    const quads = [
+      q(ENTITY, 'http://schema.org/name', '"Context Enshrine"'),
+      q(ENTITY, 'http://schema.org/description', '"In context graph"'),
+    ];
+    await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
+
+    const result = await publisher.enshrineFromWorkspace(PARANET, 'all', {
+      contextGraphId: ctxId,
+    });
+
+    expect(result.status).toBe('confirmed');
+
+    const dataResult = await store.query(
+      `SELECT ?o WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(dataResult.type).toBe('bindings');
+    if (dataResult.type === 'bindings') {
+      expect(dataResult.bindings.length).toBe(1);
+      expect(dataResult.bindings[0]['o']).toContain('Context Enshrine');
+    }
+
+    const metaResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${ctxMetaGraph}> { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeAsset> } }`,
+    );
+    expect(metaResult.type).toBe('bindings');
+    if (metaResult.type === 'bindings') {
+      expect(metaResult.bindings.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('enshrineFromWorkspace with contextGraphId calls addBatchToContextGraph', async () => {
+    const ctxId = '1';
+    await chain.createContextGraph!({
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    });
+
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Batch Test"')];
+    await publisher.writeToWorkspace(PARANET, quads, { publisherPeerId: 'peer1' });
+
+    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+
+    await publisher.enshrineFromWorkspace(PARANET, 'all', { contextGraphId: ctxId });
+
+    expect(addBatchSpy).toHaveBeenCalledTimes(1);
+    expect(addBatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextGraphId: 1n,
+        batchId: expect.any(BigInt),
+      }),
+    );
   });
 });
 
