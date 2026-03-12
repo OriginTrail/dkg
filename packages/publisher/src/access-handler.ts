@@ -181,6 +181,8 @@ export class AccessHandler {
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
           OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
           OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
+          BIND(CONCAT(STR(?paranet), '/_meta') AS ?expectedMetaGraph)
+          FILTER(STR(?g) = ?expectedMetaGraph)
         }
       } LIMIT 1`,
     );

@@ -309,6 +309,35 @@ describe('I-005: Access handler signature verification', () => {
     expect(res.granted).toBe(true);
     expect(res.nquads.length).toBeGreaterThan(0);
   });
+
+  it('ignores poisoned allowList entries outside _meta graph', async () => {
+    const keypair = await generateEd25519Keypair();
+    const store = await setupStoreWithPolicy('allowList', 'publisher-peer');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    // Attempt graph poisoning: write allow-list entry into non-meta graph.
+    await store.insert([
+      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:paranet:${PARANET}`),
+    ]);
+
+    const paymentProof = new Uint8Array(0);
+    const message = new TextEncoder().encode(KA_UAL + toHex(paymentProof));
+    const signature = await ed25519Sign(message, keypair.secretKey);
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'attacker-peer',
+      paymentProof,
+      requesterSignature: signature,
+      requesterPublicKey: keypair.publicKey,
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'attacker-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('allow list missing or empty');
+  });
 });
 
 describe('I-005: Policy checks run before signature verification (perf + clarity)', () => {
