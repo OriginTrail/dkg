@@ -94,7 +94,7 @@ program
 
     const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
     const enableAutoUpdate = (await ask(
-      'Enable auto-update from GitHub (y/n)',
+      'Enable git-based auto-update (y/n)',
       autoUpdateDefault ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
@@ -103,15 +103,24 @@ program
       const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
       const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
       const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? false;
+      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
-      const repo = await ask('GitHub repo (owner/name)', defaultRepo);
+      const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
       const branch = await ask('Branch', defaultBranch);
       const allowPrerelease = (await ask(
         'Allow pre-release versions? (y/n)',
         defaultAllowPrerelease ? 'y' : 'n',
       )).toLowerCase() === 'y';
+      const sshKeyPath = (await ask('SSH private key path (optional; blank uses agent/default SSH config)', defaultSshKeyPath)).trim();
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
-      autoUpdate = { enabled: true, repo, branch, allowPrerelease, checkIntervalMinutes: interval };
+      autoUpdate = {
+        enabled: true,
+        repo,
+        branch,
+        allowPrerelease,
+        sshKeyPath: sshKeyPath || undefined,
+        checkIntervalMinutes: interval,
+      };
     }
 
     // Chain configuration
@@ -168,7 +177,8 @@ program
       `  autoUpdate: ${
         config.autoUpdate?.enabled
           ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
-            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}`
+            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}` +
+            `${config.autoUpdate.sshKeyPath ? ` (ssh key: ${config.autoUpdate.sshKeyPath})` : ''}`
           : 'disabled'
       }`,
     );
@@ -249,7 +259,7 @@ program
     }
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
-    await migrateToBlueGreen((msg) => console.log(msg));
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
 
     if (opts.foreground) {
       await runDaemon(true);

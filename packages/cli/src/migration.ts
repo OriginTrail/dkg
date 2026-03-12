@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs } from './config.js';
 
 /**
  * One-time migration from old single-directory layout to blue-green slots.
@@ -28,8 +28,11 @@ export async function migrateToBlueGreen(
     }
   }
 
-  const repo = repoDir();
-  const hasLocalRepo = existsSync(join(repo, '.git'));
+  const config = await loadConfig().catch(() => ({} as any));
+  const network = await loadNetworkConfig().catch(() => undefined);
+  const gitEnv = gitCommandEnv(config?.autoUpdate ?? network?.autoUpdate);
+  const localRepo = repoDir();
+  const hasLocalRepo = Boolean(localRepo && existsSync(join(localRepo, '.git')));
   const normalizeCloneRepo = (value: string): string => {
     const v = value.trim();
     if (!v) return v;
@@ -38,11 +41,9 @@ export async function migrateToBlueGreen(
     return v;
   };
 
-  let sourceRepo = repo;
+  let sourceRepo = localRepo ?? '';
   let sourceBranch = process.env.DKG_BRANCH?.trim() || 'main';
   if (!hasLocalRepo) {
-    const config = await loadConfig().catch(() => ({} as any));
-    const network = await loadNetworkConfig().catch(() => undefined);
     sourceRepo = normalizeCloneRepo(
       process.env.DKG_REPO
         ?? config?.autoUpdate?.repo
@@ -56,10 +57,10 @@ export async function migrateToBlueGreen(
       ?? 'main'
     ).trim() || 'main';
     if (!opts.allowRemoteBootstrap) {
-      log('Migration: local repo has no .git; skipping remote bootstrap in this mode.');
+      log('Migration: no local checkout with .git; skipping remote bootstrap in this mode.');
       return;
     }
-    log(`Migration: local repo has no .git, bootstrapping from ${sourceRepo}@${sourceBranch}`);
+    log(`Migration: no local checkout with .git, bootstrapping from ${sourceRepo}@${sourceBranch}`);
   }
 
   await mkdir(rDir, { recursive: true });
@@ -72,24 +73,25 @@ export async function migrateToBlueGreen(
 
   log('Migrating to blue-green release slots...');
 
-  const git = (args: string[], cwd?: string): string =>
-    String(execFileSync('git', args, {
+  const git = (args: string[], cwd?: string, repoUrl?: string): string =>
+    String(execFileSync('git', [...gitCommandArgs(repoUrl, config?.autoUpdate ?? network?.autoUpdate), ...args], {
       encoding: 'utf-8',
       stdio: 'pipe',
       timeout: 120_000,
+      env: gitEnv,
       ...(cwd ? { cwd } : {}),
     })).trim();
 
   if (!slotReady(slotA)) {
     await rm(slotA, { recursive: true, force: true });
     if (hasLocalRepo) {
-      git(['clone', '--local', repo, slotA]);
+      git(['clone', '--local', localRepo!, slotA], undefined, localRepo!);
     } else {
-      git(['clone', '--branch', sourceBranch, sourceRepo, slotA]);
+      git(['clone', '--branch', sourceBranch, sourceRepo, slotA], undefined, sourceRepo);
     }
     execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
     execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
-    log(`  Slot a: cloned and built from ${hasLocalRepo ? repo : sourceRepo}`);
+    log(`  Slot a: cloned and built from ${hasLocalRepo ? localRepo : sourceRepo}`);
   }
 
   if (!slotReady(slotB)) {
@@ -97,10 +99,10 @@ export async function migrateToBlueGreen(
       await rm(slotB, { recursive: true, force: true });
       if (hasLocalRepo) {
         // Keep slot B source aligned with slot A/local repo state.
-        git(['clone', '--reference', slotA, '--dissociate', repo, slotB]);
+        git(['clone', '--reference', slotA, '--dissociate', localRepo!, slotB], undefined, localRepo!);
       } else {
         const repoUrl = sourceRepo;
-        git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB]);
+        git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB], undefined, repoUrl);
       }
       if (!hasLocalRepo) {
         git(['checkout', sourceBranch], slotB);
@@ -112,8 +114,8 @@ export async function migrateToBlueGreen(
       log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
       await rm(slotB, { recursive: true, force: true });
       try {
-        const repoUrl = hasLocalRepo ? repo : sourceRepo;
-        git(['clone', repoUrl, slotB]);
+        const repoUrl = hasLocalRepo ? localRepo! : sourceRepo;
+        git(['clone', repoUrl, slotB], undefined, repoUrl);
         if (!hasLocalRepo) {
           git(['checkout', sourceBranch], slotB);
         }

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
@@ -41,6 +41,8 @@ import {
   activeSlot,
   inactiveSlot,
   swapSlot,
+  gitCommandEnv,
+  gitCommandArgs,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
@@ -531,7 +533,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     const nodeUiDir = dirname(fileURLToPath(nodeUiPkg));
     nodeUiStaticDir = join(nodeUiDir, '..', 'dist-ui');
   } catch {
-    nodeUiStaticDir = join(repoDir(), 'packages', 'node-ui', 'dist-ui');
+    const root = repoDir();
+    nodeUiStaticDir = root
+      ? join(root, 'packages', 'node-ui', 'dist-ui')
+      : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node-ui', 'dist-ui');
   }
 
   // --- Authentication ---
@@ -1921,6 +1926,7 @@ async function resolveRemoteCommitSha(
   repoSpec: string,
   ref: string,
   log: (msg: string) => void,
+  gitEnv: NodeJS.ProcessEnv,
 ): Promise<string | null> {
   let fetchUrl = '';
   try {
@@ -1930,10 +1936,11 @@ async function resolveRemoteCommitSha(
     return null;
   }
   const githubRepo = githubRepoForApi(repoSpec);
+  const isSshRepo = fetchUrl.startsWith('git@') || fetchUrl.startsWith('ssh://');
   const apiRef = ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
 
   // Fast path for GitHub repos to preserve token-authenticated checks.
-  if (githubRepo) {
+  if (githubRepo && !isSshRepo) {
     const url = `https://api.github.com/repos/${githubRepo}/commits/${encodeURIComponent(apiRef)}`;
     const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
     const token = process.env.GITHUB_TOKEN;
@@ -1963,9 +1970,10 @@ async function resolveRemoteCommitSha(
     ? [ref, `${ref}^{}`]
     : [ref];
   try {
-    const raw = await execFileAsync('git', ['ls-remote', fetchUrl, ...queryRefs], {
+    const raw = await execFileAsync('git', [...gitCommandArgs(fetchUrl, null), 'ls-remote', fetchUrl, ...queryRefs], {
       encoding: 'utf-8',
       timeout: 30_000,
+      env: gitEnv,
     });
     const stdout = typeof raw === 'string' ? raw : String((raw as any)?.stdout ?? '');
     const lines = String(stdout).trim().split('\n').filter(Boolean);
@@ -2059,13 +2067,14 @@ export async function checkForNewCommitWithStatus(
   }
 
   const ref = (refOverride ?? au.branch).trim() || 'main';
+  const gitEnv = gitCommandEnv(au);
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return { status: 'error' };
   }
 
   try {
-    const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log);
+    const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
     if (!latestCommit) {
       return { status: 'error' };
     }
@@ -2219,12 +2228,13 @@ async function _performUpdateInner(
   }
 
   const ref = (opts.refOverride ?? au.branch).trim() || 'main';
+  const gitEnv = gitCommandEnv(au);
 
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return 'failed';
   }
-  const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log);
+  const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
   if (!latestCommit) return 'failed';
 
   if (latestCommit === currentCommit) return 'up-to-date';
@@ -2260,10 +2270,11 @@ async function _performUpdateInner(
     const fetchRef = maybeTag
       ? `${ref}:${ref}`
       : ref;
-    await execFileAsync('git', ['fetch', fetchUrl, fetchRef], {
+    await execFileAsync('git', [...gitCommandArgs(fetchUrl, au), 'fetch', fetchUrl, fetchRef], {
       cwd: targetDir,
       encoding: 'utf-8',
       timeout: 120_000,
+      env: gitEnv,
     });
     if (opts.verifyTagSignature && maybeTag) {
       await execFileAsync('git', ['verify-tag', maybeTag], {

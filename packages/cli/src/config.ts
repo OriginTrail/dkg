@@ -10,6 +10,10 @@ export interface AutoUpdateConfig {
   branch: string;
   /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
   allowPrerelease?: boolean;
+  /** Optional SSH private key path for git-based update fetches/clones. */
+  sshKeyPath?: string;
+  /** Optional raw GIT_SSH_COMMAND override for git-based update fetches/clones. */
+  sshCommand?: string;
   checkIntervalMinutes: number;
 }
 
@@ -25,6 +29,8 @@ export interface NetworkConfig {
     repo: string;
     branch: string;
     allowPrerelease?: boolean;
+    sshKeyPath?: string;
+    sshCommand?: string;
     checkIntervalMinutes: number;
   };
   chain?: {
@@ -152,14 +158,57 @@ export function dkgDir(): string {
  * Resolve the repo root from the compiled code location.
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
  */
-export function repoDir(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  for (let i = 0; i < 6; i++) {
+export function findRepoDir(startDir: string): string | null {
+  let dir = resolve(startDir);
+  while (true) {
     if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
-    dir = dirname(dir);
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
-  // Fallback: assume packages/cli/dist/
-  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+}
+
+export function repoDir(): string | null {
+  return findRepoDir(dirname(fileURLToPath(import.meta.url)));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+export function gitCommandEnv(autoUpdate?: Pick<AutoUpdateConfig, 'sshKeyPath' | 'sshCommand'> | null): NodeJS.ProcessEnv {
+  const sshCommand = process.env.DKG_GIT_SSH_COMMAND?.trim() || autoUpdate?.sshCommand?.trim();
+  const sshKeyPath = process.env.DKG_SSH_KEY_PATH?.trim() || autoUpdate?.sshKeyPath?.trim();
+  const env = { ...process.env };
+
+  if (sshCommand) {
+    env.GIT_SSH_COMMAND = sshCommand;
+    return env;
+  }
+
+  if (sshKeyPath) {
+    env.GIT_SSH_COMMAND = `ssh -i ${shellQuote(sshKeyPath)} -o IdentitiesOnly=yes`;
+  }
+
+  return env;
+}
+
+function githubHttpsRepo(repoUrl: string | undefined): boolean {
+  if (!repoUrl) return false;
+  return /^https:\/\/github\.com\//i.test(repoUrl.trim());
+}
+
+export function gitCommandArgs(
+  repoUrl?: string,
+  autoUpdate?: Pick<AutoUpdateConfig, 'sshKeyPath' | 'sshCommand'> | null,
+): string[] {
+  const token = process.env.GITHUB_TOKEN?.trim();
+  const sshCommand = process.env.DKG_GIT_SSH_COMMAND?.trim() || autoUpdate?.sshCommand?.trim();
+  const sshKeyPath = process.env.DKG_SSH_KEY_PATH?.trim() || autoUpdate?.sshKeyPath?.trim();
+  if (!token || sshCommand || sshKeyPath || !githubHttpsRepo(repoUrl)) return [];
+
+  const basic = Buffer.from(`x-access-token:${token}`, 'utf-8').toString('base64');
+  return ['-c', `http.extraHeader=Authorization: Basic ${basic}`];
 }
 
 export function releasesDir(): string {

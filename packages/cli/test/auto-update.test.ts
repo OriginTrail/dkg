@@ -44,7 +44,7 @@ vi.mock('../src/config.js', async (importOriginal) => {
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
-import { checkForUpdate, performUpdate } from '../src/daemon.js';
+import { checkForNewCommitWithStatus, checkForUpdate, performUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
 const mockedReadFile = vi.mocked(readFile);
@@ -80,6 +80,7 @@ function getExecFileCalls() {
     file: String(c[0]),
     args: (c[1] as string[]) ?? [],
     cwd: (c[2] as any)?.cwd,
+    env: (c[2] as any)?.env,
   }));
 }
 
@@ -119,6 +120,46 @@ describe('blue-green checkForUpdate', () => {
     const targetDir = '/tmp/dkg-test/releases/b';
     expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'fetch' && c.cwd === targetDir)).toBe(true);
+  });
+
+  it('uses ssh git transport with configured ssh key path', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa1111' as any);
+    (mockedExecFile as any).mockImplementation((file: string, args: string[], opts: any, cb: Function) => {
+      if (file === 'git' && args[0] === 'ls-remote') return cb(null, 'bbb2222\trefs/heads/main\n', '');
+      return cb(null, '', '');
+    });
+
+    const sshAu: AutoUpdateConfig = {
+      ...AU,
+      repo: 'git@github.com:owner/repo.git',
+      sshKeyPath: '/tmp/test key',
+    };
+
+    const result = await checkForNewCommitWithStatus(sshAu, vi.fn());
+    expect(result.status).toBe('available');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const gitCmds = getExecFileCalls().filter(c => c.file === 'git' && c.args[0] === 'ls-remote');
+    expect(gitCmds.length).toBeGreaterThan(0);
+    expect(gitCmds.every(c => c.env?.GIT_SSH_COMMAND === "ssh -i '/tmp/test key' -o IdentitiesOnly=yes")).toBe(true);
+  });
+
+  it('passes GITHUB_TOKEN to git fetch for https GitHub repos', async () => {
+    vi.stubEnv('GITHUB_TOKEN', 'ghp_test_123');
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('bbb222');
+
+    const result = await performUpdate({ ...AU, repo: 'https://github.com/owner/repo.git' }, vi.fn());
+    expect(result).toBe(true);
+
+    const fetchCall = getExecFileCalls().find(c => c.file === 'git' && c.args.includes('fetch'));
+    expect(fetchCall).toBeTruthy();
+    expect(fetchCall?.args[0]).toBe('-c');
+    expect(fetchCall?.args[1]).toContain('http.extraHeader=Authorization: Basic ');
+    expect(fetchCall?.args).toContain('fetch');
+    expect(fetchCall?.args).toContain('https://github.com/owner/repo.git');
+
+    delete process.env.GITHUB_TOKEN;
   });
 
   it('skips when no new commit', async () => {

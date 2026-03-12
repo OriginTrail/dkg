@@ -50,6 +50,7 @@ const MIME: Record<string, string> = {
 export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: string) => void): Promise<LoadedApp[]> {
   const apps: LoadedApp[] = [];
   const root = repoDir();
+  if (!root) return apps;
   const require = createRequire(join(root, 'package.json'));
 
   let rootPkg: { dependencies?: Record<string, string> };

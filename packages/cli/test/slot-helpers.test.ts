@@ -98,11 +98,12 @@ describe('slot helpers', () => {
     expect((await readFile(join(rDir, 'active'), 'utf-8')).trim()).toBe('a');
   });
 
-  it('repoDir() resolves to a directory', async () => {
+  it('repoDir() resolves to the current repo root', async () => {
     const { repoDir } = await importHelpers();
     const dir = repoDir();
+    expect(dir).not.toBeNull();
     expect(typeof dir).toBe('string');
-    expect(dir.length).toBeGreaterThan(0);
+    expect(dir!.length).toBeGreaterThan(0);
   });
 
   // -------------------------------------------------------------------
@@ -137,7 +138,18 @@ describe('slot helpers', () => {
     const { repoDir } = await importHelpers();
     const dir = repoDir();
     const { existsSync } = await import('node:fs');
-    expect(existsSync(join(dir, 'package.json'))).toBe(true);
-    expect(existsSync(join(dir, 'packages'))).toBe(true);
+    expect(dir).not.toBeNull();
+    expect(existsSync(join(dir!, 'package.json'))).toBe(true);
+    expect(existsSync(join(dir!, 'packages'))).toBe(true);
+  });
+
+  it('findRepoDir() returns null when no monorepo root exists above the start path', async () => {
+    const { findRepoDir } = await importHelpers();
+    const outsideRepo = await mkdtemp(join(tmpdir(), 'dkg-no-repo-'));
+    await mkdir(join(outsideRepo, 'nested', 'deeper'), { recursive: true });
+
+    expect(findRepoDir(join(outsideRepo, 'nested', 'deeper'))).toBeNull();
+
+    await rm(outsideRepo, { recursive: true, force: true });
   });
 });

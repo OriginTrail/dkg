@@ -119,6 +119,87 @@ describe('migrateToBlueGreen', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Migration complete'));
   });
 
+  it('skips remote bootstrap when no local checkout exists and bootstrap is disallowed', async () => {
+    vi.resetModules();
+    vi.doMock('../src/config.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/config.js')>();
+      return {
+        ...actual,
+        repoDir: () => null,
+      };
+    });
+
+    const { execSync, execFileSync } = await import('node:child_process');
+    const mockedExecSync = vi.mocked(execSync);
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    const log = vi.fn();
+
+    await migrateToBlueGreen(log, { allowRemoteBootstrap: false });
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('skipping remote bootstrap'));
+    expect(mockedExecFileSync).not.toHaveBeenCalled();
+    expect(mockedExecSync).not.toHaveBeenCalled();
+
+    vi.doUnmock('../src/config.js');
+    vi.resetModules();
+  });
+
+  it('passes configured ssh key via GIT_SSH_COMMAND during remote bootstrap clone', async () => {
+    vi.resetModules();
+    vi.doMock('../src/config.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/config.js')>();
+      return {
+        ...actual,
+        repoDir: () => null,
+        loadConfig: async () => ({ autoUpdate: { enabled: true, repo: 'git@github.com:test/repo.git', branch: 'main', sshKeyPath: '/tmp/test key' } }),
+        loadNetworkConfig: async () => undefined,
+      };
+    });
+
+    const { execFileSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+
+    await migrateToBlueGreen(vi.fn(), { allowRemoteBootstrap: true });
+
+    const cloneCall = mockedExecFileSync.mock.calls.find(c => String(c[0]) === 'git' && (c[1] as string[])[0] === 'clone');
+    expect(cloneCall).toBeTruthy();
+    expect((cloneCall?.[2] as { env?: Record<string, string> })?.env?.GIT_SSH_COMMAND).toBe("ssh -i '/tmp/test key' -o IdentitiesOnly=yes");
+
+    vi.doUnmock('../src/config.js');
+    vi.resetModules();
+  });
+
+  it('passes GITHUB_TOKEN to git clone for https GitHub bootstrap repos', async () => {
+    vi.resetModules();
+    vi.stubEnv('GITHUB_TOKEN', 'ghp_test_123');
+    vi.doMock('../src/config.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/config.js')>();
+      return {
+        ...actual,
+        repoDir: () => null,
+        loadConfig: async () => ({ autoUpdate: { enabled: true, repo: 'https://github.com/test/repo.git', branch: 'main' } }),
+        loadNetworkConfig: async () => undefined,
+      };
+    });
+
+    const { execFileSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+
+    await migrateToBlueGreen(vi.fn(), { allowRemoteBootstrap: true });
+
+    const cloneCall = mockedExecFileSync.mock.calls.find(c => String(c[0]) === 'git' && (c[1] as string[]).includes('clone'));
+    expect(cloneCall).toBeTruthy();
+    expect((cloneCall?.[1] as string[])[0]).toBe('-c');
+    expect((cloneCall?.[1] as string[])[1]).toContain('http.extraHeader=Authorization: Basic ');
+
+    delete process.env.GITHUB_TOKEN;
+    vi.doUnmock('../src/config.js');
+    vi.resetModules();
+  });
+
   // -------------------------------------------------------------------
   // Regression tests for bugs found during PR review cycles
   // -------------------------------------------------------------------
@@ -181,7 +262,7 @@ describe('migrateToBlueGreen', () => {
 
     const slotBClone = cloneCalls.find(call => String(call.args[call.args.length - 1]).endsWith('/b'));
     expect(slotBClone).toBeTruthy();
-    expect(slotBClone?.args).toContain(expectedSource);
+    expect(slotBClone?.args).toContain(expectedSource!);
   });
 
   it('rebuilds slot A when directory exists but is incomplete', async () => {
