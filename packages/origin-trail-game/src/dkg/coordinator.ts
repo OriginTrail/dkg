@@ -336,6 +336,12 @@ export class OriginTrailGameCoordinator {
         const orchestratorId = orchestratorUri.replace(/.*player\//, '');
         const swarmName = stripQuotes(row['name'] ?? '');
         const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
+
+        const STALE_TTL_MS = 24 * 60 * 60 * 1000;
+        if (createdAt > 0 && Date.now() - createdAt > STALE_TTL_MS) {
+          this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
+          continue;
+        }
         const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
         const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
           ? graphMaxPlayers

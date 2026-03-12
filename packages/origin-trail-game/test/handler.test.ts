@@ -1307,7 +1307,7 @@ describe('Graph-based lobby sync', () => {
             name: '"Graph Swarm"',
             status: '"recruiting"',
             orchestrator: 'https://origintrail-game.dkg.io/player/other-peer',
-            createdAt: '"1700000000000"',
+            createdAt: `"${Date.now()}"`,
           }],
         };
       }
