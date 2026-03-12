@@ -4,6 +4,7 @@ import type { AutoUpdateConfig } from '../src/config.js';
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
   exec: vi.fn((_cmd: string, _opts: any, cb: Function) => cb(null, '', '')),
+  execFile: vi.fn((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', '')),
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -42,7 +43,7 @@ vi.mock('../src/config.js', async (importOriginal) => {
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { checkForUpdate, performUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
@@ -51,6 +52,7 @@ const mockedWriteFile = vi.mocked(writeFile);
 const mockedExistsSync = vi.mocked(existsSync);
 const mockedSwapSlot = vi.mocked(swapSlot);
 const mockedExec = vi.mocked(exec);
+const mockedExecFile = vi.mocked(execFile);
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -73,12 +75,21 @@ function getExecCalls() {
   }));
 }
 
+function getExecFileCalls() {
+  return mockedExecFile.mock.calls.map(c => ({
+    file: String(c[0]),
+    args: (c[1] as string[]) ?? [],
+    cwd: (c[2] as any)?.cwd,
+  }));
+}
+
 describe('blue-green checkForUpdate', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
     (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
+    (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));
   });
 
   it('skips when blue-green slots are not initialized', async () => {
@@ -112,9 +123,10 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(true);
 
     const allCmds = getExecCalls();
+    const gitCmds = getExecFileCalls();
     const targetDir = '/tmp/dkg-test/releases/b';
-    expect(allCmds.some(c => c.cmd.includes('git fetch') && c.cwd === targetDir)).toBe(true);
-    expect(allCmds.some(c => c.cmd.includes('git checkout --force') && c.cwd === targetDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'fetch' && c.cwd === targetDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
 
@@ -189,8 +201,8 @@ describe('blue-green checkForUpdate', () => {
     const latest = 'ggg777';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
-    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
-      if (String(cmd).includes('git fetch')) return cb(new Error('network down'), '', '');
+    (mockedExecFile as any).mockImplementation((file: string, args: string[], _opts: any, cb: Function) => {
+      if (file === 'git' && args[0] === 'fetch') return cb(new Error('network down'), '', '');
       return cb(null, '', '');
     });
 
@@ -243,6 +255,7 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(false);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
     expect(mockedExec).not.toHaveBeenCalled();
+    expect(mockedExecFile).not.toHaveBeenCalled();
   });
 
   it('aborts swap when build output (cli.js) is missing', async () => {
@@ -341,6 +354,20 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch'));
   });
 
+  it('rejects refs that start with dash to avoid git option injection', async () => {
+    const { checkForNewCommit } = await import('../src/daemon.js');
+    mockedReadFile.mockResolvedValueOnce('current-sha' as any);
+    const log = vi.fn();
+
+    const result = await checkForNewCommit({
+      ...AU,
+      branch: '--upload-pack=/tmp/pwn',
+    }, log);
+
+    expect(result).toBeNull();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('invalid branch/ref'));
+  });
+
   it('checkForNewCommit handles fetch/network errors without throwing', async () => {
     const { checkForNewCommit } = await import('../src/daemon.js');
     mockedReadFile.mockResolvedValueOnce('current-sha' as any);
@@ -362,10 +389,10 @@ describe('blue-green checkForUpdate', () => {
     const fetchUrl = String(fetchMock.mock.calls[0]?.[0] ?? '');
     expect(fetchUrl).toContain('/commits/v9.0.5');
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
-    const allCmds = getExecCalls().map((c) => c.cmd);
-    expect(allCmds.some((c) => c.includes('git fetch origin refs/tags/v9.0.5'))).toBe(true);
-    expect(allCmds.some((c) => c.includes('git verify-tag "v9.0.5"'))).toBe(true);
-    expect(allCmds.some((c) => c.includes('git checkout --force FETCH_HEAD'))).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch origin refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
   });
 
   it('logs clear error when requested tag does not exist', async () => {

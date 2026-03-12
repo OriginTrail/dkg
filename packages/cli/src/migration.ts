@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig } from './config.js';
 
 /**
  * One-time migration from old single-directory layout to blue-green slots.
@@ -14,9 +14,33 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
   const hadCurrentLink = existsSync(currentLink);
 
   const repo = repoDir();
-  if (!existsSync(join(repo, '.git'))) {
-    log('Migration: skipping — current code directory is not a git repo');
-    return;
+  const hasLocalRepo = existsSync(join(repo, '.git'));
+  const normalizeCloneRepo = (value: string): string => {
+    const v = value.trim();
+    if (!v) return v;
+    if (v.startsWith('/') || v.includes('://') || v.startsWith('git@')) return v;
+    if (/^[^/\s]+\/[^/\s]+$/.test(v)) return `https://github.com/${v}.git`;
+    return v;
+  };
+
+  let sourceRepo = repo;
+  let sourceBranch = process.env.DKG_BRANCH?.trim() || 'main';
+  if (!hasLocalRepo) {
+    const config = await loadConfig().catch(() => ({} as any));
+    const network = await loadNetworkConfig().catch(() => undefined);
+    sourceRepo = normalizeCloneRepo(
+      process.env.DKG_REPO
+        ?? config?.autoUpdate?.repo
+        ?? network?.autoUpdate?.repo
+        ?? 'https://github.com/OriginTrail/dkg-v9.git',
+    );
+    sourceBranch = (
+      process.env.DKG_BRANCH
+      ?? config?.autoUpdate?.branch
+      ?? network?.autoUpdate?.branch
+      ?? 'main'
+    ).trim() || 'main';
+    log(`Migration: local repo has no .git, bootstrapping from ${sourceRepo}@${sourceBranch}`);
   }
 
   await mkdir(rDir, { recursive: true });
@@ -39,17 +63,24 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
 
   if (!slotReady(slotA)) {
     await rm(slotA, { recursive: true, force: true });
-    git(['clone', '--local', repo, slotA]);
+    if (hasLocalRepo) {
+      git(['clone', '--local', repo, slotA]);
+    } else {
+      git(['clone', '--branch', sourceBranch, sourceRepo, slotA]);
+    }
     execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
     execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
-    log(`  Slot a: cloned and built from ${repo}`);
+    log(`  Slot a: cloned and built from ${hasLocalRepo ? repo : sourceRepo}`);
   }
 
   if (!slotReady(slotB)) {
     try {
       await rm(slotB, { recursive: true, force: true });
-      const repoUrl = git(['remote', 'get-url', 'origin'], repo);
+      const repoUrl = hasLocalRepo ? git(['remote', 'get-url', 'origin'], repo) : sourceRepo;
       git(['clone', '--reference', slotA, '--dissociate', repoUrl, slotB]);
+      if (!hasLocalRepo) {
+        git(['checkout', sourceBranch], slotB);
+      }
       execSync('pnpm install --frozen-lockfile', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
       execSync('pnpm build', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
       log(`  Slot b: cloned and built`);
@@ -57,8 +88,11 @@ export async function migrateToBlueGreen(log: (msg: string) => void = console.lo
       log(`  Slot b: clone/build failed (${err.message}). Will be prepared on first update.`);
       await rm(slotB, { recursive: true, force: true });
       try {
-        const repoUrl = git(['remote', 'get-url', 'origin'], repo);
+        const repoUrl = hasLocalRepo ? git(['remote', 'get-url', 'origin'], repo) : sourceRepo;
         git(['clone', repoUrl, slotB]);
+        if (!hasLocalRepo) {
+          git(['checkout', sourceBranch], slotB);
+        }
       } catch { await mkdir(slotB, { recursive: true }); }
     }
   }

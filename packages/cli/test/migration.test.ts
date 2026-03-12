@@ -194,4 +194,5 @@ describe('migrateToBlueGreen', () => {
     const buildCmds = mockedExecSync.mock.calls.map(c => String(c[0]));
     expect(buildCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
   });
+
 });

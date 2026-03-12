@@ -15,7 +15,7 @@ import {
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon, performUpdate, checkForNewCommit } from './daemon.js';
+import { runDaemon, performUpdateWithStatus, checkForNewCommit } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
@@ -1218,7 +1218,6 @@ program
   .option('--allow-prerelease', 'Allow pre-release target versions')
   .option('--no-verify-tag', 'Skip signed-tag verification for version/tag updates')
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
-    await migrateToBlueGreen((msg) => console.log(msg));
     const config = await loadConfig();
     const net = await loadNetworkConfig();
     const au = config.autoUpdate ?? net?.autoUpdate ?? {
@@ -1242,19 +1241,15 @@ program
       return;
     }
 
+    await migrateToBlueGreen((msg) => console.log(msg));
     console.log('Checking for updates and applying...');
     try {
-      const pendingCommit = await checkForNewCommit(au, (msg) => console.log(msg), refOverride);
-      if (!pendingCommit) {
-        console.log('No update needed — already on latest.');
-        return;
-      }
-      const updated = await performUpdate(au, (msg) => console.log(msg), {
+      const updateStatus = await performUpdateWithStatus(au, (msg) => console.log(msg), {
         refOverride,
         allowPrerelease: opts.allowPrerelease ? true : undefined,
         verifyTagSignature,
       });
-      if (updated) {
+      if (updateStatus === 'updated') {
         const pid = await readPid();
         if (pid && isProcessRunning(pid)) {
           console.log('Stopping daemon...');
@@ -1267,6 +1262,8 @@ program
         } else {
           console.log('Update applied. Start the daemon with: dkg start');
         }
+      } else if (updateStatus === 'up-to-date') {
+        console.log('No update needed — already on latest.');
       } else {
         console.error('Update failed before activation. Check logs and retry.');
         process.exit(1);

@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { execSync, exec } from 'node:child_process';
+import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -1872,6 +1873,10 @@ function parseTagName(ref: string): string | null {
   return m ? m[1] : null;
 }
 
+function isValidRef(ref: string): boolean {
+  return /^[\w.\-/]+$/.test(ref) && !ref.startsWith('-');
+}
+
 type PendingUpdateState = {
   target: 'a' | 'b';
   commit: string;
@@ -1925,7 +1930,7 @@ export async function checkForNewCommit(
 
   const repo = normalizeRepo(au.repo);
   const ref = (refOverride ?? au.branch).trim() || 'main';
-  if (!/^[\w.\-/]+$/.test(ref)) {
+  if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
     return null;
   }
@@ -1959,6 +1964,7 @@ export async function checkForNewCommit(
 
 let _updateInProgress = false;
 let _lockToken: string | null = null;
+export type UpdateStatus = 'updated' | 'up-to-date' | 'failed';
 
 async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
   const lockPath = join(releasesDir(), '.update.lock');
@@ -2023,15 +2029,24 @@ export async function performUpdate(
   log: (msg: string) => void,
   opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean } = {},
 ): Promise<boolean> {
+  const status = await performUpdateWithStatus(au, log, opts);
+  return status === 'updated';
+}
+
+export async function performUpdateWithStatus(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean } = {},
+): Promise<UpdateStatus> {
   if (_updateInProgress) {
     log('Auto-update: another update is already in progress, skipping');
-    return false;
+    return 'failed';
   }
   _updateInProgress = true;
   const locked = await acquireUpdateLock(log);
   if (!locked) {
     _updateInProgress = false;
-    return false;
+    return 'failed';
   }
   try {
     return await _performUpdateInner(au, log, opts);
@@ -2045,7 +2060,7 @@ async function _performUpdateInner(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
   opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean },
-): Promise<boolean> {
+): Promise<UpdateStatus> {
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? 'a');
   const target = await inactiveSlot();
@@ -2054,7 +2069,7 @@ async function _performUpdateInner(
   // Bail out if the release slots don't exist or aren't git repos
   if (!existsSync(activeDir) || !existsSync(join(targetDir, '.git'))) {
     log('Auto-update: skipping — blue-green slots not initialized (run "dkg start" first)');
-    return false;
+    return 'failed';
   }
 
   const commitFile = join(dkgDir(), '.current-commit');
@@ -2069,7 +2084,7 @@ async function _performUpdateInner(
       currentCommit = stdout.trim();
       await writeFile(commitFile, currentCommit);
     } catch {
-      return false;
+      return 'failed';
     }
   }
 
@@ -2094,9 +2109,9 @@ async function _performUpdateInner(
     .replace(/^refs\/heads\//, '')
     .replace(/^refs\/tags\//, '');
 
-  if (!/^[\w.\-/]+$/.test(ref)) {
+  if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
-    return false;
+    return 'failed';
   }
 
   const url = `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(apiRef)}`;
@@ -2108,7 +2123,7 @@ async function _performUpdateInner(
   if (!res.ok) {
     if (res.status === 422 && ref.startsWith('refs/tags/')) {
       log(`Auto-update: tag "${apiRef}" not found in ${repo}`);
-      return false;
+      return 'failed';
     }
     if (res.status === 404) {
       log(
@@ -2118,12 +2133,12 @@ async function _performUpdateInner(
     } else {
       log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
     }
-    return false;
+    return 'failed';
   }
   const data = await res.json() as { sha: string };
   const latestCommit = data.sha;
 
-  if (latestCommit === currentCommit) return false;
+  if (latestCommit === currentCommit) return 'up-to-date';
 
   log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
 
@@ -2132,20 +2147,26 @@ async function _performUpdateInner(
     const fetchRef = maybeTag
       ? `${ref}:${ref}`
       : ref;
-    await execAsync(`git fetch origin ${fetchRef}`, {
-      cwd: targetDir, encoding: 'utf-8', timeout: 120_000,
+    await execFileAsync('git', ['fetch', 'origin', fetchRef], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
     });
     if (opts.verifyTagSignature && maybeTag) {
-      await execAsync(`git verify-tag "${maybeTag}"`, {
-        cwd: targetDir, encoding: 'utf-8', timeout: 30_000,
+      await execFileAsync('git', ['verify-tag', maybeTag], {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 30_000,
       });
     }
-    await execAsync('git checkout --force FETCH_HEAD', {
-      cwd: targetDir, encoding: 'utf-8', timeout: 60_000,
+    await execFileAsync('git', ['checkout', '--force', 'FETCH_HEAD'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 60_000,
     });
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
-    return false;
+    return 'failed';
   }
 
   try {
@@ -2157,13 +2178,13 @@ async function _performUpdateInner(
     });
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
-    return false;
+    return 'failed';
   }
 
   const entryFile = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
   if (!existsSync(entryFile)) {
     log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
-    return false;
+    return 'failed';
   }
 
   let nextVersion = '';
@@ -2176,7 +2197,7 @@ async function _performUpdateInner(
   const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? false;
   if (nextVersion && !allowPrerelease && /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)) {
     log(`Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`);
-    return false;
+    return 'failed';
   }
 
   await writePendingUpdateState({
@@ -2194,13 +2215,13 @@ async function _performUpdateInner(
   } catch (swapErr: any) {
     await clearPendingUpdateState();
     log(`Auto-update: symlink swap failed — ${swapErr.message}`);
-    return false;
+    return 'failed';
   }
   log(
     `Auto-update: build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ''}. Swapped symlink. Restarting...`,
   );
-  return true;
+  return 'updated';
 }
 
 export async function checkForUpdate(
