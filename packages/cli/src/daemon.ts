@@ -1009,7 +1009,15 @@ async function handleRequest(
   // POST /api/invoke-skill  { peerId: "...", skillUri: "...", input: "..." }
   if (req.method === 'POST' && path === '/api/invoke-skill') {
     const body = await readBody(req);
-    const { peerId: rawPeerId, skillUri, input } = JSON.parse(body);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const rawPeerId = parsed.peerId ? String(parsed.peerId) : '';
+    const skillUri = parsed.skillUri ? String(parsed.skillUri) : '';
+    const input = parsed.input != null ? String(parsed.input) : '';
     if (!rawPeerId || !skillUri) return jsonResponse(res, 400, { error: 'Missing "peerId" or "skillUri"' });
 
     // Resolve name → peerId
@@ -1017,7 +1025,7 @@ async function handleRequest(
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
 
     try {
-      const inputData = new TextEncoder().encode(input ?? '');
+      const inputData = new TextEncoder().encode(input);
       const response = await agent.invokeSkill(peerId, skillUri, inputData);
       return jsonResponse(res, 200, {
         success: response.success,

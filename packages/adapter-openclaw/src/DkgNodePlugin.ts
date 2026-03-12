@@ -112,6 +112,7 @@ export class DkgNodePlugin {
   }
 
   getClient(): DkgDaemonClient {
+    if (!this.client) throw new Error('DkgNodePlugin.getClient() called before register()');
     return this.client;
   }
 
@@ -385,7 +386,7 @@ export class DkgNodePlugin {
         );
       }
       const result = await this.client.publish(paranetId, quads);
-      return this.json({ kcId: result.kcId, kaCount: result.kas?.length, triplesPublished: quads.length });
+      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, triplesPublished: quads.length });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -429,7 +430,7 @@ export class DkgNodePlugin {
       if (args.peer) opts.peer = String(args.peer);
       if (args.limit) {
         const n = parseInt(String(args.limit), 10);
-        if (!isNaN(n)) opts.limit = n;
+        if (!isNaN(n) && n > 0) opts.limit = Math.min(n, 1000);
       }
       if (args.since) {
         const n = parseInt(String(args.since), 10);

@@ -89,7 +89,7 @@ On first start, the daemon auto-generates:
 - `~/.dkg/auth.token` — API bearer token
 - `~/.dkg/agent-key.bin` — Ed25519 identity key
 
-**Present wallet info to the user.** Read `~/.dkg/wallets.json` and show both public addresses and private keys so the user can back them up and fund them with testnet ETH + TRAC for on-chain operations.
+**Present wallet addresses to the user.** Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots.
 
 What the running daemon provides:
 - Local API at `http://127.0.0.1:9200`
