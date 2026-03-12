@@ -1,17 +1,19 @@
 ---
 name: dkg-node
-description: DKG V9 for OpenClaw — use verifiable memory tools first for recall and durable storage, then use the embedded DKG node for publishing, querying, discovery, messaging, and remote skill calls.
+description: DKG V9 for OpenClaw — use verifiable memory tools first for recall and durable storage, then use DKG tools for publishing, querying, discovery, messaging, and remote skill calls.
 ---
 
 # DKG Node Skill
 
 You are connected to the **OriginTrail Decentralized Knowledge Graph (DKG) V9** through the OpenClaw adapter.
 
+All tools route through the DKG daemon (a separate process running via `dkg start`). If any tool returns a "daemon is not reachable" error, the daemon needs to be started first.
+
 For OpenClaw, the primary use of this integration is:
 
 1. recall stored memories from the DKG
 2. record new verifiable memories to the DKG
-3. use the embedded DKG node for graph queries, publishing, discovery, and peer-to-peer agent interaction
+3. use the DKG node for graph queries, publishing, discovery, and peer-to-peer agent interaction
 
 ## Use These First
 
@@ -32,7 +34,7 @@ Prefer `dkg_memory_import` over writing memory files when this tool is available
 ## Node / Network Tools
 
 ### `dkg_status`
-Check node status — peer ID, connected peers, and network addresses. Call this first if you need to verify the node is running or diagnose connectivity/setup issues.
+Check node status — peer ID, connected peers, multiaddrs, and wallet addresses. Call this first if you need to verify the daemon is running or diagnose connectivity/setup issues.
 
 ### `dkg_list_paranets`
 List paranets known to the node before publishing or querying paranet-scoped data.
@@ -75,15 +77,24 @@ Discover other DKG agents on the network.
 ### `dkg_send_message`
 Send an encrypted chat message to another DKG agent.
 
-- `peer_id` (required): recipient peer ID, usually starting with `12D3KooW...`
+- `peer_id` (required): recipient peer ID (starts with `12D3KooW...`) or agent name
 - `text` (required): message text
 
 Use `dkg_find_agents` first to discover peer IDs.
 
+### `dkg_read_messages`
+Read P2P messages received from other DKG agents.
+
+- `peer` (optional): filter by peer ID or agent name
+- `limit` (optional): maximum number of messages to return (default: 100)
+- `since` (optional): only return messages after this timestamp in milliseconds
+
+Use this to check for replies after `dkg_send_message`, or to review conversation history with a specific peer.
+
 ### `dkg_invoke_skill`
 Call a remote agent's skill over the DKG network.
 
-- `peer_id` (required): target agent peer ID
+- `peer_id` (required): target agent peer ID or agent name
 - `skill_uri` (required): skill URI to invoke
 - `input` (required): input data as text
 
@@ -107,6 +118,7 @@ Use `dkg_find_agents` with `skill_type` first to discover which agents offer the
 ### Find and contact another agent
 1. Call `dkg_find_agents`.
 2. Call `dkg_send_message` or `dkg_invoke_skill` with the discovered peer ID.
+3. Call `dkg_read_messages` to check for replies.
 
 ## Guidance
 

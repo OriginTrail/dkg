@@ -196,6 +196,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"PrivBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/secret', '"s3cret"')],
+      publisherPeerId: '12D3KooWTestPublisher',
     });
 
     expect(result.kaManifest).toHaveLength(1);
@@ -751,6 +752,7 @@ describe('Update flow', () => {
       paranetId: PARANET,
       quads: [q(entity, 'http://schema.org/name', '"PrivUpdateBot"')],
       privateQuads: [q(entity, 'http://ex.org/secret', '"old-secret"')],
+      publisherPeerId: '12D3KooWTestPublisher',
     });
 
     await publisher.update(result1.kcId, {

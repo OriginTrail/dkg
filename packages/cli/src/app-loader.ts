@@ -14,6 +14,7 @@ import { join, dirname, resolve, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
+import { repoDir } from './config.js';
 
 export interface DkgAppManifest {
   id: string;
@@ -48,11 +49,13 @@ const MIME: Record<string, string> = {
  */
 export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: string) => void): Promise<LoadedApp[]> {
   const apps: LoadedApp[] = [];
-  const require = createRequire(join(process.cwd(), 'package.json'));
+  const root = repoDir();
+  if (!root) return apps;
+  const require = createRequire(join(root, 'package.json'));
 
   let rootPkg: { dependencies?: Record<string, string> };
   try {
-    rootPkg = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf-8'));
+    rootPkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf-8'));
   } catch {
     return apps;
   }

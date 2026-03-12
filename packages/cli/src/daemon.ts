@@ -1,7 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
-import { execSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { execSync, exec, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+import { join, dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
@@ -31,9 +36,26 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  repoDir,
+  releasesDir,
+  activeSlot,
+  inactiveSlot,
+  swapSlot,
+  gitCommandEnv,
+  gitCommandArgs,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { readFileSync } from 'node:fs';
+
+function getNodeVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    return pkg.version ?? '0.0.0';
+  } catch { return '0.0.0'; }
+}
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
+
+export const DAEMON_EXIT_CODE_RESTART = 75;
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -60,6 +82,23 @@ interface CatchupJob {
 interface CatchupTracker {
   jobs: Map<string, CatchupJob>;
   latestByParanet: Map<string, string>;
+}
+
+type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+interface PublishQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph: string;
+}
+
+interface PublishRequestBody {
+  paranetId: string;
+  quads: PublishQuad[];
+  privateQuads?: PublishQuad[];
+  accessPolicy?: PublishAccessPolicy;
+  allowedPeers?: string[];
 }
 
 
@@ -278,7 +317,13 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     const au = config.autoUpdate;
     log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
     updateInterval = setInterval(
-      () => checkForUpdate(au, log),
+      async () => {
+        const updated = await checkForUpdate(au, log);
+        if (updated) {
+          log('Auto-update: update activated; restarting daemon process.');
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+        }
+      },
       au.checkIntervalMinutes * 60_000,
     );
   }
@@ -522,7 +567,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     const nodeUiDir = dirname(fileURLToPath(nodeUiPkg));
     nodeUiStaticDir = join(nodeUiDir, '..', 'dist-ui');
   } catch {
-    nodeUiStaticDir = join(process.cwd(), 'packages', 'node-ui', 'dist-ui');
+    const root = repoDir();
+    nodeUiStaticDir = root
+      ? join(root, 'packages', 'node-ui', 'dist-ui')
+      : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node-ui', 'dist-ui');
   }
 
   // --- Authentication ---
@@ -671,7 +719,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
 
   // Graceful shutdown
-  async function shutdown() {
+  let shuttingDown = false;
+  async function shutdown(exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
@@ -684,7 +735,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     await removePid();
     await removeApiPort();
     log('Stopped.');
-    process.exit(0);
+    process.exit(exitCode);
   }
 
   process.on('SIGINT', shutdown);
@@ -953,6 +1004,36 @@ async function handleRequest(
     });
   }
 
+  // GET /api/info — lightweight DevOps health check (authenticated)
+  if (req.method === 'GET' && path === '/api/info') {
+    const allConns = agent.node.libp2p.getConnections();
+    const uniquePeers = new Set(allConns.map(c => c.remotePeer.toString()));
+    const chainConf = config.chain ?? network?.chain;
+    const now = Date.now();
+
+    return jsonResponse(res, 200, {
+      status: 'running',
+      version: getNodeVersion(),
+      name: config.name,
+      peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      network: network?.networkName ?? null,
+      startedAt: new Date(startedAt).toISOString(),
+      uptimeSeconds: Math.floor((now - startedAt) / 1000),
+      timestamp: new Date(now).toISOString(),
+      chain: chainConf ? {
+        chainId: chainConf.chainId ?? null,
+        rpcUrl: chainConf.rpcUrl,
+        hubAddress: chainConf.hubAddress,
+      } : null,
+      peers: uniquePeers.size,
+      paranets: config.paranets?.length ?? 0,
+      telemetry: config.telemetry?.enabled ?? false,
+      autoUpdate: config.autoUpdate?.enabled ?? false,
+      auth: config.auth?.enabled !== false,
+    });
+  }
+
   // GET /api/connections — detailed per-connection info with transport type
   if (req.method === 'GET' && path === '/api/connections') {
     const allConns = agent.node.libp2p.getConnections();
@@ -977,8 +1058,20 @@ async function handleRequest(
   }
 
   // GET /api/agents — enriched with live connection health
+  // Optional query params: ?framework=X &skill_type=X
   if (req.method === 'GET' && path === '/api/agents') {
-    const agents = await agent.findAgents();
+    const frameworkFilter = url.searchParams.get('framework') || undefined;
+    const skillTypeFilter = url.searchParams.get('skill_type') || undefined;
+    const agents = await agent.findAgents({
+      ...(frameworkFilter ? { framework: frameworkFilter } : {}),
+    });
+    // If skill_type filter is requested, find agents offering that skill and intersect
+    let filteredAgents = agents;
+    if (skillTypeFilter) {
+      const offerings = await agent.findSkills({ skillType: skillTypeFilter });
+      const agentUris = new Set(offerings.map((o: any) => o.agentUri));
+      filteredAgents = agents.filter((a: any) => agentUris.has(a.agentUri));
+    }
     const allConns = agent.node.libp2p.getConnections();
     const connByPeer = new Map<string, { transport: string; direction: string; sinceMs: number }>();
     for (const c of allConns) {
@@ -993,7 +1086,7 @@ async function handleRequest(
     }
     const myPeerId = agent.peerId;
     const healthMap = agent.getPeerHealth();
-    const enriched = agents.map((a: any) => {
+    const enriched = filteredAgents.map((a: any) => {
       const isSelf = a.peerId === myPeerId;
       const conn = connByPeer.get(a.peerId);
       const health = healthMap.get(a.peerId);
@@ -1011,9 +1104,45 @@ async function handleRequest(
   }
 
   // GET /api/skills
+  // Optional query params: ?skillType=X
   if (req.method === 'GET' && path === '/api/skills') {
-    const skills = await agent.findSkills();
+    const skillTypeFilter = url.searchParams.get('skillType') || undefined;
+    const skills = await agent.findSkills(
+      skillTypeFilter ? { skillType: skillTypeFilter } : undefined,
+    );
     return jsonResponse(res, 200, { skills });
+  }
+
+  // POST /api/invoke-skill  { peerId: "...", skillUri: "...", input: "..." }
+  if (req.method === 'POST' && path === '/api/invoke-skill') {
+    const body = await readBody(req);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const rawPeerId = parsed.peerId ? String(parsed.peerId) : '';
+    const skillUri = parsed.skillUri ? String(parsed.skillUri) : '';
+    const input = parsed.input != null ? String(parsed.input) : '';
+    if (!rawPeerId || !skillUri) return jsonResponse(res, 400, { error: 'Missing "peerId" or "skillUri"' });
+
+    // Resolve name → peerId
+    const peerId = await resolveNameToPeerId(agent, rawPeerId);
+    if (!peerId) return jsonResponse(res, 404, { error: `Agent "${rawPeerId}" not found` });
+
+    try {
+      const inputData = new TextEncoder().encode(input);
+      const response = await agent.invokeSkill(peerId, skillUri, inputData);
+      return jsonResponse(res, 200, {
+        success: response.success,
+        output: response.outputData ? new TextDecoder().decode(response.outputData) : undefined,
+        error: response.error,
+        executionTimeMs: response.executionTimeMs,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 502, { error: err.message });
+    }
   }
 
   // POST /api/chat  { to: "name-or-peerId", text: "..." }
@@ -1430,18 +1559,22 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
   if (req.method === 'POST' && path === '/api/publish') {
     const serverT0 = Date.now();
     const body = await readBody(req);
-    const { paranetId, quads, privateQuads } = JSON.parse(body);
-    if (!paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
+    const parsed = parsePublishRequestBody(body);
+    if (!parsed.ok) {
+      return jsonResponse(res, 400, { error: parsed.error });
     }
+
+    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
+        accessPolicy,
+        allowedPeers,
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
       });
@@ -1910,6 +2043,74 @@ async function resolveNameToPeerId(agent: DKGAgent, nameOrId: string): Promise<s
   return match?.peerId ?? null;
 }
 
+function isPublishQuad(value: unknown): value is PublishQuad {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.subject === 'string' &&
+    typeof v.predicate === 'string' &&
+    typeof v.object === 'string' &&
+    typeof v.graph === 'string'
+  );
+}
+
+function parsePublishRequestBody(body: string):
+  | { ok: true; value: PublishRequestBody }
+  | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, error: 'Body must be a JSON object' };
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = payload;
+
+  if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
+    return { ok: false, error: 'Missing or invalid "paranetId"' };
+  }
+
+  if (!Array.isArray(quads) || quads.length === 0 || !quads.every(isPublishQuad)) {
+    return { ok: false, error: 'Missing or invalid "quads" (must be a non-empty quad array)' };
+  }
+
+  if (privateQuads !== undefined && (!Array.isArray(privateQuads) || !privateQuads.every(isPublishQuad))) {
+    return { ok: false, error: 'Invalid "privateQuads" (must be a quad array)' };
+  }
+
+  if (accessPolicy !== undefined && accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+    return { ok: false, error: 'Invalid "accessPolicy" (must be public, ownerOnly, or allowList)' };
+  }
+
+  if (allowedPeers !== undefined && (!Array.isArray(allowedPeers) || !allowedPeers.every((p) => typeof p === 'string' && p.trim().length > 0))) {
+    return { ok: false, error: 'Invalid "allowedPeers" (must be an array of non-empty strings)' };
+  }
+
+  if (accessPolicy === 'allowList' && (!allowedPeers || allowedPeers.length === 0)) {
+    return { ok: false, error: '"allowList" accessPolicy requires non-empty "allowedPeers"' };
+  }
+
+  if (accessPolicy !== 'allowList' && allowedPeers && allowedPeers.length > 0) {
+    return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      paranetId,
+      quads,
+      privateQuads,
+      accessPolicy,
+      allowedPeers,
+    },
+  };
+}
+
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, {
@@ -1958,123 +2159,515 @@ function normalizeRepo(repo: string): string {
   return t;
 }
 
-export async function checkForUpdate(
-  au: AutoUpdateConfig,
+function parseTagName(ref: string): string | null {
+  const m = ref.match(/^refs\/tags\/(.+)$/);
+  return m ? m[1] : null;
+}
+
+function isValidRef(ref: string): boolean {
+  return /^[\w./+\-]+$/.test(ref) && !ref.startsWith('-');
+}
+
+function isValidRepoSpec(repo: string): boolean {
+  const trimmed = repo.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('-')) return false;
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) return false;
+  if (/\s/.test(trimmed)) return false;
+
+  if (trimmed.startsWith('/') || /^[A-Za-z]:\\/.test(trimmed)) return true; // Absolute local path.
+  if (trimmed.startsWith('file://')) return true;
+  if (trimmed.startsWith('https://') || trimmed.startsWith('ssh://') || trimmed.startsWith('git@')) return true;
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(trimmed)) return true; // owner/name or owner/name.git
+  if (/^[A-Za-z0-9._/\-]+$/.test(trimmed)) return true; // Relative local path.
+
+  return false;
+}
+
+function repoToFetchUrl(repo: string): string {
+  const trimmed = repo.trim();
+  if (!isValidRepoSpec(trimmed)) {
+    throw new Error(`invalid autoUpdate.repo "${repo}"`);
+  }
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('/') || trimmed.includes('://') || trimmed.startsWith('git@')) return trimmed;
+  const normalized = normalizeRepo(trimmed);
+  if (/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    return `https://github.com/${normalized}.git`;
+  }
+  return trimmed;
+}
+
+function githubRepoForApi(repo: string): string | null {
+  const trimmed = repo.trim().replace(/\.git$/i, '');
+  if (!trimmed) return null;
+  const urlMatch = trimmed.match(/github\.com[/:]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/|$)/i);
+  if (urlMatch) return urlMatch[1];
+  // Treat plain owner/name as GitHub shorthand; explicit paths should use ./ or / prefixes.
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+async function resolveRemoteCommitSha(
+  repoSpec: string,
+  ref: string,
   log: (msg: string) => void,
-): Promise<void> {
+  gitEnv: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  let fetchUrl = '';
   try {
-    const cwd = process.cwd();
+    fetchUrl = repoToFetchUrl(repoSpec);
+  } catch (err: any) {
+    log(`Auto-update: ${err?.message ?? 'invalid autoUpdate.repo'}`);
+    return null;
+  }
+  const githubRepo = githubRepoForApi(repoSpec);
+  const isSshRepo = fetchUrl.startsWith('git@') || fetchUrl.startsWith('ssh://');
+  const apiRef = ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '');
 
-    // Bail out if not inside a git worktree
-    try {
-      const inWorktree = execSync('git rev-parse --is-inside-work-tree', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
-      if (inWorktree !== 'true') {
-        log('Auto-update: skipping — not inside a git worktree');
-        return;
-      }
-    } catch {
-      log('Auto-update: skipping — not inside a git worktree');
-      return;
-    }
-
-    // Bail out if worktree has tracked uncommitted changes
-    const status = execSync('git status --porcelain --untracked-files=no', { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
-    if (status) {
-      log('Auto-update: skipping — worktree has tracked uncommitted changes');
-      return;
-    }
-
-    const commitFile = join(dkgDir(), '.current-commit');
-
-    // Get current running commit
-    let currentCommit = '';
-    try {
-      currentCommit = (await readFile(commitFile, 'utf-8')).trim();
-    } catch {
-      // First run — record current commit
-      try {
-        currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd }).trim();
-        await writeFile(commitFile, currentCommit);
-      } catch {
-        return;
-      }
-    }
-
-    const repo = normalizeRepo(au.repo);
-    const branch = au.branch.trim() || 'main';
-    const url = `https://api.github.com/repos/${repo}/commits/${branch}`;
+  // Fast path for GitHub repos to preserve token-authenticated checks.
+  if (githubRepo && !isSshRepo) {
+    const url = `https://api.github.com/repos/${githubRepo}/commits/${encodeURIComponent(apiRef)}`;
     const headers: Record<string, string> = { Accept: 'application/vnd.github.v3+json' };
     const token = process.env.GITHUB_TOKEN;
     if (token) headers.Authorization = `Bearer ${token}`;
-
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
+      if (res.status === 422 && ref.startsWith('refs/tags/')) {
+        log(`Auto-update: tag "${apiRef}" not found in ${githubRepo}`);
+        return null;
+      }
       if (res.status === 404) {
         log(
-          `Auto-update: GitHub returned 404 for ${repo} branch "${branch}". ` +
-            'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/branch in config.',
+          `Auto-update: GitHub returned 404 for ${githubRepo} ref "${ref}". ` +
+            'If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.',
         );
       } else {
         log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
       }
-      return;
+      return null;
     }
-    const data = await res.json() as { sha: string };
-    const latestCommit = data.sha;
+    const data = await res.json() as { sha?: string };
+    return data.sha ? String(data.sha).trim() : null;
+  }
 
-    if (latestCommit === currentCommit) return;
-
-    log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}), updating...`);
-
-    try {
-      execSync(`git fetch origin ${branch}`, {
-        cwd, encoding: 'utf-8', stdio: 'pipe',
-      });
-    } catch (fetchErr: any) {
-      log(`Auto-update: fetch failed — ${fetchErr.message}`);
-      return;
+  // Generic path for local/non-GitHub repositories.
+  const queryRefs = ref.startsWith('refs/tags/')
+    ? [ref, `${ref}^{}`]
+    : [ref];
+  try {
+    const raw = await execFileAsync('git', [...gitCommandArgs(fetchUrl, null), 'ls-remote', fetchUrl, ...queryRefs], {
+      encoding: 'utf-8',
+      timeout: 30_000,
+      env: gitEnv,
+    });
+    const stdout = typeof raw === 'string' ? raw : String((raw as any)?.stdout ?? '');
+    const lines = String(stdout).trim().split('\n').filter(Boolean);
+    if (lines.length === 0) {
+      log(`Auto-update: ref "${ref}" not found in ${fetchUrl}`);
+      return null;
     }
+    const peeledTagRef = `${ref}^{}`;
+    const parsed = lines
+      .map((line) => line.split(/\s+/))
+      .filter((parts) => parts.length >= 2)
+      .map(([sha, remoteRef]) => ({ sha: sha.trim(), remoteRef: remoteRef.trim() }))
+      .filter((entry) => /^[0-9a-f]{7,40}$/i.test(entry.sha));
+    const peeled = parsed.find((entry) => entry.remoteRef === peeledTagRef);
+    if (peeled) return peeled.sha;
+    const exact = parsed.find((entry) => entry.remoteRef === ref);
+    if (exact) return exact.sha;
+    return parsed[0]?.sha ?? null;
+  } catch (err: any) {
+    log(`Auto-update: failed to resolve remote ref ${ref} from ${fetchUrl} (${err?.message ?? String(err)})`);
+    return null;
+  }
+}
 
+type PendingUpdateState = {
+  target: 'a' | 'b';
+  commit: string;
+  version?: string;
+  ref: string;
+  createdAt: string;
+};
+
+export type CommitCheckStatus = {
+  status: 'available' | 'up-to-date' | 'error';
+  commit?: string;
+};
+
+async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  try {
+    const raw = await readFile(pendingFile, 'utf-8');
+    const parsed = JSON.parse(raw) as PendingUpdateState;
+    if ((parsed.target !== 'a' && parsed.target !== 'b') || !parsed.commit || !parsed.ref) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function clearPendingUpdateState(): Promise<void> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  try { await unlink(pendingFile); } catch { /* ok */ }
+}
+
+async function writePendingUpdateState(state: PendingUpdateState): Promise<void> {
+  const pendingFile = join(dkgDir(), '.update-pending.json');
+  await writeFile(pendingFile, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Check GitHub for a new commit on the configured branch.
+ * Returns the latest commit SHA if an update is available, null otherwise.
+ */
+export async function checkForNewCommit(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  refOverride?: string,
+): Promise<string | null> {
+  const result = await checkForNewCommitWithStatus(au, log, refOverride);
+  return result.status === 'available' ? (result.commit ?? null) : null;
+}
+
+export async function checkForNewCommitWithStatus(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  refOverride?: string,
+): Promise<CommitCheckStatus> {
+  const commitFile = join(dkgDir(), '.current-commit');
+  let currentCommit = '';
+  try {
+    currentCommit = (await readFile(commitFile, 'utf-8')).trim();
+  } catch {
+    const active = await activeSlot();
+    const activeDir = join(releasesDir(), active ?? 'a');
     try {
-      execSync(`git merge --ff-only origin/${branch}`, {
-        cwd, encoding: 'utf-8', stdio: 'pipe',
-      });
-    } catch (mergeErr: any) {
-      log(`Auto-update: skipping — fast-forward merge failed: ${mergeErr.message}`);
-      return;
+      currentCommit = execSync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir, stdio: 'pipe' }).trim();
+    } catch {
+      // First-run node (or missing slots/metadata): treat as unknown current commit and still allow check.
+      currentCommit = '';
     }
+  }
 
-    try {
-      execSync('pnpm install --frozen-lockfile', {
-        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
-      });
-      execSync('pnpm build', {
-        cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000,
-      });
-    } catch (err: any) {
-      log(`Auto-update: build failed after merge — ${err.message}`);
+  const ref = (refOverride ?? au.branch).trim() || 'main';
+  const gitEnv = gitCommandEnv(au);
+  if (!isValidRef(ref)) {
+    log(`Auto-update: invalid branch/ref "${ref}"`);
+    return { status: 'error' };
+  }
+
+  try {
+    const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
+    if (!latestCommit) {
+      return { status: 'error' };
+    }
+    if (latestCommit === currentCommit) return { status: 'up-to-date' };
+    return { status: 'available', commit: latestCommit };
+  } catch (err: any) {
+    log(`Auto-update: failed to check for new commit (${err?.message ?? String(err)})`);
+    return { status: 'error' };
+  }
+}
+
+let _updateInProgress = false;
+let _lockToken: string | null = null;
+export type UpdateStatus = 'updated' | 'up-to-date' | 'failed';
+
+async function acquireUpdateLock(log: (msg: string) => void): Promise<boolean> {
+  const lockPath = join(releasesDir(), '.update.lock');
+  try {
+    await mkdir(releasesDir(), { recursive: true });
+    const { openSync, closeSync, writeFileSync } = await import('node:fs');
+    const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    const fd = openSync(lockPath, 'wx');
+    writeFileSync(fd, token);
+    closeSync(fd);
+    _lockToken = token;
+    return true;
+  } catch (err: any) {
+    if (err.code === 'EEXIST') {
       try {
-        execSync(`git reset --hard ${currentCommit}`, { cwd, encoding: 'utf-8', stdio: 'pipe' });
-        execSync('pnpm install --frozen-lockfile', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        try {
-          execSync('pnpm build', { cwd, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-        } catch (buildErr: any) {
-          log(`Auto-update: rollback build failed — artifacts may be stale: ${buildErr.message}`);
+        const { readFileSync, unlinkSync } = await import('node:fs');
+        const raw = String(readFileSync(lockPath, 'utf-8')).trim();
+        const pidStr = raw.split(':')[0] ?? raw;
+        const lockPid = parseInt(pidStr, 10);
+        if (lockPid === process.pid) {
+          _lockToken = raw;
+          return true;
         }
-        log('Auto-update: rolled back to previous commit after build failure');
-      } catch (resetErr: any) {
-        log(`Auto-update: rollback failed — ${resetErr.message}`);
-      }
-      return;
+        if (lockPid) {
+          try {
+            process.kill(lockPid, 0);
+            log('Auto-update: another update process holds the lock, skipping');
+            return false;
+          } catch {
+            // Lock holder is dead, remove stale lock
+            try { unlinkSync(lockPath); } catch {}
+            return acquireUpdateLock(log);
+          }
+        }
+      } catch { /* can't read lock */ }
     }
+    // Fail closed: do not proceed if lock semantics are uncertain.
+    log(`Auto-update: could not acquire lock (${err.code ?? err.message}), skipping`);
+    return false;
+  }
+}
 
-    // Record the new commit
-    await writeFile(commitFile, latestCommit);
-    log(`Auto-update: build succeeded. Restarting daemon...`);
+async function releaseUpdateLock(): Promise<void> {
+  const lockPath = join(releasesDir(), '.update.lock');
+  try {
+    if (!_lockToken) return;
+    const { readFileSync, unlinkSync } = await import('node:fs');
+    const raw = String(readFileSync(lockPath, 'utf-8')).trim();
+    if (raw !== _lockToken) return;
+    unlinkSync(lockPath);
+  } catch { /* ok */ }
+  _lockToken = null;
+}
 
-    // Signal the process to restart (pm2 or wrapper script will restart it)
-    process.kill(process.pid, 'SIGTERM');
+/**
+ * Core blue-green update logic. Builds the new version in the inactive slot,
+ * then atomically swaps the `releases/current` symlink.
+ * Returns true if an update was applied (caller should SIGTERM to restart).
+ */
+export async function performUpdate(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean } = {},
+): Promise<boolean> {
+  const status = await performUpdateWithStatus(au, log, opts);
+  return status === 'updated';
+}
+
+export async function performUpdateWithStatus(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean } = {},
+): Promise<UpdateStatus> {
+  if (_updateInProgress) {
+    log('Auto-update: another update is already in progress, skipping');
+    return 'failed';
+  }
+  _updateInProgress = true;
+  const locked = await acquireUpdateLock(log);
+  if (!locked) {
+    _updateInProgress = false;
+    return 'failed';
+  }
+  try {
+    return await _performUpdateInner(au, log, opts);
+  } finally {
+    await releaseUpdateLock();
+    _updateInProgress = false;
+  }
+}
+
+async function _performUpdateInner(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+  opts: { refOverride?: string; allowPrerelease?: boolean; verifyTagSignature?: boolean },
+): Promise<UpdateStatus> {
+  const rDir = releasesDir();
+  const activeDir = join(rDir, (await activeSlot()) ?? 'a');
+  const target = await inactiveSlot();
+  const targetDir = join(rDir, target);
+
+  // Bail out if the active slot is missing; target slot can self-heal below.
+  if (!existsSync(activeDir)) {
+    log('Auto-update: skipping — blue-green slots not initialized (run "dkg start" first)');
+    return 'failed';
+  }
+
+  const commitFile = join(dkgDir(), '.current-commit');
+  const versionFile = join(dkgDir(), '.current-version');
+
+  let currentCommit = '';
+  try {
+    currentCommit = (await readFile(commitFile, 'utf-8')).trim();
+  } catch {
+    try {
+      const { stdout } = await execAsync('git rev-parse HEAD', { encoding: 'utf-8', cwd: activeDir });
+      currentCommit = stdout.trim();
+      await writeFile(commitFile, currentCommit);
+    } catch {
+      return 'failed';
+    }
+  }
+
+  const pending = await readPendingUpdateState();
+  if (pending) {
+    const active = await activeSlot();
+    if (active === pending.target) {
+      await writeFile(commitFile, pending.commit);
+      if (pending.version) await writeFile(versionFile, pending.version);
+      await clearPendingUpdateState();
+      currentCommit = pending.commit;
+      log(`Auto-update: recovered pending update state for slot ${pending.target}.`);
+    } else {
+      await clearPendingUpdateState();
+      log('Auto-update: cleared stale pending update state.');
+    }
+  }
+
+  const ref = (opts.refOverride ?? au.branch).trim() || 'main';
+  const gitEnv = gitCommandEnv(au);
+
+  if (!isValidRef(ref)) {
+    log(`Auto-update: invalid branch/ref "${ref}"`);
+    return 'failed';
+  }
+  const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
+  if (!latestCommit) return 'failed';
+
+  if (latestCommit === currentCommit) return 'up-to-date';
+
+  log(`Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`);
+  let checkedOutCommit = latestCommit;
+  let fetchUrl = '';
+
+  try {
+    fetchUrl = repoToFetchUrl(au.repo);
+  } catch (repoErr: any) {
+    log(`Auto-update: ${repoErr?.message ?? 'invalid autoUpdate.repo'}`);
+    return 'failed';
+  }
+
+  if (!existsSync(join(targetDir, '.git'))) {
+    try {
+      log(`Auto-update: slot ${target} missing git metadata; reinitializing slot repo.`);
+      await mkdir(targetDir, { recursive: true });
+      await execFileAsync('git', ['init'], {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+    } catch (initErr: any) {
+      log(`Auto-update: failed to initialize slot ${target} repo — ${initErr?.message ?? String(initErr)}`);
+      return 'failed';
+    }
+  }
+
+  try {
+    const maybeTag = parseTagName(ref);
+    const fetchRef = maybeTag
+      ? `${ref}:${ref}`
+      : ref;
+    const fetchStartedAt = Date.now();
+    log(`Auto-update: fetching "${ref}" from ${fetchUrl} into slot ${target}...`);
+    await execFileAsync('git', [...gitCommandArgs(fetchUrl, au), 'fetch', fetchUrl, fetchRef], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+      env: gitEnv,
+    });
+    if (opts.verifyTagSignature && maybeTag) {
+      await execFileAsync('git', ['verify-tag', maybeTag], {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+    }
+    await execFileAsync('git', ['checkout', '--force', 'FETCH_HEAD'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 60_000,
+    });
+    log(`Auto-update: cleaning slot ${target} working tree (git clean -fdx)...`);
+    await execFileAsync('git', ['clean', '-fdx'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+    });
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+    const resolved = String(stdout).trim();
+    if (/^[0-9a-f]{7,40}$/i.test(resolved)) checkedOutCommit = resolved;
+    const fetchElapsedMs = Date.now() - fetchStartedAt;
+    log(
+      `Auto-update: fetch complete in slot ${target}, checked out ${checkedOutCommit.slice(0, 8)} ` +
+      `(in ${fetchElapsedMs}ms).`,
+    );
+  } catch (fetchErr: any) {
+    log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
+    return 'failed';
+  }
+
+  try {
+    await execAsync('pnpm install --frozen-lockfile', {
+      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+    });
+    await execAsync('pnpm build', {
+      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+    });
+  } catch (err: any) {
+    log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
+    return 'failed';
+  }
+
+  const entryFile = join(targetDir, 'packages', 'cli', 'dist', 'cli.js');
+  if (!existsSync(entryFile)) {
+    log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
+    return 'failed';
+  }
+
+  let nextVersion = '';
+  try {
+    const pkgRaw = await readFile(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
+    nextVersion = String((JSON.parse(pkgRaw) as { version?: string }).version ?? '').trim();
+  } catch {
+    // Version is optional metadata for operators; commit SHA remains source of truth.
+  }
+  const allowPrerelease = opts.allowPrerelease ?? au.allowPrerelease ?? false;
+  if (nextVersion && !allowPrerelease && /^[0-9]+\.[0-9]+\.[0-9]+-/.test(nextVersion)) {
+    log(`Auto-update: target version ${nextVersion} is pre-release and allowPrerelease=false. Aborting swap.`);
+    return 'failed';
+  }
+
+  await writePendingUpdateState({
+    target,
+    commit: checkedOutCommit,
+    version: nextVersion || undefined,
+    ref,
+    createdAt: new Date().toISOString(),
+  });
+  try {
+    const swapStartedAt = Date.now();
+    log(`Auto-update: swapping active slot to ${target}...`);
+    await swapSlot(target);
+    await writeFile(commitFile, checkedOutCommit);
+    if (nextVersion) await writeFile(versionFile, nextVersion);
+    await clearPendingUpdateState();
+    const swapElapsedMs = Date.now() - swapStartedAt;
+    log(`Auto-update: swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`);
+  } catch (swapErr: any) {
+    await clearPendingUpdateState();
+    log(`Auto-update: symlink swap failed — ${swapErr.message}`);
+    return 'failed';
+  }
+  log(
+    `Auto-update: build succeeded in slot ${target}` +
+      `${nextVersion ? ` (version ${nextVersion})` : ''}. Swapped symlink. Restarting...`,
+  );
+  log('v9 auto-update test live leeroy jenkins');
+  return 'updated';
+}
+
+export async function checkForUpdate(
+  au: AutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  try {
+    const updated = await performUpdate(au, log);
+    return updated;
   } catch (err: any) {
     log(`Auto-update: error — ${err.message}`);
+    return false;
   }
 }

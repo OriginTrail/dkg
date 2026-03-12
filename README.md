@@ -43,7 +43,7 @@ For the full walkthrough (testnet ETH, publishing knowledge, querying, framework
 | Guide | For |
 |---|---|
 | [Join the Testnet](docs/setup/JOIN_TESTNET.md) | Quick start — install, init, start, message, publish |
-| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw agents with the DKG plugin |
+| [OpenClaw Setup](packages/adapter-openclaw/README.md) | OpenClaw agents — full Agent Runbook your agent can follow autonomously |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS agents with the DKG plugin |
 | [Custom Project](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |
 

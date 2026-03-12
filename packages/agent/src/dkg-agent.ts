@@ -1084,7 +1084,12 @@ export class DKGAgent {
     paranetId: string,
     quads: Quad[],
     privateQuads?: Quad[],
-    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+    opts?: {
+      onPhase?: PhaseCallback;
+      operationCtx?: OperationContext;
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    },
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
@@ -1103,7 +1108,9 @@ export class DKGAgent {
       paranetId,
       quads,
       privateQuads,
-      publisherPeerId: this.node.peerId.toString(),
+      publisherPeerId: this.peerId,
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
       operationCtx: ctx,
       onPhase,
     });

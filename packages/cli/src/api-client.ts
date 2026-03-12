@@ -80,7 +80,10 @@ export class ApiClient {
     subject: string; predicate: string; object: string; graph: string;
   }>, privateQuads?: Array<{
     subject: string; predicate: string; object: string; graph: string;
-  }>): Promise<{
+  }>, options?: {
+    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+    allowedPeers?: string[];
+  }): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
     kas: Array<{ tokenId: string; rootEntity: string }>;
@@ -89,7 +92,7 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId, quads, privateQuads });
+    return this.post('/api/publish', { paranetId, quads, privateQuads, ...options });
   }
 
   async workspaceWrite(paranetId: string, quads: Array<{

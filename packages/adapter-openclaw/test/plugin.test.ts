@@ -6,19 +6,18 @@ describe('DkgNodePlugin', () => {
   it('can be instantiated with default config', () => {
     const plugin = new DkgNodePlugin();
     expect(plugin).toBeDefined();
-    expect(plugin.getAgent()).toBeNull();
   });
 
   it('can be instantiated with custom config', () => {
     const plugin = new DkgNodePlugin({
-      dataDir: '/tmp/test-dkg',
-      name: 'test-agent',
-      description: 'A test agent',
+      daemonUrl: 'http://localhost:9999',
+      memory: { enabled: true },
+      channel: { enabled: false },
     });
     expect(plugin).toBeDefined();
   });
 
-  it('registers lifecycle hooks and tools via register()', () => {
+  it('registers session_end hook and all 8 tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];
     const registeredTools: OpenClawTool[] = [];
@@ -33,7 +32,6 @@ describe('DkgNodePlugin', () => {
 
     plugin.register(mockApi);
 
-    expect(registeredHooks).toContainEqual({ event: 'session_start', name: 'dkg-node-start' });
     expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
 
     const toolNames = registeredTools.map(t => t.name);
@@ -43,8 +41,9 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
     expect(toolNames).toContain('dkg_send_message');
+    expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(registeredTools.length).toBe(7);
+    expect(registeredTools.length).toBe(8);
   });
 
   it('all tools have name, description, parameters, and execute', () => {
@@ -71,8 +70,23 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('stop() is safe to call when agent is not started', async () => {
+  it('stop() is safe to call without register()', async () => {
     const plugin = new DkgNodePlugin();
     await expect(plugin.stop()).resolves.toBeUndefined();
+  });
+
+  it('getClient() returns the DkgDaemonClient after register()', () => {
+    const plugin = new DkgNodePlugin({ daemonUrl: 'http://example.com:9200' });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    };
+    plugin.register(mockApi);
+    const client = plugin.getClient();
+    expect(client).toBeDefined();
+    expect(client.baseUrl).toBe('http://example.com:9200');
   });
 });
