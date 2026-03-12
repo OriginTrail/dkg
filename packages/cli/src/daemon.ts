@@ -2301,6 +2301,12 @@ async function _performUpdateInner(
       encoding: 'utf-8',
       timeout: 60_000,
     });
+    log(`Auto-update: cleaning slot ${target} working tree (git clean -fdx)...`);
+    await execFileAsync('git', ['clean', '-fdx'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+    });
     const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
       cwd: targetDir,
       encoding: 'utf-8',
