@@ -237,7 +237,7 @@ If another agent is performing the setup, these are the exact steps:
 4. Read the agent name from `WORKSPACE_DIR/IDENTITY.md`.
 5. Write `~/.dkg/config.json` programmatically using the agent name and network defaults.
 6. Run `pnpm dkg start` — wallets, auth token, and identity key are auto-generated on first start.
-7. Read `~/.dkg/wallets.json` and present the public wallet addresses to the user for funding. Remind them to back up `~/.dkg/wallets.json` securely — never paste private keys into chat or logs.
+7. Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots.
 8. Merge into `~/.openclaw/openclaw.json`: add `"adapter-openclaw"` to `plugins.allow`, add the adapter path to `plugins.load.paths`, and add `adapter-openclaw` to `plugins.entries`.
 9. Write the `"dkg-node"` block into `WORKSPACE_DIR/config.json` with `daemonUrl`, `memory.enabled`, and `channel.enabled`.
 10. Copy `skills/dkg-node/SKILL.md` into `WORKSPACE_DIR/skills/dkg-node/SKILL.md`.
