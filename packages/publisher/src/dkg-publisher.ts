@@ -365,32 +365,9 @@ export class DKGPublisher implements Publisher {
             await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
           } else {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
-            try {
-              const rollbackQuads = (publishResult.publicQuads ?? []).map((q) => ({
-                ...q,
-                graph: targetGraphUri ?? q.graph,
-              }));
-              if (rollbackQuads.length > 0) {
-                await this.store.delete(rollbackQuads);
-              }
-              if (targetMetaGraphUri && publishResult.ual) {
-                await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: publishResult.ual });
-                for (const ka of publishResult.kaManifest ?? []) {
-                  const kaSubject = `${publishResult.ual}/${ka.tokenId ?? ka.rootEntity}`;
-                  await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: kaSubject });
-                }
-              }
-              this.log.info(ctx, `Rolled back ${rollbackQuads.length} quads from this publish`);
-            } catch (cleanErr) {
-              this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
-            }
-            const ownedSet = this.ownedEntities.get(paranetId);
-            if (ownedSet) {
-              for (const ka of publishResult.kaManifest ?? []) {
-                ownedSet.delete(ka.rootEntity);
-              }
-            }
-
+            // KC is already confirmed on-chain — do NOT rollback local data
+            // or return 'failed', as that creates chain/local divergence.
+            // Keep the data and report the context-graph failure separately.
             this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
               reason: 'context_graph_registration_failed',
               batchId: String(publishResult.onChainResult.batchId),
@@ -399,7 +376,7 @@ export class DKGPublisher implements Publisher {
             });
             return {
               ...publishResult,
-              status: 'failed' as const,
+              contextGraphError: `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`,
             };
           }
         }

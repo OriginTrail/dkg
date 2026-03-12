@@ -182,9 +182,14 @@ export class FinalizationHandler {
       // For context graph finalizations, also verify ContextGraphExpanded
       // (may be at a later block since addBatchToContextGraph is a separate tx)
       if (ctxGraphId) {
+        const scanWindow = 256;
+        const headBlock = typeof this.chain.getBlockNumber === 'function'
+          ? await this.chain.getBlockNumber()
+          : blockNumber + scanWindow;
         const cgFilter: EventFilter = {
           eventTypes: ['ContextGraphExpanded'],
           fromBlock: blockNumber,
+          toBlock: Math.min(blockNumber + scanWindow, headBlock),
         };
         for await (const event of this.chain.listenForEvents(cgFilter)) {
           const eventCGId = String(event.data['contextGraphId'] ?? '');
@@ -205,7 +210,7 @@ export class FinalizationHandler {
     paranetId: string,
     workspaceQuads: Quad[],
     ual: string,
-    _rootEntities: string[],
+    msgRootEntities: string[],
     publisherAddress: string,
     txHash: string,
     blockNumber: number,
@@ -228,7 +233,11 @@ export class FinalizationHandler {
     const merkleRoot = new MerkleTree(allHashes).root;
 
     const partitioned = autoPartition(canonicalQuads);
-    const rootEntities = [...partitioned.keys()].sort();
+    // Use the root entity order from the finalization message (matches publisher's
+    // tokenId assignment) instead of re-sorting, which could remap tokenId -> rootEntity.
+    const rootEntities = msgRootEntities.length > 0
+      ? msgRootEntities
+      : [...partitioned.keys()];
     const kaMetadata: KAMetadata[] = [];
 
     for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
@@ -254,10 +263,19 @@ export class FinalizationHandler {
       timestamp: new Date(),
     };
 
+    let blockTimestamp = Math.floor(Date.now() / 1000);
+    if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
+      try {
+        blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
+      } catch {
+        this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+      }
+    }
+
     const provenance: OnChainProvenance = {
       txHash,
       blockNumber,
-      blockTimestamp: Math.floor(Date.now() / 1000),
+      blockTimestamp,
       publisherAddress,
       batchId,
       chainId: this.chain?.chainId ?? 'unknown',

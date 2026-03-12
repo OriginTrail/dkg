@@ -62,6 +62,8 @@ export interface PublishResult {
   onChainResult?: OnChainPublishResult;
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];
+  /** Set when KC is confirmed on-chain but context-graph registration failed. */
+  contextGraphError?: string;
 }
 
 export interface Publisher {
