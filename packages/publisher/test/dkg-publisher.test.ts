@@ -106,6 +106,7 @@ describe('DKGPublisher', () => {
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
+      publisherPeerId: '12D3KooWTestPublisher',
     });
 
     expect(result.kaManifest[0].privateTripleCount).toBe(1);

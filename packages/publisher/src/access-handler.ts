@@ -17,7 +17,9 @@ interface KAMeta {
   rootEntity: string;
   paranetId: string;
   privateMerkleRoot?: Uint8Array;
-  accessPolicy: AccessPolicy;
+  privateTripleCount?: number;
+  accessPolicy?: AccessPolicy;
+  hasInvalidExplicitPolicy?: boolean;
   publisherPeerId?: string;
   allowedPeers?: string[];
 }
@@ -64,8 +66,25 @@ export class AccessHandler {
         return this.deny('KA not found');
       }
 
+      if (meta.hasInvalidExplicitPolicy) {
+        return this.deny('Access denied: invalid access policy metadata');
+      }
+
+      const hasPrivate =
+        this.privateStore.hasPrivateTriples(meta.paranetId, meta.rootEntity) ||
+        (await this.privateStore.hasPrivateTriplesInStore(meta.paranetId, meta.rootEntity));
+
+      if (!hasPrivate) {
+        return this.deny('No private triples available for this KA');
+      }
+
+      const effectivePolicy = this.resolveAccessPolicy(meta, hasPrivate);
+
       // Enforce access policy (cheap peerId checks first, before expensive crypto)
-      if (meta.accessPolicy === 'ownerOnly') {
+      if (effectivePolicy === 'ownerOnly') {
+        if (!meta.publisherPeerId || meta.publisherPeerId === 'unknown') {
+          return this.deny('Access denied: owner identity missing for owner-only policy');
+        }
         if (meta.publisherPeerId && fromPeerId !== meta.publisherPeerId) {
           this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
             kaUal: request.kaUal,
@@ -74,8 +93,11 @@ export class AccessHandler {
           });
           return this.deny('Access denied: owner-only policy');
         }
-      } else if (meta.accessPolicy === 'allowList') {
-        if (meta.allowedPeers && !meta.allowedPeers.includes(fromPeerId)) {
+      } else if (effectivePolicy === 'allowList') {
+        if (!meta.allowedPeers || meta.allowedPeers.length === 0) {
+          return this.deny('Access denied: allow list missing or empty');
+        }
+        if (!meta.allowedPeers.includes(fromPeerId)) {
           this.eventBus.emit(DKGEvent.ACCESS_RESPONSE, {
             kaUal: request.kaUal,
             requester: fromPeerId,
@@ -86,7 +108,7 @@ export class AccessHandler {
       }
 
       // Verify signature for non-public access policies
-      if (meta.accessPolicy !== 'public') {
+      if (effectivePolicy !== 'public') {
         if (!request.requesterSignature || request.requesterSignature.length === 0) {
           return this.deny('Access denied: signature required for non-public access');
         }
@@ -105,14 +127,6 @@ export class AccessHandler {
         if (!valid) {
           return this.deny('Access denied: invalid signature');
         }
-      }
-
-      const hasPrivate =
-        this.privateStore.hasPrivateTriples(meta.paranetId, meta.rootEntity) ||
-        (await this.privateStore.hasPrivateTriplesInStore(meta.paranetId, meta.rootEntity));
-
-      if (!hasPrivate) {
-        return this.deny('No private triples available for this KA');
       }
 
       const privateQuads = await this.privateStore.getPrivateTriples(
@@ -157,14 +171,18 @@ export class AccessHandler {
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const result = await this.store.query(
-      `SELECT ?rootEntity ?paranet ?privateMerkleRoot ?accessPolicy ?publisherPeerId WHERE {
+      `SELECT ?rootEntity ?paranet ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
         GRAPH ?g {
           <${kaUal}> <${DKG_NS}rootEntity> ?rootEntity .
           <${kaUal}> <${DKG_NS}partOf> ?kc .
           ?kc <${DKG_NS}paranet> ?paranet .
           OPTIONAL { <${kaUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
+          OPTIONAL { <${kaUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
           OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
+          OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
+          BIND(CONCAT(STR(?paranet), '/_meta') AS ?expectedMetaGraph)
+          FILTER(STR(?g) = ?expectedMetaGraph)
         }
       } LIMIT 1`,
     );
@@ -177,6 +195,7 @@ export class AccessHandler {
     const rootEntity = row['rootEntity'];
     const paranetUri = row['paranet'];
     const paranetId = paranetUri.replace('did:dkg:paranet:', '');
+    const kcUal = row['kc'];
 
     let privateMerkleRoot: Uint8Array | undefined;
     const rawRoot = row['privateMerkleRoot'];
@@ -191,16 +210,54 @@ export class AccessHandler {
       }
     }
 
+    const privateTripleCount = row['privateTripleCount']
+      ? Number(stripLiteral(row['privateTripleCount']))
+      : 0;
+
     const rawPolicy = row['accessPolicy'];
-    const accessPolicy = rawPolicy
-      ? (stripLiteral(rawPolicy) as AccessPolicy)
-      : 'public';
+    const parsedPolicy = rawPolicy ? stripLiteral(rawPolicy) : undefined;
+    const accessPolicy = isAccessPolicy(parsedPolicy) ? parsedPolicy : undefined;
+    const hasInvalidExplicitPolicy = !!parsedPolicy && !isAccessPolicy(parsedPolicy);
 
     const publisherPeerId = row['publisherPeerId']
       ? stripLiteral(row['publisherPeerId'])
-      : undefined;
+      : row['attributedTo']
+        ? stripLiteral(row['attributedTo'])
+        : undefined;
 
-    return { rootEntity, paranetId, privateMerkleRoot, accessPolicy, publisherPeerId };
+    const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
+    const allowedPeerRes = await this.store.query(
+      `SELECT ?allowedPeer WHERE {
+        GRAPH <${metaGraph}> {
+          <${kcUal}> <${DKG_NS}allowedPeer> ?allowedPeer .
+        }
+      }`,
+    );
+    const allowedPeers =
+      allowedPeerRes.type === 'bindings'
+        ? [...new Set(
+          allowedPeerRes.bindings
+            .map((b) => b['allowedPeer'])
+            .filter(Boolean)
+            .map((s) => stripLiteral(s)),
+        )]
+        : undefined;
+
+    return {
+      rootEntity,
+      paranetId,
+      privateMerkleRoot,
+      privateTripleCount,
+      accessPolicy,
+      hasInvalidExplicitPolicy,
+      publisherPeerId,
+      allowedPeers,
+    };
+  }
+
+  private resolveAccessPolicy(meta: KAMeta, hasPrivate: boolean): AccessPolicy {
+    if (meta.accessPolicy) return meta.accessPolicy;
+    return hasPrivate ? 'ownerOnly' : 'public';
   }
 
   private deny(reason: string): Uint8Array {
@@ -224,4 +281,8 @@ function stripLiteral(s: string): string {
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
   if (match) return match[1];
   return s;
+}
+
+function isAccessPolicy(value: string | undefined): value is AccessPolicy {
+  return value === 'public' || value === 'ownerOnly' || value === 'allowList';
 }

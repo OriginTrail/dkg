@@ -197,6 +197,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-xyz"'),
         q(ENTITY, 'http://ex.org/modelWeights', '"s3://bucket/weights.bin"'),
       ],
+      publisherPeerId: nodeB.peerId,
     });
 
     expect(result.kaManifest[0].privateTripleCount).toBe(2);

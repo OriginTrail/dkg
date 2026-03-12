@@ -37,7 +37,11 @@ function lit(s: string): string {
   return `"${s}"`;
 }
 
-async function setupStoreWithPolicy(policy: string, publisherPeerId?: string): Promise<OxigraphStore> {
+async function setupStoreWithPolicy(
+  policy: string,
+  publisherPeerId?: string,
+  allowedPeers?: string[],
+): Promise<OxigraphStore> {
   const store = new OxigraphStore();
   const gm = new GraphManager(store);
   await gm.ensureParanet(PARANET);
@@ -55,6 +59,12 @@ async function setupStoreWithPolicy(policy: string, publisherPeerId?: string): P
     await store.insert([
       mq(KC_UAL, `${DKG}publisherPeerId`, lit(publisherPeerId), META_GRAPH),
     ]);
+  }
+
+  if (allowedPeers?.length) {
+    await store.insert(
+      allowedPeers.map((peerId) => mq(KC_UAL, `${DKG}allowedPeer`, lit(peerId), META_GRAPH)),
+    );
   }
 
   // Private data in the correct private graph
@@ -240,7 +250,25 @@ describe('I-005: Access handler signature verification', () => {
     expect(res.granted).toBe(true);
   });
 
-  it('rejects empty signature for allowList policy', async () => {
+  it('rejects unknown explicit access policy values', async () => {
+    const store = await setupStoreWithPolicy('totallyUnknownPolicy');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'any-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'any-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('invalid access policy metadata');
+  });
+
+  it('rejects allowList access when allowed peer list is missing', async () => {
     const store = await setupStoreWithPolicy('allowList', 'publisher-peer');
     const handler = new AccessHandler(store, new TypedEventBus());
 
@@ -255,7 +283,60 @@ describe('I-005: Access handler signature verification', () => {
     const res = decodeAccessResponse(resBytes);
 
     expect(res.granted).toBe(false);
-    expect(res.rejectionReason).toContain('signature required');
+    expect(res.rejectionReason).toContain('allow list missing or empty');
+  });
+
+  it('allows allowList peer with valid signature', async () => {
+    const keypair = await generateEd25519Keypair();
+    const store = await setupStoreWithPolicy('allowList', 'publisher-peer', ['allowed-peer']);
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    const paymentProof = new Uint8Array(0);
+    const message = new TextEncoder().encode(KA_UAL + toHex(paymentProof));
+    const signature = await ed25519Sign(message, keypair.secretKey);
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'allowed-peer',
+      paymentProof,
+      requesterSignature: signature,
+      requesterPublicKey: keypair.publicKey,
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'allowed-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(true);
+    expect(res.nquads.length).toBeGreaterThan(0);
+  });
+
+  it('ignores poisoned allowList entries outside _meta graph', async () => {
+    const keypair = await generateEd25519Keypair();
+    const store = await setupStoreWithPolicy('allowList', 'publisher-peer');
+    const handler = new AccessHandler(store, new TypedEventBus());
+
+    // Attempt graph poisoning: write allow-list entry into non-meta graph.
+    await store.insert([
+      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:paranet:${PARANET}`),
+    ]);
+
+    const paymentProof = new Uint8Array(0);
+    const message = new TextEncoder().encode(KA_UAL + toHex(paymentProof));
+    const signature = await ed25519Sign(message, keypair.secretKey);
+
+    const reqBytes = encodeAccessRequest({
+      kaUal: KA_UAL,
+      requesterPeerId: 'attacker-peer',
+      paymentProof,
+      requesterSignature: signature,
+      requesterPublicKey: keypair.publicKey,
+    });
+
+    const resBytes = await handler.handler(reqBytes, 'attacker-peer' as any);
+    const res = decodeAccessResponse(resBytes);
+
+    expect(res.granted).toBe(false);
+    expect(res.rejectionReason).toContain('allow list missing or empty');
   });
 });
 

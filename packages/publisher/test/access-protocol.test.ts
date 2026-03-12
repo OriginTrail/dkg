@@ -11,7 +11,6 @@ import { MockChainAdapter } from '@dkg/chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
-import { computePrivateRoot } from '../src/merkle.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 
@@ -51,7 +50,14 @@ describe('Access Protocol', () => {
     return { nodeA, nodeB };
   }
 
-  async function publishWithPrivate(store: OxigraphStore) {
+  async function publishWithPrivate(
+    store: OxigraphStore,
+    options?: {
+      publisherPeerId?: string;
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    },
+  ) {
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
@@ -75,16 +81,19 @@ describe('Access Protocol', () => {
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"'),
         q(ENTITY, 'http://ex.org/credentials', '"password:hunter2"'),
       ],
+      publisherPeerId: options?.publisherPeerId,
+      accessPolicy: options?.accessPolicy,
+      allowedPeers: options?.allowedPeers,
     });
 
     return { result, bus, keypair };
   }
 
-  it('grants access and verifies merkle root of received private triples', async () => {
+  it('denies non-owner access to private triples', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
@@ -99,22 +108,12 @@ describe('Access Protocol', () => {
 
     const onChain = result.onChainResult!;
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    // accessClient is bound to nodeB (requester); nodeA.peerId is the remote provider target.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
-    expect(accessResult.granted).toBe(true);
-    expect(accessResult.quads.length).toBe(2);
-    expect(accessResult.verified).toBe(true);
-
-    const apiKeyTriple = accessResult.quads.find(
-      (q) => q.predicate === 'http://ex.org/apiKey',
-    );
-    expect(apiKeyTriple).toBeDefined();
-    expect(apiKeyTriple!.object).toContain('secret-key-123');
-
-    // Verify the returned merkle root matches what we compute locally
-    const localRoot = computePrivateRoot(accessResult.quads);
-    expect(localRoot).toBeDefined();
-    expect(accessResult.privateMerkleRoot).toBeDefined();
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.quads.length).toBe(0);
+    expect(accessResult.rejectionReason).toContain('owner-only');
   }, 20000);
 
   it('denies access when KA does not exist', async () => {
@@ -139,11 +138,11 @@ describe('Access Protocol', () => {
     expect(accessResult.rejectionReason).toContain('not found');
   }, 20000);
 
-  it('returns correct private triples for the specific KA requested', async () => {
+  it('denies non-owner by default for private KA access', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     const accessHandler = new AccessHandler(storeA, bus);
     const routerA = new ProtocolRouter(nodeA);
@@ -157,18 +156,15 @@ describe('Access Protocol', () => {
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
-    expect(accessResult.granted).toBe(true);
-    // All returned triples should relate to the requested entity
-    for (const quad of accessResult.quads) {
-      expect(quad.subject).toContain(ENTITY);
-    }
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner-only');
   }, 20000);
 
   it('AccessClient sends requesterPublicKey for ownerOnly access', async () => {
     const { nodeA, nodeB } = await setupTwoNodes();
 
     const storeA = new OxigraphStore();
-    const { result, bus } = await publishWithPrivate(storeA);
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
     const onChain = result.onChainResult!;
     const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
@@ -193,4 +189,91 @@ describe('Access Protocol', () => {
     expect(accessResult.granted).toBe(true);
     expect(accessResult.quads.length).toBe(2);
   }, 20000);
+
+  it('denies private access when policy and owner metadata are missing', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
+
+    const onChain = result.onChainResult!;
+    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    await storeA.delete([
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
+      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
+    ]);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner identity missing');
+  }, 20000);
+
+  it('denies ownerOnly access when owner identity is missing', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA, {
+      publisherPeerId: nodeA.peerId,
+      accessPolicy: 'ownerOnly',
+    });
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const onChain = result.onChainResult!;
+    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const metaGraph = `did:dkg:paranet:${PARANET}/_meta`;
+    await storeA.delete([
+      { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
+      { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
+    ]);
+
+    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(false);
+    expect(accessResult.rejectionReason).toContain('owner identity missing');
+  }, 20000);
+
+  it('rejects publish when allowList policy is set without allowed peers', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+    const publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: bus,
+      keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    await expect(
+      publisher.publish({
+        paranetId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"TestBot"')],
+        privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
+        publisherPeerId: '12D3KooWTestPublisher',
+        accessPolicy: 'allowList',
+      }),
+    ).rejects.toThrow('accessPolicy "allowList" requires non-empty "allowedPeers"');
+  });
 });

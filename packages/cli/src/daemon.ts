@@ -70,6 +70,23 @@ interface CatchupTracker {
   latestByParanet: Map<string, string>;
 }
 
+type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+interface PublishQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph: string;
+}
+
+interface PublishRequestBody {
+  paranetId: string;
+  quads: PublishQuad[];
+  privateQuads?: PublishQuad[];
+  accessPolicy?: PublishAccessPolicy;
+  allowedPeers?: string[];
+}
+
 
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
@@ -1442,18 +1459,22 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
   if (req.method === 'POST' && path === '/api/publish') {
     const serverT0 = Date.now();
     const body = await readBody(req);
-    const { paranetId, quads, privateQuads } = JSON.parse(body);
-    if (!paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
+    const parsed = parsePublishRequestBody(body);
+    if (!parsed.ok) {
+      return jsonResponse(res, 400, { error: parsed.error });
     }
+
+    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
+        accessPolicy,
+        allowedPeers,
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
       });
@@ -1846,6 +1867,74 @@ async function resolveNameToPeerId(agent: DKGAgent, nameOrId: string): Promise<s
     a.name.toLowerCase().startsWith(lower),
   );
   return match?.peerId ?? null;
+}
+
+function isPublishQuad(value: unknown): value is PublishQuad {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.subject === 'string' &&
+    typeof v.predicate === 'string' &&
+    typeof v.object === 'string' &&
+    typeof v.graph === 'string'
+  );
+}
+
+function parsePublishRequestBody(body: string):
+  | { ok: true; value: PublishRequestBody }
+  | { ok: false; error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, error: 'Invalid JSON body' };
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, error: 'Body must be a JSON object' };
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = payload;
+
+  if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
+    return { ok: false, error: 'Missing or invalid "paranetId"' };
+  }
+
+  if (!Array.isArray(quads) || quads.length === 0 || !quads.every(isPublishQuad)) {
+    return { ok: false, error: 'Missing or invalid "quads" (must be a non-empty quad array)' };
+  }
+
+  if (privateQuads !== undefined && (!Array.isArray(privateQuads) || !privateQuads.every(isPublishQuad))) {
+    return { ok: false, error: 'Invalid "privateQuads" (must be a quad array)' };
+  }
+
+  if (accessPolicy !== undefined && accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList') {
+    return { ok: false, error: 'Invalid "accessPolicy" (must be public, ownerOnly, or allowList)' };
+  }
+
+  if (allowedPeers !== undefined && (!Array.isArray(allowedPeers) || !allowedPeers.every((p) => typeof p === 'string' && p.trim().length > 0))) {
+    return { ok: false, error: 'Invalid "allowedPeers" (must be an array of non-empty strings)' };
+  }
+
+  if (accessPolicy === 'allowList' && (!allowedPeers || allowedPeers.length === 0)) {
+    return { ok: false, error: '"allowList" accessPolicy requires non-empty "allowedPeers"' };
+  }
+
+  if (accessPolicy !== 'allowList' && allowedPeers && allowedPeers.length > 0) {
+    return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      paranetId,
+      quads,
+      privateQuads,
+      accessPolicy,
+      allowedPeers,
+    },
+  };
 }
 
 

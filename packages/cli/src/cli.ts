@@ -441,6 +441,8 @@ program
   .option('-s, --subject <uri>', 'Subject URI for simple publish')
   .option('-p, --predicate <uri>', 'Predicate URI for simple publish')
   .option('-o, --object <value>', 'Object value for simple publish')
+  .option('--access-policy <policy>', 'Access policy for private triples (public|ownerOnly|allowList)')
+  .option('--allowed-peer <peerId>', 'Peer ID allowed when using allowList policy', (v, prev: string[] = []) => [...prev, v], [])
   .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -481,7 +483,25 @@ program
         console.log(`Parsed ${privateQuads.length} private quad(s) from ${opts.privateFile} (${format})`);
       }
 
-      const result = await client.publish(paranet, quads, privateQuads);
+      const accessPolicy = opts.accessPolicy as ('public' | 'ownerOnly' | 'allowList' | undefined);
+      const allowedPeers = (opts.allowedPeer as string[] | undefined)?.map((p) => p.trim()).filter(Boolean) ?? [];
+      if (accessPolicy && !['public', 'ownerOnly', 'allowList'].includes(accessPolicy)) {
+        console.error('Invalid --access-policy. Use one of: public, ownerOnly, allowList');
+        process.exit(1);
+      }
+      if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
+        console.error('When --access-policy allowList is used, provide at least one --allowed-peer');
+        process.exit(1);
+      }
+      if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
+        console.error('--allowed-peer can only be used with --access-policy allowList');
+        process.exit(1);
+      }
+
+      const result = await client.publish(paranet, quads, privateQuads, {
+        accessPolicy,
+        allowedPeers,
+      });
       console.log(`Published to "${paranet}":`);
       console.log(`  Status:    ${result.status}`);
       console.log(`  KC ID:     ${result.kcId}`);
