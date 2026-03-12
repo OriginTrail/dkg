@@ -33,6 +33,14 @@ import {
   type AutoUpdateConfig,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { readFileSync } from 'node:fs';
+
+function getNodeVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    return pkg.version ?? '0.0.0';
+  } catch { return '0.0.0'; }
+}
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
@@ -691,6 +699,36 @@ async function handleRequest(
       relayConnected: circuitAddrs.length > 0,
       multiaddrs: agent.multiaddrs,
       blockExplorerUrl,
+    });
+  }
+
+  // GET /api/info — lightweight DevOps health check (authenticated)
+  if (req.method === 'GET' && path === '/api/info') {
+    const allConns = agent.node.libp2p.getConnections();
+    const uniquePeers = new Set(allConns.map(c => c.remotePeer.toString()));
+    const chainConf = config.chain ?? network?.chain;
+    const now = Date.now();
+
+    return jsonResponse(res, 200, {
+      status: 'running',
+      version: getNodeVersion(),
+      name: config.name,
+      peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      network: network?.networkName ?? null,
+      startedAt: new Date(startedAt).toISOString(),
+      uptimeSeconds: Math.floor((now - startedAt) / 1000),
+      timestamp: new Date(now).toISOString(),
+      chain: chainConf ? {
+        chainId: chainConf.chainId ?? null,
+        rpcUrl: chainConf.rpcUrl,
+        hubAddress: chainConf.hubAddress,
+      } : null,
+      peers: uniquePeers.size,
+      paranets: config.paranets?.length ?? 0,
+      telemetry: config.telemetry?.enabled ?? false,
+      autoUpdate: config.autoUpdate?.enabled ?? false,
+      auth: config.auth?.enabled !== false,
     });
   }
 
