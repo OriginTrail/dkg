@@ -725,9 +725,10 @@ export class OriginTrailGameCoordinator {
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
     const proposalTimestamp = Date.now();
+    const voteAttestors = votes.map(v => ({ peerId: v.peerId, timestamp: proposalTimestamp }));
     const turnQuads = this.computeTurnQuads(
       swarm.id, swarm.currentTurn, winningAction, newStateJson,
-      votes, resolution, hash, proposalTimestamp,
+      votes.map(v => v.peerId), voteAttestors, resolution, hash,
     );
     const tripleHashes = turnQuads.map(q => hashTriple(q.subject, q.predicate, q.object));
     const merkleRoot = new MerkleTree(tripleHashes).root;
@@ -866,10 +867,25 @@ export class OriginTrailGameCoordinator {
     if (isLeader) {
       try {
         const collectedSigs = [...proposal.participantSignatures.values()];
-        const turnQuads = proposal.turnQuads ?? [];
+        let turnQuads = proposal.turnQuads ?? [];
 
         if (turnQuads.length === 0) {
-          this.log(`Turn ${proposal.turn}: no quads to publish (proposal missing turnQuads), skipping enshrinement`);
+          const approvers = [...proposal.approvals].map(peerId => ({
+            peerId,
+            timestamp: proposal.approvalTimestamps.get(peerId) ?? Date.now(),
+          }));
+          turnQuads = this.computeTurnQuads(
+            swarm.id, proposal.turn, proposal.winningAction,
+            proposal.newStateJson, proposal.votes.map(v => v.peerId),
+            approvers, proposal.resolution, proposal.hash,
+          );
+          if (turnQuads.length > 0) {
+            this.log(`Turn ${proposal.turn}: recomputed ${turnQuads.length} turn quads from proposal data`);
+          }
+        }
+
+        if (turnQuads.length === 0) {
+          this.log(`Turn ${proposal.turn}: no quads to publish after recomputation, skipping enshrinement`);
         } else {
           const reqSigs = swarm.requiredSignatures ?? 0;
           let useContextGraph = !!swarm.contextGraphId;
@@ -1066,20 +1082,20 @@ export class OriginTrailGameCoordinator {
 
   private computeTurnQuads(
     swarmId: string, turn: number, winningAction: string,
-    newStateJson: string, votes: Array<{ peerId: string; action: string }>,
-    resolution: string, proposalHash: string, proposalTimestamp: number,
+    newStateJson: string, voters: string[],
+    attestors: Array<{ peerId: string; timestamp: number }>,
+    resolution: string, proposalHash: string,
   ): Array<{ subject: string; predicate: string; object: string; graph: string }> {
-    const attestations: rdf.ConsensusAttestation[] = votes.map(v => ({
-      peerId: v.peerId,
+    const attestations: rdf.ConsensusAttestation[] = attestors.map(a => ({
+      peerId: a.peerId,
       proposalHash,
       approved: true,
-      timestamp: proposalTimestamp,
+      timestamp: a.timestamp,
     }));
     return [
       ...rdf.turnResolvedQuads(
         this.paranetId, swarmId, turn,
-        winningAction, newStateJson,
-        votes.map(v => v.peerId),
+        winningAction, newStateJson, voters,
       ),
       ...rdf.consensusAttestationQuads(
         this.paranetId, swarmId, turn, attestations, resolution, proposalHash,
@@ -1385,12 +1401,13 @@ export class OriginTrailGameCoordinator {
     const receivedAt = Date.now();
     const peerSigs = new Map<string, ParticipantSignature>();
 
-    // Recompute turn quads and merkle root locally so we can verify the
-    // proposal's claimed root before signing. Uses the proposal timestamp
-    // for deterministic attestation quads.
+    // Recompute turn quads and merkle root locally to verify the
+    // proposal's claimed root before signing. Must use the same inputs
+    // as the leader (votes + proposal timestamp) for determinism.
+    const voteAttestors = votes.map(v => ({ peerId: v.peerId, timestamp: msg.timestamp }));
     const localTurnQuads = this.computeTurnQuads(
       swarm.id, msg.turn, msg.winningAction, msg.newStateJson,
-      votes, resolution, msg.proposalHash, msg.timestamp,
+      votes.map(v => v.peerId), voteAttestors, resolution, msg.proposalHash,
     );
     let localMerkleRootHex: string | undefined;
     if (localTurnQuads.length > 0) {
