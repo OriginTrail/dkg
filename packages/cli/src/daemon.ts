@@ -769,7 +769,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       try {
         spawn(
           process.execPath,
-          [...process.execArgv, entryPoint, 'daemon-foreground-worker'],
+          [...process.execArgv, entryPoint, 'start', '--foreground'],
           {
             stdio: 'inherit',
             env: process.env,
@@ -2651,9 +2651,62 @@ async function _performUpdateInner(
     await execAsync('pnpm install --frozen-lockfile', {
       cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
     });
-    await execAsync('pnpm build', {
-      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
-    });
+    let usedFullBuildFallback = false;
+    let hasRuntimeBuildScript = false;
+    try {
+      const rootPkgRaw = await readFile(join(targetDir, 'package.json'), 'utf-8');
+      const rootPkg = JSON.parse(rootPkgRaw) as { scripts?: Record<string, string> };
+      hasRuntimeBuildScript = typeof rootPkg.scripts?.['build:runtime'] === 'string';
+    } catch {
+      hasRuntimeBuildScript = false;
+    }
+
+    if (hasRuntimeBuildScript) {
+      await execAsync('pnpm build:runtime', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+    } else {
+      log('Auto-update: target repo has no build:runtime script; falling back to pnpm build.');
+      await execAsync('pnpm build', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+      usedFullBuildFallback = true;
+    }
+
+    if (usedFullBuildFallback) {
+      log('Auto-update: contract build check skipped (full build fallback already executed).');
+    } else {
+      let shouldBuildContracts = false;
+      try {
+        if (/^[0-9a-f]{6,40}$/i.test(currentCommit) && /^[0-9a-f]{6,40}$/i.test(checkedOutCommit)) {
+          const { stdout } = await execFileAsync('git', ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`], {
+            cwd: targetDir,
+            encoding: 'utf-8',
+            timeout: 30_000,
+          });
+          const changedPaths = String(stdout)
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+          shouldBuildContracts = changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
+        }
+      } catch (diffErr: any) {
+        log(`Auto-update: contract-change check failed (${diffErr.message}); skipping contract build.`);
+        shouldBuildContracts = false;
+      }
+
+      if (shouldBuildContracts) {
+        log('Auto-update: contract folder changes detected; building @dkg/evm-module...');
+        await execAsync('pnpm --filter @dkg/evm-module build', {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          timeout: 300_000,
+        });
+        log('Auto-update: @dkg/evm-module build completed.');
+      } else {
+        log('Auto-update: no contract folder changes detected; skipping @dkg/evm-module build.');
+      }
+    }
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';
