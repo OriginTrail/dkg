@@ -1757,6 +1757,9 @@ async function handleRequest(
         participantIdentityIds: sortedUniqueIds,
         requiredSignatures,
       });
+      if (!result.success) {
+        return jsonResponse(res, 502, { error: 'Context graph creation transaction failed on-chain', success: false });
+      }
       return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });

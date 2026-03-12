@@ -365,9 +365,37 @@ export class DKGPublisher implements Publisher {
             await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
           } else {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
-            // KC is already confirmed on-chain — do NOT rollback local data
-            // or return 'failed', as that creates chain/local divergence.
-            // Keep the data and report the context-graph failure separately.
+
+            // KC is confirmed on-chain but NOT registered in the context graph.
+            // Move data from context-graph URI back to the default paranet data
+            // graph so local state matches what is actually on-chain.
+            try {
+              const ctxDataGraph = contextGraphDataUri(paranetId, ctxGraphId);
+              const ctxMetaGraph = contextGraphMetaUri(paranetId, ctxGraphId);
+              const defaultDataGraph = this.graphManager.dataGraphUri(paranetId);
+              const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
+
+              const ctxQuads = await this.store.query(
+                `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${ctxDataGraph}> { ?s ?p ?o } }`,
+              );
+              if (ctxQuads.type === 'quads' && ctxQuads.quads.length > 0) {
+                await this.store.insert(ctxQuads.quads.map(q => ({ ...q, graph: defaultDataGraph })));
+                await this.store.delete(ctxQuads.quads.map(q => ({ ...q, graph: ctxDataGraph })));
+              }
+
+              const ctxMeta = await this.store.query(
+                `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${ctxMetaGraph}> { ?s ?p ?o } }`,
+              );
+              if (ctxMeta.type === 'quads' && ctxMeta.quads.length > 0) {
+                await this.store.insert(ctxMeta.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
+                await this.store.delete(ctxMeta.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
+              }
+
+              this.log.info(ctx, `Migrated data from context graph ${ctxGraphId} back to paranet data graph`);
+            } catch (migrateErr) {
+              this.log.warn(ctx, `Failed to migrate context-graph data back to paranet graph: ${migrateErr instanceof Error ? migrateErr.message : String(migrateErr)}`);
+            }
+
             this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
               reason: 'context_graph_registration_failed',
               batchId: String(publishResult.onChainResult.batchId),

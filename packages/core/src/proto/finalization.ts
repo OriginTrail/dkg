@@ -37,8 +37,13 @@ export interface FinalizationMessageMsg {
   contextGraphId?: string;
 }
 
+const MAX_UINT64 = (1n << 64n) - 1n;
+
 function bigIntToProtoSafe(val: number | bigint | Long): number | Long {
   if (typeof val === 'bigint') {
+    if (val < 0n || val > MAX_UINT64) {
+      throw new RangeError(`Value ${val} exceeds uint64 range [0, 2^64-1]`);
+    }
     const low = Number(val & 0xFFFFFFFFn);
     const high = Number((val >> 32n) & 0xFFFFFFFFn);
     return { low, high, unsigned: true };
