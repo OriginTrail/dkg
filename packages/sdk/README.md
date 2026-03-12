@@ -2,6 +2,13 @@
 
 Resource-first TypeScript SDK for DKG daemon APIs.
 
+## Docs
+
+- Quickstart: `packages/sdk/docs/quickstart.md`
+- Publish/Query flow: `packages/sdk/docs/publish-query-flow.md`
+- Auth: `packages/sdk/docs/auth.md`
+- Examples: `packages/sdk/examples/`
+
 ## Quick Start
 
 ```ts
@@ -49,6 +56,42 @@ const enshrined = await dkg.publish.workspaceEnshrine({
   contextGraphId: context.contextGraphId,
 });
 console.log(enshrined.contextGraphId);
+```
+
+## Auth
+
+- If your daemon requires auth, pass a bearer token via `token`.
+- If auth is disabled, omit `token`.
+
+```ts
+const dkg = createDKG({
+  baseUrl: 'http://127.0.0.1:9200',
+  token: process.env.DKG_TOKEN,
+});
+```
+
+## Publish/Query Flow
+
+```ts
+const paranetId = 'dev-coordination';
+const graph = `did:dkg:paranet:${paranetId}`;
+
+await dkg.publish.quads({
+  paranetId,
+  quads: [
+    {
+      subject: 'urn:entity:alice',
+      predicate: 'http://schema.org/name',
+      object: '"Alice"',
+      graph,
+    },
+  ],
+});
+
+const out = await dkg.query.sparql(
+  'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name } LIMIT 25',
+  { paranetId },
+);
 ```
 
 ## Current Resources
