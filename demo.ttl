@@ -1,8 +1,0 @@
-@prefix schema: <https://schema.org/> .
-@prefix dkg: <did:dkg:entity:> .
-
-dkg:zivojin-demo
-    a schema:Thing, schema:Person ;
-    schema:name "Zivojin's Demo Entity" ;
-    schema:description "First cross-agent knowledge published on DKG V9 testnet" ;
-    schema:dateCreated "2026-02-26" .

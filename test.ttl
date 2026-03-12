@@ -1,6 +1,0 @@
-@prefix schema: <https://schema.org/> .
-
-<did:dkg:entity:idemo-bre2>
-    a schema:Thing ;
-    schema:name "Ovo je bre Knowledge Asset" ;
-    schema:description "Published from the testnet" .
