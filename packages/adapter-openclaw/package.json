@@ -23,15 +23,10 @@
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
-  "dependencies": {
-    "@dkg/agent": "workspace:*",
-    "@dkg/core": "workspace:*",
-    "@dkg/storage": "workspace:*"
-  },
+  "dependencies": {},
   "openclaw": {
     "extensions": ["./openclaw-entry.mjs"]
   },
-  "bundledDependencies": ["@dkg/agent", "@dkg/core", "@dkg/storage"],
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"

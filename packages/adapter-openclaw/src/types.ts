@@ -172,34 +172,6 @@ export interface OpenClawMemorySearchManager {
 // ---------------------------------------------------------------------------
 
 export interface DkgOpenClawConfig {
-  /** Persistent identity / state directory. Default: `.dkg/openclaw` */
-  dataDir?: string;
-  /** DKG listen port. Default: random */
-  listenPort?: number;
-  /** Relay peer multiaddrs for NAT traversal. */
-  relayPeers?: string[];
-  /** Bootstrap peer multiaddrs. */
-  bootstrapPeers?: string[];
-  /** Agent display name (defaults to OpenClaw agent name). */
-  name?: string;
-  /** Agent description. */
-  description?: string;
-  /** On-chain config (private key via DKG_EVM_PRIVATE_KEY env var). */
-  chainConfig?: {
-    rpcUrl?: string;
-    hubAddress?: string;
-    privateKey?: string;
-  };
-  /** Skills this agent offers. */
-  skills?: Array<{
-    skillType: string;
-    pricePerCall?: number;
-    currency?: string;
-    handler: (input: Uint8Array) => Promise<{ status: string; output?: Uint8Array; error?: string }>;
-  }>;
-
-  // --- Integration extensions ---
-
   /** DKG daemon HTTP URL (default: "http://127.0.0.1:9200"). */
   daemonUrl?: string;
 

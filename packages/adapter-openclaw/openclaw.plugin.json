@@ -2,23 +2,27 @@
   "id": "adapter-openclaw",
   "name": "DKG Node — Decentralized Knowledge Graph",
   "version": "0.0.1",
-  "description": "Turns your OpenClaw agent into a DKG V9 node. Enables publishing knowledge, querying the graph, discovering other agents, and invoking remote skills over a decentralized P2P network.",
+  "description": "Connects your OpenClaw agent to a DKG V9 node. Enables verifiable memory, publishing knowledge, querying the graph, discovering agents, and invoking remote skills over a decentralized P2P network.",
   "configSchema": {
     "type": "object",
     "properties": {
-      "dataDir": { "type": "string", "default": ".dkg/openclaw", "description": "Persistent state directory (keys, triple store)" },
-      "listenPort": { "type": "number", "description": "TCP port (0 = random)" },
-      "relayPeers": { "type": "array", "items": { "type": "string" }, "description": "Relay multiaddrs for NAT traversal" },
-      "bootstrapPeers": { "type": "array", "items": { "type": "string" }, "description": "DKG bootstrap multiaddrs" },
-      "name": { "type": "string", "description": "Agent display name" },
-      "description": { "type": "string", "description": "Agent description" },
-      "chainConfig": {
+      "daemonUrl": { "type": "string", "default": "http://127.0.0.1:9200", "description": "DKG daemon HTTP URL" },
+      "memory": {
         "type": "object",
         "properties": {
-          "rpcUrl": { "type": "string", "description": "EVM RPC URL" },
-          "hubAddress": { "type": "string", "description": "DKG Hub contract address" }
+          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG memory tools and file-watcher sync" },
+          "memoryDir": { "type": "string", "description": "Override watched memory directory" },
+          "watchDebounceMs": { "type": "number", "default": 1500, "description": "File watcher debounce interval (ms)" }
         },
-        "description": "On-chain config (private key via DKG_EVM_PRIVATE_KEY env var)"
+        "description": "DKG memory integration"
+      },
+      "channel": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG UI ↔ OpenClaw bridge" },
+          "port": { "type": "number", "default": 9201, "description": "Standalone bridge port (when gateway route registration unavailable)" }
+        },
+        "description": "DKG UI channel bridge"
       }
     }
   },

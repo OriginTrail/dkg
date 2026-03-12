@@ -139,6 +139,86 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Node status (full)
+  // ---------------------------------------------------------------------------
+
+  async getFullStatus(): Promise<Record<string, unknown>> {
+    return this.get('/api/status');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agents & skills discovery
+  // ---------------------------------------------------------------------------
+
+  async getAgents(filter?: { framework?: string; skill_type?: string }): Promise<{ agents: any[] }> {
+    const params = new URLSearchParams();
+    if (filter?.framework) params.set('framework', filter.framework);
+    if (filter?.skill_type) params.set('skill_type', filter.skill_type);
+    const qs = params.toString();
+    return this.get(`/api/agents${qs ? `?${qs}` : ''}`);
+  }
+
+  async getSkills(filter?: { skillType?: string }): Promise<{ skills: any[] }> {
+    const params = new URLSearchParams();
+    if (filter?.skillType) params.set('skillType', filter.skillType);
+    const qs = params.toString();
+    return this.get(`/api/skills${qs ? `?${qs}` : ''}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // P2P messaging
+  // ---------------------------------------------------------------------------
+
+  async sendChat(to: string, text: string): Promise<any> {
+    return this.post('/api/chat', { to, text });
+  }
+
+  async getMessages(opts?: { peer?: string; limit?: number; since?: number }): Promise<{ messages: any[] }> {
+    const params = new URLSearchParams();
+    if (opts?.peer) params.set('peer', opts.peer);
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.since != null) params.set('since', String(opts.since));
+    const qs = params.toString();
+    return this.get(`/api/messages${qs ? `?${qs}` : ''}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Publish
+  // ---------------------------------------------------------------------------
+
+  async publish(
+    paranetId: string,
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+    privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+  ): Promise<any> {
+    return this.post('/api/publish', { paranetId, quads, privateQuads });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Paranets
+  // ---------------------------------------------------------------------------
+
+  async listParanets(): Promise<{ paranets: any[] }> {
+    return this.get('/api/paranet/list');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Skill invocation
+  // ---------------------------------------------------------------------------
+
+  async invokeSkill(peerId: string, skillUri: string, input?: string): Promise<any> {
+    return this.post('/api/invoke-skill', { peerId, skillUri, input });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wallets
+  // ---------------------------------------------------------------------------
+
+  async getWallets(): Promise<{ wallets: string[] }> {
+    return this.get('/api/wallets');
+  }
+
+  // ---------------------------------------------------------------------------
   // HTTP primitives
   // ---------------------------------------------------------------------------
 

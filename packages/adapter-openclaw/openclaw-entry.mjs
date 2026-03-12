@@ -26,27 +26,6 @@ export default function (api) {
   // Build config from workspace settings
   const config = { ...wsConfig };
 
-  // Deep-clone chainConfig to avoid mutating the parsed object
-  if (wsConfig.chainConfig) {
-    config.chainConfig = { ...wsConfig.chainConfig };
-  }
-
-  // Inject EVM private key from environment (never store in config files).
-  // If there's no chainConfig block but the env var is set, create one with
-  // testnet defaults so the user only needs to set the env var.
-  const envKey = process.env.DKG_EVM_PRIVATE_KEY;
-  if (envKey) {
-    if (!config.chainConfig) {
-      config.chainConfig = {
-        rpcUrl: 'https://sepolia.base.org',
-        hubAddress: '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
-      };
-    }
-    if (!config.chainConfig.privateKey) {
-      config.chainConfig.privateKey = envKey;
-    }
-  }
-
   // Override daemon URL from environment if set
   if (process.env.DKG_DAEMON_URL) {
     config.daemonUrl = process.env.DKG_DAEMON_URL;
@@ -69,7 +48,7 @@ export default function (api) {
     api.workspaceDir = workspaceDir;
   }
 
-  log.info?.(`[dkg-entry] config — memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}`);
+  log.info?.(`[dkg-entry] config — daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}`);
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);

@@ -1,12 +1,12 @@
 /**
- * DkgNodePlugin — OpenClaw adapter that turns any OpenClaw agent into a
- * DKG V9 node.
+ * DkgNodePlugin — OpenClaw adapter that connects any OpenClaw agent to a
+ * running DKG V9 daemon.
  *
- * Wraps a `DKGAgent` and exposes its capabilities as OpenClaw tools.
- * The agent starts lazily on first tool call (or on `session_start`) and
- * stops on `session_end`.
+ * All tools route through DkgDaemonClient → daemon HTTP API.
+ * There is no embedded DKGAgent — the daemon owns the node, triple store,
+ * and P2P networking.
  *
- * Phase 0 extensions (spike):
+ * Integration modules:
  *   - DKG UI channel bridge (DkgChannelPlugin)
  *   - DKG-backed memory search (DkgMemoryPlugin)
  *   - Memory write capture (WriteCapture)
@@ -14,7 +14,6 @@
 import { readFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { DKGAgent, type DKGAgentConfig } from '@dkg/agent';
 import { DkgDaemonClient } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
 import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
@@ -27,12 +26,12 @@ import type {
 } from './types.js';
 
 export class DkgNodePlugin {
-  private agent: DKGAgent | null = null;
-  private starting: Promise<void> | null = null;
   private readonly config: DkgOpenClawConfig;
 
-  // Integration modules (Phase 0 spike)
-  private client: DkgDaemonClient | null = null;
+  // HTTP client to daemon — used by all tools and integration modules
+  private client!: DkgDaemonClient;
+
+  // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private writeCapture: WriteCapture | null = null;
@@ -40,10 +39,7 @@ export class DkgNodePlugin {
   private backlogImportDone: Promise<void> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
-    this.config = {
-      dataDir: '.dkg/openclaw',
-      ...config,
-    };
+    this.config = { ...config };
   }
 
   /**
@@ -51,14 +47,17 @@ export class DkgNodePlugin {
    * Registers lifecycle hooks, agent-facing tools, and integration modules.
    */
   register(api: OpenClawPluginApi): void {
-    api.registerHook('session_start', () => this.start(), { name: 'dkg-node-start' });
+    // Create daemon client — used by all tools and integration modules
+    const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
+    this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
+
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
     for (const tool of this.tools()) {
       api.registerTool(tool);
     }
 
-    // --- Integration modules (Phase 0) ---
+    // --- Integration modules ---
     this.registerIntegrationModules(api);
   }
 
@@ -67,10 +66,7 @@ export class DkgNodePlugin {
    * Each module is optional — enabled via config flags.
    */
   private registerIntegrationModules(api: OpenClawPluginApi): void {
-    const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
-    this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
-
-    // --- Channel module (Spike A) ---
+    // --- Channel module ---
     const channelConfig = this.config.channel;
     if (channelConfig?.enabled) {
       this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
@@ -78,7 +74,7 @@ export class DkgNodePlugin {
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
 
-    // --- Memory module (Spike B) ---
+    // --- Memory module ---
     const memoryConfig = this.config.memory;
     if (memoryConfig?.enabled) {
       // Auto-detect memory directory from workspace if not configured
@@ -105,7 +101,7 @@ export class DkgNodePlugin {
 
         // Fire-and-forget: backlog import on first-ever install (runs at most once)
         if (!this.backlogImportDone) {
-          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client!, effectiveConfig)
+          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
             .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
         }
       }, { name: 'dkg-write-watcher-start' });
@@ -114,78 +110,18 @@ export class DkgNodePlugin {
     }
   }
 
-  async start(): Promise<void> {
-    if (this.agent) return;
-    // Prevent concurrent callers from double-initializing
-    if (this.starting) return this.starting;
-    this.starting = this.doStart();
-    try {
-      await this.starting;
-    } finally {
-      this.starting = null;
-    }
-  }
-
-  private async doStart(): Promise<void> {
-    const chainKey = this.config.chainConfig?.privateKey;
-    const agentConfig: DKGAgentConfig = {
-      name: this.config.name ?? 'openclaw-agent',
-      framework: 'OpenClaw',
-      description: this.config.description,
-      listenPort: this.config.listenPort,
-      dataDir: this.config.dataDir,
-      relayPeers: this.config.relayPeers,
-      bootstrapPeers: this.config.bootstrapPeers,
-      chainConfig: chainKey ? {
-        rpcUrl: this.config.chainConfig?.rpcUrl ?? 'https://sepolia.base.org',
-        hubAddress: this.config.chainConfig?.hubAddress ?? '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
-        operationalKeys: [chainKey],
-      } : undefined,
-      skills: this.config.skills?.map(s => ({
-        skillType: s.skillType,
-        pricePerCall: s.pricePerCall,
-        currency: s.currency,
-        handler: async (req: any) => {
-          const result = await s.handler(req.inputData);
-          return {
-            success: result.status === 'ok',
-            outputData: result.output,
-            error: result.error,
-          };
-        },
-      })),
-    };
-
-    this.agent = await DKGAgent.create(agentConfig);
-    await this.agent.start();
-    await this.agent.publishProfile();
-  }
-
   async stop(): Promise<void> {
-    // If currently starting, wait for it to finish before stopping
-    if (this.starting) {
-      try { await this.starting; } catch { /* stop anyway */ }
-    }
-
     // Stop integration modules
     this.writeCapture?.stop();
     await this.channelPlugin?.stop();
-
-    if (!this.agent) return;
-    await this.agent.stop();
-    this.agent = null;
   }
 
-  getAgent(): DKGAgent | null {
-    return this.agent;
-  }
-
-  getClient(): DkgDaemonClient | null {
+  getClient(): DkgDaemonClient {
     return this.client;
   }
 
   // ---------------------------------------------------------------------------
-  // Backlog import (Phase 3, Layer 1)
+  // Backlog import
   // ---------------------------------------------------------------------------
 
   /**
@@ -286,6 +222,17 @@ export class DkgNodePlugin {
     return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], details: { error: message } };
   }
 
+  private daemonError(err: any): OpenClawToolResult {
+    const msg = err.message ?? String(err);
+    if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
+      return this.error(
+        'DKG daemon is not reachable. Make sure the daemon is running (dkg start) ' +
+        `and accessible at ${this.client.baseUrl}.`,
+      );
+    }
+    return this.error(msg);
+  }
+
   // ---------------------------------------------------------------------------
   // Tools
   // ---------------------------------------------------------------------------
@@ -295,9 +242,8 @@ export class DkgNodePlugin {
       {
         name: 'dkg_status',
         description:
-          'Show DKG node status: peer ID, connected peers, and multiaddrs. ' +
-          'Call this to verify the node is running and to diagnose connectivity issues. ' +
-          'Returns config summary if the node has not started yet.',
+          'Show DKG node status: peer ID, connected peers, multiaddrs, and wallet addresses. ' +
+          'Call this to verify the daemon is running and to diagnose connectivity issues.',
         parameters: { type: 'object', properties: {}, required: [] },
         execute: async (_toolCallId, _params) => this.handleStatus(),
       },
@@ -352,23 +298,40 @@ export class DkgNodePlugin {
             framework: { type: 'string', description: 'Filter by framework name (e.g. "OpenClaw", "ElizaOS")' },
             skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis")' },
           },
+          required: [],
         },
         execute: async (_toolCallId, args) => this.handleFindAgents(args),
       },
       {
         name: 'dkg_send_message',
         description:
-          'Send an end-to-end encrypted chat message to another DKG agent by their peer ID. ' +
+          'Send an end-to-end encrypted chat message to another DKG agent by their peer ID or name. ' +
           'Both agents must be online. Use dkg_find_agents first to discover peer IDs.',
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Recipient peer ID (starts with 12D3KooW...)' },
+            peer_id: { type: 'string', description: 'Recipient peer ID (starts with 12D3KooW...) or agent name' },
             text: { type: 'string', description: 'Message text to send' },
           },
           required: ['peer_id', 'text'],
         },
         execute: async (_toolCallId, args) => this.handleSendMessage(args),
+      },
+      {
+        name: 'dkg_read_messages',
+        description:
+          'Read P2P messages received from other DKG agents. Returns both sent and received messages. ' +
+          'Filter by peer ID/name, limit results, or fetch messages since a timestamp.',
+        parameters: {
+          type: 'object',
+          properties: {
+            peer: { type: 'string', description: 'Filter by peer ID or agent name (optional)' },
+            limit: { type: 'string', description: 'Maximum number of messages to return (default: 100)' },
+            since: { type: 'string', description: 'Only return messages after this timestamp in ms (optional)' },
+          },
+          required: [],
+        },
+        execute: async (_toolCallId, args) => this.handleReadMessages(args),
       },
       {
         name: 'dkg_invoke_skill',
@@ -378,7 +341,7 @@ export class DkgNodePlugin {
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Target agent peer ID (starts with 12D3KooW...)' },
+            peer_id: { type: 'string', description: 'Target agent peer ID (starts with 12D3KooW...) or agent name' },
             skill_uri: { type: 'string', description: 'Skill URI to invoke (e.g. "ImageAnalysis")' },
             input: { type: 'string', description: 'Input data as UTF-8 text' },
           },
@@ -390,50 +353,32 @@ export class DkgNodePlugin {
   }
 
   // ---------------------------------------------------------------------------
-  // Handlers
+  // Handlers — all route through DkgDaemonClient → daemon HTTP API
   // ---------------------------------------------------------------------------
 
   private async handleStatus(): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
-      const peers = agent.node.libp2p.getPeers();
-      return this.json({
-        status: 'running',
-        peerId: agent.peerId,
-        multiaddrs: agent.multiaddrs,
-        connectedPeers: peers.map(p => p.toString()),
-        peerCount: peers.length,
-      });
+      const [status, wallets] = await Promise.all([
+        this.client.getFullStatus(),
+        this.client.getWallets().catch(() => ({ wallets: [] })),
+      ]);
+      return this.json({ ...status, walletAddresses: wallets.wallets });
     } catch (err: any) {
-      // Return config summary so the agent can diagnose what went wrong
-      return this.json({
-        status: 'error',
-        error: err.message,
-        config: {
-          name: this.config.name ?? 'openclaw-agent',
-          dataDir: this.config.dataDir,
-          relayPeers: this.config.relayPeers,
-          hasChainKey: !!this.config.chainConfig?.privateKey,
-        },
-      });
+      return this.daemonError(err);
     }
   }
 
   private async handleListParanets(): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const paranets = await this.agent!.listParanets();
-      return this.json({ paranets, count: paranets.length });
+      const result = await this.client.listParanets();
+      return this.json({ paranets: result.paranets, count: result.paranets.length });
     } catch (err: any) {
-      return this.error(err.message ?? 'Failed to list paranets');
+      return this.daemonError(err);
     }
   }
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
       const paranetId = String(args.paranet_id);
       const nquadsText = String(args.nquads);
 
@@ -444,72 +389,74 @@ export class DkgNodePlugin {
           'Example: <did:dkg:entity:x> <https://schema.org/name> "Hello" .',
         );
       }
-      const result = await agent.publish(paranetId, quads as any);
-      return this.json({ kcId: result.kcId, kaCount: result.kaManifest.length, triplesPublished: quads.length });
+      const result = await this.client.publish(paranetId, quads);
+      return this.json({ kcId: result.kcId, kaCount: result.kas?.length, triplesPublished: quads.length });
     } catch (err: any) {
-      return this.error(err.message);
+      return this.daemonError(err);
     }
   }
 
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
       const sparql = String(args.sparql);
       const paranetId = args.paranet_id ? String(args.paranet_id) : undefined;
-      const result = await agent.query(sparql, paranetId);
+      const result = await this.client.query(sparql, { paranetId });
       return this.json(result);
     } catch (err: any) {
-      return this.error(err.message);
+      return this.daemonError(err);
     }
   }
 
   private async handleFindAgents(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
-
-      if (args.skill_type) {
-        const offerings = await agent.findSkills({ skillType: String(args.skill_type) });
-        return this.json(offerings);
-      }
-
-      const agents = await agent.findAgents(
-        args.framework ? { framework: String(args.framework) } : undefined,
-      );
-      return this.json(agents);
+      const filter: { framework?: string; skill_type?: string } = {};
+      if (args.framework) filter.framework = String(args.framework);
+      if (args.skill_type) filter.skill_type = String(args.skill_type);
+      const result = await this.client.getAgents(Object.keys(filter).length ? filter : undefined);
+      return this.json(result);
     } catch (err: any) {
-      return this.error(err.message);
+      return this.daemonError(err);
     }
   }
 
   private async handleSendMessage(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
-      const result = await agent.sendChat(String(args.peer_id), String(args.text));
+      const result = await this.client.sendChat(String(args.peer_id), String(args.text));
       return this.json(result);
     } catch (err: any) {
-      return this.error(err.message);
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleReadMessages(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const opts: { peer?: string; limit?: number; since?: number } = {};
+      if (args.peer) opts.peer = String(args.peer);
+      if (args.limit) {
+        const n = parseInt(String(args.limit), 10);
+        if (!isNaN(n)) opts.limit = n;
+      }
+      if (args.since) {
+        const n = parseInt(String(args.since), 10);
+        if (!isNaN(n)) opts.since = n;
+      }
+      const result = await this.client.getMessages(opts);
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
     }
   }
 
   private async handleInvokeSkill(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      await this.start();
-      const agent = this.agent!;
-      const response = await agent.invokeSkill(
+      const result = await this.client.invokeSkill(
         String(args.peer_id),
         String(args.skill_uri),
-        new TextEncoder().encode(String(args.input)),
+        String(args.input),
       );
-      return this.json({
-        success: response.success,
-        output: response.outputData ? new TextDecoder().decode(response.outputData) : undefined,
-        error: response.error,
-      });
+      return this.json(result);
     } catch (err: any) {
-      return this.error(err.message);
+      return this.daemonError(err);
     }
   }
 }
