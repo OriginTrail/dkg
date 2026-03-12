@@ -164,6 +164,8 @@ function detectDeaths(
     });
 }
 
+const STALE_SWARM_TTL_MS = 24 * 60 * 60 * 1000;
+
 function stripQuotes(s: string): string {
   if (s.startsWith('"')) {
     const dtIdx = s.indexOf('"^^');
@@ -337,8 +339,7 @@ export class OriginTrailGameCoordinator {
         const swarmName = stripQuotes(row['name'] ?? '');
         const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
 
-        const STALE_TTL_MS = 24 * 60 * 60 * 1000;
-        if (createdAt > 0 && Date.now() - createdAt > STALE_TTL_MS) {
+        if (createdAt > 0 && Date.now() - createdAt > STALE_SWARM_TTL_MS) {
           this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
           continue;
         }

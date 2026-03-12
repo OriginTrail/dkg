@@ -1337,6 +1337,42 @@ describe('Graph-based lobby sync', () => {
     expect(lobby.openSwarms[0].players[0].displayName).toBe('OtherPlayer');
     expect(queryCount).toBeGreaterThanOrEqual(3);
   }, 10_000);
+
+  it('loadLobbyFromGraph skips swarms older than 24 hours', async () => {
+    const syncAgent = makeMockAgent('stale-peer');
+    const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000; // 25 hours ago
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-stale',
+            name: '"Stale Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/stale-leader',
+            createdAt: `"${staleTimestamp}"`,
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [{
+            agent: 'https://origintrail-game.dkg.io/player/stale-leader',
+            displayName: '"StalePlayer"',
+          }],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    await new Promise(r => setTimeout(r, 6_000));
+
+    const lobby = coordinator.getLobby();
+    expect(lobby.openSwarms.length).toBe(0);
+    expect(lobby.mySwarms.length).toBe(0);
+  }, 10_000);
 });
 
 describe('Network topology hints (V3)', () => {
