@@ -115,3 +115,14 @@ const out = await dkg.query.sparql(
 - `dkg.agent.messages({ peer?, since?, limit? })`
 
 This is the initial SDK foundation; next step is expanding each resource with additional typed operations.
+
+## Testing
+
+- Unit tests: `pnpm --filter @dkg/sdk test`
+- Integration tests (against a running local daemon):
+
+```bash
+DKG_SDK_INTEGRATION_BASE_URL=http://127.0.0.1:9200 \
+DKG_SDK_INTEGRATION_TOKEN=<optional-token> \
+pnpm --filter @dkg/sdk test:integration
+```
