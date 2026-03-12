@@ -47,6 +47,8 @@ import {
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
+export const DAEMON_EXIT_CODE_RESTART = 75;
+
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
 interface CatchupJobResult {
@@ -289,7 +291,13 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     const au = config.autoUpdate;
     log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
     updateInterval = setInterval(
-      () => checkForUpdate(au, log),
+      async () => {
+        const updated = await checkForUpdate(au, log);
+        if (updated) {
+          log('Auto-update: update activated; restarting daemon process.');
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+        }
+      },
       au.checkIntervalMinutes * 60_000,
     );
   }
@@ -663,7 +671,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
 
   // Graceful shutdown
-  async function shutdown() {
+  let shuttingDown = false;
+  async function shutdown(exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log('Shutting down...');
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
@@ -676,7 +687,7 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     await removePid();
     await removeApiPort();
     log('Stopped.');
-    process.exit(0);
+    process.exit(exitCode);
   }
 
   process.on('SIGINT', shutdown);
@@ -2352,19 +2363,19 @@ async function _performUpdateInner(
     `Auto-update: build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ''}. Swapped symlink. Restarting...`,
   );
+  log('v9 auto-update test live leeroy jenkins');
   return 'updated';
 }
 
 export async function checkForUpdate(
   au: AutoUpdateConfig,
   log: (msg: string) => void,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const updated = await performUpdate(au, log);
-    if (updated) {
-      process.kill(process.pid, 'SIGTERM');
-    }
+    return updated;
   } catch (err: any) {
     log(`Auto-update: error — ${err.message}`);
+    return false;
   }
 }

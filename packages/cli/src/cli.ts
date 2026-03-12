@@ -15,7 +15,12 @@ import {
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { runDaemon, performUpdateWithStatus, checkForNewCommitWithStatus } from './daemon.js';
+import {
+  runDaemon,
+  performUpdateWithStatus,
+  checkForNewCommitWithStatus,
+  DAEMON_EXIT_CODE_RESTART,
+} from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
 
 /** Options object passed to commander action callbacks (parsed .option() values) */
@@ -38,6 +43,46 @@ function getCliVersion(): string {
     return pkg.version ?? '0.0.0';
   } catch {
     return '0.0.0';
+  }
+}
+
+function resolveDaemonEntryPoint(): string {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(rDir) && existsSync(currentLink)
+    ? currentLink
+    : fileURLToPath(import.meta.url);
+}
+
+async function runDaemonSupervisor(): Promise<void> {
+  const maxCrashRestarts = 5;
+  let crashRestartCount = 0;
+
+  while (true) {
+    const child = spawn(
+      process.execPath,
+      [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-worker'],
+      {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        env: process.env,
+      },
+    );
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child.once('exit', (code) => resolve(code));
+    });
+
+    if (exitCode === DAEMON_EXIT_CODE_RESTART) {
+      crashRestartCount = 0;
+      await sleep(250);
+      continue;
+    }
+
+    if (exitCode === 0) return;
+
+    crashRestartCount += 1;
+    if (crashRestartCount >= maxCrashRestarts) return;
+    await sleep(1000);
   }
 }
 
@@ -243,6 +288,20 @@ authCmd
 // ─── dkg start ───────────────────────────────────────────────────────
 
 program
+  .command('daemon-worker', { hidden: true })
+  .description('Internal: run daemon worker process')
+  .action(async () => {
+    await runDaemon(false);
+  });
+
+program
+  .command('daemon-supervisor', { hidden: true })
+  .description('Internal: supervise daemon worker restarts')
+  .action(async () => {
+    await runDaemonSupervisor();
+  });
+
+program
   .command('start')
   .description('Start the DKG daemon')
   .option('-f, --foreground', 'Run in the foreground (don\'t daemonize)')
@@ -266,15 +325,11 @@ program
       return;
     }
 
-    // Spawn detached background process via releases/current symlink
-    const rDir = releasesDir();
-    const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
-    const entryPoint = existsSync(rDir) && existsSync(currentLink)
-      ? currentLink
-      : fileURLToPath(import.meta.url);
+    // Spawn detached background supervisor via releases/current symlink
+    const entryPoint = resolveDaemonEntryPoint();
     const child = spawn(
       process.execPath,
-      [...process.execArgv, entryPoint, 'start', '--foreground'],
+      [...process.execArgv, entryPoint, 'daemon-supervisor'],
       {
         detached: true,
         stdio: ['ignore', 'ignore', 'ignore'],

@@ -210,17 +210,15 @@ describe('blue-green checkForUpdate', () => {
     );
   });
 
-  it('calls SIGTERM after swap via checkForUpdate', async () => {
+  it('returns true after swap via checkForUpdate', async () => {
     const current = 'aaa111';
     const latest = 'ddd444';
     mockedReadFile.mockResolvedValueOnce(current as any);
     makeFetchOk(latest);
 
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const log = vi.fn();
-    await checkForUpdate(AU, log);
-    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
-    killSpy.mockRestore();
+    const updated = await checkForUpdate(AU, log);
+    expect(updated).toBe(true);
   });
 
   it('build failure does not swap', async () => {
