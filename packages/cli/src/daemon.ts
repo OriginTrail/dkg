@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { execSync, exec, execFile } from 'node:child_process';
+import { execSync, exec, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -56,6 +56,14 @@ function getNodeVersion(): string {
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
+
+function resolveDaemonEntryPoint(): string {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(rDir) && existsSync(currentLink)
+    ? currentLink
+    : fileURLToPath(import.meta.url);
+}
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -324,6 +332,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
+  let pendingForegroundRestart = false;
   if (config.autoUpdate?.enabled) {
     const au = config.autoUpdate;
     log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
@@ -331,6 +340,12 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       async () => {
         const updated = await checkForUpdate(au, log);
         if (updated) {
+          if (foreground) {
+            log('Auto-update: update activated; restarting foreground daemon in-place.');
+            pendingForegroundRestart = true;
+            await shutdown(0);
+            return;
+          }
           log('Auto-update: update activated; restarting daemon process.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
         }
@@ -746,6 +761,25 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     await removePid();
     await removeApiPort();
     log('Stopped.');
+
+    if (pendingForegroundRestart) {
+      pendingForegroundRestart = false;
+      const entryPoint = resolveDaemonEntryPoint();
+      log(`Auto-update: launching updated foreground daemon from ${entryPoint}`);
+      try {
+        spawn(
+          process.execPath,
+          [...process.execArgv, entryPoint, 'daemon-foreground-worker'],
+          {
+            stdio: 'inherit',
+            env: process.env,
+          },
+        );
+      } catch (err: any) {
+        log(`Auto-update: failed to relaunch foreground daemon — ${err.message}`);
+        process.exit(1);
+      }
+    }
     process.exit(exitCode);
   }
 

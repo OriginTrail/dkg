@@ -295,6 +295,13 @@ program
   });
 
 program
+  .command('daemon-foreground-worker', { hidden: true })
+  .description('Internal: run foreground daemon worker process')
+  .action(async () => {
+    await runDaemon(true);
+  });
+
+program
   .command('daemon-supervisor', { hidden: true })
   .description('Internal: supervise daemon worker restarts')
   .action(async () => {
