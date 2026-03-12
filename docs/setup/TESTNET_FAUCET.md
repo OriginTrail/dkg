@@ -62,7 +62,7 @@ On `429` responses, back off using the `retry-after` header.
 
 ## Dry run (test without sending transactions)
 
-`POST /dry-run` accepts the same body but doesn't broadcast transactions. Use it to verify your request before spending rate-limit budget.
+`POST /dry-run` accepts the same body but doesn't broadcast transactions. Use it to verify your request while avoiding on-chain transactions; note that dry-run requests still count against the shared funding rate limit.
 
 ```bash
 curl -X POST "https://euphoria.origin-trail.network/faucet/dry-run" \

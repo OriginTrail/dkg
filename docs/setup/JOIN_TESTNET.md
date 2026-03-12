@@ -22,7 +22,7 @@ All three use the same network and protocol; CLI, OpenClaw, and ElizaOS nodes ca
 - **pnpm** v9+ — install with: `npm install -g pnpm`
 - **Git**
 - Internet connection
-- **Base Sepolia ETH** for on-chain publishing (~0.001 ETH per publish; messaging and queries are free)
+- **Base Sepolia ETH + TRAC** for on-chain operations (~0.001 ETH per publish; messaging and queries are free)
 - An **EVM private key** — any wallet; you can create a new one just for the testnet (no KYC, no real money)
 
 ### Get Base Sepolia ETH + TRAC
@@ -32,6 +32,7 @@ All three use the same network and protocol; CLI, OpenClaw, and ElizaOS nodes ca
 ```bash
 curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: YOUR_UNIQUE_IDEMPOTENCY_KEY" \
   --data-raw '{"mode": "v9_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
 ```
 
