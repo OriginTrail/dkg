@@ -22,8 +22,6 @@ export interface PublishOptions {
   /** Allowed peer IDs when accessPolicy is allowList. */
   allowedPeers?: string[];
   manifest?: KAManifestEntry[];
-  /** Publishing node identity (peerId) for provenance metadata. */
-  publisherPeerId?: string;
   operationCtx?: OperationContext;
   /**
    * When true, triples are grouped by root entity and each group gets its
