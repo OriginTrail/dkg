@@ -381,35 +381,28 @@ export class DKGPublisher implements Publisher {
         const defaultDataGraph = this.graphManager.dataGraphUri(paranetId);
         const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
 
-        const batchRoots = publishResult.kaManifest.map(ka => ka.rootEntity);
-        const values = batchRoots.map(r => `<${r}>`).join(' ');
-
-        const scopedDataQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
-          GRAPH <${defaultDataGraph}> {
-            VALUES ?root { ${values} }
-            ?s ?p ?o .
-            FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
-          }
-        }`;
-        const dataResult = await this.store.query(scopedDataQuery);
-        if (dataResult.type === 'quads' && dataResult.quads.length > 0) {
-          await this.store.insert(dataResult.quads.map(q => ({ ...q, graph: ctxDataGraph })));
-          await this.store.delete(dataResult.quads.map(q => ({ ...q, graph: defaultDataGraph })));
+        if (publishResult.publicQuads && publishResult.publicQuads.length > 0) {
+          const storedQuads = publishResult.publicQuads.map(q => ({ ...q, graph: defaultDataGraph }));
+          await this.store.insert(storedQuads.map(q => ({ ...q, graph: ctxDataGraph })));
+          await this.store.delete(storedQuads);
         }
 
-        const scopedMetaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+        const ual = publishResult.ual;
+        const kaUals = publishResult.kaManifest.map(ka => `${ual}/${ka.tokenId}`);
+        const metaSubjects = new Set([ual, ...kaUals]);
+        const metaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
           GRAPH <${defaultMetaGraph}> {
+            VALUES ?s { ${[...metaSubjects].map(s => `<${s}>`).join(' ')} }
             ?s ?p ?o .
-            FILTER(STRSTARTS(STR(?s), "${publishResult.ual}"))
           }
         }`;
-        const metaResult = await this.store.query(scopedMetaQuery);
+        const metaResult = await this.store.query(metaQuery);
         if (metaResult.type === 'quads' && metaResult.quads.length > 0) {
           await this.store.insert(metaResult.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
           await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
         }
 
-        this.log.info(ctx, `Promoted ${batchRoots.length} root entities from default graph to context graph ${ctxGraphId}`);
+        this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${ctxGraphId}`);
       }
     }
 
