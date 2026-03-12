@@ -1227,7 +1227,7 @@ export class DKGAgent {
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
-      const rootEntities = [...result.kaManifest.map(ka => ka.rootEntity)].sort();
+      const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
 
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
