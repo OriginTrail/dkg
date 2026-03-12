@@ -162,10 +162,19 @@ export async function startHardhatChain(): Promise<HardhatChain> {
 }
 
 export async function stopHardhat(chain: HardhatChain): Promise<void> {
-  if (chain.process && !chain.process.killed) {
-    chain.process.kill('SIGTERM');
-    await sleep(1000);
-    if (!chain.process.killed) chain.process.kill('SIGKILL');
+  if (!chain.process || chain.process.exitCode !== null) return;
+
+  chain.process.kill('SIGTERM');
+  const exited = await Promise.race([
+    new Promise<boolean>(resolve => chain.process!.once('exit', () => resolve(true))),
+    sleep(3000).then(() => false),
+  ]);
+  if (!exited && chain.process.exitCode === null) {
+    chain.process.kill('SIGKILL');
+    await Promise.race([
+      new Promise<void>(resolve => chain.process!.once('exit', () => resolve())),
+      sleep(2000),
+    ]);
   }
 }
 

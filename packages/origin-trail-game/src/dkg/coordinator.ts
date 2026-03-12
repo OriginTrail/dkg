@@ -555,13 +555,16 @@ export class OriginTrailGameCoordinator {
     // Create on-chain context graph with all participant identity IDs.
     // M = ceil(2N/3): matches the gossip consensus threshold so the
     // contract enforces the same quorum that the game protocol requires.
+    // All active players must have an identityId; otherwise skip context-graph
+    // mode to prevent silently lowering quorum.
     try {
-      const participantIdentityIds = swarm.players
-        .map(p => p.identityId)
-        .filter((id): id is string => id != null && id !== '0')
-        .map(id => BigInt(id));
-
-      if (participantIdentityIds.length > 0) {
+      const allIds = swarm.players.map(p => p.identityId);
+      const missing = allIds.filter(id => id == null || id === '0');
+      if (missing.length > 0) {
+        this.log(`Skipping context graph: ${missing.length}/${swarm.players.length} players lack an identityId`);
+      } else {
+        const participantIdentityIds = allIds.map(id => BigInt(id!))
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const M = signatureThreshold(participantIdentityIds.length);
         const result = await this.agent.createContextGraph({
           participantIdentityIds,
@@ -593,6 +596,7 @@ export class OriginTrailGameCoordinator {
       gameStateJson,
       partyOrder: swarm.players.map(p => p.peerId),
       contextGraphId: swarm.contextGraphId,
+      requiredSignatures: swarm.requiredSignatures,
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
@@ -835,13 +839,11 @@ export class OriginTrailGameCoordinator {
     const proposal = swarm.pendingProposal;
     if (!proposal) return;
 
-    // When a context graph exists, require M crypto signatures.
-    // Without a context graph, fall back to gossip approval count.
+    // Turn progression is always gated by gossip approval count.
+    // Signature collection for context-graph enshrinement is best-effort
+    // at publish time — a signing failure must not deadlock the game.
     const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
-    const readyCount = swarm.contextGraphId
-      ? proposal.participantSignatures.size
-      : proposal.approvals.size;
-    if (readyCount < threshold) return;
+    if (proposal.approvals.size < threshold) return;
 
     const isLeader = swarm.leaderPeerId === this.myPeerId;
     const opsSnapshot = isLeader ? [...(this.workspaceOps.get(swarm.id) ?? [])] : [];
@@ -1210,13 +1212,14 @@ export class OriginTrailGameCoordinator {
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
     if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
+    if (msg.requiredSignatures != null) swarm.requiredSignatures = msg.requiredSignatures;
 
     this.pushNotification({
       type: 'expedition_launched', swarmId: msg.swarmId, swarmName: swarm.name,
       peerId: msg.peerId, timestamp: msg.timestamp,
       message: `Expedition launched for "${swarm.name}"!`,
     });
-    this.log(`Journey started for ${msg.swarmId} (remote)${swarm.contextGraphId ? ` [contextGraph=${swarm.contextGraphId}]` : ''}`);
+    this.log(`Journey started for ${msg.swarmId} (remote)${swarm.contextGraphId ? ` [contextGraph=${swarm.contextGraphId}, M=${swarm.requiredSignatures}]` : ''}`);
   }
 
   private isValidPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
@@ -1400,11 +1403,17 @@ export class OriginTrailGameCoordinator {
     swarm.pendingProposal.approvalTimestamps.set(msg.peerId, Date.now());
 
     if (msg.identityId && msg.signatureR && msg.signatureVS) {
-      swarm.pendingProposal.participantSignatures.set(msg.peerId, {
-        identityId: BigInt(msg.identityId),
-        r: ethers.getBytes(msg.signatureR),
-        vs: ethers.getBytes(msg.signatureVS),
-      });
+      const senderPlayer = swarm.players.find(p => p.peerId === msg.peerId);
+      const expectedId = senderPlayer?.identityId;
+      if (expectedId && String(msg.identityId) === String(expectedId)) {
+        swarm.pendingProposal.participantSignatures.set(msg.peerId, {
+          identityId: BigInt(msg.identityId),
+          r: ethers.getBytes(msg.signatureR),
+          vs: ethers.getBytes(msg.signatureVS),
+        });
+      } else {
+        this.log(`Rejected signature from ${msg.peerId.slice(0, 8)}: claimed identityId=${msg.identityId} does not match registered ${expectedId ?? 'none'}`);
+      }
     }
 
     const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
