@@ -1235,7 +1235,7 @@ export class DKGAgent {
         rootEntities,
         timestampMs: Date.now(),
         operationId: ctx.operationId,
-        contextGraphId: ctxGraphIdStr,
+        contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
       };
 
       const topic = paranetFinalizationTopic(paranetId);

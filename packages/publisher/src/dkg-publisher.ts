@@ -157,17 +157,8 @@ export class DKGPublisher implements Publisher {
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
     const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
-    // Delete-then-insert for upserted entities (replace old triples).
-    // Delete exact root + skolemized children only to avoid prefix collisions.
-    // Also remove prior workspace_meta ops referencing these roots.
-    for (const m of manifestEntries) {
-      if (wsOwned.has(m.rootEntity)) {
-        await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
-        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
-        await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
-      }
-    }
-
+    // Pre-encode gossip message and enforce size limit BEFORE any
+    // destructive workspace mutations to avoid leaving orphaned state.
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
     const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: paranetGraph }));
     const nquadsStr = gossipQuads
@@ -197,6 +188,15 @@ export class DKGPublisher implements Publisher {
         `Workspace message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
         `Split large writes into multiple writeToWorkspace calls partitioned by root entity.`,
       );
+    }
+
+    // Delete-then-insert for upserted entities (replace old triples).
+    for (const m of manifestEntries) {
+      if (wsOwned.has(m.rootEntity)) {
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+        await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
+      }
     }
 
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
@@ -583,6 +583,9 @@ export class DKGPublisher implements Publisher {
         this.log.warn(ctx, `Receiver signature collection failed, rolling back stored data: ${msg}`);
         try {
           await this.store.delete(normalizedQuads);
+          for (const [rootEntity] of kaMap) {
+            await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
+          }
         } catch (rollbackErr) {
           this.log.warn(ctx, `Rollback after signature failure failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`);
         }
