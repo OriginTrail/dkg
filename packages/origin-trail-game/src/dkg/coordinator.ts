@@ -1368,7 +1368,7 @@ export class OriginTrailGameCoordinator {
       try {
         const merkleRootBytes = ethers.getBytes(msg.merkleRoot);
         const sig = await this.agent.signContextGraphDigest(
-          BigInt(msg.contextGraphId), merkleRootBytes,
+          BigInt(msg.contextGraphId!), merkleRootBytes,
         );
         peerSigs.set(this.myPeerId, sig);
         myIdentityIdStr = String(sig.identityId);

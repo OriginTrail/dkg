@@ -1226,8 +1226,8 @@ export class DKGAgent {
       contextGraphSignatures: options?.contextGraphSignatures,
     });
 
-    if (result.status === 'confirmed' && result.onChainResult) {
-      const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
+    if (result.status === 'confirmed' && result.onChainResult && !result.contextGraphError) {
+      const rootEntities = [...result.kaManifest.map(ka => ka.rootEntity)].sort();
 
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
@@ -1242,7 +1242,7 @@ export class DKGAgent {
         rootEntities,
         timestampMs: Date.now(),
         operationId: ctx.operationId,
-        contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+        contextGraphId: ctxGraphIdStr,
       };
 
       const topic = paranetFinalizationTopic(paranetId);
@@ -1252,6 +1252,8 @@ export class DKGAgent {
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
+    } else if (result.contextGraphError) {
+      this.log.warn(ctx, `Skipping finalization broadcast: context graph registration failed (${result.contextGraphError})`);
     }
 
     return result;
@@ -2411,6 +2413,19 @@ function verifySyncedData(
 
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
+      } else if (kcPrivateRoots.length > 0) {
+        const legacyRoot = computeFlatKCRoot(allQuadsForKC, []);
+        const legacyHex = Array.from(legacyRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+        if (legacyHex === claimedHex) {
+          log.debug(ctx, `KC ${kcUal} verified via legacy flat root (without private root anchoring)`);
+          verifiedKcUals.add(kcUal);
+        } else if (acceptUnverified) {
+          log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        } else {
+          log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        }
       } else if (acceptUnverified) {
         log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;

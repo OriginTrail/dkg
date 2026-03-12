@@ -305,8 +305,6 @@ export class DKGPublisher implements Publisher {
         throw new Error(`Invalid contextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
       }
     }
-    const targetGraphUri = ctxGraphId ? contextGraphDataUri(paranetId, ctxGraphId) : undefined;
-    const targetMetaGraphUri = ctxGraphId ? contextGraphMetaUri(paranetId, ctxGraphId) : undefined;
 
     this.log.info(ctx, `Enshrining ${quads.length} quads from workspace to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}`);
     const publishResult = await this.publish({
@@ -314,12 +312,9 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
-      targetGraphUri,
-      targetMetaGraphUri,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
-      // Build participant signatures: use provided ones, or self-sign if chain adapter supports it
       let participantSigs = options?.contextGraphSignatures ?? [];
       if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
         const identityId = this.publisherNodeIdentityId;
@@ -366,50 +361,6 @@ export class DKGPublisher implements Publisher {
           } else {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
 
-            // KC is confirmed on-chain but NOT registered in the context graph.
-            // Move only THIS batch's data from context-graph URI back to the
-            // default paranet data graph. Scoped to the current publish's root
-            // entities to avoid disturbing other batches already in the context graph.
-            try {
-              const ctxDataGraph = contextGraphDataUri(paranetId, ctxGraphId);
-              const ctxMetaGraph = contextGraphMetaUri(paranetId, ctxGraphId);
-              const defaultDataGraph = this.graphManager.dataGraphUri(paranetId);
-              const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
-
-              const batchRoots = publishResult.kaManifest.map(ka => ka.rootEntity);
-              const values = batchRoots.map(r => `<${r}>`).join(' ');
-              const scopedDataQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
-                GRAPH <${ctxDataGraph}> {
-                  VALUES ?root { ${values} }
-                  ?s ?p ?o .
-                  FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
-                }
-              }`;
-
-              const ctxQuads = await this.store.query(scopedDataQuery);
-              if (ctxQuads.type === 'quads' && ctxQuads.quads.length > 0) {
-                await this.store.insert(ctxQuads.quads.map(q => ({ ...q, graph: defaultDataGraph })));
-                await this.store.delete(ctxQuads.quads.map(q => ({ ...q, graph: ctxDataGraph })));
-              }
-
-              const scopedMetaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
-                GRAPH <${ctxMetaGraph}> {
-                  ?s ?p ?o .
-                  FILTER(STRSTARTS(STR(?s), "${publishResult.ual}"))
-                }
-              }`;
-
-              const ctxMeta = await this.store.query(scopedMetaQuery);
-              if (ctxMeta.type === 'quads' && ctxMeta.quads.length > 0) {
-                await this.store.insert(ctxMeta.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
-                await this.store.delete(ctxMeta.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
-              }
-
-              this.log.info(ctx, `Migrated ${batchRoots.length} root entities from context graph ${ctxGraphId} back to paranet data graph`);
-            } catch (migrateErr) {
-              this.log.warn(ctx, `Failed to migrate context-graph data back to paranet graph: ${migrateErr instanceof Error ? migrateErr.message : String(migrateErr)}`);
-            }
-
             this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
               reason: 'context_graph_registration_failed',
               batchId: String(publishResult.onChainResult.batchId),
@@ -422,6 +373,43 @@ export class DKGPublisher implements Publisher {
             };
           }
         }
+      }
+
+      if (registered) {
+        const ctxDataGraph = contextGraphDataUri(paranetId, ctxGraphId);
+        const ctxMetaGraph = contextGraphMetaUri(paranetId, ctxGraphId);
+        const defaultDataGraph = this.graphManager.dataGraphUri(paranetId);
+        const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
+
+        const batchRoots = publishResult.kaManifest.map(ka => ka.rootEntity);
+        const values = batchRoots.map(r => `<${r}>`).join(' ');
+
+        const scopedDataQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+          GRAPH <${defaultDataGraph}> {
+            VALUES ?root { ${values} }
+            ?s ?p ?o .
+            FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+          }
+        }`;
+        const dataResult = await this.store.query(scopedDataQuery);
+        if (dataResult.type === 'quads' && dataResult.quads.length > 0) {
+          await this.store.insert(dataResult.quads.map(q => ({ ...q, graph: ctxDataGraph })));
+          await this.store.delete(dataResult.quads.map(q => ({ ...q, graph: defaultDataGraph })));
+        }
+
+        const scopedMetaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+          GRAPH <${defaultMetaGraph}> {
+            ?s ?p ?o .
+            FILTER(STRSTARTS(STR(?s), "${publishResult.ual}"))
+          }
+        }`;
+        const metaResult = await this.store.query(scopedMetaQuery);
+        if (metaResult.type === 'quads' && metaResult.quads.length > 0) {
+          await this.store.insert(metaResult.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
+          await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
+        }
+
+        this.log.info(ctx, `Promoted ${batchRoots.length} root entities from default graph to context graph ${ctxGraphId}`);
       }
     }
 

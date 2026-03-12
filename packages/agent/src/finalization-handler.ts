@@ -164,6 +164,32 @@ export class FinalizationHandler {
     return roots;
   }
 
+  private async getPublisherPeerIdFromMeta(paranetId: string, rootEntities: string[]): Promise<string | undefined> {
+    const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+    const safeRoots = rootEntities.filter(isSafeIri);
+    if (safeRoots.length === 0) return undefined;
+
+    const values = safeRoots.map(r => `<${r}>`).join(' ');
+    const PROV = 'http://www.w3.org/ns/prov#';
+    const sparql = `SELECT ?peerId WHERE {
+      GRAPH <${wsMetaGraph}> {
+        VALUES ?root { ${values} }
+        ?op <${DKG_NS}rootEntity> ?root .
+        ?op <${PROV}wasAttributedTo> ?peerId .
+      }
+    } LIMIT 1`;
+
+    try {
+      const result = await this.store.query(sparql);
+      if (result.type === 'bindings' && result.bindings.length > 0) {
+        const raw = result.bindings[0]['peerId'] as string;
+        const peerId = raw.replace(/^"(.*)".*$/, '$1');
+        if (peerId && peerId !== 'unknown') return peerId;
+      }
+    } catch { /* workspace metadata may not exist */ }
+    return undefined;
+  }
+
   private async verifyOnChain(
     txHash: string,
     blockNumber: number,
@@ -263,11 +289,17 @@ export class FinalizationHandler {
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);
-    // Use the root entity order from the finalization message (matches publisher's
-    // tokenId assignment) instead of re-sorting, which could remap tokenId -> rootEntity.
-    const rootEntities = msgRootEntities.length > 0
-      ? msgRootEntities
-      : [...partitioned.keys()];
+    const localRoots = [...partitioned.keys()].sort();
+    const sortedMsgRoots = msgRootEntities.length > 0
+      ? [...msgRootEntities].sort()
+      : localRoots;
+
+    if (sortedMsgRoots.length !== localRoots.length ||
+        !sortedMsgRoots.every((r, i) => r === localRoots[i])) {
+      this.log.warn(ctx, `Finalization: root entity set mismatch — message has [${sortedMsgRoots.join(', ')}] but local data has [${localRoots.join(', ')}]`);
+    }
+
+    const rootEntities = localRoots;
     const kaMetadata: KAMetadata[] = [];
 
     for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
@@ -284,12 +316,13 @@ export class FinalizationHandler {
       });
     }
 
+    const wsPeerId = await this.getPublisherPeerIdFromMeta(paranetId, msgRootEntities);
     const kcMeta: KCMetadata = {
       ual,
       paranetId,
       merkleRoot,
       kaCount: kaMetadata.length,
-      publisherPeerId: publisherAddress,
+      publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
     };
 
