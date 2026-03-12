@@ -66,7 +66,7 @@ Release and tagging workflow is documented in [RELEASE_PROCESS.md](RELEASE_PROCE
 | Guide | For |
 |---|---|
 | [Join the Testnet](docs/setup/JOIN_TESTNET.md) | End-to-end node setup and first publish/query |
-| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw integration |
+| [OpenClaw Setup](https://github.com/OriginTrail/dkg-v9/blob/docs/readme-refresh/packages/adapter-openclaw/README.md) | OpenClaw integration |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS integration |
 | [Custom Project Setup](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |
 | [SPARQL HTTP Storage](docs/setup/STORAGE_SPARQL_HTTP.md) | External triple store backends |
