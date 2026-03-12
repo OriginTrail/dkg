@@ -1590,8 +1590,8 @@ async function handleRequest(
     if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
       return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
     }
-    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 0) {
-      return jsonResponse(res, 400, { error: 'requiredSignatures must be a non-negative integer' });
+    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
+      return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
     }
     if (requiredSignatures > participantIdentityIds.length) {
       return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
@@ -1611,8 +1611,10 @@ async function handleRequest(
       }
     }
     try {
+      const sortedUniqueIds = [...new Set(participantIdentityIds.map((id: number | string) => BigInt(id)))]
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
       const result = await agent.createContextGraph({
-        participantIdentityIds: participantIdentityIds.map((id: number | string) => BigInt(id)),
+        participantIdentityIds: sortedUniqueIds,
         requiredSignatures,
       });
       return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });

@@ -365,24 +365,24 @@ export class DKGPublisher implements Publisher {
             await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
           } else {
             this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
-            if (targetGraphUri) {
-              try {
-                const publishedRoots = autoPartition(quads).keys();
-                for (const rootEntity of publishedRoots) {
-                  await this.store.deleteByPattern({ graph: targetGraphUri, subject: rootEntity });
-                  await this.store.deleteBySubjectPrefix(targetGraphUri, rootEntity + '/.well-known/genid/');
-                }
-                if (targetMetaGraphUri && publishResult.ual) {
-                  await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: publishResult.ual });
-                  for (const ka of publishResult.kaManifest ?? []) {
-                    const kaSubject = `${publishResult.ual}/${ka.tokenId ?? ka.rootEntity}`;
-                    await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: kaSubject });
-                  }
-                }
-                this.log.info(ctx, `Rolled back this publish's quads from ${targetGraphUri}`);
-              } catch (cleanErr) {
-                this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
+            try {
+              const rollbackQuads = (publishResult.publicQuads ?? []).map((q) => ({
+                ...q,
+                graph: targetGraphUri ?? q.graph,
+              }));
+              if (rollbackQuads.length > 0) {
+                await this.store.delete(rollbackQuads);
               }
+              if (targetMetaGraphUri && publishResult.ual) {
+                await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: publishResult.ual });
+                for (const ka of publishResult.kaManifest ?? []) {
+                  const kaSubject = `${publishResult.ual}/${ka.tokenId ?? ka.rootEntity}`;
+                  await this.store.deleteByPattern({ graph: targetMetaGraphUri, subject: kaSubject });
+                }
+              }
+              this.log.info(ctx, `Rolled back ${rollbackQuads.length} quads from this publish`);
+            } catch (cleanErr) {
+              this.log.warn(ctx, `Context graph cleanup failed: ${cleanErr instanceof Error ? cleanErr.message : String(cleanErr)}`);
             }
             const ownedSet = this.ownedEntities.get(paranetId);
             if (ownedSet) {
@@ -601,7 +601,10 @@ export class DKGPublisher implements Publisher {
         collectedReceiverSigs = await options.receiverSignatureProvider(merkleRootHex, publicByteSize);
         this.log.info(ctx, `Collected ${collectedReceiverSigs.length} receiver signature(s) from peers`);
       } catch (err) {
-        this.log.warn(ctx, `Receiver signature collection failed: ${err instanceof Error ? err.message : String(err)}`);
+        onPhase?.('collect_signatures', 'end');
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `Receiver signature collection failed: ${msg}`);
+        throw new Error(`Publish aborted: receiverSignatureProvider failed and no fallback is configured. ${msg}`);
       }
       onPhase?.('collect_signatures', 'end');
     }

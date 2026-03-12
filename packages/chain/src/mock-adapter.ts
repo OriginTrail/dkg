@@ -557,6 +557,18 @@ export class MockChainAdapter implements ChainAdapter {
   private nextContextGraphId = 1n;
 
   async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+    if (params.requiredSignatures < 1) {
+      throw new Error('Mock: requiredSignatures must be >= 1');
+    }
+    if (params.requiredSignatures > params.participantIdentityIds.length) {
+      throw new Error(`Mock: requiredSignatures (${params.requiredSignatures}) exceeds participant count (${params.participantIdentityIds.length})`);
+    }
+    for (let i = 1; i < params.participantIdentityIds.length; i++) {
+      if (params.participantIdentityIds[i] <= params.participantIdentityIds[i - 1]) {
+        throw new Error('Mock: participantIdentityIds must be strictly increasing (sorted, unique)');
+      }
+    }
+
     const contextGraphId = this.nextContextGraphId++;
     this.contextGraphs.set(contextGraphId, {
       manager: this.signerAddress,
@@ -588,6 +600,20 @@ export class MockChainAdapter implements ChainAdapter {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
       return this.txResult(false);
+    }
+
+    const batch = this.batches.get(params.batchId);
+    if (!batch) {
+      throw new Error(`Mock: batch ${params.batchId} does not exist`);
+    }
+    const providedHex = typeof params.merkleRoot === 'string'
+      ? params.merkleRoot
+      : toHex(params.merkleRoot);
+    const storedHex = typeof batch.merkleRoot === 'string'
+      ? batch.merkleRoot
+      : toHex(batch.merkleRoot);
+    if (providedHex !== storedHex) {
+      throw new Error(`Mock: merkleRoot mismatch for batch ${params.batchId}`);
     }
 
     if (params.signerSignatures.length < cg.requiredSignatures) {
