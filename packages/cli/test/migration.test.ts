@@ -166,6 +166,24 @@ describe('migrateToBlueGreen', () => {
     }
   });
 
+  it('when local repo exists, slot B clones from same local source path', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const mockedExecFileSync = vi.mocked(execFileSync);
+    const { repoDir } = await import('../src/config.js');
+    const expectedSource = repoDir();
+
+    const { migrateToBlueGreen } = await import('../src/migration.js');
+    await migrateToBlueGreen(vi.fn());
+
+    const cloneCalls = mockedExecFileSync.mock.calls
+      .map(c => ({ binary: String(c[0]), args: c[1] as string[] }))
+      .filter(call => call.binary === 'git' && call.args[0] === 'clone');
+
+    const slotBClone = cloneCalls.find(call => String(call.args[call.args.length - 1]).endsWith('/b'));
+    expect(slotBClone).toBeTruthy();
+    expect(slotBClone?.args).toContain(expectedSource);
+  });
+
   it('rebuilds slot A when directory exists but is incomplete', async () => {
     const rDir = join(dkgHome, 'releases');
     const slotA = join(rDir, 'a');
