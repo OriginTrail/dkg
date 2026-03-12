@@ -12,6 +12,8 @@ export async function migrateToBlueGreen(
   log: (msg: string) => void = console.log,
   opts: { allowRemoteBootstrap?: boolean } = {},
 ): Promise<void> {
+  const INSTALL_TIMEOUT_MS = 10 * 60_000;
+  const BUILD_TIMEOUT_MS = 15 * 60_000;
   const rDir = releasesDir();
   const currentLink = join(rDir, 'current');
   let hadCurrentLink = false;
@@ -89,8 +91,18 @@ export async function migrateToBlueGreen(
     } else {
       git(['clone', '--branch', sourceBranch, sourceRepo, slotA], undefined, sourceRepo);
     }
-    execSync('pnpm install --frozen-lockfile', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-    execSync('pnpm build', { cwd: slotA, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
+    execSync('pnpm install --frozen-lockfile', {
+      cwd: slotA,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: INSTALL_TIMEOUT_MS,
+    });
+    execSync('pnpm build', {
+      cwd: slotA,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: BUILD_TIMEOUT_MS,
+    });
     log(`  Slot a: cloned and built from ${hasLocalRepo ? localRepo : sourceRepo}`);
   }
 
@@ -107,8 +119,18 @@ export async function migrateToBlueGreen(
       if (!hasLocalRepo) {
         git(['checkout', sourceBranch], slotB);
       }
-      execSync('pnpm install --frozen-lockfile', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
-      execSync('pnpm build', { cwd: slotB, encoding: 'utf-8', stdio: 'pipe', timeout: 180_000 });
+      execSync('pnpm install --frozen-lockfile', {
+        cwd: slotB,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: INSTALL_TIMEOUT_MS,
+      });
+      execSync('pnpm build', {
+        cwd: slotB,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: BUILD_TIMEOUT_MS,
+      });
       log(`  Slot b: cloned and built`);
     } catch (err: any) {
       log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
