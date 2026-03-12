@@ -527,6 +527,8 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeUndefined();
+    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
   it('turnProvenanceQuads omits blockNumber when undefined', async () => {
@@ -910,6 +912,10 @@ describe('Consensus attestation triples (V1)', () => {
     for (const lq of linkQuads) {
       expect(lq.subject).toBe(root);
     }
+
+    // Graph must stay publish-compatible (no context suffix).
+    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
   it('forceResolveTurn publishes turn and attestation triples in a single call', async () => {
