@@ -51,6 +51,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         return json(res, 200, {
           openSwarms: lobby.openSwarms.map(w => coordinator.formatSwarmState(w)),
           mySwarms: lobby.mySwarms.map(w => coordinator.formatSwarmState(w)),
+          recruitingSwarms: lobby.recruitingSwarms.map(w => coordinator.formatSwarmState(w)),
         });
       }
 

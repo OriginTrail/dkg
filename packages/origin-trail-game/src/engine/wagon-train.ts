@@ -50,6 +50,7 @@ export interface TurnResult {
 export interface SwarmLobby {
   openSwarms: Swarm[];
   mySwarms: Swarm[];
+  recruitingSwarms: Swarm[];
 }
 
 const swarms = new Map<string, Swarm>();
@@ -222,13 +223,20 @@ function resolveTurn(swarm: Swarm): void {
 export function getLobby(playerId: string): SwarmLobby {
   const openSwarms: Swarm[] = [];
   const mySwarms: Swarm[] = [];
+  const recruitingSwarms: Swarm[] = [];
   for (const swarm of swarms.values()) {
     if (swarm.players.some(p => p.playerId === playerId)) mySwarms.push(swarm);
-    else if (swarm.status === 'recruiting') openSwarms.push(swarm);
+    else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
+      openSwarms.push(swarm);
+      recruitingSwarms.push(swarm);
+    } else if (swarm.status === 'recruiting') {
+      recruitingSwarms.push(swarm);
+    }
   }
   openSwarms.sort((a, b) => b.createdAt - a.createdAt);
   mySwarms.sort((a, b) => b.createdAt - a.createdAt);
-  return { openSwarms, mySwarms };
+  recruitingSwarms.sort((a, b) => b.createdAt - a.createdAt);
+  return { openSwarms, mySwarms, recruitingSwarms };
 }
 
 export function getSwarm(swarmId: string): Swarm | null {

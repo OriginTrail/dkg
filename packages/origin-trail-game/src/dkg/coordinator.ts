@@ -208,6 +208,7 @@ export class OriginTrailGameCoordinator {
   private readonly topic: string;
   private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
   private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
+  private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
   private log: (msg: string) => void;
@@ -215,6 +216,7 @@ export class OriginTrailGameCoordinator {
   private graphSyncInitialTimer: ReturnType<typeof setTimeout> | null = null;
   private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
   private graphSyncInFlight = false;
+  private graphSyncLastErrorLogAt = 0;
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -300,6 +302,13 @@ export class OriginTrailGameCoordinator {
     this.graphSyncInFlight = true;
     try {
       await this.loadLobbyFromGraph();
+    } catch (err) {
+      const now = Date.now();
+      if (now - this.graphSyncLastErrorLogAt >= OriginTrailGameCoordinator.GRAPH_SYNC_ERROR_LOG_INTERVAL_MS) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`Graph sync failed: ${msg}`);
+        this.graphSyncLastErrorLogAt = now;
+      }
     } finally {
       this.graphSyncInFlight = false;
     }
@@ -308,14 +317,14 @@ export class OriginTrailGameCoordinator {
   private startGraphSyncInterval(): void {
     if (this.graphSyncTimer) return;
     this.graphSyncTimer = setInterval(() => {
-      this.runGraphSyncOnce().catch(() => {});
+      void this.runGraphSyncOnce();
     }, OriginTrailGameCoordinator.GRAPH_SYNC_INTERVAL_MS);
     this.graphSyncTimer.unref?.();
   }
 
   private scheduleGraphSync(): void {
     this.graphSyncInitialTimer = setTimeout(() => {
-      this.runGraphSyncOnce().catch(() => {});
+      void this.runGraphSyncOnce();
       this.startGraphSyncInterval();
     }, OriginTrailGameCoordinator.GRAPH_SYNC_INITIAL_DELAY_MS);
     this.graphSyncInitialTimer.unref?.();
@@ -417,7 +426,7 @@ export class OriginTrailGameCoordinator {
         this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
       }
     } catch (err: any) {
-      this.log(`Graph sync failed: ${err.message}`);
+      throw err;
     }
   }
 
@@ -1593,19 +1602,24 @@ export class OriginTrailGameCoordinator {
 
   // ── Query helpers ─────────────────────────────────────────────────
 
-  getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[] } {
+  getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[]; recruitingSwarms: SwarmState[] } {
     const openSwarms: SwarmState[] = [];
     const mySwarms: SwarmState[] = [];
+    const recruitingSwarms: SwarmState[] = [];
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         mySwarms.push(swarm);
-      } else if (swarm.status === 'recruiting') {
+      } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
         openSwarms.push(swarm);
+        recruitingSwarms.push(swarm);
+      } else if (swarm.status === 'recruiting') {
+        recruitingSwarms.push(swarm);
       }
     }
     openSwarms.sort((a, b) => b.createdAt - a.createdAt);
     mySwarms.sort((a, b) => b.createdAt - a.createdAt);
-    return { openSwarms, mySwarms };
+    recruitingSwarms.sort((a, b) => b.createdAt - a.createdAt);
+    return { openSwarms, mySwarms, recruitingSwarms };
   }
 
   getSwarm(swarmId: string): SwarmState | null {

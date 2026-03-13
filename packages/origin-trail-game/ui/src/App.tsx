@@ -516,7 +516,7 @@ export function App() {
 
         <div className="ot-section">
           <h2>Open Swarms</h2>
-          {lobby?.openSwarms?.length ? lobby.openSwarms.map((w: any) => (
+          {(lobby?.recruitingSwarms ?? lobby?.openSwarms)?.length ? (lobby?.recruitingSwarms ?? lobby?.openSwarms).map((w: any) => (
             <div key={w.id} className="ot-card">
               <strong>{w.name}</strong> — {w.players?.length ?? 0}/{w.maxPlayers} players {(w.players?.length ?? 0) >= w.maxPlayers ? '(Full)' : ''}
               <button onClick={async () => {
