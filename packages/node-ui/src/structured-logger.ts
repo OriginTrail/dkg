@@ -1,4 +1,4 @@
-import { Logger, type OperationContext } from '@dkg/core';
+import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 
 /**

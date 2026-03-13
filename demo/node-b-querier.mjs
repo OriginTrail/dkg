@@ -15,10 +15,10 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   generateEd25519Keypair, decodePublishRequest, paranetPublishTopic,
-} from '@dkg/core';
-import { OxigraphStore, GraphManager } from '@dkg/storage';
-import { DKGQueryEngine } from '@dkg/query';
-import { AccessClient } from '@dkg/publisher';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, GraphManager } from '@origintrail-official/dkg-storage';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
+import { AccessClient } from '@origintrail-official/dkg-publisher';
 import { multiaddr } from '@multiformats/multiaddr';
 
 const PARANET = 'agent-skills';

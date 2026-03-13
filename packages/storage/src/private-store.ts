@@ -1,4 +1,4 @@
-import { assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
+import { assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import type { TripleStore, Quad } from './triple-store.js';
 import type { GraphManager } from './graph-manager.js';
 

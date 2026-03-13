@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   encodePublishRequest,
-} from '@dkg/core';
-import { OxigraphStore, type Quad } from '@dkg/storage';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
 
 const PARANET = 'test-gossip-handler';

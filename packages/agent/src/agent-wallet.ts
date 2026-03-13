@@ -1,4 +1,4 @@
-import { ed25519Sign, type Ed25519Keypair } from '@dkg/core';
+import { ed25519Sign, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { hmac } from '@noble/hashes/hmac.js';
 import { sha512 } from '@noble/hashes/sha2.js';
 import { ed25519 } from '@noble/curves/ed25519.js';

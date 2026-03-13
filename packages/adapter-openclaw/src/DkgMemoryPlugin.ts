@@ -1,4 +1,4 @@
-import { escapeSparqlLiteral } from '@dkg/core';
+import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
 /**
  * DkgMemoryPlugin — DKG-backed memory search.

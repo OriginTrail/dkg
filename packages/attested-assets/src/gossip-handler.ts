@@ -1,4 +1,4 @@
-import type { GossipSubManager, GossipMessageHandler } from '@dkg/core';
+import type { GossipSubManager, GossipMessageHandler } from '@origintrail-official/dkg-core';
 import type { AKAEvent } from './types.js';
 import { decodeAKAEvent } from './proto/aka-events.js';
 

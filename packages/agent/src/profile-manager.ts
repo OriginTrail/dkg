@@ -1,6 +1,6 @@
-import type { Publisher, PublishOptions, PublishResult } from '@dkg/publisher';
-import type { TripleStore } from '@dkg/storage';
-import { paranetDataGraphUri } from '@dkg/core';
+import type { Publisher, PublishOptions, PublishResult } from '@origintrail-official/dkg-publisher';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { paranetDataGraphUri } from '@origintrail-official/dkg-core';
 import { buildAgentProfile, AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 
 /**

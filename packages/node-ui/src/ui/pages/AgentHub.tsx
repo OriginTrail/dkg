@@ -21,7 +21,7 @@ import {
   type ChatLlmDiagnostics,
   type ChatPersistenceStatusEvent,
 } from '../api.js';
-import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph, useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 
 type Triple = { subject: string; predicate: string; object: string };
 

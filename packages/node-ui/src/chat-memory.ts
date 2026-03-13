@@ -1,4 +1,4 @@
-import { isSafeIri } from '@dkg/core';
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 

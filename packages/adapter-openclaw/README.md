@@ -1,6 +1,6 @@
 # DKG V9 OpenClaw Adapter
 
-`@dkg/adapter-openclaw` connects an existing OpenClaw agent to a DKG V9 node.
+`@origintrail-official/dkg-adapter-openclaw` connects an existing OpenClaw agent to a DKG V9 node.
 
 The adapter is a thin HTTP client — it does **not** run its own DKG node. A single DKG daemon process (`dkg start`) owns the node, triple store, P2P networking, and Node UI. The adapter registers tools and integration modules that route through the daemon's HTTP API.
 

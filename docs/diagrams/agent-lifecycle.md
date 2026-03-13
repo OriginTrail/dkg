@@ -8,13 +8,13 @@ developers integrating the DKG into their own agents (e.g. OpenClaw, ElizaOS).
 ```mermaid
 sequenceDiagram
     actor Dev as Developer / Framework
-    participant Agent as @dkg/agent<br/>DKGAgent
-    participant Wallet as @dkg/agent<br/>AgentWallet
-    participant Node as @dkg/core<br/>DKGNode
-    participant Store as @dkg/storage<br/>TripleStore
-    participant Chain as @dkg/chain<br/>EVMChainAdapter
+    participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
+    participant Wallet as @origintrail-official/dkg-agent<br/>AgentWallet
+    participant Node as @origintrail-official/dkg-core<br/>DKGNode
+    participant Store as @origintrail-official/dkg-storage<br/>TripleStore
+    participant Chain as @origintrail-official/dkg-chain<br/>EVMChainAdapter
     participant EVM as EVM Blockchain
-    participant Gossip as @dkg/core<br/>GossipSub
+    participant Gossip as @origintrail-official/dkg-core<br/>GossipSub
     participant Peers as DKG Network
 
     Note over Dev,Peers: Phase 1 — Initialization
@@ -114,7 +114,7 @@ interface DKGAgentConfig {
 ## Integration example (OpenClaw / ElizaOS)
 
 ```typescript
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 const agent = await DKGAgent.create({
   dataDir: './my-agent-data',

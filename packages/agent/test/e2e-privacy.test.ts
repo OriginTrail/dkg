@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const PRIVATE_PARANET = 'agent-memory-test';
 const PUBLIC_PARANET = 'public-e2e';

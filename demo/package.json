@@ -1,15 +1,15 @@
 {
-  "name": "@dkg/demo",
+  "name": "@origintrail-official/dkg-demo",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@dkg/agent": "workspace:*",
-    "@dkg/core": "workspace:*",
-    "@dkg/storage": "workspace:*",
-    "@dkg/chain": "workspace:*",
-    "@dkg/query": "workspace:*",
-    "@dkg/publisher": "workspace:*",
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*",
+    "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-publisher": "workspace:*",
     "@multiformats/multiaddr": "*"
   }
 }

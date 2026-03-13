@@ -1,4 +1,4 @@
-import type { OperationContext } from '@dkg/core';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 
 /**

@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/network-sim",
+  "name": "@origintrail-official/dkg-network-sim",
   "version": "0.0.1",
   "private": true,
   "type": "module",

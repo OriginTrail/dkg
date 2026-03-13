@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/node-ui",
+  "name": "@origintrail-official/dkg-node-ui",
   "version": "0.0.1",
   "type": "module",
   "main": "dist/index.js",
@@ -15,8 +15,8 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@dkg/core": "workspace:*",
-    "@dkg/graph-viz": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-graph-viz": "workspace:*",
     "better-sqlite3": "^11"
   },
   "devDependencies": {
@@ -24,7 +24,7 @@
     "@codemirror/language": "^6.12.2",
     "@codemirror/state": "^6",
     "@codemirror/view": "^6",
-    "@dkg/graph-viz": "workspace:*",
+    "@origintrail-official/dkg-graph-viz": "workspace:*",
     "@types/better-sqlite3": "^7",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -39,5 +39,20 @@
     "typescript": "^5.7",
     "vite": "^6",
     "vitest": "^3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "dist-ui",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/node-ui"
   }
 }

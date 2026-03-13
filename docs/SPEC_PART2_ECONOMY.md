@@ -638,19 +638,19 @@ This is optional — publishers accept the availability trade-off if they don't 
 | 4 | `/dkg/sync/1.0.0`: SyncRequest/SyncResponse protocol, batch streaming, merkle verification on sync, resume from block. | 2 |
 | 5 | GossipSub authentication: message signing, membership validation, rate limiting, duplicate detection. | 1 |
 | 6 | Selective replication: node scope advertisement via DHT, query routing based on replication metadata. | 2 |
-| 7 | SLIP-10 key derivation: replace BIP-32, update `@dkg/core` crypto module. | 0.5 |
+| 7 | SLIP-10 key derivation: replace BIP-32, update `@origintrail-official/dkg-core` crypto module. | 0.5 |
 
 **Total: ~12.5 weeks**
 
 ### WP-2B: Economy & Governance (Developer B)
 
-**Scope**: `@dkg/access`, marketplace flows, payment integration, dispute resolution, self-governance
+**Scope**: `@origintrail-official/dkg-access`, marketplace flows, payment integration, dispute resolution, self-governance
 
 | Phase | Deliverable | Weeks |
 |---|---|---|
-| 1 | `@dkg/access`: Macaroon minting/verification/attenuation. Caveat engine. | 2 |
+| 1 | `@origintrail-official/dkg-access`: Macaroon minting/verification/attenuation. Caveat engine. | 2 |
 | 2 | x402 integration: payment flow, receipt verification, Macaroon issuance on payment. | 2 |
-| 3 | Payment channel client in `@dkg/agent`: auto-open, voucher signing, periodic settle. | 2 |
+| 3 | Payment channel client in `@origintrail-official/dkg-agent`: auto-open, voucher signing, periodic settle. | 2 |
 | 3.5 | Relay receipt client: agents sign connection receipts with relays, batch submission on-chain per epoch. Relay reward claim flow. | 1 |
 | 4 | Access policy in `KAManifestEntry` protobuf. Publisher-declared pricing flows through to meta graph. | 1 |
 | 5 | Access dispute resolution: conditional payment via channels, merkle proof verification, dispute flow. | 1.5 |

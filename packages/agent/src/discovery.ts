@@ -1,5 +1,5 @@
-import type { QueryEngine, QueryResult } from '@dkg/query';
-import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri } from '@dkg/core';
+import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
+import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_PARANET } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';

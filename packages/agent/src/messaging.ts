@@ -1,4 +1,4 @@
-import type { StreamHandler, EventBus, Ed25519Keypair } from '@dkg/core';
+import type { StreamHandler, EventBus, Ed25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   PROTOCOL_MESSAGE,
@@ -8,8 +8,8 @@ import {
   ed25519Verify,
   withRetry,
   type AgentMessageMsg,
-} from '@dkg/core';
-import type { ProtocolRouter } from '@dkg/core';
+} from '@origintrail-official/dkg-core';
+import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import { encrypt, decrypt, x25519SharedSecret, ed25519ToX25519Public } from './encryption.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';

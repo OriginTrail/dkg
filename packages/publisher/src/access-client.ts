@@ -1,12 +1,12 @@
-import type { ProtocolRouter } from '@dkg/core';
+import type { ProtocolRouter } from '@origintrail-official/dkg-core';
 import {
   PROTOCOL_ACCESS,
   encodeAccessRequest,
   decodeAccessResponse,
   ed25519Sign,
   type Ed25519Keypair,
-} from '@dkg/core';
-import type { Quad } from '@dkg/storage';
+} from '@origintrail-official/dkg-core';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { computePrivateRoot } from './merkle.js';
 
 export interface AccessResult {

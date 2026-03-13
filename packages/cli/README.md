@@ -1,18 +1,18 @@
-# @dkg/cli
+# @origintrail-official/dkg
 
 Command-line interface and daemon for DKG V9. This is the main entry point for running a DKG node — it manages the node lifecycle, exposes a local HTTP API, and provides commands for publishing, querying, and interacting with the network.
 
 ## Installation
 
 ```bash
-npm install -g @dkg/cli
+npm install -g @origintrail-official/dkg
 ```
 
 **From source** (monorepo development):
 
 ```bash
 pnpm build
-pnpm link --global --filter @dkg/cli
+pnpm link --global --filter @origintrail-official/dkg
 
 # Binary is now available as `dkg`
 dkg --help
@@ -91,6 +91,6 @@ Node runners install an app (`pnpm add dkg-app-my-game`), restart, and it appear
 
 ## Internal Dependencies
 
-- `@dkg/agent` — agent runtime, wallet, publishing, querying
-- `@dkg/core` — P2P node, event bus
-- `@dkg/node-ui` — web dashboard serving
+- `@origintrail-official/dkg-agent` — agent runtime, wallet, publishing, querying
+- `@origintrail-official/dkg-core` — P2P node, event bus
+- `@origintrail-official/dkg-node-ui` — web dashboard serving

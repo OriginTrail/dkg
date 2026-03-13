@@ -3,10 +3,10 @@
  * Each test targets a specific vulnerability that was identified and fixed.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad, GraphManager } from '@dkg/storage';
-import { MockChainAdapter, NoChainAdapter } from '@dkg/chain';
-import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@dkg/core';
-import { generateEd25519Keypair } from '@dkg/core';
+import { OxigraphStore, type Quad, GraphManager } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   UpdateHandler,

@@ -1,4 +1,4 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;

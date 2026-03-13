@@ -14,10 +14,10 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   generateEd25519Keypair, encodePublishRequest,
   PROTOCOL_ACCESS, DKGEvent, paranetPublishTopic,
-} from '@dkg/core';
-import { OxigraphStore } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { DKGPublisher, AccessHandler } from '@dkg/publisher';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGPublisher, AccessHandler } from '@origintrail-official/dkg-publisher';
 
 const PARANET = 'agent-skills';
 const TOPIC = paranetPublishTopic(PARANET);

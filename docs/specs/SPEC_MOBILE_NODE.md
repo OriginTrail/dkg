@@ -3,7 +3,7 @@
 **Status**: DRAFT v0.1  
 **Date**: 2026-02-28  
 **Scope**: Run a DKG edge node on iOS and Android via nodejs-mobile + React Native.  
-**Depends on**: @dkg/agent, @dkg/core, @dkg/storage, @dkg/publisher, @dkg/chain  
+**Depends on**: @origintrail-official/dkg-agent, @origintrail-official/dkg-core, @origintrail-official/dkg-storage, @origintrail-official/dkg-publisher, @origintrail-official/dkg-chain  
 
 ---
 
@@ -17,8 +17,8 @@ receiving data — without needing a separate machine running 24/7.
 ### Goals
 
 - A native iOS and Android app that runs a real DKG edge node on-device.
-- Reuse the existing `@dkg/agent`, `@dkg/core`, `@dkg/storage`,
-  `@dkg/query`, `@dkg/publisher`, and `@dkg/chain` packages unchanged.
+- Reuse the existing `@origintrail-official/dkg-agent`, `@origintrail-official/dkg-core`, `@origintrail-official/dkg-storage`,
+  `@origintrail-official/dkg-query`, `@origintrail-official/dkg-publisher`, and `@origintrail-official/dkg-chain` packages unchanged.
 - New packages only where mobile-specific bridging or UI is required.
 - The mobile node is a first-class peer: it has its own PeerId, can
   publish knowledge assets, send/receive messages, and sync with peers.
@@ -39,7 +39,7 @@ receiving data — without needing a separate machine running 24/7.
 ┌─────────────────────────────────────────────────────────┐
 │  React Native App (UI Thread)                           │
 │  ┌───────────────────────────────────────────────────┐  │
-│  │  @dkg/mobile-ui                                   │  │
+│  │  @origintrail-official/dkg-mobile-ui                                   │  │
 │  │  React Native screens: Messages, Explorer,        │  │
 │  │  Dashboard, Publish, Settings, Onboarding         │  │
 │  └──────────────┬────────────────────────────────────┘  │
@@ -47,15 +47,15 @@ receiving data — without needing a separate machine running 24/7.
 │  ┌──────────────┴────────────────────────────────────┐  │
 │  │  Node.js Thread (nodejs-mobile)                   │  │
 │  │  ┌─────────────────────────────────────────────┐  │  │
-│  │  │  @dkg/mobile-bridge                         │  │  │
+│  │  │  @origintrail-official/dkg-mobile-bridge                         │  │  │
 │  │  │  RPC dispatcher, lifecycle, state sync      │  │  │
 │  │  └──────────┬──────────────────────────────────┘  │  │
 │  │             │                                     │  │
 │  │  ┌──────────┴──────────────────────────────────┐  │  │
 │  │  │  Existing packages (UNCHANGED)              │  │  │
-│  │  │  @dkg/agent → @dkg/core → @dkg/storage     │  │  │
-│  │  │          → @dkg/publisher → @dkg/chain      │  │  │
-│  │  │          → @dkg/query                       │  │  │
+│  │  │  @origintrail-official/dkg-agent → @origintrail-official/dkg-core → @origintrail-official/dkg-storage     │  │  │
+│  │  │          → @origintrail-official/dkg-publisher → @origintrail-official/dkg-chain      │  │  │
+│  │  │          → @origintrail-official/dkg-query                       │  │  │
 │  │  └─────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -94,7 +94,7 @@ packages/mobile/
 ├── nodejs-assets/
 │   └── nodejs-project/
 │       ├── package.json           # Node.js thread entry
-│       └── main.js                # boots @dkg/mobile-bridge
+│       └── main.js                # boots @origintrail-official/dkg-mobile-bridge
 ├── src/
 │   ├── App.tsx                    # Root navigator
 │   ├── bridge/
@@ -140,8 +140,8 @@ packages/mobile-bridge/
 ```
 
 **Key dependencies:**
-- Workspace: `@dkg/agent`, `@dkg/core`, `@dkg/storage`, `@dkg/query`,
-  `@dkg/publisher`, `@dkg/chain`
+- Workspace: `@origintrail-official/dkg-agent`, `@origintrail-official/dkg-core`, `@origintrail-official/dkg-storage`, `@origintrail-official/dkg-query`,
+  `@origintrail-official/dkg-publisher`, `@origintrail-official/dkg-chain`
 - `nodejs-mobile-react-native` (for `rn-bridge` module)
 
 ### 3.3 `packages/mobile-ui` — Shared React Native Components (optional)
@@ -235,7 +235,7 @@ It runs in-memory with no native compilation needed.
 - Cons: In-memory only (must serialize/deserialize on start/stop).
   Higher memory usage than native. WASM memory cannot shrink.
 - Mitigation: Persist to N-Quads file on pause/stop (already implemented
-  in `@dkg/storage` via `flushToDisk`). Limit dataset size for mobile
+  in `@origintrail-official/dkg-storage` via `flushToDisk`). Limit dataset size for mobile
   (see §7.2).
 
 **Option B — Cross-compiled native Oxigraph via napi-rs.**
@@ -253,16 +253,16 @@ Use a JavaScript triple store (e.g., `n3` + `comunica`).
 
 - Pros: No native code at all.
 - Cons: Significantly slower SPARQL evaluation. Large dependency tree.
-  Would require changes to `@dkg/storage` (violates "unchanged" goal).
+  Would require changes to `@origintrail-official/dkg-storage` (violates "unchanged" goal).
 - When: Only if Options A and B both fail.
 
-**Recommendation: Start with Option A.** The existing `@dkg/storage`
+**Recommendation: Start with Option A.** The existing `@origintrail-official/dkg-storage`
 package already imports `oxigraph` — the WASM version loads transparently
-in Node.js. No changes to `@dkg/storage` are needed.
+in Node.js. No changes to `@origintrail-official/dkg-storage` are needed.
 
 ### 5.2 libp2p Transports
 
-The existing `@dkg/core` configures libp2p with TCP and WebSocket
+The existing `@origintrail-official/dkg-core` configures libp2p with TCP and WebSocket
 transports. On mobile:
 
 - **TCP works** inside the nodejs-mobile thread (it has full Node.js
@@ -274,7 +274,7 @@ transports. On mobile:
 No transport changes are needed for v1. The mobile node connects to the
 relay via TCP (same as desktop edge nodes). If TCP proves unreliable on
 certain mobile networks, WebSocket-only mode can be added as a config
-option without changing `@dkg/core`.
+option without changing `@origintrail-official/dkg-core`.
 
 ### 5.3 Crypto
 
@@ -334,7 +334,7 @@ Works on nodejs-mobile without changes.
 ```typescript
 // packages/mobile-bridge/src/index.ts (runs in Node.js thread)
 import rn_bridge from 'rn-bridge';
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { RpcDispatcher } from './rpc.js';
 import { pushEvent } from './events.js';
 
@@ -514,7 +514,7 @@ stored in `react-native-keychain` (iOS Keychain / Android Keystore).
 | 1.2 | Integrate `nodejs-mobile-react-native` | NEEDS IMPL |
 | 1.3 | Create `packages/mobile-bridge` with minimal RPC (echo test) | NEEDS IMPL |
 | 1.4 | Verify bridge communication works on iOS simulator + Android emulator | NEEDS IMPL |
-| 1.5 | Verify `@dkg/agent` loads in nodejs-mobile (Node 18 compat) | NEEDS IMPL |
+| 1.5 | Verify `@origintrail-official/dkg-agent` loads in nodejs-mobile (Node 18 compat) | NEEDS IMPL |
 
 ### Phase 2 — Core Agent on Mobile (2-3 weeks)
 
@@ -556,7 +556,7 @@ stored in `react-native-keychain` (iOS Keychain / Android Keystore).
 | 5.1 | Native oxigraph build via napi-rs cross-compilation | NEEDS SPEC |
 | 5.2 | iOS Background Tasks API for periodic sync | NEEDS SPEC |
 | 5.3 | Push notifications for incoming messages (relay-side service) | NEEDS SPEC |
-| 5.4 | Graph visualization (port @dkg/graph-viz to react-native-skia) | NEEDS SPEC |
+| 5.4 | Graph visualization (port @origintrail-official/dkg-graph-viz to react-native-skia) | NEEDS SPEC |
 | 5.5 | QR code pairing between desktop and mobile nodes | NEEDS SPEC |
 
 ---
@@ -565,17 +565,17 @@ stored in `react-native-keychain` (iOS Keychain / Android Keystore).
 
 | Package | Changes needed | Notes |
 |---------|---------------|-------|
-| `@dkg/agent` | **None** | Used as-is in Node.js thread |
-| `@dkg/core` | **None** | TCP transport works in nodejs-mobile |
-| `@dkg/storage` | **None** | Oxigraph WASM loads transparently |
-| `@dkg/query` | **None** | Pure JS on top of storage |
-| `@dkg/publisher` | **None** | Pure JS + ethers |
-| `@dkg/chain` | **None** | Pure JS + ethers |
-| `@dkg/cli` | **None** | Not used on mobile |
-| `@dkg/node-ui` | **None** | Not used on mobile |
-| `@dkg/graph-viz` | **None** | Not used on mobile (v1) |
-| **`@dkg/mobile`** | **NEW** | React Native app |
-| **`@dkg/mobile-bridge`** | **NEW** | Node.js thread RPC layer |
+| `@origintrail-official/dkg-agent` | **None** | Used as-is in Node.js thread |
+| `@origintrail-official/dkg-core` | **None** | TCP transport works in nodejs-mobile |
+| `@origintrail-official/dkg-storage` | **None** | Oxigraph WASM loads transparently |
+| `@origintrail-official/dkg-query` | **None** | Pure JS on top of storage |
+| `@origintrail-official/dkg-publisher` | **None** | Pure JS + ethers |
+| `@origintrail-official/dkg-chain` | **None** | Pure JS + ethers |
+| `@origintrail-official/dkg` | **None** | Not used on mobile |
+| `@origintrail-official/dkg-node-ui` | **None** | Not used on mobile |
+| `@origintrail-official/dkg-graph-viz` | **None** | Not used on mobile (v1) |
+| **`@origintrail-official/dkg-mobile`** | **NEW** | React Native app |
+| **`@origintrail-official/dkg-mobile-bridge`** | **NEW** | Node.js thread RPC layer |
 
 **Zero changes to existing packages.** The mobile app is entirely
 additive — two new packages that compose the existing stack.

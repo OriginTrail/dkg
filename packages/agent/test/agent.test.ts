@@ -12,11 +12,11 @@ import {
   DKGAgent,
   AGENT_REGISTRY_PARANET,
 } from '../src/index.js';
-import { OxigraphStore } from '@dkg/storage';
-import { getGenesisQuads, computeNetworkId, SYSTEM_PARANETS } from '@dkg/core';
-import { DKGQueryEngine } from '@dkg/query';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { getGenesisQuads, computeNetworkId, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -198,9 +198,9 @@ describe('Profile Builder', () => {
 describe('ProfileManager', () => {
   it('publishes a profile as a KC via the Publisher', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@dkg/chain');
-    const { DKGPublisher } = await import('@dkg/publisher');
-    const { TypedEventBus, generateEd25519Keypair } = await import('@dkg/core');
+    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
+    const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+    const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
@@ -220,9 +220,9 @@ describe('ProfileManager', () => {
 
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
-    const { MockChainAdapter } = await import('@dkg/chain');
-    const { DKGPublisher } = await import('@dkg/publisher');
-    const { TypedEventBus, generateEd25519Keypair } = await import('@dkg/core');
+    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
+    const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+    const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus, keypair });
@@ -763,7 +763,7 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
   });
 
   it('emits warning when queryAccess.defaultPolicy is explicitly "public"', async () => {
-    const { Logger } = await import('@dkg/core');
+    const { Logger } = await import('@origintrail-official/dkg-core');
     const logs: Array<{ level: string; message: string }> = [];
     Logger.setSink((entry) => logs.push(entry));
     let agent: DKGAgent | undefined;
@@ -788,7 +788,7 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
   });
 
   it('does not emit public-query warning when queryAccess is omitted (deny default)', async () => {
-    const { Logger } = await import('@dkg/core');
+    const { Logger } = await import('@origintrail-official/dkg-core');
     const logs: Array<{ level: string; message: string }> = [];
     Logger.setSink((entry) => logs.push(entry));
     let agent: DKGAgent | undefined;

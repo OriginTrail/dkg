@@ -5,7 +5,7 @@ import {
   paranetPrivateGraphUri,
   paranetWorkspaceGraphUri,
   paranetWorkspaceMetaGraphUri,
-} from '@dkg/core';
+} from '@origintrail-official/dkg-core';
 
 export class GraphManager {
   private readonly store: TripleStore;

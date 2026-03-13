@@ -7,10 +7,10 @@ import {
   contextGraphMetaUri,
   paranetMetaGraphUri,
   Logger,
-} from '@dkg/core';
-import { OxigraphStore, GraphManager, type Quad } from '@dkg/storage';
-import { computeTripleHash } from '@dkg/publisher';
-import { MerkleTree } from '@dkg/core';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { computeTripleHash } from '@origintrail-official/dkg-publisher';
+import { MerkleTree } from '@origintrail-official/dkg-core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
 const PARANET = 'test-finalization';

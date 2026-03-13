@@ -12,7 +12,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { MerkleTree, hashTriple } from '@dkg/core';
+import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { gameEngine, GameEngine } from '../engine/game-engine.js';
 import type { GameState, ActionResult } from '../game/types.js';
@@ -20,7 +20,7 @@ import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-tr
 import * as proto from './protocol.js';
 import * as rdf from './rdf.js';
 
-/** Subset of PublishResult from @dkg/publisher — keep aligned with the canonical type. */
+/** Subset of PublishResult from @origintrail-official/dkg-publisher — keep aligned with the canonical type. */
 interface DKGPublishReturn {
   ual?: string;
   onChainResult?: { txHash?: string; blockNumber?: number };

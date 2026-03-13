@@ -27,7 +27,7 @@ the current implementation serves that goal, and where the gaps are.
 
 ### What's Working Well
 
-1. **"Agent is the Node" architecture.** Installing `@dkg/agent` makes an
+1. **"Agent is the Node" architecture.** Installing `@origintrail-official/dkg-agent` makes an
    AI agent a full network participant in ~5 lines of code. This is the
    single biggest win — a 10× DX improvement over V8's SDK-calls-engine model.
 
@@ -231,7 +231,7 @@ chain types extended with `CreateParanetParams` (name/description/accessPolicy),
 Per-paranet workspace graph (`/_workspace` + `/_workspace_meta`) so agents can build and replicate knowledge without chain cost, then **enshrine** (publish with finality) when ready. Replication same as publish (GossipSub on workspace topic). Challenges (message ordering, Rule 4 consistency, sync semantics, enshrine coordination, growth, private quads, **Byzantine node / entity exclusivity**) are documented with mitigations in the plan.
 
 - **Plan**: [PLAN_WORKSPACE_GRAPH.md](./PLAN_WORKSPACE_GRAPH.md)
-- **Implemented**: Constants + GraphManager (workspace/workspace_meta URIs and topic); proto `WorkspacePublishRequest`; `Publisher.writeToWorkspace` + `enshrineFromWorkspace`; `WorkspaceHandler` for workspace topic; agent subscribes to both publish and workspace topics, exposes `writeToWorkspace`/`enshrineFromWorkspace`; query options `graphSuffix: '_workspace'` and `includeWorkspace: true`. **Tests**: unit tests in `@dkg/publisher` (workspace.test.ts: writeToWorkspace, enshrineFromWorkspace, WorkspaceHandler), `@dkg/query` (query-engine.test.ts: graphSuffix and includeWorkspace), proto round-trip in `@dkg/core`; e2e in `@dkg/agent` (e2e-workspace.test.ts: 2-node write → GossipSub replicate → query workspace → includeWorkspace → enshrine → query data). Sync extension (workspace on connect) still to do; **test in a real use case** next.
+- **Implemented**: Constants + GraphManager (workspace/workspace_meta URIs and topic); proto `WorkspacePublishRequest`; `Publisher.writeToWorkspace` + `enshrineFromWorkspace`; `WorkspaceHandler` for workspace topic; agent subscribes to both publish and workspace topics, exposes `writeToWorkspace`/`enshrineFromWorkspace`; query options `graphSuffix: '_workspace'` and `includeWorkspace: true`. **Tests**: unit tests in `@origintrail-official/dkg-publisher` (workspace.test.ts: writeToWorkspace, enshrineFromWorkspace, WorkspaceHandler), `@origintrail-official/dkg-query` (query-engine.test.ts: graphSuffix and includeWorkspace), proto round-trip in `@origintrail-official/dkg-core`; e2e in `@origintrail-official/dkg-agent` (e2e-workspace.test.ts: 2-node write → GossipSub replicate → query workspace → includeWorkspace → enshrine → query data). Sync extension (workspace on connect) still to do; **test in a real use case** next.
 
 ### 2.5 Capacity metering & dynamic pricing — **NEEDS SPEC** (exists as draft)
 Gas-like metering for DKG resources (storage, CPU, bandwidth) with
@@ -450,7 +450,7 @@ All phases complete:
 
 **Testing:** A shared conformance test suite validates all `TripleStore`
 interface methods against every registered backend. Run Blazegraph tests
-with: `BLAZEGRAPH_URL=<endpoint> pnpm --filter @dkg/storage test`.
+with: `BLAZEGRAPH_URL=<endpoint> pnpm --filter @origintrail-official/dkg-storage test`.
 
 **Benchmark results** (10K ops, 100 concurrency, 100 KAs/publish):
 `oxigraph` (in-process) is 4–12x faster per-operation (publish 125ms vs

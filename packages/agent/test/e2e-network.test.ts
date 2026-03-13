@@ -11,8 +11,8 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { DKGNode } from '@dkg/core';
-import { MockChainAdapter } from '@dkg/chain';
+import { DKGNode } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 

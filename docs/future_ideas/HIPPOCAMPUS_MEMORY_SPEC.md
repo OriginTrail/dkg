@@ -69,7 +69,7 @@
 
 ### 3.1 Option A: Agent memory module (recommended starting point)
 
-- **What**: New package or module, e.g. `@dkg/memory` or `@dkg/agent` submodule, implementing:
+- **What**: New package or module, e.g. `@origintrail-official/dkg-memory` or `@origintrail-official/dkg-agent` submodule, implementing:
   - **Append-only log** of “memory entries” (e.g. dialogue turns, tool outputs, or summaries).
   - **Token-ID serialization** (using the same tokenizer as the rest of the stack where possible) + **Random Indexing** → binary signatures.
   - **DWM** (or a simplified equivalent) to co-index content and signatures; **Hamming-ball search** for retrieval.
@@ -97,7 +97,7 @@
 
 ### 3.4 Recommended path
 
-- **Phase 1**: Implement **Option A** (agent memory module) as a standalone, optional component used by `@dkg/agent` for conversation/session memory. No change to `TripleStore` or `DKGQueryEngine` contract.
+- **Phase 1**: Implement **Option A** (agent memory module) as a standalone, optional component used by `@origintrail-official/dkg-agent` for conversation/session memory. No change to `TripleStore` or `DKGQueryEngine` contract.
 - **Phase 2**: If needed, add **Option B** (semantic index over graph-derived text) so that “semantic search over my knowledge” can return DKG entities/UALs; keep SPARQL as the authoritative path.
 - **Phase 3**: Revisit Option C only if there is a clear need for a single store that does both SPARQL and Hippocampus-style retrieval (e.g. a dedicated “memory” graph with a custom backend).
 
@@ -137,7 +137,7 @@
 ## 5. Dependencies and References
 
 - **Paper**: Hippocampus: An Efficient and Scalable Memory Module for Agentic AI (arXiv:2602.13594).
-- **DKG-V9**: `@dkg/storage` (TripleStore, GraphManager), `@dkg/agent` (DKGAgent, config), `@dkg/query` (DKGQueryEngine); implementation plan §8.1 (pluggable triple store).
+- **DKG-V9**: `@origintrail-official/dkg-storage` (TripleStore, GraphManager), `@origintrail-official/dkg-agent` (DKGAgent, config), `@origintrail-official/dkg-query` (DKGQueryEngine); implementation plan §8.1 (pluggable triple store).
 - **Existing docs**: [query-flow.md](../diagrams/query-flow.md), [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md), [00_IMPLEMENTATION_PLAN.md](../plans/00_IMPLEMENTATION_PLAN.md).
 
 ---

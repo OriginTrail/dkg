@@ -1,6 +1,6 @@
-import type { TripleStore, Quad } from '@dkg/storage';
-import type { ChainAdapter } from '@dkg/chain';
-import { contextGraphDataUri, assertSafeIri } from '@dkg/core';
+import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { contextGraphDataUri, assertSafeIri } from '@origintrail-official/dkg-core';
 import { ProofIndex, type TripleProof } from './proof-index.js';
 
 export interface VerificationInfo {

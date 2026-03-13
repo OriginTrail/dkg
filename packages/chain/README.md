@@ -1,4 +1,4 @@
-# @dkg/chain
+# @origintrail-official/dkg-chain
 
 Blockchain abstraction layer for DKG V9. Provides a `ChainAdapter` interface with implementations for EVM chains and testing.
 
@@ -12,7 +12,7 @@ Blockchain abstraction layer for DKG V9. Provides a `ChainAdapter` interface wit
 ## Usage
 
 ```typescript
-import { EVMChainAdapter } from '@dkg/chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 
 const chain = new EVMChainAdapter({
   rpcUrl: 'https://sepolia.base.org',
@@ -25,5 +25,5 @@ const tx = await chain.createKnowledgeCollection(merkleRoot, size, epochs);
 
 ## Internal Dependencies
 
-- `@dkg/core` — configuration types, logging
-- `@dkg/evm-module` — contract ABIs for DKG smart contracts
+- `@origintrail-official/dkg-core` — configuration types, logging
+- `@origintrail-official/dkg-evm-module` — contract ABIs for DKG smart contracts

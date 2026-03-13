@@ -2,7 +2,7 @@
 
 **Status:** Draft  
 **Depends on:** Oregon Trail game logic (OregonTrailV9), DKG V9 node (workspace, context graphs with M/N attestation), Context Oracle (optional, for verified reads)  
-**Target:** `@dkg/node-ui` and daemon (`packages/cli`) so users can play Oregon Trail from their DKG Node dashboard. Each player runs their own node; coordination is via the DKG (workspace + context graph).
+**Target:** `@origintrail-official/dkg-node-ui` and daemon (`packages/cli`) so users can play Oregon Trail from their DKG Node dashboard. Each player runs their own node; coordination is via the DKG (workspace + context graph).
 
 ---
 
@@ -180,12 +180,12 @@ Integrate **Oregon Trail** (multiplayer wagon-train game on the DKG) into the No
 | Layer | Location | Contents |
 |-------|----------|----------|
 | **App logic (backend + shared)** | **`packages/oregon-trail`** (new package) | Types (`WagonState`, `VoteAction`, `ProposedEntry`), reducer / game engine (from OregonTrailV9), constants (paranet id, threshold). Optionally: **API handler** — a function the daemon can call to handle `/api/oregon-trail/*` (so route logic lives with the app, not in the daemon). |
-| **API routes** | **`packages/cli`** (daemon) | Mounts Oregon Trail API: either imports handlers from `@dkg/oregon-trail` and registers them, or defines routes in `oregon-trail-api.ts` that call into `@dkg/oregon-trail` for logic. |
-| **Frontend (UI)** | **`packages/node-ui`** | Oregon Trail as one more **route** in the existing Node UI app: `src/ui/pages/OregonTrailPage.tsx`, subviews under `src/ui/pages/oregon-trail/`, API helpers in `api.ts`. Imports types (and optionally helpers) from `@dkg/oregon-trail`. |
+| **API routes** | **`packages/cli`** (daemon) | Mounts Oregon Trail API: either imports handlers from `@origintrail-official/dkg-oregon-trail` and registers them, or defines routes in `oregon-trail-api.ts` that call into `@origintrail-official/dkg-oregon-trail` for logic. |
+| **Frontend (UI)** | **`packages/node-ui`** | Oregon Trail as one more **route** in the existing Node UI app: `src/ui/pages/OregonTrailPage.tsx`, subviews under `src/ui/pages/oregon-trail/`, API helpers in `api.ts`. Imports types (and optionally helpers) from `@origintrail-official/dkg-oregon-trail`. |
 
 **How the frontend gets loaded**
 
-- The Node UI is a **single Vite app** (one bundle). It is built once (`pnpm build:ui` in `@dkg/node-ui`) and served by the daemon at `/ui` (static dir: `node-ui/dist-ui`).
+- The Node UI is a **single Vite app** (one bundle). It is built once (`pnpm build:ui` in `@origintrail-official/dkg-node-ui`) and served by the daemon at `/ui` (static dir: `node-ui/dist-ui`).
 - Oregon Trail does **not** ship as a separate app or iframe. It is a **route and set of components** inside the same SPA: path `/oregon-trail`, sidebar link “Oregon Trail”. Adding it = adding a `<Route>` and a `<NavLink>` in `App.tsx` (or in a central app registry — see below). No extra “loading” step: it’s part of the same bundle.
 
 ---

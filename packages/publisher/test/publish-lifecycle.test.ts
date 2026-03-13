@@ -16,9 +16,9 @@ import {
   decodePublishAck,
   createOperationContext,
   MerkleTree,
-} from '@dkg/core';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';

@@ -1,7 +1,7 @@
-import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
+import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
-import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
+import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
 
 /**

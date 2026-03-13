@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const PARANET = 'publish-protocol-e2e';
 const ENTITY_1 = 'urn:protocol:entity:1';

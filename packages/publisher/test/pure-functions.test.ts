@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   skolemize,
   isBlankNode,

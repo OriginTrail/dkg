@@ -32,29 +32,29 @@ Core Infrastructure   core  storage  chain  evm-module
 ```mermaid
 graph TD
     subgraph "Core Infrastructure"
-        core["@dkg/core"]
-        storage["@dkg/storage"]
-        chain["@dkg/chain"]
-        evm["@dkg/evm-module"]
+        core["@origintrail-official/dkg-core"]
+        storage["@origintrail-official/dkg-storage"]
+        chain["@origintrail-official/dkg-chain"]
+        evm["@origintrail-official/dkg-evm-module"]
     end
 
     subgraph "Features"
-        query["@dkg/query"]
-        publisher["@dkg/publisher"]
-        agent["@dkg/agent"]
+        query["@origintrail-official/dkg-query"]
+        publisher["@origintrail-official/dkg-publisher"]
+        agent["@origintrail-official/dkg-agent"]
     end
 
     subgraph "Adapters & Integrations"
-        elizaos["@dkg/adapter-elizaos"]
-        openclaw["@dkg/adapter-openclaw"]
-        mcp["@dkg/mcp-server"]
+        elizaos["@origintrail-official/dkg-adapter-elizaos"]
+        openclaw["@origintrail-official/dkg-adapter-openclaw"]
+        mcp["@origintrail-official/dkg-mcp-server"]
     end
 
     subgraph "Tooling & UI"
-        cli["@dkg/cli"]
-        nodeui["@dkg/node-ui"]
-        graphviz["@dkg/graph-viz"]
-        netsim["@dkg/network-sim"]
+        cli["@origintrail-official/dkg"]
+        nodeui["@origintrail-official/dkg-node-ui"]
+        graphviz["@origintrail-official/dkg-graph-viz"]
+        netsim["@origintrail-official/dkg-network-sim"]
     end
 
     %% Core Infrastructure deps
@@ -97,28 +97,28 @@ graph TD
 
 These packages provide the foundation that everything else builds on.
 
-### @dkg/core
+### @origintrail-official/dkg-core
 `packages/core/`
 
-The lowest-level building block. Provides the libp2p networking layer (peer discovery, GossipSub messaging, protocol routing), cryptographic primitives (Ed25519 signing, hashing, RDF canonicalization), protobuf message definitions, the event bus, logging, and shared types/constants. Every other package in the monorepo depends on `@dkg/core` either directly or transitively.
+The lowest-level building block. Provides the libp2p networking layer (peer discovery, GossipSub messaging, protocol routing), cryptographic primitives (Ed25519 signing, hashing, RDF canonicalization), protobuf message definitions, the event bus, logging, and shared types/constants. Every other package in the monorepo depends on `@origintrail-official/dkg-core` either directly or transitively.
 
 **Key exports**: `DKGNode`, `ProtocolRouter`, `GossipSubManager`, `PeerDiscoveryManager`, `Logger`, genesis helpers.
 
-### @dkg/storage
+### @origintrail-official/dkg-storage
 `packages/storage/`
 
 Abstracts triple store backends behind a common `TripleStore` interface. Ships with four adapters: Oxigraph (embedded, default), Oxigraph Worker (off-main-thread), Blazegraph (remote), and a generic SPARQL-over-HTTP adapter. Also provides `GraphManager` for named-graph lifecycle and `PrivateContentStore` for encrypted data at rest.
 
 **Depends on**: `core`.
 
-### @dkg/chain
+### @origintrail-official/dkg-chain
 `packages/chain/`
 
 Defines the `ChainAdapter` interface for on-chain operations (identity registration, staking, knowledge asset creation, token transfers). Ships three implementations: `EVMChainAdapter` (real EVM via ethers.js), `MockChainAdapter` (for tests), and `NoChainAdapter` (offline mode).
 
 **Depends on**: `core`, `evm-module` (for contract ABIs).
 
-### @dkg/evm-module
+### @origintrail-official/dkg-evm-module
 `packages/evm-module/`
 
 The Solidity smart contracts that run on-chain (forked from DKG v8). Includes contracts for identity, staking, knowledge assets, knowledge collections, paranets, token management, random sampling, and fair-swap dispute resolution. Uses Hardhat for compilation, testing, and deployment. Other TypeScript packages import only the compiled ABI JSON files from this package.
@@ -131,21 +131,21 @@ The Solidity smart contracts that run on-chain (forked from DKG v8). Includes co
 
 These packages implement the core DKG capabilities: publishing knowledge, querying it, and running an autonomous agent.
 
-### @dkg/publisher
+### @origintrail-official/dkg-publisher
 `packages/publisher/`
 
 Handles the full publish lifecycle: validation, blank-node skolemization, auto-partitioning into knowledge assets, Merkle root computation (public, private, combined), metadata generation, on-chain commitment via `chain`, and gossip-based replication to peers. Also provides `AccessHandler`/`AccessClient` for private-data access control and `ChainEventPoller` for reacting to on-chain paranet events.
 
 **Depends on**: `core`, `storage`, `chain`, `query`.
 
-### @dkg/query
+### @origintrail-official/dkg-query
 `packages/query/`
 
 Provides `DKGQueryEngine` for local SPARQL queries and `QueryHandler` for responding to remote peer queries over the P2P network. Includes a `sparql-guard` that validates queries are read-only before execution, preventing mutation through the query path.
 
 **Depends on**: `core`, `storage`.
 
-### @dkg/agent
+### @origintrail-official/dkg-agent
 `packages/agent/`
 
 The high-level "batteries-included" package. `DKGAgent` composes a node, publisher, query engine, wallet management, agent profiles, peer discovery, and encrypted messaging into a single orchestrator. Manages the agent lifecycle (start, register identity, publish profile, discover peers, handle messages, stop). Also provides skill-based RPC: agents can advertise skill offerings and invoke each other's skills over the network.
@@ -158,21 +158,21 @@ The high-level "batteries-included" package. `DKGAgent` composes a node, publish
 
 These packages connect the DKG to external frameworks and tools.
 
-### @dkg/adapter-elizaos
+### @origintrail-official/dkg-adapter-elizaos
 `packages/adapter-elizaos/`
 
 An ElizaOS plugin that turns any ElizaOS agent into a DKG v9 node. Exposes DKG capabilities as ElizaOS actions (publish, query, find agents, send message, invoke skill) and provides a knowledge provider that feeds graph data into the agent's context.
 
 **Depends on**: `core`, `storage`, `agent`.
 
-### @dkg/adapter-openclaw
+### @origintrail-official/dkg-adapter-openclaw
 `packages/adapter-openclaw/`
 
 An OpenClaw plugin adapter that turns any OpenClaw agent into a DKG v9 node. Follows the OpenClaw plugin convention (plugin manifest, entry script, tool definitions). Similar capability surface to the ElizaOS adapter but shaped to OpenClaw's extension API.
 
 **Depends on**: `core`, `storage`, `agent`.
 
-### @dkg/mcp-server
+### @origintrail-official/dkg-mcp-server
 `packages/mcp-server/`
 
 A Model Context Protocol (MCP) server that exposes the DKG code graph to AI coding assistants (Claude Code, Cursor, etc.). Provides tools for finding modules, functions, classes, and packages by keyword, getting file summaries without reading source, and running raw SPARQL queries. Connects to a running DKG node's API.
@@ -185,28 +185,28 @@ A Model Context Protocol (MCP) server that exposes the DKG code graph to AI codi
 
 These packages support development, operations, and visualization.
 
-### @dkg/cli
+### @origintrail-official/dkg
 `packages/cli/`
 
 The `dkg` command-line tool. Provides commands for node lifecycle (`init`, `start`, `stop`, `status`), knowledge operations (`publish`, `query`, `query-remote`), paranet management (`paranet create`, `paranet list`), agent networking (`peers`, `send`, `chat`), wallet management, ask configuration, codebase indexing, and log tailing. This is the primary user-facing entry point for running a DKG node.
 
 **Depends on**: `core`, `agent`, `node-ui`.
 
-### @dkg/node-ui
+### @origintrail-official/dkg-node-ui
 `packages/node-ui/`
 
 A dashboard backend and React frontend for monitoring a running DKG node. The backend provides `DashboardDB` (SQLite-based metrics, operation tracking, chat history, query logs), `StructuredLogger`, `MetricsCollector`, `OperationTracker`, and OpenTelemetry integration. The frontend (built with Vite) provides a visual dashboard with charts (Recharts), a SPARQL query editor (CodeMirror), and a knowledge graph explorer (using `graph-viz`).
 
 **Depends on**: `core`, `graph-viz`.
 
-### @dkg/graph-viz
+### @origintrail-official/dkg-graph-viz
 `packages/graph-viz/`
 
 A standalone RDF knowledge graph visualizer. Renders force-directed graphs with hexagonal nodes, supports declarative view configs, temporal filtering, multiple color palettes, and both 2D (Canvas) and optional 3D (Three.js) rendering. Can load data from Oxigraph or remote SPARQL endpoints. Also exports React components for embedding in web apps.
 
 **Depends on**: `force-graph`, `n3`, `oxigraph` (no workspace deps).
 
-### @dkg/network-sim
+### @origintrail-official/dkg-network-sim
 `packages/network-sim/`
 
 A browser-based network simulator for visualizing DKG node interactions. A React + Vite app that lets you spawn virtual nodes, watch them discover peers, publish knowledge, and propagate data -- useful for understanding network dynamics without running real nodes.
@@ -243,17 +243,17 @@ A browser-based network simulator for visualizing DKG node interactions. A React
 
 | Package              | Workspace Dependencies                              |
 |----------------------|------------------------------------------------------|
-| `@dkg/core`          | (none -- leaf)                                       |
-| `@dkg/evm-module`    | (none -- leaf, Solidity only)                        |
-| `@dkg/storage`       | `core`                                               |
-| `@dkg/chain`         | `core`, `evm-module`                                 |
-| `@dkg/query`         | `core`, `storage`                                    |
-| `@dkg/publisher`     | `core`, `storage`, `chain`, `query`                  |
-| `@dkg/agent`         | `core`, `storage`, `chain`, `publisher`, `query`     |
-| `@dkg/adapter-elizaos` | `core`, `storage`, `agent`                         |
-| `@dkg/adapter-openclaw` | `core`, `storage`, `agent`                        |
-| `@dkg/mcp-server`    | (none -- connects via HTTP API)                      |
-| `@dkg/graph-viz`     | (none -- standalone)                                 |
-| `@dkg/network-sim`   | (none -- standalone)                                 |
-| `@dkg/node-ui`       | `core`, `graph-viz`                                  |
-| `@dkg/cli`           | `core`, `agent`, `node-ui`                           |
+| `@origintrail-official/dkg-core`          | (none -- leaf)                                       |
+| `@origintrail-official/dkg-evm-module`    | (none -- leaf, Solidity only)                        |
+| `@origintrail-official/dkg-storage`       | `core`                                               |
+| `@origintrail-official/dkg-chain`         | `core`, `evm-module`                                 |
+| `@origintrail-official/dkg-query`         | `core`, `storage`                                    |
+| `@origintrail-official/dkg-publisher`     | `core`, `storage`, `chain`, `query`                  |
+| `@origintrail-official/dkg-agent`         | `core`, `storage`, `chain`, `publisher`, `query`     |
+| `@origintrail-official/dkg-adapter-elizaos` | `core`, `storage`, `agent`                         |
+| `@origintrail-official/dkg-adapter-openclaw` | `core`, `storage`, `agent`                        |
+| `@origintrail-official/dkg-mcp-server`    | (none -- connects via HTTP API)                      |
+| `@origintrail-official/dkg-graph-viz`     | (none -- standalone)                                 |
+| `@origintrail-official/dkg-network-sim`   | (none -- standalone)                                 |
+| `@origintrail-official/dkg-node-ui`       | `core`, `graph-viz`                                  |
+| `@origintrail-official/dkg`           | `core`, `agent`, `node-ui`                           |

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { MerkleTree, hashTriple } from '@dkg/core';
-import type { TripleStore, Quad, QueryResult, SelectResult, AskResult, ConstructResult } from '@dkg/storage';
-import type { ChainAdapter } from '@dkg/chain';
+import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import type { TripleStore, Quad, QueryResult, SelectResult, AskResult, ConstructResult } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ContextOracle } from '../src/context-oracle.js';
 import { ProofIndex } from '../src/proof-index.js';
 

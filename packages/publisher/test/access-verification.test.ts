@@ -17,8 +17,8 @@ import {
   encodeAccessRequest,
   decodeAccessRequest,
   decodeAccessResponse,
-} from '@dkg/core';
-import { OxigraphStore, GraphManager, type Quad } from '@dkg/storage';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { AccessHandler } from '../src/access-handler.js';
 
 const PARANET = 'test-access-verify';

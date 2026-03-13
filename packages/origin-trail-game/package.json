@@ -1,5 +1,5 @@
 {
-  "name": "dkg-app-origin-trail-game",
+  "name": "@origintrail-official/dkg-app-origin-trail-game",
   "version": "0.1.0",
   "description": "OriginTrail Game — a multiplayer game on the DKG. Installable DKG app.",
   "type": "module",
@@ -22,12 +22,12 @@
     "clean": "rm -rf dist dist-ui tsconfig.tsbuildinfo"
   },
   "peerDependencies": {
-    "@dkg/agent": "workspace:*",
-    "@dkg/core": "workspace:*",
-    "@dkg/storage": "workspace:*"
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
   },
   "dependencies": {
-    "@dkg/graph-viz": "workspace:*",
+    "@origintrail-official/dkg-graph-viz": "workspace:*",
     "ethers": "^6",
     "uuid": "^9.0.0"
   },
@@ -47,5 +47,20 @@
     "typescript": "^5.7",
     "vite": "^6",
     "vitest": "^3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "dist-ui",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/origin-trail-game"
   }
 }

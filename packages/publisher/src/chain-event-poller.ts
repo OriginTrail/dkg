@@ -1,5 +1,5 @@
-import type { ChainAdapter, EventFilter, ChainEvent } from '@dkg/chain';
-import { Logger, createOperationContext, type OperationContext } from '@dkg/core';
+import type { ChainAdapter, EventFilter, ChainEvent } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 

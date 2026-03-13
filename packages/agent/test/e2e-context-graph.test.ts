@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const PARANET = 'context-graph-e2e';
 const ENTITY_CTX_1 = 'urn:ctxgraph:entity:1';

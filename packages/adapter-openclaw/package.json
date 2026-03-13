@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/adapter-openclaw",
+  "name": "@origintrail-official/dkg-adapter-openclaw",
   "version": "0.0.1",
   "description": "OpenClaw plugin adapter — turns any OpenClaw agent into a DKG V9 node",
   "type": "module",
@@ -15,7 +15,9 @@
     "dist",
     "skills",
     "openclaw-entry.mjs",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
@@ -24,13 +26,24 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@dkg/core": "workspace:*"
+    "@origintrail-official/dkg-core": "workspace:*"
   },
   "openclaw": {
-    "extensions": ["./openclaw-entry.mjs"]
+    "extensions": [
+      "./openclaw-entry.mjs"
+    ]
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/adapter-openclaw"
   }
 }

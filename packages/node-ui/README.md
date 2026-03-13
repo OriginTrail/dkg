@@ -1,11 +1,11 @@
-# @dkg/node-ui
+# @origintrail-official/dkg-node-ui
 
 Web dashboard for DKG V9 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with agents.
 
 ## Features
 
 - **Dashboard** — real-time node metrics (peers, KAs published, queries served, uptime)
-- **Knowledge Explorer** — browse and search Knowledge Assets with interactive graph visualization (powered by `@dkg/graph-viz`)
+- **Knowledge Explorer** — browse and search Knowledge Assets with interactive graph visualization (powered by `@origintrail-official/dkg-graph-viz`)
 - **SPARQL editor** — write and execute SPARQL queries with syntax highlighting and result tables
 - **Chat interface** — send messages and invoke skills on remote agents
 - **Metrics & telemetry** — `DashboardDB` (SQLite) for persistent metric snapshots, `MetricsCollector` for gauges and counters, `OperationTracker` for request tracing
@@ -22,7 +22,7 @@ The package has two sides:
 ## Usage
 
 ```typescript
-import { handleNodeUIRequest, initTelemetry } from '@dkg/node-ui';
+import { handleNodeUIRequest, initTelemetry } from '@origintrail-official/dkg-node-ui';
 
 // In the daemon's HTTP server
 if (url.startsWith('/ui')) {
@@ -45,5 +45,5 @@ pnpm build
 
 ## Internal Dependencies
 
-- `@dkg/core` — configuration types, event bus integration
-- `@dkg/graph-viz` — interactive RDF graph visualization component
+- `@origintrail-official/dkg-core` — configuration types, event bus integration
+- `@origintrail-official/dkg-graph-viz` — interactive RDF graph visualization component

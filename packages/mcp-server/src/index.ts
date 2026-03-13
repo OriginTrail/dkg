@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { DkgClient } from './connection.js';
-import { escapeSparqlLiteral } from '@dkg/core';
+import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
 const PARANET = 'dev-coordination';
 const DG = 'https://ontology.dkg.io/devgraph#';
@@ -401,7 +401,7 @@ type AdapterRegisterFn = (
 ) => void;
 
 const ADAPTER_MAP: Record<string, string> = {
-  autoresearch: '@dkg/adapter-autoresearch',
+  autoresearch: '@origintrail-official/dkg-adapter-autoresearch',
 };
 
 async function loadAdapters() {

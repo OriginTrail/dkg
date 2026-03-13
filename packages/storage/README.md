@@ -1,4 +1,4 @@
-# @dkg/storage
+# @origintrail-official/dkg-storage
 
 Triple store abstraction layer for DKG V9. Provides a unified API over multiple RDF storage backends with named graph management and private content storage.
 
@@ -16,7 +16,7 @@ Triple store abstraction layer for DKG V9. Provides a unified API over multiple 
 ## Usage
 
 ```typescript
-import { createTripleStore, GraphManager } from '@dkg/storage';
+import { createTripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 
 const store = createTripleStore({ backend: 'oxigraph', path: './data' });
 const graphs = new GraphManager(store);
@@ -27,4 +27,4 @@ const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 
 ## Internal Dependencies
 
-- `@dkg/core` — configuration types, logging, constants
+- `@origintrail-official/dkg-core` — configuration types, logging, constants

@@ -844,7 +844,7 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
     }
   } catch {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end('<!DOCTYPE html><html><body><h1>Node UI not built</h1><p>Run <code>pnpm build:ui</code> in @dkg/node-ui</p></body></html>');
+    res.end('<!DOCTYPE html><html><body><h1>Node UI not built</h1><p>Run <code>pnpm build:ui</code> in @origintrail-official/dkg-node-ui</p></body></html>');
   }
 
   return true;

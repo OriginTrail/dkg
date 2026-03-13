@@ -1,5 +1,5 @@
-import type { Quad } from '@dkg/storage';
-import { DKG_ONTOLOGY, SYSTEM_PARANETS } from '@dkg/core';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'https://schema.org/';

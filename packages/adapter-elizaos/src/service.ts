@@ -4,7 +4,7 @@
  * Initialized once per ElizaOS agent runtime. Reads config from runtime
  * settings (DKG_*), starts a DKGAgent, and publishes the agent profile.
  */
-import { DKGAgent, type DKGAgentConfig } from '@dkg/agent';
+import { DKGAgent, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import type { IAgentRuntime, Service } from './types.js';
 
 let agentInstance: DKGAgent | null = null;

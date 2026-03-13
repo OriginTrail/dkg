@@ -6,8 +6,8 @@
  * gossip-publish-handler or dkg-agent sync, these tests break — on purpose.
  */
 import { describe, it, expect } from 'vitest';
-import { encodePublishRequest } from '@dkg/core';
-import { OxigraphStore } from '@dkg/storage';
+import { encodePublishRequest } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler, type GossipPhaseCallback } from '../src/gossip-publish-handler.js';
 
 const PARANET = 'test-phase-seq';

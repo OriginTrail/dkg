@@ -1,9 +1,9 @@
-import type { TripleStore, Quad } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
-import type { EventBus } from '@dkg/core';
-import { Logger, createOperationContext } from '@dkg/core';
+import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import type { EventBus } from '@origintrail-official/dkg-core';
+import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest } from '@dkg/core';
+import { decodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
 import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';

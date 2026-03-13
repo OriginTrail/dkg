@@ -1,4 +1,4 @@
-# @dkg/publisher
+# @origintrail-official/dkg-publisher
 
 Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowledge Assets from a node into the network — from RDF processing through Merkle tree construction to on-chain finalization.
 
@@ -19,7 +19,7 @@ Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowle
 ## Usage
 
 ```typescript
-import { DKGPublisher } from '@dkg/publisher';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 
 const publisher = new DKGPublisher(agent);
 
@@ -35,7 +35,7 @@ console.log('Published KC:', result.ual);
 
 ## Internal Dependencies
 
-- `@dkg/core` — P2P networking, protocol streams, crypto
-- `@dkg/chain` — on-chain KC creation and finalization
-- `@dkg/query` — entity resolution during publishing
-- `@dkg/storage` — triple persistence
+- `@origintrail-official/dkg-core` — P2P networking, protocol streams, crypto
+- `@origintrail-official/dkg-chain` — on-chain KC creation and finalization
+- `@origintrail-official/dkg-query` — entity resolution during publishing
+- `@origintrail-official/dkg-storage` — triple persistence

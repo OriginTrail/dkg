@@ -9,14 +9,14 @@ import {
   encodePublishRequest,
   decodePublishRequest,
   decodePublishAck,
-} from '@dkg/core';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
-import { DKGQueryEngine } from '@dkg/query';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 import { computePublicRoot, computeKARoot, computeKCRoot } from '../src/merkle.js';

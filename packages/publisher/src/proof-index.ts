@@ -1,5 +1,5 @@
-import { MerkleTree, hashTriple } from '@dkg/core';
-import type { Quad } from '@dkg/storage';
+import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 export interface TripleProof {
   tripleHash: string;

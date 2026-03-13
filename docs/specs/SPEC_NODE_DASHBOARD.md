@@ -26,7 +26,7 @@ the node optionally exports metrics via OpenTelemetry.
 │                              DKG Node                                     │
 │                                                                           │
 │  ┌──────────┐  ┌──────────────┐  ┌─────────────────────────────────────┐ │
-│  │ @dkg/core │  │ @dkg/agent   │  │ @dkg/cli (daemon.ts)               │ │
+│  │ @origintrail-official/dkg-core │  │ @origintrail-official/dkg-agent   │  │ @origintrail-official/dkg (daemon.ts)               │ │
 │  │           │  │              │  │                                     │ │
 │  │ libp2p    │  │ store ───────┼──┼─► /api/query  /api/publish         │ │
 │  │ gossipsub │  │ publisher    │  │  /api/status                       │ │
@@ -67,7 +67,7 @@ the node optionally exports metrics via OpenTelemetry.
 │  └────┬────┘ └────┬────┘ └────┬─────┘ └───┬────┘ └────────┬─────────┘   │
 │       │           │           │            │               │             │
 │       │      ┌────┴────┐  ┌──┴──────────┐ │  ┌────────────┴───────────┐ │
-│       │      │ Integra-│  │ @dkg/       │ │  │      AI Assistant      │ │
+│       │      │ Integra-│  │ @origintrail-official/dkg-       │ │  │      AI Assistant      │ │
 │       │      │  tions  │  │  graph-viz  │ │  │ NL → SQL + SPARQL      │ │
 │       │      └─────────┘  └─────────────┘ │  └────────────────────────┘ │
 │       ▼                                   ▼                             │
@@ -173,7 +173,7 @@ RPC latency sparkline with red threshold line.
 
 The **core knowledge interface** — browse, query, and visualize everything
 in your node's knowledge graph. Built on the existing `/api/query` and
-`/api/publish` endpoints, with `@dkg/graph-viz` for interactive visualization.
+`/api/publish` endpoints, with `@origintrail-official/dkg-graph-viz` for interactive visualization.
 
 #### SPARQL Editor
 
@@ -189,12 +189,12 @@ Results render in three modes:
 | Mode | When to use |
 |------|-------------|
 | **Table** | SELECT queries — standard tabular results |
-| **Graph** | CONSTRUCT/DESCRIBE queries — interactive force-directed graph via `@dkg/graph-viz` |
+| **Graph** | CONSTRUCT/DESCRIBE queries — interactive force-directed graph via `@origintrail-official/dkg-graph-viz` |
 | **JSON** | Raw bindings — for debugging or copy-paste |
 
 #### Graph Visualization
 
-Powered by `@dkg/graph-viz` (already in the monorepo), **as the main Explorer view**:
+Powered by `@origintrail-official/dkg-graph-viz` (already in the monorepo), **as the main Explorer view**:
 - The **Graph** tab loads the full knowledge graph via `CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o } LIMIT N` (configurable limit: 1k–50k).
 - Interactive force-directed 2D layout; humanized labels; node click for details.
 - Interactive force-directed 2D layout (with optional 3D via `renderer-3d`)
@@ -348,7 +348,7 @@ and results are appended (NL→SPARQL).
 
 ## Implementation approach
 
-### Package: `@dkg/node-ui`
+### Package: `@origintrail-official/dkg-node-ui`
 
 New package containing:
 
@@ -364,7 +364,7 @@ New package containing:
 **Frontend (React SPA)**:
 - Built with React + Vite, pre-built at publish time to static files
 - Consumes the `/api/*` endpoints for all data
-- Embeds `@dkg/graph-viz` for the Knowledge Explorer's graph view
+- Embeds `@origintrail-official/dkg-graph-viz` for the Knowledge Explorer's graph view
 - CodeMirror or Monaco for the SPARQL editor
 - Recharts or similar for time-series charts
 - The AI Assistant panel shares the same chat UI components
@@ -730,7 +730,7 @@ Power users enable the OTel exporter to pipe into their existing stack.
 ### Phase 3: Knowledge Explorer
 - SPARQL editor (CodeMirror with SPARQL mode)
 - Table view for SELECT results
-- Graph visualization via `@dkg/graph-viz` for CONSTRUCT/DESCRIBE
+- Graph visualization via `@origintrail-official/dkg-graph-viz` for CONSTRUCT/DESCRIBE
 - Paranet browser: list paranets → KCs → KAs → root entities
 - Publish UI: simple form → `/api/publish`
 - Query history and saved queries (SQLite)
@@ -765,4 +765,4 @@ Power users enable the OTel exporter to pipe into their existing stack.
 | `react` + `vite` | SPA framework (build-time only) | — |
 | `recharts` | Time-series charts | ~200KB |
 | `@codemirror/lang-sparql` | SPARQL editor | ~50KB |
-| `@dkg/graph-viz` | Graph visualization (in-monorepo) | — |
+| `@origintrail-official/dkg-graph-viz` | Graph visualization (in-monorepo) | — |

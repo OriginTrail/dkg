@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useFetch, formatDuration } from '../hooks.js';
 import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, fetchOperation, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
 import { isDevModeEnabled } from '../dev-mode.js';
-import { RdfGraph } from '@dkg/graph-viz/react';
-import type { ViewConfig } from '@dkg/graph-viz';
+import { RdfGraph } from '@origintrail-official/dkg-graph-viz/react';
+import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
 import { Tooltip, InfoTip } from '../components/Tooltip.js';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────

@@ -26,7 +26,7 @@ importers:
 
   .:
     dependencies:
-      dkg-app-origin-trail-game:
+      '@origintrail-official/dkg-app-origin-trail-game':
         specifier: workspace:*
         version: link:packages/origin-trail-game
     devDependencies:
@@ -51,27 +51,27 @@ importers:
 
   demo:
     dependencies:
-      '@dkg/agent':
-        specifier: workspace:*
-        version: link:../packages/agent
-      '@dkg/chain':
-        specifier: workspace:*
-        version: link:../packages/chain
-      '@dkg/core':
-        specifier: workspace:*
-        version: link:../packages/core
-      '@dkg/publisher':
-        specifier: workspace:*
-        version: link:../packages/publisher
-      '@dkg/query':
-        specifier: workspace:*
-        version: link:../packages/query
-      '@dkg/storage':
-        specifier: workspace:*
-        version: link:../packages/storage
       '@multiformats/multiaddr':
         specifier: '*'
         version: 13.0.1
+      '@origintrail-official/dkg-agent':
+        specifier: workspace:*
+        version: link:../packages/agent
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../packages/chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../packages/core
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:../packages/publisher
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../packages/query
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../packages/storage
 
   packages/adapter-autoresearch:
     dependencies:
@@ -91,13 +91,13 @@ importers:
 
   packages/adapter-elizaos:
     dependencies:
-      '@dkg/agent':
+      '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/storage':
+      '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
     devDependencies:
@@ -110,7 +110,7 @@ importers:
 
   packages/adapter-openclaw:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -123,21 +123,6 @@ importers:
 
   packages/agent:
     dependencies:
-      '@dkg/chain':
-        specifier: workspace:*
-        version: link:../chain
-      '@dkg/core':
-        specifier: workspace:*
-        version: link:../core
-      '@dkg/publisher':
-        specifier: workspace:*
-        version: link:../publisher
-      '@dkg/query':
-        specifier: workspace:*
-        version: link:../query
-      '@dkg/storage':
-        specifier: workspace:*
-        version: link:../storage
       '@libp2p/peer-id':
         specifier: ^6.0.4
         version: 6.0.4
@@ -156,6 +141,21 @@ importers:
       '@noble/hashes':
         specifier: ^2
         version: 2.0.1
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:../publisher
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../query
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -169,10 +169,10 @@ importers:
 
   packages/attested-assets:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/storage':
+      '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
       protobufjs:
@@ -188,25 +188,26 @@ importers:
 
   packages/chain:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/evm-module':
-        specifier: workspace:*
-        version: link:../evm-module
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    optionalDependencies:
+      '@origintrail-official/dkg-evm-module':
+        specifier: workspace:*
+        version: link:../evm-module
 
   packages/cli:
     dependencies:
-      '@dkg/agent':
+      '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/node-ui':
+      '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui
       commander:
@@ -439,12 +440,12 @@ importers:
 
   packages/mcp-server:
     dependencies:
-      '@dkg/core':
-        specifier: workspace:*
-        version: link:../core
       '@modelcontextprotocol/sdk':
         specifier: ^1
         version: 1.27.1(zod@3.25.76)
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       zod:
         specifier: ^3.25
         version: 3.25.76
@@ -453,7 +454,7 @@ importers:
         specifier: ^3
         version: 3.2.4(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0)
     optionalDependencies:
-      '@dkg/adapter-autoresearch':
+      '@origintrail-official/dkg-adapter-autoresearch':
         specifier: workspace:*
         version: link:../adapter-autoresearch
 
@@ -487,10 +488,10 @@ importers:
 
   packages/node-ui:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/graph-viz':
+      '@origintrail-official/dkg-graph-viz':
         specifier: workspace:*
         version: link:../graph-viz
       better-sqlite3:
@@ -554,16 +555,16 @@ importers:
 
   packages/origin-trail-game:
     dependencies:
-      '@dkg/agent':
+      '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/graph-viz':
+      '@origintrail-official/dkg-graph-viz':
         specifier: workspace:*
         version: link:../graph-viz
-      '@dkg/storage':
+      '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
       ethers:
@@ -621,21 +622,21 @@ importers:
 
   packages/publisher:
     dependencies:
-      '@dkg/chain':
-        specifier: workspace:*
-        version: link:../chain
-      '@dkg/core':
-        specifier: workspace:*
-        version: link:../core
-      '@dkg/query':
-        specifier: workspace:*
-        version: link:../query
-      '@dkg/storage':
-        specifier: workspace:*
-        version: link:../storage
       '@multiformats/multiaddr':
         specifier: ^13.0.1
         version: 13.0.1
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../query
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       ethers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -655,10 +656,10 @@ importers:
 
   packages/query:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@dkg/storage':
+      '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
     devDependencies:
@@ -671,7 +672,7 @@ importers:
 
   packages/storage:
     dependencies:
-      '@dkg/core':
+      '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
       n3:

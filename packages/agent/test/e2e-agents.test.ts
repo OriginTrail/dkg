@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { DKGNode } from '@dkg/core';
-import { MockChainAdapter } from '@dkg/chain';
+import { DKGNode } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];

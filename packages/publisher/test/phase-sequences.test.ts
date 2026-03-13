@@ -12,9 +12,9 @@ import {
   generateEd25519Keypair,
   createOperationContext,
   encodeWorkspacePublishRequest,
-} from '@dkg/core';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { WorkspaceHandler } from '../src/workspace-handler.js';
 import { ethers } from 'ethers';

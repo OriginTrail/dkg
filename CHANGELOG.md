@@ -21,7 +21,7 @@ First tracked release (DKG V9). Includes:
 
 ### Added
 - **Cross-agent query protocol** (`/dkg/query/2.0.0`): query another node's knowledge store over libp2p (ENTITY_BY_UAL, ENTITIES_BY_TYPE, ENTITY_TRIPLES, SPARQL_QUERY) with access policies and rate limiting.
-- **Node dashboard UI** (`@dkg/node-ui`): web UI served by the daemon — dashboard, Knowledge Explorer (SPARQL + graph viz), Operations log, Network, Wallet, Integrations, chat assistant (rule-based + optional LLM).
+- **Node dashboard UI** (`@origintrail-official/dkg-node-ui`): web UI served by the daemon — dashboard, Knowledge Explorer (SPARQL + graph viz), Operations log, Network, Wallet, Integrations, chat assistant (rule-based + optional LLM).
 - **Oxigraph persistence and sync**: triple store persists to disk; sync protocol for catch-up on connect.
 - **On-chain publishing**: Base Sepolia testnet integration, TRAC staking, ask setting, knowledge asset minting.
 - **CLI**: `dkg init`, `start`, `stop`, `status`, `peers`, `publish`, `query`, `query-remote`, `subscribe`, `paranet create/list/info`, `set-ask`, `wallet`, `logs`.

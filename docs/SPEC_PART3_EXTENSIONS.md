@@ -13,23 +13,23 @@ These extensions are **optional packages** that agents install to gain additiona
 
 | Package | Purpose | Depends on |
 |---|---|---|
-| `@dkg/neural` | Hybrid symbolic+neural queries (similarity, link prediction) | core, query, storage |
-| `@dkg/pipeline` | Continuous knowledge graph construction from external sources | publisher, query, storage |
-| `@dkg/visualizer` | Interactive knowledge graph visualization | query |
+| `@origintrail-official/dkg-neural` | Hybrid symbolic+neural queries (similarity, link prediction) | core, query, storage |
+| `@origintrail-official/dkg-pipeline` | Continuous knowledge graph construction from external sources | publisher, query, storage |
+| `@origintrail-official/dkg-visualizer` | Interactive knowledge graph visualization | query |
 
 ---
 
-## 2. Neural Knowledge Layer (`@dkg/neural`)
+## 2. Neural Knowledge Layer (`@origintrail-official/dkg-neural`)
 
 ### Purpose
 
-Extend SPARQL with neural predicates: similarity search, link prediction, confidence scoring. Agents with `@dkg/neural` installed gain hybrid query capabilities.
+Extend SPARQL with neural predicates: similarity search, link prediction, confidence scoring. Agents with `@origintrail-official/dkg-neural` installed gain hybrid query capabilities.
 
 ### Architecture
 
 ```
-@dkg/query (SPARQL engine)
-  → PredicateRegistry → delegates ngdb:* calls to → @dkg/neural
+@origintrail-official/dkg-query (SPARQL engine)
+  → PredicateRegistry → delegates ngdb:* calls to → @origintrail-official/dkg-neural
                                                        ├── Embedding Engine (TransE/RotatE)
                                                        ├── Vector Index (HNSW)
                                                        └── Sync Hook (listens to triple store)
@@ -78,7 +78,7 @@ All nodes in a paranet use the same model.
 
 ### Pluggable Predicate Handler Interface
 
-`@dkg/query` exposes a general registration interface:
+`@origintrail-official/dkg-query` exposes a general registration interface:
 
 ```
 interface PredicateHandler {
@@ -111,7 +111,7 @@ Agents may promote predictions to asserted triples by publishing them as new KAs
 
 ---
 
-## 3. Knowledge Mining Pipelines (`@dkg/pipeline`)
+## 3. Knowledge Mining Pipelines (`@origintrail-official/dkg-pipeline`)
 
 ### Purpose
 
@@ -130,7 +130,7 @@ Sources → Extract → Transform → Validate → Batch → Publish
 | **Transformer** | `transform(data, ontology): Quad[]` | Map to RDF, entity resolution, URI minting |
 | **Validator** | `validate(quads, shapes): Report` | SHACL shape validation |
 | **Batcher** | `add(quads), flush(): KC[]` | Group into KCs (by entity/source/time) |
-| **Publisher** | Uses `@dkg/publisher` | Reserve UALs, publish, retry |
+| **Publisher** | Uses `@origintrail-official/dkg-publisher` | Reserve UALs, publish, retry |
 
 ### Extractors
 
@@ -167,7 +167,7 @@ Pipelines emit metrics: `items.received`, `triples.generated`, `validation.passe
 
 ---
 
-## 4. Visualizer (`@dkg/visualizer`)
+## 4. Visualizer (`@origintrail-official/dkg-visualizer`)
 
 ### Purpose
 
@@ -248,7 +248,7 @@ Full threat model should be developed as a separate document during implementati
 
 ### WP-3A: Neural Layer (Developer A)
 
-**Scope**: `@dkg/neural`
+**Scope**: `@origintrail-official/dkg-neural`
 
 | Phase | Deliverable | Weeks |
 |---|---|---|
@@ -262,7 +262,7 @@ Full threat model should be developed as a separate document during implementati
 
 ### WP-3B: Pipelines & Visualization (Developer B)
 
-**Scope**: `@dkg/pipeline`, `@dkg/visualizer`
+**Scope**: `@origintrail-official/dkg-pipeline`, `@origintrail-official/dkg-visualizer`
 
 | Phase | Deliverable | Weeks |
 |---|---|---|
@@ -271,7 +271,7 @@ Full threat model should be developed as a separate document during implementati
 | 3 | Extractors: LLM-based (OpenAI/Anthropic), regex-based | 2 |
 | 4 | Transformers + validators: RDF mapping, SHACL validation | 1 |
 | 5 | Batcher + publisher integration: auto-partition, batch publish | 1 |
-| 6 | `@dkg/visualizer`: force-directed graph, paranet browser, agent profiles, marketplace UI | 3 |
+| 6 | `@origintrail-official/dkg-visualizer`: force-directed graph, paranet browser, agent profiles, marketplace UI | 3 |
 
 **Total: ~10 weeks**
 
@@ -289,21 +289,21 @@ Full threat model should be developed as a separate document during implementati
 
 | Package | Part | Owner (suggested) |
 |---|---|---|
-| `@dkg/core` | 1 | Dev A |
-| `@dkg/storage` | 1 | Dev A |
-| `@dkg/chain` (EVM) | 1 | Dev A |
-| `@dkg/publisher` | 1 | Dev A |
-| `@dkg/query` | 1 | Dev A |
-| `@dkg/agent` | 1 | Dev B |
-| `@dkg/access` | 2 | Dev B |
-| `@dkg/chain` (Solana) | 2 | Dev A |
+| `@origintrail-official/dkg-core` | 1 | Dev A |
+| `@origintrail-official/dkg-storage` | 1 | Dev A |
+| `@origintrail-official/dkg-chain` (EVM) | 1 | Dev A |
+| `@origintrail-official/dkg-publisher` | 1 | Dev A |
+| `@origintrail-official/dkg-query` | 1 | Dev A |
+| `@origintrail-official/dkg-agent` | 1 | Dev B |
+| `@origintrail-official/dkg-access` | 2 | Dev B |
+| `@origintrail-official/dkg-chain` (Solana) | 2 | Dev A |
 | EVM contracts (delegation, channels) | 2 | Dev A |
 | Solana programs | 2 | Dev A |
 | Marketplace flows | 2 | Dev B |
 | Self-governance | 2 | Dev B |
-| `@dkg/neural` | 3 | Dev A |
-| `@dkg/pipeline` | 3 | Dev B |
-| `@dkg/visualizer` | 3 | Dev B |
+| `@origintrail-official/dkg-neural` | 3 | Dev A |
+| `@origintrail-official/dkg-pipeline` | 3 | Dev B |
+| `@origintrail-official/dkg-visualizer` | 3 | Dev B |
 
 ### Timeline Summary
 

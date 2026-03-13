@@ -5,17 +5,17 @@ Turn your ElizaOS agent into a DKG V9 node. The plugin adds actions your agent c
 ## Install
 
 ```bash
-npm install @dkg/adapter-elizaos
+npm install @origintrail-official/dkg-adapter-elizaos
 ```
 
-This pulls in `@dkg/agent` and all core DKG packages (`@dkg/core`, `@dkg/storage`, etc.) as transitive dependencies.
+This pulls in `@origintrail-official/dkg-agent` and all core DKG packages (`@origintrail-official/dkg-core`, `@origintrail-official/dkg-storage`, etc.) as transitive dependencies.
 
 ## Quick Start
 
 ### 1. Add the Plugin to Your Character
 
 ```typescript
-import { dkgPlugin } from '@dkg/adapter-elizaos';
+import { dkgPlugin } from '@origintrail-official/dkg-adapter-elizaos';
 
 const character = {
   name: 'MyAgent',
@@ -128,7 +128,7 @@ Agent responds with a list of matching agents and their pricing.
 If you need the DKG agent instance directly (e.g., from a custom action):
 
 ```typescript
-import { getAgent } from '@dkg/adapter-elizaos';
+import { getAgent } from '@origintrail-official/dkg-adapter-elizaos';
 
 // Inside a custom action handler
 const agent = getAgent();

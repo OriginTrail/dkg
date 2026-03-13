@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { TypedEventBus } from '@dkg/core';
-import { generateEd25519Keypair } from '@dkg/core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   WorkspaceHandler,
@@ -426,7 +426,7 @@ describe('WorkspaceHandler', () => {
   });
 
   it('stores valid workspace message to workspace and workspace_meta', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const nquads = `<${ENTITY}> <http://schema.org/name> "Handler Test" <${DATA_GRAPH}> .`;
     const msg = encodeWorkspacePublishRequest({
       paranetId: PARANET,
@@ -454,7 +454,7 @@ describe('WorkspaceHandler', () => {
   });
 
   it('rejects message when rootEntity was created by a different peer (Rule 4)', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     workspaceOwned.set(PARANET, new Map([[ENTITY, 'otherPeer']]));
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Duplicate" <${DATA_GRAPH}> .`;
@@ -482,7 +482,7 @@ describe('WorkspaceHandler', () => {
   });
 
   it('allows same creator to upsert via gossip handler', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWSameCreator';
 
     const msg1 = encodeWorkspacePublishRequest({
@@ -518,7 +518,7 @@ describe('WorkspaceHandler', () => {
   });
 
   it('persists ownership triples and does not duplicate on same-creator upsert', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@dkg/core');
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWOwner';
 
     const msg1 = encodeWorkspacePublishRequest({

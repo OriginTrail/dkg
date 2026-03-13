@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/mcp-server",
+  "name": "@origintrail-official/dkg-mcp-server",
   "version": "9.0.0-beta.2",
   "type": "module",
   "main": "dist/index.js",
@@ -13,14 +13,28 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@dkg/core": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25"
   },
   "optionalDependencies": {
-    "@dkg/adapter-autoresearch": "workspace:*"
+    "@origintrail-official/dkg-adapter-autoresearch": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/mcp-server"
   }
 }

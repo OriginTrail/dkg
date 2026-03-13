@@ -1,19 +1,19 @@
-# Create a GitHub Release when a version tag (v*.*.*) is pushed.
-# Users can download source from the release or clone that tag.
+# Create a GitHub Release and publish to npm when a version tag is pushed.
+# Supports stable (v9.0.0) and pre-release (v9.0.0-beta.2) tags.
 
 name: Release
 
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
   release:
-    name: Build and create release
+    name: Build, test, release, and publish
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -23,9 +23,29 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate tag format
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not match semver format v*.*.*"
+            exit 1
+          fi
+
       - name: Set version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+            echo "NPM_TAG=next" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+            echo "NPM_TAG=latest" >> $GITHUB_OUTPUT
+          fi
 
       - name: pnpm setup
         uses: pnpm/action-setup@v4
@@ -35,6 +55,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -43,14 +64,13 @@ jobs:
         run: pnpm build
 
       - name: Run tests
-        run: pnpm turbo test --filter='!@dkg/evm-module'
+        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
 
       - name: Extract release notes
         id: notes
         run: |
           V="${{ steps.version.outputs.VERSION }}"
           if [ -f CHANGELOG.md ]; then
-            # Extract the section for this version (from ## [X.Y.Z] until next ## or end)
             sed -n "/^## \[$V\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
           fi
           if [ ! -s release_notes.md ]; then
@@ -59,12 +79,18 @@ jobs:
             echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/v$V/CHANGELOG.md) for details." >> release_notes.md
           fi
 
+      - name: Publish to npm
+        run: pnpm -r publish --no-git-checks --tag ${{ steps.prerelease.outputs.NPM_TAG }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.version.outputs.VERSION }}
           body_path: release_notes.md
           draft: false
+          prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

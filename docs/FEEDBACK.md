@@ -193,12 +193,12 @@ Issue IDs stay stable on purpose, so references do not break.
 - What is happening: there is no full plugin runtime (manifest/deps/lifecycle/collision checks).
 - Why it matters: extension becomes ad-hoc as ecosystem grows.
 - Decision option A (keep this design): keep explicit registration model while ecosystem is small.
-- Decision option B (change, recommended): add a plugin kernel on top of `@dkg/agent` with explicit activation and checks.
+- Decision option B (change, recommended): add a plugin kernel on top of `@origintrail-official/dkg-agent` with explicit activation and checks.
 - Evidence: `packages/agent/src/dkg-agent.ts:46`, `packages/agent/src/dkg-agent.ts:305`, `packages/adapter-openclaw/src/DkgNodePlugin.ts:32`, `packages/storage/src/triple-store.ts:62`.
 
 ### I-018 - Forking the full monorepo is the only available implementation model
 - Severity: High
-- What is happening: packages are **not published to npm** (README line 240: "The CLI is not yet published to npm. Until then, use `pnpm dkg` from the repo root."). There is no `@dkg/agent` on any registry. Fork-and-edit is not just the default path — it is the **only** path. The config surface (`DKGAgentConfig` at `dkg-agent.ts:34-83`) covers only basic settings: name, ports, relay peers, skills, store backend, chain config. Anything beyond these (custom protocol handlers, custom gossip logic, custom API routes, custom validation) requires source modification in the hotspot files. The `DKGAgent.create()` factory (line 133-214) hardcodes all component wiring with no extension points for custom composition.
+- What is happening: packages are **not published to npm** (README line 240: "The CLI is not yet published to npm. Until then, use `pnpm dkg` from the repo root."). There is no `@origintrail-official/dkg-agent` on any registry. Fork-and-edit is not just the default path — it is the **only** path. The config surface (`DKGAgentConfig` at `dkg-agent.ts:34-83`) covers only basic settings: name, ports, relay peers, skills, store backend, chain config. Anything beyond these (custom protocol handlers, custom gossip logic, custom API routes, custom validation) requires source modification in the hotspot files. The `DKGAgent.create()` factory (line 133-214) hardcodes all component wiring with no extension points for custom composition.
 - Why it matters: upstream updates are not just expensive — they are the only option for getting fixes and features, and every implementer's fork will diverge in the same hotspot files. This compounds I-012 (merge hotspots) because the files most likely to be customized are the same files that mix 7+ concerns.
 - Decision option A (keep this design): allow forks only for short-lived prototypes with strict rebase windows.
 - Decision option B (change, recommended): publish packages to npm, move to package-consumption model (implementation repo + config + plugins), and treat full forks as last resort.
@@ -264,7 +264,7 @@ Issue IDs stay stable on purpose, so references do not break.
 - Decide whether V9 keeps explicit registration/import-based extension activation only, or introduces a controlled dynamic plugin discovery model.
 
 ### D-020 - Plugin kernel strategy
-- Decide whether to introduce a first-class plugin kernel (manifest metadata, dependency ordering, lifecycle hooks, collision checks) on top of `@dkg/agent` for implementation-level extensibility.
+- Decide whether to introduce a first-class plugin kernel (manifest metadata, dependency ordering, lifecycle hooks, collision checks) on top of `@origintrail-official/dkg-agent` for implementation-level extensibility.
 
 ### D-021 - Pluggable capability boundary
 - Decide which capabilities are immutable core semantics vs pluggable provider interfaces (for example retrieval, indexing, policy) so extension does not mutate core guarantees.
@@ -296,9 +296,9 @@ Issue IDs stay stable on purpose, so references do not break.
 
 ### I-021 - Stale dist when installing adapter from local path (dev-only)
 - Severity: Low
-- What is happening: when installing `@dkg/adapter-openclaw` from a local monorepo path (pre-publish), the compiled `dist/` can be stale (e.g. using `handler` instead of `execute` for tool functions). This causes `tool.execute is not a function` at runtime.
+- What is happening: when installing `@origintrail-official/dkg-adapter-openclaw` from a local monorepo path (pre-publish), the compiled `dist/` can be stale (e.g. using `handler` instead of `execute` for tool functions). This causes `tool.execute is not a function` at runtime.
 - Why it matters: local development setup appears to work (plugin loads, tools register by name) but silently fails on first use. Only affects pre-publish local installs — once published to npm, `prepublishOnly` ensures fresh builds.
-- Decision option A (recommended): document in README that local installs require `pnpm --filter @dkg/adapter-openclaw run build` before `npm install`. Add a `prepack` script as a safety net.
+- Decision option A (recommended): document in README that local installs require `pnpm --filter @origintrail-official/dkg-adapter-openclaw run build` before `npm install`. Add a `prepack` script as a safety net.
 - Decision option B: no action needed if all contributors use published packages.
 - Evidence: `packages/adapter-openclaw/package.json:23`.
 

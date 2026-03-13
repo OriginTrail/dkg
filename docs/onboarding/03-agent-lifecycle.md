@@ -8,8 +8,8 @@ How a DKG agent boots, joins the network, operates in steady state, and shuts do
 >
 > | Term | Definition |
 > |------|-----------|
-> | **DKGAgent** | High-level facade (`@dkg/agent`) that ties together identity, networking, publishing, querying, discovery, and messaging into a single object. |
-> | **DKGNode** | Lower-level networking component (`@dkg/core`) that manages a libp2p host -- TCP/WebSocket listeners, peer connections, and transport encryption. |
+> | **DKGAgent** | High-level facade (`@origintrail-official/dkg-agent`) that ties together identity, networking, publishing, querying, discovery, and messaging into a single object. |
+> | **DKGNode** | Lower-level networking component (`@origintrail-official/dkg-core`) that manages a libp2p host -- TCP/WebSocket listeners, peer connections, and transport encryption. |
 > | **libp2p** | Modular peer-to-peer networking stack. Each node gets a PeerId derived from its Ed25519 keypair. |
 > | **GossipSub** | Publish-subscribe protocol layered on libp2p. Nodes subscribe to "topics" (one per paranet) and receive messages from any peer on that topic. |
 > | **Peer discovery** | How nodes find each other. Uses mDNS (local network), bootstrap peers (known addresses), or relay nodes. |

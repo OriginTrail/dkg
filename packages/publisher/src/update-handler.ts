@@ -1,9 +1,9 @@
-import type { TripleStore, Quad } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
-import type { EventBus } from '@dkg/core';
-import type { ChainAdapter, KAUpdateVerification } from '@dkg/chain';
-import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@dkg/core';
-import { decodeKAUpdateRequest } from '@dkg/core';
+import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import type { EventBus } from '@origintrail-official/dkg-core';
+import type { ChainAdapter, KAUpdateVerification } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@origintrail-official/dkg-core';
+import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
 import { computeTripleHash, computeFlatKCRoot } from './merkle.js';

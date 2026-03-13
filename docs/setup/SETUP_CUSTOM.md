@@ -1,23 +1,23 @@
 # Setting Up a DKG V9 Node in a Custom Project
 
-Use `@dkg/agent` directly to turn any Node.js/TypeScript project into a DKG V9 node. No framework required — just import, configure, start.
+Use `@origintrail-official/dkg-agent` directly to turn any Node.js/TypeScript project into a DKG V9 node. No framework required — just import, configure, start.
 
 ## Install
 
 ```bash
-npm install @dkg/agent
+npm install @origintrail-official/dkg-agent
 ```
 
-This pulls in all DKG packages (`@dkg/core`, `@dkg/storage`, `@dkg/publisher`, `@dkg/query`, `@dkg/chain`) as transitive dependencies. If you want to import from them directly (e.g., `import { OxigraphStore } from '@dkg/storage'` or `import { createTripleStore } from '@dkg/storage'`), add them explicitly:
+This pulls in all DKG packages (`@origintrail-official/dkg-core`, `@origintrail-official/dkg-storage`, `@origintrail-official/dkg-publisher`, `@origintrail-official/dkg-query`, `@origintrail-official/dkg-chain`) as transitive dependencies. If you want to import from them directly (e.g., `import { OxigraphStore } from '@origintrail-official/dkg-storage'` or `import { createTripleStore } from '@origintrail-official/dkg-storage'`), add them explicitly:
 
 ```bash
-npm install @dkg/agent @dkg/core @dkg/storage
+npm install @origintrail-official/dkg-agent @origintrail-official/dkg-core @origintrail-official/dkg-storage
 ```
 
 ## Quick Start
 
 ```typescript
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 const agent = await DKGAgent.create({
   name: 'MyNode',
@@ -224,7 +224,7 @@ const agent = await DKGAgent.create({
 If your nodes are behind NATs (home networks, office LANs), you need at least one relay on a public IP:
 
 ```typescript
-import { DKGNode } from '@dkg/core';
+import { DKGNode } from '@origintrail-official/dkg-core';
 
 const relay = new DKGNode({
   listenAddresses: ['/ip4/0.0.0.0/tcp/9090', '/ip4/0.0.0.0/tcp/9091/ws'],
@@ -268,10 +268,10 @@ Without `dataDir`, a fresh ephemeral identity is generated every time (useful fo
 If you need more control, you can use the individual packages directly:
 
 ```typescript
-import { DKGNode, ProtocolRouter, GossipSubManager } from '@dkg/core';
-import { OxigraphStore, createTripleStore } from '@dkg/storage';
-import { DKGPublisher } from '@dkg/publisher';
-import { DKGQueryEngine } from '@dkg/query';
+import { DKGNode, ProtocolRouter, GossipSubManager } from '@origintrail-official/dkg-core';
+import { OxigraphStore, createTripleStore } from '@origintrail-official/dkg-storage';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 
 // Create components individually
 const node = new DKGNode({ listenAddresses: ['/ip4/0.0.0.0/tcp/9100'] });
@@ -302,9 +302,9 @@ router.register('/my-custom/protocol/1.0.0', async (data, peerId) => {
 All packages ship with full type declarations. The main types you'll use:
 
 ```typescript
-import type { DKGAgentConfig } from '@dkg/agent';
-import type { DKGNodeConfig } from '@dkg/core';
-import type { Quad, TripleStore } from '@dkg/storage';
-import type { PublishResult } from '@dkg/publisher';
-import type { QueryResult } from '@dkg/query';
+import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
+import type { DKGNodeConfig } from '@origintrail-official/dkg-core';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { PublishResult } from '@origintrail-official/dkg-publisher';
+import type { QueryResult } from '@origintrail-official/dkg-query';
 ```

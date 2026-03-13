@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/core",
+  "name": "@origintrail-official/dkg-core",
   "version": "0.0.1",
   "type": "module",
   "main": "dist/index.js",
@@ -39,5 +39,19 @@
   },
   "devDependencies": {
     "vitest": "^3.2.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/core"
   }
 }

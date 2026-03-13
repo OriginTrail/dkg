@@ -1,4 +1,4 @@
-# @dkg/mcp-server
+# @origintrail-official/dkg-mcp-server
 
 [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server for DKG V9. Exposes DKG node capabilities as MCP tools, allowing AI assistants (Cursor, Claude Desktop, etc.) to publish, query, and explore the knowledge graph.
 
@@ -29,7 +29,7 @@
   "mcpServers": {
     "dkg": {
       "command": "npx",
-      "args": ["@dkg/mcp-server"],
+      "args": ["@origintrail-official/dkg-mcp-server"],
       "env": {
         "DKG_NODE_URL": "http://localhost:9200",
         "DKG_API_TOKEN": "your-token-here"

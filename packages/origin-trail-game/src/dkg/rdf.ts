@@ -1,7 +1,7 @@
 /**
  * RDF helpers for OriginTrail Game state stored in the DKG.
  *
- * Uses @dkg/storage Quad format: { subject, predicate, object, graph }.
+ * Uses @origintrail-official/dkg-storage Quad format: { subject, predicate, object, graph }.
  */
 
 export const OT = 'https://origintrail-game.dkg.io/';

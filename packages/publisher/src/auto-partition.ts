@@ -1,4 +1,4 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { skolemize, isSkolemizedUri, rootEntityFromSkolemized, isBlankNode } from './skolemize.js';
 
 /**

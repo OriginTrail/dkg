@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ChildProcess, spawn } from 'node:child_process';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { EVMChainAdapter, type EVMAdapterConfig } from '@dkg/chain';
+import { EVMChainAdapter, type EVMAdapterConfig } from '@origintrail-official/dkg-chain';
 import path from 'node:path';
 
 const EVM_MODULE_DIR = path.resolve(import.meta.dirname, '../../evm-module');

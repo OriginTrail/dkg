@@ -60,7 +60,7 @@ Optional:
 When creating an agent in code, pass `storeConfig`:
 
 ```ts
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 const agent = await DKGAgent.create({
   name: 'MyAgent',

@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/adapter-elizaos",
+  "name": "@origintrail-official/dkg-adapter-elizaos",
   "version": "0.0.1",
   "description": "ElizaOS plugin adapter — turns any ElizaOS agent into a DKG V9 node",
   "type": "module",
@@ -18,12 +18,26 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@dkg/agent": "workspace:*",
-    "@dkg/core": "workspace:*",
-    "@dkg/storage": "workspace:*"
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/adapter-elizaos"
   }
 }

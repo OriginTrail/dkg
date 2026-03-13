@@ -15,7 +15,7 @@
  *   node demo/agent-a.mjs --relay /ip4/<PUBLIC_IP>/tcp/<PORT>/p2p/<RELAY_PEER_ID>
  */
 
-import { DKGNode } from '@dkg/core';
+import { DKGNode } from '@origintrail-official/dkg-core';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 

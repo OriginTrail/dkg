@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@dkg/core';
-import { generateEd25519Keypair } from '@dkg/core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
+import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';

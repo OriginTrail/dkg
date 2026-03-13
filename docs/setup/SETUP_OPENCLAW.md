@@ -1,11 +1,11 @@
 # Setting Up DKG V9 with OpenClaw
 
-The full setup guide lives in the `@dkg/adapter-openclaw` package itself, so it ships with the npm install and is always in sync with the code.
+The full setup guide lives in the `@origintrail-official/dkg-adapter-openclaw` package itself, so it ships with the npm install and is always in sync with the code.
 
 **After installing:**
 
 ```
-node_modules/@dkg/adapter-openclaw/README.md
+node_modules/@origintrail-official/dkg-adapter-openclaw/README.md
 ```
 
 **In this repo:**
@@ -16,7 +16,7 @@ packages/adapter-openclaw/README.md
 
 ## Quick Overview
 
-1. `cd WORKSPACE_DIR && npm install @dkg/adapter-openclaw` — install in your workspace
+1. `cd WORKSPACE_DIR && npm install @origintrail-official/dkg-adapter-openclaw` — install in your workspace
 2. Enable in `~/.openclaw/openclaw.json` — add `~/` prefixed `load.paths` and `plugins.entries["adapter-openclaw"].enabled: true`
 3. Configure in `WORKSPACE_DIR/config.json` — under the `"dkg-node"` key
 4. Set `DKG_EVM_PRIVATE_KEY` in `~/.openclaw/.env` for on-chain publishing (optional)

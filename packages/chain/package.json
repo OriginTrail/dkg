@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/chain",
+  "name": "@origintrail-official/dkg-chain",
   "version": "0.0.1",
   "type": "module",
   "main": "dist/index.js",
@@ -11,8 +11,25 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@dkg/core": "workspace:*",
-    "@dkg/evm-module": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
     "ethers": "^6"
+  },
+  "optionalDependencies": {
+    "@origintrail-official/dkg-evm-module": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "abi",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/chain"
   }
 }

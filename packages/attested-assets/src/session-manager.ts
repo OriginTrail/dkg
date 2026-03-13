@@ -1,5 +1,5 @@
-import type { GossipSubManager } from '@dkg/core';
-import type { EventBus } from '@dkg/core';
+import type { GossipSubManager } from '@origintrail-official/dkg-core';
+import type { EventBus } from '@origintrail-official/dkg-core';
 import type {
   SessionConfig,
   SessionMember,

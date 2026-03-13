@@ -9,20 +9,20 @@ import {
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
   type DKGNodeConfig, type OperationContext,
-} from '@dkg/core';
-import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
   computeTripleHash, computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata,
-} from '@dkg/publisher';
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
-} from '@dkg/query';
+} from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';

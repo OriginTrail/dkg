@@ -66,11 +66,11 @@ ProtocolTreasury.sol                         (self-contained, governed by Hub ow
 
 1. ✅ **Copy V8 contracts** from `dkg-evm-module/` into `packages/evm-module/`
    - Copied `contracts/`, `deploy/`, `test/`, `hardhat.config.ts`, relevant config
-   - Set up as `@dkg/evm-module` in the pnpm workspace
+   - Set up as `@origintrail-official/dkg-evm-module` in the pnpm workspace
    - `npx hardhat compile` succeeds, 295 V8 tests pass
 2. ✅ **Basic EVMChainAdapter**
    - Implemented in `packages/chain/src/evm-adapter.ts`
-   - ethers.js v6, reads contract ABIs from `@dkg/evm-module`
+   - ethers.js v6, reads contract ABIs from `@origintrail-official/dkg-evm-module`
    - Methods: `registerIdentity`, `listenForEvents`, contract resolution from Hub
 3. ✅ **Mock-to-real verification**
    - Integration tests pass against local Hardhat node

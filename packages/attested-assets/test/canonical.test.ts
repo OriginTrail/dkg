@@ -13,7 +13,7 @@ import {
   verifyAKASignature,
 } from '../src/canonical.js';
 import type { SessionMember, SigningContext } from '../src/index.js';
-import { generateEd25519Keypair } from '@dkg/core';
+import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 
 describe('canonicalJsonEncode', () => {
   it('sorts object keys alphabetically', () => {

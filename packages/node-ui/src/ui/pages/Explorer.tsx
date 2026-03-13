@@ -2,8 +2,8 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
 import { executeQuery, fetchParanets } from '../api.js';
-import { RdfGraph, useRdfGraph } from '@dkg/graph-viz/react';
-import type { ViewConfig } from '@dkg/graph-viz';
+import { RdfGraph, useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
+import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
 import { EditorState, type Extension } from '@codemirror/state';
 import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view';
 import { sql } from '@codemirror/lang-sql';

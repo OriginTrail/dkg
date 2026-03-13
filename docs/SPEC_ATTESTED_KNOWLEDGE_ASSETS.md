@@ -416,7 +416,7 @@ All signed payloads MUST use RFC 8785 (JSON Canonicalization Scheme / JCS) for d
 
 ### 11.2 Hash algorithm
 
-SHA-256 for all hashes (state hashes, input set hashes, config hash, reducer hash), consistent with existing `@dkg/core` crypto utilities.
+SHA-256 for all hashes (state hashes, input set hashes, config hash, reducer hash), consistent with existing `@origintrail-official/dkg-core` crypto utilities.
 
 ### 11.3 Signature scheme
 
@@ -475,7 +475,7 @@ dkg/paranet/<paranetId>/sessions             — session lifecycle events
 dkg/paranet/<paranetId>/sessions/<sessionId> — round events for a specific session
 ```
 
-This follows the existing topic conventions in `@dkg/core/constants.ts`.
+This follows the existing topic conventions in `@origintrail-official/dkg-core/constants.ts`.
 
 ### 13.2 Message format
 

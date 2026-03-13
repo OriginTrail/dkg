@@ -1,8 +1,8 @@
-import type { Quad, TripleStore } from '@dkg/storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@dkg/chain';
-import type { EventBus, OperationContext } from '@dkg/core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, type Ed25519Keypair } from '@dkg/core';
-import { GraphManager, PrivateContentStore } from '@dkg/storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';

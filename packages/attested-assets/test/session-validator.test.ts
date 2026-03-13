@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SessionValidator, detectEquivocation } from '../src/session-validator.js';
 import { signAKAPayload } from '../src/canonical.js';
 import { encodeRoundAckPayload } from '../src/proto/aka-events.js';
-import { generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
+import { generateEd25519Keypair, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import type { AKAEvent, SessionState, SessionConfig, RoundState, RoundAckPayload } from '../src/types.js';
 
 let kp: Ed25519Keypair;

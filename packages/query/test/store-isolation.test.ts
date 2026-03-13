@@ -10,7 +10,7 @@
  * 4. Data only enters a node's store via protocol handlers
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, GraphManager, type Quad } from '@dkg/storage';
+import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const PARANET = 'test-paranet';

@@ -24,8 +24,8 @@
  * and the same hash (SHA-256) and tree construction. These tests are the spec.
  */
 import { describe, it, expect } from 'vitest';
-import type { Quad } from '@dkg/storage';
-import { MerkleTree, hashTriple, sha256 } from '@dkg/core';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { MerkleTree, hashTriple, sha256 } from '@origintrail-official/dkg-core';
 import {
   computeTripleHash,
   computePublicRoot,
@@ -93,7 +93,7 @@ describe('Merkle / triple hashing (robust)', () => {
       expect(computeTripleHash(quad1)).toEqual(computeTripleHash(quad2));
     });
 
-    it('matches @dkg/core hashTriple for same (s,p,o)', () => {
+    it('matches @origintrail-official/dkg-core hashTriple for same (s,p,o)', () => {
       const subject = 'did:dkg:agent:QmBot';
       const predicate = 'http://schema.org/name';
       const object = '"Bot"';

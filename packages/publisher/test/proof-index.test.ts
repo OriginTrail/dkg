@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { MerkleTree, hashTriple } from '@dkg/core';
-import type { Quad } from '@dkg/storage';
+import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { ProofIndex } from '../src/proof-index.js';
 
 const GRAPH = 'did:dkg:paranet:test/contextGraphs/1';

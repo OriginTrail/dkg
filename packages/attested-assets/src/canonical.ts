@@ -1,4 +1,4 @@
-import { sha256, ed25519Sign, ed25519Verify } from '@dkg/core';
+import { sha256, ed25519Sign, ed25519Verify } from '@origintrail-official/dkg-core';
 import type { SessionConfig, SessionMember, AKAEventType } from './types.js';
 
 const encoder = new TextEncoder();

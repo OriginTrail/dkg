@@ -1,6 +1,6 @@
-import type { Quad } from '@dkg/storage';
-import type { OnChainPublishResult } from '@dkg/chain';
-import type { OperationContext } from '@dkg/core';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 
 export interface KAManifestEntry {
   tokenId: bigint;

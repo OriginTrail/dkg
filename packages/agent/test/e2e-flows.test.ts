@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const agents: DKGAgent[] = [];
 

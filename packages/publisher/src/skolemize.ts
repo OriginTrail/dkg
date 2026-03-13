@@ -1,4 +1,4 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 const GENID_SEGMENT = '/.well-known/genid/';
 

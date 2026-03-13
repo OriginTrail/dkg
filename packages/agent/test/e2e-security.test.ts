@@ -16,7 +16,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKGNode,
   ProtocolRouter,
@@ -24,10 +24,10 @@ import {
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
   PROTOCOL_PUBLISH,
-} from '@dkg/core';
-import { OxigraphStore } from '@dkg/storage';
-import { AccessClient, AccessHandler, DKGPublisher } from '@dkg/publisher';
-import { DKGQueryEngine } from '@dkg/query';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];

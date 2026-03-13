@@ -5,14 +5,14 @@ import {
   Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type OperationContext,
-} from '@dkg/core';
-import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
-import { type ChainAdapter, type EventFilter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRoot, autoPartition,
   generateConfirmedFullMetadata, getTentativeStatusQuad,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
-} from '@dkg/publisher';
+} from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 import { ethers } from 'ethers';
 

@@ -1,4 +1,4 @@
-# @dkg/adapter-autoresearch
+# @origintrail-official/dkg-adapter-autoresearch
 
 > Collaborative autonomous ML research over the Decentralized Knowledge Graph.
 
@@ -64,8 +64,8 @@ Results propagate via GossipSub to all paranet subscribers. Every agent sees eve
 ### Prerequisites
 
 - A running DKG V9 node (`dkg start`)
-- The DKG MCP server built (`pnpm --filter @dkg/mcp-server build`)
-- The adapter built (`pnpm --filter @dkg/adapter-autoresearch build`)
+- The DKG MCP server built (`pnpm --filter @origintrail-official/dkg-mcp-server build`)
+- The adapter built (`pnpm --filter @origintrail-official/dkg-adapter-autoresearch build`)
 - A clone of [autoresearch](https://github.com/karpathy/autoresearch/) (or a Mac fork — see [Hardware](#hardware))
 
 ### 1. Enable the adapter
@@ -362,7 +362,7 @@ Namespace: `https://ontology.dkg.io/autoresearch#`
 This package follows the DKG adapter pattern:
 
 ```
-@dkg/adapter-autoresearch
+@origintrail-official/dkg-adapter-autoresearch
 ├── src/
 │   ├── index.ts        # Public exports
 │   ├── ontology.ts     # RDF namespace, classes, properties
@@ -376,7 +376,7 @@ This package follows the DKG adapter pattern:
 **Integration point**: the adapter exports a single `registerTools(server, getClient)` function. The MCP server calls this at startup when `DKG_ADAPTERS=autoresearch` is set. The adapter never imports the MCP server — the server imports the adapter. This keeps both packages decoupled.
 
 ```typescript
-import { registerTools } from '@dkg/adapter-autoresearch';
+import { registerTools } from '@origintrail-official/dkg-adapter-autoresearch';
 
 // In the MCP server's startup:
 registerTools(server, getClient);
@@ -398,4 +398,4 @@ The DKG adapter is hardware-agnostic — the ontology and tools work with any fo
 - `@modelcontextprotocol/sdk` — MCP tool registration
 - `zod` — input schema validation
 
-Loaded as an optional dependency by `@dkg/mcp-server`.
+Loaded as an optional dependency by `@origintrail-official/dkg-mcp-server`.

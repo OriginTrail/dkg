@@ -10,8 +10,8 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { DKGAgent, loadOpWallets } from '@dkg/agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger } from '@dkg/core';
+import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -21,7 +21,7 @@ import {
   ChatMemoryManager,
   LogPushWorker,
   type MetricsSource,
-} from '@dkg/node-ui';
+} from '@origintrail-official/dkg-node-ui';
 import {
   loadConfig,
   saveConfig,
@@ -634,10 +634,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     },
   };
 
-  // Resolve the static UI directory (built by @dkg/node-ui)
+  // Resolve the static UI directory (built by @origintrail-official/dkg-node-ui)
   let nodeUiStaticDir: string;
   try {
-    const nodeUiPkg = import.meta.resolve('@dkg/node-ui');
+    const nodeUiPkg = import.meta.resolve('@origintrail-official/dkg-node-ui');
     const nodeUiDir = dirname(fileURLToPath(nodeUiPkg));
     nodeUiStaticDir = join(nodeUiDir, '..', 'dist-ui');
   } catch {
@@ -1060,7 +1060,7 @@ async function handleRequest(
   config: DkgConfig,
   startedAt: number,
   dashDb: DashboardDB,
-  opWallets: import('@dkg/agent').OpWalletsConfig,
+  opWallets: import('@origintrail-official/dkg-agent').OpWalletsConfig,
   network: Awaited<ReturnType<typeof loadNetworkConfig>>,
   tracker: OperationTracker,
   memoryManager: ChatMemoryManager,
@@ -2770,15 +2770,15 @@ async function _performUpdateInner(
       }
 
       if (shouldBuildContracts) {
-        log('Auto-update: contract folder changes detected; building @dkg/evm-module...');
-        await execAsync('pnpm --filter @dkg/evm-module build', {
+        log('Auto-update: contract folder changes detected; building @origintrail-official/dkg-evm-module...');
+        await execAsync('pnpm --filter @origintrail-official/dkg-evm-module build', {
           cwd: targetDir,
           encoding: 'utf-8',
           timeout: 300_000,
         });
-        log('Auto-update: @dkg/evm-module build completed.');
+        log('Auto-update: @origintrail-official/dkg-evm-module build completed.');
       } else {
-        log('Auto-update: no contract folder changes detected; skipping @dkg/evm-module build.');
+        log('Auto-update: no contract folder changes detected; skipping @origintrail-official/dkg-evm-module build.');
       }
     }
   } catch (err: any) {

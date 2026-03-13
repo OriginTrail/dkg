@@ -75,13 +75,13 @@ kcMerkleRoot ◄── on-chain            kaRoot₁, kaRoot₂, … kaRootₙ
 sequenceDiagram
     actor User
 
-    participant Agent as @dkg/agent<br/>DKGAgent
-    participant Publisher as @dkg/publisher<br/>DKGPublisher
-    participant Crypto as @dkg/core<br/>Crypto
-    participant Store as @dkg/storage<br/>TripleStore
-    participant Chain as @dkg/chain<br/>EVMChainAdapter
+    participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
+    participant Publisher as @origintrail-official/dkg-publisher<br/>DKGPublisher
+    participant Crypto as @origintrail-official/dkg-core<br/>Crypto
+    participant Store as @origintrail-official/dkg-storage<br/>TripleStore
+    participant Chain as @origintrail-official/dkg-chain<br/>EVMChainAdapter
     participant EVM as EVM Blockchain
-    participant Gossip as @dkg/core<br/>GossipSub
+    participant Gossip as @origintrail-official/dkg-core<br/>GossipSub
 
     participant RcvAgent as Receiver<br/>Agent
     participant RcvCrypto as Receiver<br/>Crypto

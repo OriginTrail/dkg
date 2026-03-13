@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@dkg/chain';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const PARANET = 'ws-sync-e2e';
 const ENTITY_1 = 'urn:ws-sync:entity:1';

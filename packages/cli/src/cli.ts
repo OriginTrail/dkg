@@ -1071,7 +1071,7 @@ program
     try {
       const config = await loadConfig();
       const network = await loadNetworkConfig();
-      const { loadOpWallets } = await import('@dkg/agent');
+      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());
 
       if (!opWallets.wallets.length) {
@@ -1140,7 +1140,7 @@ program
     try {
       const config = await loadConfig();
       const network = await loadNetworkConfig();
-      const { loadOpWallets } = await import('@dkg/agent');
+      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());
 
       if (!opWallets.wallets.length) {

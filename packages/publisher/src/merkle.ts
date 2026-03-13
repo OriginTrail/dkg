@@ -1,5 +1,5 @@
-import { sha256, MerkleTree, hashTriple } from '@dkg/core';
-import type { Quad } from '@dkg/storage';
+import { sha256, MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 /**
  * Compute SHA-256 hash of a single triple (s, p, o).

@@ -1,4 +1,4 @@
-# @dkg/attested-assets
+# @origintrail-official/dkg-attested-assets
 
 > **Experimental** — This package implements the Attested Knowledge Assets (AKA) protocol, which is under active development. APIs may change.
 
@@ -35,7 +35,7 @@ Each round follows: **start → collect inputs → propose → validate & ACK �
 ## Usage
 
 ```typescript
-import { SessionManager, ReducerRegistry } from '@dkg/attested-assets';
+import { SessionManager, ReducerRegistry } from '@origintrail-official/dkg-attested-assets';
 
 // Register a reducer for your application
 ReducerRegistry.register({
@@ -59,5 +59,5 @@ const session = await sessionManager.createSession({
 
 ## Internal Dependencies
 
-- `@dkg/core` — P2P node, GossipSub, event bus, crypto primitives
-- `@dkg/storage` — session state persistence
+- `@origintrail-official/dkg-core` — P2P node, GossipSub, event bus, crypto primitives
+- `@origintrail-official/dkg-storage` — session state persistence

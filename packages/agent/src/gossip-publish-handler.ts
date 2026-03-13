@@ -3,15 +3,15 @@ import {
   Logger, createOperationContext,
   isSafeIri,
   type OperationContext,
-} from '@dkg/core';
-import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
-import { type ChainAdapter, type EventFilter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeTripleHash, computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   validatePublishRequest,
   type KAMetadata,
-} from '@dkg/publisher';
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;

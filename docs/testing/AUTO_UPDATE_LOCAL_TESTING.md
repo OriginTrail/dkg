@@ -14,7 +14,7 @@ rm -rf "$DKG_HOME"
 From repo root:
 
 ```bash
-pnpm --filter @dkg/cli build
+pnpm --filter @origintrail-official/dkg build
 DKG_HOME="$DKG_HOME" ./install.sh
 ```
 

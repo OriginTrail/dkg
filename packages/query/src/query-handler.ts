@@ -1,5 +1,5 @@
-import type { PeerId } from '@dkg/core';
-import { paranetDataGraphUri, assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
+import type { PeerId } from '@origintrail-official/dkg-core';
+import { paranetDataGraphUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';

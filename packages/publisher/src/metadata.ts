@@ -1,5 +1,5 @@
-import type { Quad, TripleStore } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const DKG = 'http://dkg.io/ontology/';

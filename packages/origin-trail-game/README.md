@@ -1,4 +1,4 @@
-# dkg-app-origin-trail-game
+# @origintrail-official/dkg-app-origin-trail-game
 
 OriginTrail Game — a multiplayer game on the [DKG](https://github.com/OriginTrail/dkg-v9). Installable DKG app.
 
@@ -15,7 +15,7 @@ Add this package as a dependency of `dkg-v9`:
 
 ```bash
 # In the dkg-v9 repo root:
-pnpm add dkg-app-origin-trail-game@github:yourorg/oregon-trail-dkg
+pnpm add @origintrail-official/dkg-app-origin-trail-game@github:yourorg/oregon-trail-dkg
 ```
 
 The daemon's app loader discovers it (via `dkgApp` in `package.json`) and serves it at `/apps/origin-trail-game/`.

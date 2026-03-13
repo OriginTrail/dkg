@@ -7,7 +7,7 @@
 
 ## 1. Architecture Overview
 
-The game runs as an installable DKG app (`dkg-app-origin-trail-game`).
+The game runs as an installable DKG app (`@origintrail-official/dkg-app-origin-trail-game`).
 Each node loads the game coordinator, which bridges the game engine with the
 DKG network using four DKG primitives:
 

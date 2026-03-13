@@ -16,7 +16,7 @@ import {
   encodeRoundProposalPayload,
   encodeInputPayload,
 } from '../src/proto/aka-events.js';
-import { TypedEventBus, generateEd25519Keypair, type Ed25519Keypair } from '@dkg/core';
+import { TypedEventBus, generateEd25519Keypair, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import type {
   ReducerModule,
   QuorumPolicy,

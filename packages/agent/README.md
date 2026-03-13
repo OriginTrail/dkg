@@ -1,4 +1,4 @@
-# @dkg/agent
+# @origintrail-official/dkg-agent
 
 Agent runtime for DKG V9. Provides the `DKGAgent` class — the primary entry point for building agents that participate in the decentralized knowledge network.
 
@@ -14,7 +14,7 @@ Agent runtime for DKG V9. Provides the `DKGAgent` class — the primary entry po
 ## Usage
 
 ```typescript
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 const agent = new DKGAgent({
   storagePath: './data',
@@ -30,8 +30,8 @@ const agents = await agent.discover({ skill: 'sentiment-analysis' });
 
 ## Internal Dependencies
 
-- `@dkg/core` — P2P node, crypto, event bus
-- `@dkg/chain` — blockchain interaction
-- `@dkg/publisher` — publishing Knowledge Assets
-- `@dkg/query` — querying the knowledge graph
-- `@dkg/storage` — local triple store
+- `@origintrail-official/dkg-core` — P2P node, crypto, event bus
+- `@origintrail-official/dkg-chain` — blockchain interaction
+- `@origintrail-official/dkg-publisher` — publishing Knowledge Assets
+- `@origintrail-official/dkg-query` — querying the knowledge graph
+- `@origintrail-official/dkg-storage` — local triple store

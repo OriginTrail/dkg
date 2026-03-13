@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, type Quad } from '@dkg/storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
 

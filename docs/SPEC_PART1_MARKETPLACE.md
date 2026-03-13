@@ -36,12 +36,12 @@ DKG V9 is a **decentralized knowledge marketplace run by AI agents**. Any agent 
 ## 2. Package Architecture
 
 ```
-@dkg/core          P2P networking, protocol messages, types, crypto
-@dkg/storage       Pluggable triple store (Oxigraph, Blazegraph, custom adapters)
-@dkg/chain         Blockchain abstraction (ChainAdapter interface, EVM + Solana adapters)
-@dkg/publisher     Publishing protocol, merkle trees, on-chain finalization
-@dkg/query         SPARQL engine, paranet-scoped local queries (no remote query exposure)
-@dkg/agent         Agent identity, skill profiles, messaging, framework adapters
+@origintrail-official/dkg-core          P2P networking, protocol messages, types, crypto
+@origintrail-official/dkg-storage       Pluggable triple store (Oxigraph, Blazegraph, custom adapters)
+@origintrail-official/dkg-chain         Blockchain abstraction (ChainAdapter interface, EVM + Solana adapters)
+@origintrail-official/dkg-publisher     Publishing protocol, merkle trees, on-chain finalization
+@origintrail-official/dkg-query         SPARQL engine, paranet-scoped local queries (no remote query exposure)
+@origintrail-official/dkg-agent         Agent identity, skill profiles, messaging, framework adapters
 ```
 
 Dependencies:
@@ -54,8 +54,8 @@ query ──→ core, storage
 agent ──→ core, publisher, query
 ```
 
-Part 2 adds: `@dkg/access`, payment channels, paranet lifecycle, sync protocol, GossipSub auth.  
-Part 3 adds: `@dkg/neural`, `@dkg/pipeline`, `@dkg/visualizer`.
+Part 2 adds: `@origintrail-official/dkg-access`, payment channels, paranet lifecycle, sync protocol, GossipSub auth.  
+Part 3 adds: `@origintrail-official/dkg-neural`, `@origintrail-official/dkg-pipeline`, `@origintrail-official/dkg-visualizer`.
 
 ---
 
@@ -84,7 +84,7 @@ Key derivation: BIP-32 from master Ed25519 seed. One master key → deterministi
 
 An agent becomes a DKG node by:
 
-1. **Installing** `@dkg/agent` (npm/pip) or a framework-specific skill (OpenClaw DKG skill).
+1. **Installing** `@origintrail-official/dkg-agent` (npm/pip) or a framework-specific skill (OpenClaw DKG skill).
 2. **Generating** an identity (or loading existing keypair).
 3. **Connecting** to the P2P network (bootstrap peers).
 4. **Publishing** an agent profile to the Agent Registry paranet.
@@ -132,7 +132,7 @@ _:offering1 → <did:dkg:agent:QmImageBot/.well-known/genid/offering1>
 _:pricing   → <did:dkg:agent:QmImageBot/.well-known/genid/pricing>
 ```
 
-Skolemized URIs are NOT rootEntities — they don't get manifest entries or tokens. They are sub-parts of the KA. The `@dkg/publisher` SDK performs skolemization automatically via `skolemize(rootEntity, triples)`.
+Skolemized URIs are NOT rootEntities — they don't get manifest entries or tokens. They are sub-parts of the KA. The `@origintrail-official/dkg-publisher` SDK performs skolemization automatically via `skolemize(rootEntity, triples)`.
 
 **Rules**:
 1. Skolemized URIs follow the pattern `{rootEntity}/.well-known/genid/{label}`.
@@ -532,7 +532,7 @@ message PublishAck {
 
 ### Auto-Partitioning
 
-`@dkg/publisher` provides `autoPartition(triples)`:
+`@origintrail-official/dkg-publisher` provides `autoPartition(triples)`:
 
 1. **Skolemize** all blank nodes under their parent rootEntity.
 2. **Group** triples: each rootEntity (non-skolemized subject) defines a KA. Triples with skolemized subjects are grouped with the rootEntity in their URI prefix.
@@ -775,7 +775,7 @@ Every DKG network begins with a **genesis knowledge** — a deterministic set of
 
 ### Genesis File
 
-Shipped with every `@dkg/core` package as `genesis.trig` (TriG format — RDF with named graph support):
+Shipped with every `@origintrail-official/dkg-core` package as `genesis.trig` (TriG format — RDF with named graph support):
 
 ```turtle
 @prefix dkg:     <https://dkg.network/ontology#> .
@@ -1055,20 +1055,20 @@ Both developers work in parallel. No blockchain dependency. The full agent marke
 
 #### WP-1A-i: Protocol Core — Developer A
 
-**Scope**: `@dkg/core`, `@dkg/storage`, `@dkg/publisher` (mock-chain), `@dkg/query`
+**Scope**: `@origintrail-official/dkg-core`, `@origintrail-official/dkg-storage`, `@origintrail-official/dkg-publisher` (mock-chain), `@origintrail-official/dkg-query`
 
 | # | Deliverable | Status |
 |---|---|---|
-| 1 | `@dkg/core`: libp2p node (TCP+Noise+yamux+WebSocket), peer discovery (DHT+mDNS), GossipSub (paranet topics), protocol router, event bus, crypto (Ed25519, ECDSA, merkle trees, URDNA2015) | **DONE** |
-| 2 | `@dkg/storage`: In-memory + Oxigraph adapters, TripleStore interface, named graph manager (data graph + meta graph per paranet), private KA content store (publisher-only triples, flagged in meta graph) | **DONE** |
-| 3 | `@dkg/publisher` (mock-chain mode): entity-based auto-partitioning, triple canonicalization, merkle tree computation (public + private KA roots), PublishRequest/Ack P2P flow, private KA manifest with pre-computed roots, metadata triple generation. UAL reservation = local counter. Finalization = auto-confirm. | **DONE** |
-| 4 | `@dkg/query`: Local-only SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), result formats. No remote query exposure — all queries run against the node's own store (see §11). | **DONE** |
+| 1 | `@origintrail-official/dkg-core`: libp2p node (TCP+Noise+yamux+WebSocket), peer discovery (DHT+mDNS), GossipSub (paranet topics), protocol router, event bus, crypto (Ed25519, ECDSA, merkle trees, URDNA2015) | **DONE** |
+| 2 | `@origintrail-official/dkg-storage`: In-memory + Oxigraph adapters, TripleStore interface, named graph manager (data graph + meta graph per paranet), private KA content store (publisher-only triples, flagged in meta graph) | **DONE** |
+| 3 | `@origintrail-official/dkg-publisher` (mock-chain mode): entity-based auto-partitioning, triple canonicalization, merkle tree computation (public + private KA roots), PublishRequest/Ack P2P flow, private KA manifest with pre-computed roots, metadata triple generation. UAL reservation = local counter. Finalization = auto-confirm. | **DONE** |
+| 4 | `@origintrail-official/dkg-query`: Local-only SPARQL, paranet-scoped queries, KA resolution (rootEntity lookup), result formats. No remote query exposure — all queries run against the node's own store (see §11). | **DONE** |
 | 5 | `/dkg/access/1.0.0`: Private KA access protocol — AccessRequest/Response handler, payment proof verification (mock), merkle verification on recipient side, triple transfer | TODO |
 | 6 | Circuit Relay + Hole Punching: `circuitRelayTransport`, `dcutr`, `autoNAT`, relay server, cross-network agent connectivity (see §5.6) | **DONE** |
 
 #### WP-1B: Agent Layer — Developer B
 
-**Scope**: `@dkg/agent`, skill ontology, messaging, framework adapters
+**Scope**: `@origintrail-official/dkg-agent`, skill ontology, messaging, framework adapters
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -1132,7 +1132,7 @@ The publisher calls `ChainAdapter` methods — it never knows which chain it's t
 
 | # | Deliverable |
 |---|---|
-| 1 | `@dkg/chain` package: `ChainAdapter` interface, adapter registry, mock adapter (wraps Phase 1 mock-chain) |
+| 1 | `@origintrail-official/dkg-chain` package: `ChainAdapter` interface, adapter registry, mock adapter (wraps Phase 1 mock-chain) |
 | 2 | EVM adapter (ethers.js): contract clients for KnowledgeCollection, KnowledgeCollectionStorage, ParametersStorage. Event listener (polling + WebSocket). Tx manager with gas estimation and retry. |
 | 3 | Wire into publisher: real UAL reservation, on-chain finalization, event-driven tentative→confirmed lifecycle. Publisher calls `ChainAdapter`, unaware of EVM specifics. |
 

@@ -1,4 +1,4 @@
-# @dkg/network-sim
+# @origintrail-official/dkg-network-sim
 
 Network simulation tool for DKG V9. A Vite-based web application for orchestrating multi-node devnet testing, running load tests, and observing network behavior.
 

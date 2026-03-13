@@ -1,4 +1,4 @@
-# @dkg/adapter-elizaos
+# @origintrail-official/dkg-adapter-elizaos
 
 [ElizaOS](https://elizaos.ai) plugin adapter for DKG V9. Turns any ElizaOS agent into a DKG node with knowledge publishing, querying, agent discovery, and skill invocation capabilities.
 
@@ -12,7 +12,7 @@
 ## Usage
 
 ```typescript
-import { dkgPlugin } from '@dkg/adapter-elizaos';
+import { dkgPlugin } from '@origintrail-official/dkg-adapter-elizaos';
 
 const agent = new ElizaAgent({
   plugins: [dkgPlugin],
@@ -29,6 +29,6 @@ Once the plugin is loaded, the agent can:
 
 ## Internal Dependencies
 
-- `@dkg/agent` — DKG agent runtime
-- `@dkg/core` — P2P node, configuration
-- `@dkg/storage` — triple store for local data
+- `@origintrail-official/dkg-agent` — DKG agent runtime
+- `@origintrail-official/dkg-core` — P2P node, configuration
+- `@origintrail-official/dkg-storage` — triple store for local data

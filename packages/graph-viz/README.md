@@ -1,4 +1,4 @@
-# @dkg/graph-viz
+# @origintrail-official/dkg-graph-viz
 
 RDF Knowledge Graph Visualizer for the [OriginTrail Decentralized Knowledge Graph (DKG)](https://origintrail.io). Renders knowledge graphs with hexagonal nodes, force-directed layout, native RDF data loading, and declarative view configuration.
 
@@ -41,7 +41,7 @@ RDF Knowledge Graph Visualizer for the [OriginTrail Decentralized Knowledge Grap
 
 ```bash
 pnpm install
-pnpm --filter @dkg/graph-viz demo
+pnpm --filter @origintrail-official/dkg-graph-viz demo
 ```
 
 Open http://localhost:4321 to see the Moltbook social graph demo.
@@ -49,7 +49,7 @@ Open http://localhost:4321 to see the Moltbook social graph demo.
 ## Usage (Vanilla JS)
 
 ```javascript
-import { RdfGraphViz, OxigraphSource } from '@dkg/graph-viz';
+import { RdfGraphViz, OxigraphSource } from '@origintrail-official/dkg-graph-viz';
 
 const container = document.getElementById('graph');
 const viz = new RdfGraphViz(container, {
@@ -106,7 +106,7 @@ viz.applyView(viewConfig);
 ## Usage (React)
 
 ```jsx
-import { RdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 
 function App() {
   return (
@@ -162,10 +162,10 @@ src/
 ## Building
 
 ```bash
-pnpm --filter @dkg/graph-viz build       # Build for distribution (ESM + CJS + DTS)
-pnpm --filter @dkg/graph-viz dev         # Watch mode
-pnpm --filter @dkg/graph-viz demo        # Start Vite dev server for demos
-pnpm --filter @dkg/graph-viz test        # Run tests
+pnpm --filter @origintrail-official/dkg-graph-viz build       # Build for distribution (ESM + CJS + DTS)
+pnpm --filter @origintrail-official/dkg-graph-viz dev         # Watch mode
+pnpm --filter @origintrail-official/dkg-graph-viz demo        # Start Vite dev server for demos
+pnpm --filter @origintrail-official/dkg-graph-viz test        # Run tests
 ```
 
 ## License

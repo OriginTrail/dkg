@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent, type ParanetSub } from '../src/index.js';
-import { OxigraphStore } from '@dkg/storage';
-import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri } from '@dkg/core';
-import { MockChainAdapter, type ParanetOnChain } from '@dkg/chain';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri } from '@origintrail-official/dkg-core';
+import { MockChainAdapter, type ParanetOnChain } from '@origintrail-official/dkg-chain';
 
 class MockChainWithParanets extends MockChainAdapter {
   private readonly onChainList: ParanetOnChain[];

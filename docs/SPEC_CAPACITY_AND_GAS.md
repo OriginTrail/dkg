@@ -603,7 +603,7 @@ Where `capacity_multiplier` rewards nodes that commit to and deliver higher capa
 - Add startup benchmark to determine `maxGasPerSecond`.
 - Collect real-world data to calibrate gas costs.
 
-**Deliverables**: `@dkg/gas-meter` package, dashboard for monitoring gas consumption.
+**Deliverables**: `@origintrail-official/dkg-gas-meter` package, dashboard for monitoring gas consumption.
 
 **No economic impact.** This phase is purely observational.
 

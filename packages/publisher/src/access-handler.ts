@@ -1,13 +1,13 @@
-import type { StreamHandler, EventBus } from '@dkg/core';
+import type { StreamHandler, EventBus } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   decodeAccessRequest,
   encodeAccessResponse,
   ed25519Verify,
   assertSafeIri,
-} from '@dkg/core';
-import type { TripleStore } from '@dkg/storage';
-import { GraphManager, PrivateContentStore } from '@dkg/storage';
+} from '@origintrail-official/dkg-core';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { computePrivateRoot } from './merkle.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';

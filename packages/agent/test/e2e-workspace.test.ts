@@ -4,8 +4,8 @@
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { DKGNode } from '@dkg/core';
-import { MockChainAdapter } from '@dkg/chain';
+import { DKGNode } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 const PARANET = 'workspace-e2e';
 const ENTITY = 'urn:e2e:workspace:entity:1';

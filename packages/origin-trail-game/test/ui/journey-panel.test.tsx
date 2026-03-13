@@ -15,7 +15,7 @@ import React from 'react';
 
 // Mock the RdfGraph component so we don't need a real canvas/WebGL context.
 // We capture the props via a module-level ref that the hoisted factory can close over.
-vi.mock('@dkg/graph-viz/react', () => {
+vi.mock('@origintrail-official/dkg-graph-viz/react', () => {
   const React = require('react');
   return {
     RdfGraph: (props: any) => {

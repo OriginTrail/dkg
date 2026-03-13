@@ -15,10 +15,10 @@ remote/federated querying in Part 1.
 ```mermaid
 sequenceDiagram
     actor User
-    participant Agent as @dkg/agent<br/>DKGAgent
-    participant QueryEngine as @dkg/query<br/>DKGQueryEngine
-    participant Store as @dkg/storage<br/>TripleStore
-    participant GraphMgr as @dkg/storage<br/>GraphManager
+    participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
+    participant QueryEngine as @origintrail-official/dkg-query<br/>DKGQueryEngine
+    participant Store as @origintrail-official/dkg-storage<br/>TripleStore
+    participant GraphMgr as @origintrail-official/dkg-storage<br/>GraphManager
 
     User ->> Agent: query(sparql, paranetId)
     Agent ->> Agent: Generate operationId (UUID)
@@ -54,10 +54,10 @@ Runs the same SPARQL against every known paranet and unions the results.
 ```mermaid
 sequenceDiagram
     actor User
-    participant Agent as @dkg/agent<br/>DKGAgent
-    participant QueryEngine as @dkg/query<br/>DKGQueryEngine
-    participant GraphMgr as @dkg/storage<br/>GraphManager
-    participant Store as @dkg/storage<br/>TripleStore
+    participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
+    participant QueryEngine as @origintrail-official/dkg-query<br/>DKGQueryEngine
+    participant GraphMgr as @origintrail-official/dkg-storage<br/>GraphManager
+    participant Store as @origintrail-official/dkg-storage<br/>TripleStore
 
     User ->> Agent: queryAllParanets(sparql)
     Agent ->> Agent: Generate operationId (UUID)
@@ -90,9 +90,9 @@ entity's data triples from the data graph.
 ```mermaid
 sequenceDiagram
     actor User
-    participant Agent as @dkg/agent<br/>DKGAgent
-    participant QueryEngine as @dkg/query<br/>DKGQueryEngine
-    participant Store as @dkg/storage<br/>TripleStore
+    participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
+    participant QueryEngine as @origintrail-official/dkg-query<br/>DKGQueryEngine
+    participant Store as @origintrail-official/dkg-storage<br/>TripleStore
 
     User ->> Agent: resolveKA(ual)
     Agent ->> Agent: Generate operationId (UUID)
@@ -133,11 +133,11 @@ flowchart LR
         R[resolveKA]
     end
 
-    subgraph DKG_Query[@dkg/query]
+    subgraph DKG_Query[@origintrail-official/dkg-query]
         QE[DKGQueryEngine]
     end
 
-    subgraph DKG_Storage[@dkg/storage]
+    subgraph DKG_Storage[@origintrail-official/dkg-storage]
         GM[GraphManager]
         TS[TripleStore]
     end

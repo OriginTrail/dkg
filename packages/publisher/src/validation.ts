@@ -1,4 +1,4 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import type { KAManifestEntry } from './publisher.js';
 import { isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 

@@ -33,7 +33,7 @@ jobs:
         run: pnpm build
 
       - name: Run tests (Vitest packages)
-        run: pnpm turbo test --filter='!@dkg/evm-module'
+        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
 
   solidity:
     name: Solidity (Compile & Test)

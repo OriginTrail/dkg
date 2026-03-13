@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardDB } from '../src/db.js';
 import { StructuredLogger } from '../src/structured-logger.js';
-import type { OperationContext } from '@dkg/core';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 
 let db: DashboardDB;
 let dir: string;

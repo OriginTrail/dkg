@@ -1,4 +1,4 @@
-# @dkg/query
+# @origintrail-official/dkg-query
 
 SPARQL query engine for DKG V9. Provides paranet-scoped querying, Knowledge Asset resolution by UAL, and read-only query validation.
 
@@ -13,7 +13,7 @@ SPARQL query engine for DKG V9. Provides paranet-scoped querying, Knowledge Asse
 ## Usage
 
 ```typescript
-import { DKGQueryEngine } from '@dkg/query';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 
 const engine = new DKGQueryEngine(store);
 
@@ -25,5 +25,5 @@ const results = await engine.query({
 
 ## Internal Dependencies
 
-- `@dkg/core` — configuration, logging, protocol streams
-- `@dkg/storage` — triple store access for query execution
+- `@origintrail-official/dkg-core` — configuration, logging, protocol streams
+- `@origintrail-official/dkg-storage` — triple store access for query execution

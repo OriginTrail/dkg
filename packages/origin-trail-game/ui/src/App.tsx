@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from './api.js';
-import { RdfGraph } from '@dkg/graph-viz/react';
+import { RdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import './styles.css';
 
 type Triple = { subject: string; predicate: string; object: string };

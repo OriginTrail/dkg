@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { TypedEventBus, generateEd25519Keypair } from '@dkg/core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import type { Quad } from '@dkg/storage';
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 const PARANET = 'agent-registry';

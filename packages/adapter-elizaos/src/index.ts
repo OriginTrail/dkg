@@ -1,10 +1,10 @@
 /**
- * @dkg/adapter-elizaos — ElizaOS plugin that turns any ElizaOS agent
+ * @origintrail-official/dkg-adapter-elizaos — ElizaOS plugin that turns any ElizaOS agent
  * into a DKG V9 node.
  *
  * Usage in a character config:
  *
- *   import { dkgPlugin } from '@dkg/adapter-elizaos';
+ *   import { dkgPlugin } from '@origintrail-official/dkg-adapter-elizaos';
  *
  *   const character = {
  *     plugins: [dkgPlugin],

@@ -18,7 +18,7 @@
  *   anything else    — send as a chat message to all connected peers
  */
 
-import { DKGAgent } from '@dkg/agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { createInterface } from 'node:readline';
 
 const args = process.argv.slice(2);

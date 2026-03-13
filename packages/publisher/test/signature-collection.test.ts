@@ -10,10 +10,10 @@
  * They will FAIL until the publisher is updated.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
-import { TypedEventBus, DKGEvent } from '@dkg/core';
-import { generateEd25519Keypair } from '@dkg/core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, DKGEvent } from '@origintrail-official/dkg-core';
+import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { ethers } from 'ethers';
 

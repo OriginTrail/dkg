@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/cli",
+  "name": "@origintrail-official/dkg",
   "version": "9.0.0-beta.2",
   "type": "module",
   "main": "dist/cli.js",
@@ -13,9 +13,9 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@dkg/agent": "workspace:*",
-    "@dkg/core": "workspace:*",
-    "@dkg/node-ui": "workspace:*",
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-node-ui": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
     "n3": "^2.0.1",
@@ -24,5 +24,19 @@
   "devDependencies": {
     "@types/n3": "^1.26.1",
     "vitest": "^3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/cli"
   }
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@dkg/graph-viz",
+  "name": "@origintrail-official/dkg-graph-viz",
   "version": "0.0.1",
   "description": "RDF Knowledge Graph Visualizer — force-directed graph rendering with hexagonal nodes, declarative view configs, RDF-native data loading, and SPARQL-driven views",
   "type": "module",
@@ -25,7 +25,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
@@ -53,10 +54,18 @@
     "three": ">=0.150.0"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true },
-    "react-dom": { "optional": true },
-    "3d-force-graph": { "optional": true },
-    "three": { "optional": true }
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "3d-force-graph": {
+      "optional": true
+    },
+    "three": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/n3": "^1.26.1",
@@ -79,5 +88,13 @@
     "sparql",
     "n-triples"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/graph-viz"
+  }
 }

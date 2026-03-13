@@ -246,7 +246,7 @@ Install inside your workspace directory (the path from `agents.defaults.workspac
 
 ```bash
 cd WORKSPACE_DIR
-npm install @dkg/adapter-openclaw
+npm install @origintrail-official/dkg-adapter-openclaw
 ```
 
 ### 2. Enable the Plugin
@@ -257,7 +257,7 @@ npm install @dkg/adapter-openclaw
 {
   "plugins": {
     "load": {
-      "paths": ["~/path/to/workspace/node_modules/@dkg/adapter-openclaw"]
+      "paths": ["~/path/to/workspace/node_modules/@origintrail-official/dkg-adapter-openclaw"]
     },
     "entries": {
       "adapter-openclaw": {
@@ -268,7 +268,7 @@ npm install @dkg/adapter-openclaw
 }
 ```
 
-- `load.paths` must use a `~/` prefix path (replace `$HOME` with `~` in your workspace path, append `/node_modules/@dkg/adapter-openclaw`). Bare relative paths break across platforms.
+- `load.paths` must use a `~/` prefix path (replace `$HOME` with `~` in your workspace path, append `/node_modules/@origintrail-official/dkg-adapter-openclaw`). Bare relative paths break across platforms.
 - The `entries` key must be `adapter-openclaw` (the plugin manifest ID), not the npm package name.
 - Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
 
@@ -309,7 +309,7 @@ Copy the skill file into your workspace (replace the path with your actual works
 
 ```bash
 mkdir -p /path/to/your/workspace/skills/dkg-node
-cp node_modules/@dkg/adapter-openclaw/skills/dkg-node/SKILL.md /path/to/your/workspace/skills/dkg-node/SKILL.md
+cp node_modules/@origintrail-official/dkg-adapter-openclaw/skills/dkg-node/SKILL.md /path/to/your/workspace/skills/dkg-node/SKILL.md
 ```
 
 ### 6. Restart and Verify
@@ -355,13 +355,13 @@ If your machine runs an ElizaOS agent, add DKG as a plugin. It gives your agent 
 In your ElizaOS project:
 
 ```bash
-npm install @dkg/adapter-elizaos
+npm install @origintrail-official/dkg-adapter-elizaos
 ```
 
 ### Add the Plugin to Your Character
 
 ```typescript
-import { dkgPlugin } from '@dkg/adapter-elizaos';
+import { dkgPlugin } from '@origintrail-official/dkg-adapter-elizaos';
 
 const character = {
   name: 'MyAgent',
@@ -421,7 +421,7 @@ The `dkgKnowledgeProvider` automatically enriches your agent's context. When a m
 From a custom action handler:
 
 ```typescript
-import { getAgent } from '@dkg/adapter-elizaos';
+import { getAgent } from '@origintrail-official/dkg-adapter-elizaos';
 
 const agent = getAgent();
 if (agent) {
@@ -579,7 +579,7 @@ Config in `~/.dkg/config.json`:
 
 To disable: set `"enabled": false` or re-run `pnpm dkg init` and answer `n`.
 
-For OpenClaw/ElizaOS agents, auto-update is handled at your project level — pull the latest `@dkg/adapter-*` packages when new versions are published.
+For OpenClaw/ElizaOS agents, auto-update is handled at your project level — pull the latest `@origintrail-official/dkg-adapter-*` packages when new versions are published.
 
 ## Persistent Identity
 

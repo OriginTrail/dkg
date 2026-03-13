@@ -14,9 +14,9 @@ import {
   decodePublishRequest,
   TypedEventBus,
   createOperationContext,
-} from '@dkg/core';
-import { OxigraphStore, type Quad } from '@dkg/storage';
-import { MockChainAdapter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computePublicRoot,
   computeKARoot,
@@ -26,7 +26,7 @@ import {
   generateKCMetadata,
   getConfirmedStatusQuad,
   type KAMetadata,
-} from '@dkg/publisher';
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 
 const PARANET = 'test-gossip';

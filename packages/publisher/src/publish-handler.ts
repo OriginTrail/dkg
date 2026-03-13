@@ -1,6 +1,6 @@
-import type { TripleStore, Quad } from '@dkg/storage';
-import { GraphManager } from '@dkg/storage';
-import type { EventBus, StreamHandler, OperationContext } from '@dkg/core';
+import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager } from '@origintrail-official/dkg-storage';
+import type { EventBus, StreamHandler, OperationContext } from '@origintrail-official/dkg-core';
 import {
   DKGEvent,
   decodePublishRequest,
@@ -9,8 +9,8 @@ import {
   createOperationContext,
   assertSafeIri,
   type PublishRequestMsg,
-} from '@dkg/core';
-import type { ChainAdapter } from '@dkg/chain';
+} from '@origintrail-official/dkg-core';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
 import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
