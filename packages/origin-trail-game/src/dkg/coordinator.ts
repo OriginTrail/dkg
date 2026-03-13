@@ -216,8 +216,8 @@ export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
   private readonly topic: string;
-  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
-  private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
+  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 2_000;
+  private static readonly GRAPH_SYNC_INTERVAL_MS = 10_000;
   private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
@@ -2050,15 +2050,33 @@ export class OriginTrailGameCoordinator {
 
   // ── Utilities ─────────────────────────────────────────────────────
 
+  private static readonly CRITICAL_MSG_TYPES = new Set([
+    'swarm:created', 'swarm:joined', 'expedition:launched',
+    'turn:proposal', 'turn:resolved',
+  ]);
+
   private async broadcast(msg: proto.OTMessage): Promise<void> {
-    try {
-      const publishPromise = this.agent.gossip.publish(this.topic, proto.encode(msg));
-      const timeout = new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('publish timeout')), 5_000),
-      );
-      await Promise.race([publishPromise, timeout]);
-    } catch (err: any) {
-      this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+    const data = proto.encode(msg);
+    const isCritical = OriginTrailGameCoordinator.CRITICAL_MSG_TYPES.has(msg.type);
+    const maxAttempts = isCritical ? 3 : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const publishPromise = this.agent.gossip.publish(this.topic, data);
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('publish timeout')), 5_000),
+        );
+        await Promise.race([publishPromise, timeout]);
+        return;
+      } catch (err: any) {
+        if (attempt < maxAttempts) {
+          const delay = 500 * Math.pow(2, attempt - 1);
+          this.log(`Broadcast ${msg.type} attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+        } else {
+          this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+        }
+      }
     }
   }
 

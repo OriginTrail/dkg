@@ -335,6 +335,7 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "paranets": ["devnet-test", "origin-trail-game"],
+  "auth": { "enabled": false },
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
@@ -425,9 +426,12 @@ start_node() {
   local node_pid=$!
   echo "$node_pid" > "$pidfile"
 
-  # Wait for API to be ready
+  # Wait for API to be ready — relay node (1) gets extra time since first boot
+  # compiles Solidity contracts which is CPU-intensive.
   local api_port=$((API_PORT_BASE + node_num - 1))
-  for i in $(seq 1 20); do
+  local max_wait=30
+  [ "$node_num" -eq 1 ] && max_wait=60
+  for i in $(seq 1 "$max_wait"); do
     if curl -s "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
       log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
 
@@ -454,7 +458,7 @@ start_node() {
     sleep 1
   done
 
-  log "WARNING: Node $node_num not ready after 20s (check $node_dir/daemon.log)"
+  log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log)"
 }
 
 stop_devnet_nodes_only() {
