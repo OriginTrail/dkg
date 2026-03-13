@@ -119,8 +119,7 @@ function LlmSection() {
     <div className="settings-card">
       <div className="settings-title">LLM Configuration</div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
-        Connect an OpenAI-compatible LLM to power the Agent Hub with natural language understanding,
-        SPARQL generation, and DKG tool calling. Without an API key, the agent uses rule-based responses only.
+        Configure an OpenAI-compatible LLM to support knowledge extraction from imported memories, agent chat, and intelligent interactions with the DKG. Without an API key, entity extraction is disabled and advanced capabilities are limited.
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, padding: '8px 12px', borderRadius: 8, background: llm?.configured ? 'var(--green-dim)' : 'rgba(255,255,255,.03)', border: `1px solid ${llm?.configured ? 'rgba(74,222,128,.2)' : 'var(--border)'}` }}>

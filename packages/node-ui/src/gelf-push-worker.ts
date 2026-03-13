@@ -36,6 +36,14 @@ export interface LogPushWorkerOptions {
   network: string;
   /** Node name from config */
   nodeName?: string;
+  /** Semver version from package.json, e.g. "9.0.0-beta.2" */
+  version?: string;
+  /** Short git commit SHA of the running code, e.g. "a1b2c3d8" */
+  commit?: string;
+  /** Node role: "core" or "edge" */
+  role?: string;
+  /** Whether auto-update is enabled */
+  autoUpdate?: boolean;
 }
 
 interface LogEntry {
@@ -63,6 +71,10 @@ export class LogPushWorker {
   private readonly peerId: string;
   private readonly network: string;
   private readonly nodeName: string;
+  private readonly version: string;
+  private readonly commit: string;
+  private readonly role: string;
+  private readonly autoUpdate: string;
 
   constructor(opts: LogPushWorkerOptions) {
     this.host = opts.host;
@@ -70,6 +82,10 @@ export class LogPushWorker {
     this.peerId = opts.peerId;
     this.network = opts.network;
     this.nodeName = opts.nodeName ?? 'dkg-node';
+    this.version = opts.version ?? '';
+    this.commit = opts.commit ?? '';
+    this.role = opts.role ?? '';
+    this.autoUpdate = opts.autoUpdate ? 'on' : 'off';
   }
 
   push(entry: LogEntry): void {
@@ -133,9 +149,16 @@ export class LogPushWorker {
 
     for (const entry of batch) {
       const pri = FACILITY_LOCAL0 * 8 + (SYSLOG_SEVERITY[entry.level] ?? 6);
-      const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}"]`;
+      const extra = [
+        this.version ? `ver="${sdEscape(this.version)}"` : '',
+        this.commit ? `commit="${sdEscape(this.commit)}"` : '',
+        this.role ? `role="${sdEscape(this.role)}"` : '',
+        `autoUpd="${this.autoUpdate}"`,
+      ].filter(Boolean).join(' ');
+      const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}" ${extra}]`;
       const msg = entry.message.replace(/[\r\n]+/g, ' ').slice(0, 8192);
-      const line = `<${pri}>1 ${ts} ${sdEscape(this.nodeName)} dkg-v9 - - ${sd} ${msg}\n`;
+      const hostname = this.nodeName.replace(/[^A-Za-z0-9.\-]/g, '-') || 'dkg-node';
+      const line = `<${pri}>1 ${ts} ${hostname} dkg-v9 - - ${sd} ${msg}\n`;
 
       try {
         this.socket.write(line);

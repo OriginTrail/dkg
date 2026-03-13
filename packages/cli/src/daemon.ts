@@ -53,9 +53,26 @@ function getNodeVersion(): string {
     return pkg.version ?? '0.0.0';
   } catch { return '0.0.0'; }
 }
+
+function getCurrentCommitShort(): string {
+  try {
+    const commitFile = join(dkgDir(), '.current-commit');
+    return readFileSync(commitFile, 'utf-8').trim().slice(0, 8);
+  } catch {
+    try {
+      const rDir = releasesDir();
+      const slotDir = existsSync(join(rDir, 'current'))
+        ? join(rDir, 'current')
+        : dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
+    } catch { return ''; }
+  }
+}
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
+
+const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '' };
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
@@ -181,7 +198,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   origStdoutWrite(banner + '\n');
   appendFile(logFile, banner + '\n').catch(() => {});
 
-  log(`Starting DKG ${role} node "${config.name}"...`);
+  const nodeVersion = getNodeVersion();
+  const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
+  const versionTag = nodeCommit ? `v${nodeVersion}, ${nodeCommit}` : `v${nodeVersion}`;
+  log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
   const syncParanets = [...new Set([
@@ -330,14 +350,26 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Auto-update
+  // Version check + auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   let pendingForegroundRestart = false;
-  if (config.autoUpdate?.enabled) {
-    const au = config.autoUpdate;
-    log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
-    updateInterval = setInterval(
-      async () => {
+  const au = config.autoUpdate;
+  if (au?.repo && au?.branch) {
+    const checkIntervalMs = (au.checkIntervalMinutes || 30) * 60_000;
+    if (au.enabled) {
+      log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
+    } else {
+      log(`Auto-update disabled — version check only: ${au.repo}@${au.branch}`);
+    }
+
+    const runCheck = async () => {
+      const commitStatus = await checkForNewCommitWithStatus(au, log);
+      if (commitStatus.status !== 'error') {
+        lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
+        lastUpdateCheck.checkedAt = Date.now();
+        if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+      }
+      if (au.enabled && commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
           if (foreground) {
@@ -349,9 +381,11 @@ export async function runDaemon(foreground: boolean): Promise<void> {
           log('Auto-update: update activated; restarting daemon process.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
         }
-      },
-      au.checkIntervalMinutes * 60_000,
-    );
+      }
+    };
+
+    setTimeout(runCheck, 15_000);
+    updateInterval = setInterval(runCheck, checkIntervalMs);
   }
 
   // --- Dashboard DB + Metrics ---
@@ -440,6 +474,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       peerId: agent.peerId,
       network: networkKey,
       nodeName: config.name,
+      version: nodeVersion,
+      commit: nodeCommit,
+      role: config.nodeRole ?? 'edge',
+      autoUpdate: config.autoUpdate?.enabled ?? false,
     });
     logPusher.start();
     log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
@@ -723,6 +761,8 @@ export async function runDaemon(foreground: boolean): Promise<void> {
         tracker,
         memoryManager,
         bridgeAuthToken,
+        nodeVersion,
+        nodeCommit,
         catchupTracker,
       );
     } catch (err: any) {
@@ -1015,6 +1055,8 @@ async function handleRequest(
   tracker: OperationTracker,
   memoryManager: ChatMemoryManager,
   bridgeAuthToken: string | undefined,
+  nodeVersion: string,
+  nodeCommit: string,
   catchupTracker: CatchupTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
@@ -1033,6 +1075,8 @@ async function handleRequest(
     const identityId = agent.publisher.getIdentityId();
     return jsonResponse(res, 200, {
       name: config.name,
+      version: nodeVersion,
+      commit: nodeCommit || null,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
@@ -1046,6 +1090,10 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      hasOpenClawChannel: !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
+      autoUpdate: config.autoUpdate?.enabled ?? false,
+      updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
+      latestCommit: lastUpdateCheck.latestCommit || null,
     });
   }
 
