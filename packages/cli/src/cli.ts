@@ -205,7 +205,7 @@ program
     const config = {
       ...existing,
       name: name || 'dkg-node',
-      relay: (relay && relay !== networkDefaultRelay) ? relay : undefined,
+      relay: (!existing.relay && relay === networkDefaultRelay) ? undefined : (relay || undefined),
       apiPort,
       nodeRole,
       paranets,
@@ -218,7 +218,9 @@ program
     console.log(`\nConfig saved to ${configPath()}`);
     console.log(`  name:       ${config.name}`);
     console.log(`  role:       ${config.nodeRole}`);
-    console.log(`  relay:      ${config.relay ?? `(network default — ${network?.relays?.length ?? 0} relays)`}`);
+    const relayDisplay = config.relay
+      ?? (network?.relays?.length ? `(network default — ${network.relays.length} relays)` : '(none)');
+    console.log(`  relay:      ${relayDisplay}`);
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
