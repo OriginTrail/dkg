@@ -469,7 +469,13 @@ export class OriginTrailGameCoordinator {
           existingSwarm.createdAt = createdAt;
           changed = true;
         }
-        if (existingSwarm.status !== status) {
+        // Never regress a swarm that is already traveling/finished back to
+        // recruiting — the graph may lag behind in-memory state because the
+        // expedition-launched publish is still in-flight or hasn't propagated.
+        const STATUS_RANK: Record<string, number> = { recruiting: 0, traveling: 1, finished: 2 };
+        const localRank = STATUS_RANK[existingSwarm.status] ?? 0;
+        const graphRank = STATUS_RANK[status] ?? 0;
+        if (graphRank > localRank) {
           existingSwarm.status = status;
           changed = true;
         }

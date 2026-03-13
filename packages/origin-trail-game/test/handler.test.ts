@@ -1603,6 +1603,139 @@ describe('Graph-based lobby sync', () => {
     expect(swarm!.players.map(p => p.peerId)).toEqual(['leader-peer', 'dup-peer']);
     coordinator.destroy();
   });
+
+  it('graph sync does not regress a traveling swarm back to recruiting', async () => {
+    const syncAgent = makeMockAgent('leader-peer');
+    const now = Date.now();
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-regress',
+            name: '"Regress Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+            maxPlayers: '"3"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"', joinedAt: `"${now + 10}"` },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    // Initial sync: swarm is created as recruiting
+    await (coordinator as any).loadLobbyFromGraph();
+    const swarm = coordinator.getSwarm('swarm-regress');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.status).toBe('recruiting');
+
+    // Simulate expedition launch advancing the swarm to traveling
+    swarm!.status = 'traveling';
+    swarm!.gameState = { sessionId: 'test', status: 'active', party: [], month: 1, epochs: 0 } as any;
+    swarm!.currentTurn = 1;
+
+    // Graph sync runs again — graph still says 'recruiting' (publish lag)
+    await (coordinator as any).loadLobbyFromGraph();
+
+    // Status must NOT regress back to recruiting
+    expect(swarm!.status).toBe('traveling');
+    coordinator.destroy();
+  });
+
+  it('graph sync allows forward progression from recruiting to finished', async () => {
+    const syncAgent = makeMockAgent('leader-peer');
+    const now = Date.now();
+    let graphStatus = '"recruiting"';
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-fwd',
+            name: '"Forward Swarm"',
+            status: graphStatus,
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    await (coordinator as any).loadLobbyFromGraph();
+    const swarm = coordinator.getSwarm('swarm-fwd');
+    expect(swarm!.status).toBe('recruiting');
+
+    // Graph now reports finished (another node published game-over)
+    graphStatus = '"finished"';
+    await (coordinator as any).loadLobbyFromGraph();
+    expect(swarm!.status).toBe('finished');
+
+    coordinator.destroy();
+  });
+
+  it('graph sync does not regress a finished swarm back to traveling', async () => {
+    const syncAgent = makeMockAgent('leader-peer');
+    const now = Date.now();
+    let graphStatus = '"recruiting"';
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-done',
+            name: '"Done Swarm"',
+            status: graphStatus,
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    // Seed the swarm as recruiting, then advance to finished locally
+    await (coordinator as any).loadLobbyFromGraph();
+    const swarm = coordinator.getSwarm('swarm-done');
+    expect(swarm).toBeTruthy();
+    swarm!.status = 'finished';
+
+    // Graph now lags and shows traveling
+    graphStatus = '"traveling"';
+    await (coordinator as any).loadLobbyFromGraph();
+    expect(swarm!.status).toBe('finished');
+
+    coordinator.destroy();
+  });
 });
 
 describe('Network topology hints (V3)', () => {
