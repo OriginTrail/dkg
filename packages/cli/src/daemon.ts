@@ -68,7 +68,7 @@ import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
 
-const lastUpdateCheck = { upToDate: true, checkedAt: 0 };
+const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '' };
 
 function resolveDaemonEntryPoint(): string {
   const rDir = releasesDir();
@@ -357,6 +357,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       const commitStatus = await checkForNewCommitWithStatus(au, log);
       lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
       lastUpdateCheck.checkedAt = Date.now();
+      if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
       if (commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
@@ -1076,6 +1077,7 @@ async function handleRequest(
       hasIdentity: identityId > 0n,
       autoUpdate: config.autoUpdate?.enabled ?? false,
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
+      latestCommit: lastUpdateCheck.latestCommit || null,
     });
   }
 

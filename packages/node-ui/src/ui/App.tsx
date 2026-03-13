@@ -273,6 +273,7 @@ export function App() {
   const currentVersion = liveStatus?.version;
   const commitShort = liveStatus?.commit;
   const updateAvailable = liveStatus?.updateAvailable === true;
+  const latestCommit = liveStatus?.latestCommit;
 
   return (
     <div className="app-layout">
@@ -293,12 +294,12 @@ export function App() {
               }}>latest</span>
             )}
             {updateAvailable && (
-              <span title={liveStatus?.autoUpdate ? 'Auto-update will apply the new version on the next check' : 'A newer version is available — update manually'} style={{
+              <span title={`Latest: ${latestCommit || 'unknown'}${liveStatus?.autoUpdate ? ' — auto-update will apply it' : ' — update manually'}`} style={{
                 fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
                 background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
                 letterSpacing: '0.03em',
                 animation: 'pulse-fade 2.5s ease-in-out infinite',
-              }}>{liveStatus?.autoUpdate ? 'updating...' : 'update available'}</span>
+              }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}{latestCommit ? ` → ${latestCommit}` : ''}</span>
             )}
           </div>
           {currentVersion && (
