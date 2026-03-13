@@ -17,8 +17,11 @@
  * full context continuity.
  */
 
+import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
@@ -49,6 +52,8 @@ export class DkgChannelPlugin {
   private cfg: any = null;
   /** Plugin-sdk helpers — lazily loaded at first dispatch. */
   private sdk: any = null;
+  /** True after the first loadSdk() attempt — prevents re-trying and re-logging every turn. */
+  private sdkLoaded = false;
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
@@ -203,18 +208,49 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   private loadSdk(): any {
-    if (this.sdk) return this.sdk;
+    if (this.sdkLoaded) return this.sdk;
+    this.sdkLoaded = true;
+    const log = this.api?.logger;
+
+    // Strategy 1: resolve from the adapter's own context (works if adapter is
+    // inside the gateway's node_modules tree).
     try {
       this.sdk = moduleRequire('openclaw/plugin-sdk');
-    } catch {
+      log?.info?.('[dkg-channel] Loaded plugin-sdk via adapter context');
+      return this.sdk;
+    } catch { /* expected — adapter is typically loaded from an external path */ }
+
+    // Strategy 2: resolve from the gateway's main script. process.argv[1] is
+    // the gateway entry (e.g. .../openclaw/dist/index.js), so createRequire
+    // from there can find openclaw's own subpath exports.
+    if (process.argv[1]) {
       try {
-        const ocMain = moduleRequire.resolve('openclaw');
-        const ocRequire = createRequire(ocMain);
-        this.sdk = ocRequire('./plugin-sdk');
-      } catch {
-        this.api?.logger.warn?.('[dkg-channel] Could not load openclaw/plugin-sdk — dispatch unavailable');
-      }
+        this.sdk = createRequire(process.argv[1])('openclaw/plugin-sdk');
+        log?.info?.('[dkg-channel] Loaded plugin-sdk via gateway entry');
+        return this.sdk;
+      } catch { /* gateway entry might not be resolvable */ }
     }
+
+    // Strategy 3: walk up from the adapter's location looking for
+    // node_modules/openclaw/package.json, then require from there.
+    // Handles global installs, monorepos, and any OS.
+    try {
+      const adapterDir = dirname(fileURLToPath(import.meta.url));
+      let dir = adapterDir;
+      for (let i = 0; i < 20; i++) {
+        const candidate = join(dir, 'node_modules', 'openclaw', 'package.json');
+        if (existsSync(candidate)) {
+          this.sdk = createRequire(candidate)('openclaw/plugin-sdk');
+          log?.info?.('[dkg-channel] Loaded plugin-sdk via node_modules walk');
+          return this.sdk;
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break; // reached filesystem root
+        dir = parent;
+      }
+    } catch { /* walk failed */ }
+
+    log?.warn?.('[dkg-channel] Could not load openclaw/plugin-sdk — using direct runtime dispatch');
     return this.sdk;
   }
 
@@ -287,9 +323,9 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
     const cfg = this.cfg;
 
-    // --- Primary: dispatch via plugin-sdk (same as Telegram/Discord) ---
+    // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
-      api.logger.info?.(`[dkg-channel] Dispatching via plugin-sdk for: ${correlationId}`);
+      api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
@@ -408,7 +444,7 @@ export class DkgChannelPlugin {
     }
 
     // 6. Direct runtime dispatch fallback (no sdk)
-    log.info?.('[dkg-channel] Falling back to direct runtime dispatch');
+    log.debug?.('[dkg-channel] Using direct runtime dispatch');
     return this.dispatchWithRuntime(runtime, cfg, route, storePath, ctxPayload, correlationId);
   }
 
