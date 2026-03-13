@@ -279,42 +279,8 @@ export function App() {
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
           <style>{`@keyframes pulse-fade{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span className="logo-version" style={updateAvailable ? { color: '#fbbf24' } : liveStatus?.updateAvailable === false ? { color: 'var(--green)' } : {}}>
-              {currentVersion ? `v${currentVersion}` : 'DKG v9 Node'}
-              {commitShort ? ` (${commitShort})` : ''}
-            </span>
-            {liveStatus?.updateAvailable === false && (
-              <span title="Running the latest version" style={{
-                fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
-                background: 'rgba(74,222,128,.08)', color: 'var(--green)', cursor: 'default',
-                letterSpacing: '0.03em',
-              }}>latest</span>
-            )}
-            {updateAvailable && (
-              <span title={`Latest: ${latestCommit || 'unknown'}${liveStatus?.autoUpdate ? ' — auto-update will apply it' : ' — update manually'}`} style={{
-                fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4,
-                background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
-                letterSpacing: '0.03em',
-                animation: 'pulse-fade 2.5s ease-in-out infinite',
-              }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}{latestCommit ? ` → ${latestCommit}` : ''}</span>
-            )}
-          </div>
-          {currentVersion && (
-            <div style={{ marginTop: 1 }}>
-              {liveStatus?.autoUpdate ? (
-                <span title="Node will automatically update on the next version check" style={{
-                  fontSize: 10, color: 'var(--green)', opacity: 0.8, cursor: 'default',
-                }}>Auto-updater: enabled</span>
-              ) : (
-                <span title="Enable auto-update in config.json to stay current automatically" style={{
-                  fontSize: 10, color: 'var(--text-dim)', cursor: 'default',
-                }}>Auto-updater: disabled</span>
-              )}
-            </div>
-          )}
+          <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6 }}>
             <span style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '0.02em' }}>powered by</span>
             <svg width="60" height="13" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ opacity: 0.55 }}>
@@ -349,16 +315,38 @@ export function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: liveStatus ? 'var(--green)' : 'var(--text-dim)', boxShadow: liveStatus ? '0 0 8px rgba(74,222,128,.4)' : 'none', display: 'inline-block' }} />
             <span style={{ color: liveStatus ? 'var(--green)' : 'var(--text-muted)', fontWeight: 600 }}>{liveStatus ? 'Online' : 'Connecting…'}</span>
             <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>
               {liveStatus?.connectedPeers != null ? `${liveStatus.connectedPeers} peers` : liveStatus?.peerCount != null ? `${liveStatus.peerCount} peers` : '…'}
             </span>
           </div>
-          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10, marginBottom: 6 }}>
             {liveStatus?.networkName ?? liveStatus?.networkId ?? 'unknown network'}{liveStatus?.syncing ? ' · syncing…' : ''}
           </div>
+          {currentVersion && (
+            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                <span className="mono" style={{ fontSize: 10, color: updateAvailable ? '#fbbf24' : liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)' }}>
+                  v{currentVersion}{commitShort ? ` (${commitShort})` : ''}
+                </span>
+                {liveStatus?.updateAvailable === false && (
+                  <span style={{ fontSize: 9, fontWeight: 600, color: 'var(--green)' }}>· latest</span>
+                )}
+                {updateAvailable && (
+                  <span title={`Latest: ${latestCommit || 'unknown'}${liveStatus?.autoUpdate ? ' — auto-update will apply it' : ' — update manually'}`} style={{
+                    fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 3,
+                    background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
+                    animation: 'pulse-fade 2.5s ease-in-out infinite',
+                  }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}{latestCommit ? ` → ${latestCommit}` : ''}</span>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: liveStatus?.autoUpdate ? 'var(--green)' : 'var(--text-dim)', opacity: 0.7 }}>
+                Auto-updater: {liveStatus?.autoUpdate ? 'enabled' : 'disabled'}
+              </div>
+            </div>
+          )}
         </div>
       </aside>
 

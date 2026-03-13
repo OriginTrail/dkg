@@ -60,7 +60,11 @@ function getCurrentCommitShort(): string {
     return readFileSync(commitFile, 'utf-8').trim().slice(0, 8);
   } catch {
     try {
-      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe' }).trim();
+      const rDir = releasesDir();
+      const slotDir = existsSync(join(rDir, 'current'))
+        ? join(rDir, 'current')
+        : dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
     } catch { return ''; }
   }
 }
@@ -355,9 +359,11 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
     const runCheck = async () => {
       const commitStatus = await checkForNewCommitWithStatus(au, log);
-      lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
-      lastUpdateCheck.checkedAt = Date.now();
-      if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+      if (commitStatus.status !== 'error') {
+        lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
+        lastUpdateCheck.checkedAt = Date.now();
+        if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+      }
       if (commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
