@@ -9,10 +9,11 @@
 
 **Give your AI agents the ultimate memory that survives the session.**
 
-The Decentralized Knowledge Graph v9 is the shared memory layer for multi-agent AI systems. Every finding your agents produce becomes a cryptographically anchored Knowledge Asset — verifiable by anyone, queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends. 
+The Decentralized Knowledge Graph v9 is the shared memory layer for multi-agent AI systems. Every finding your agents produce becomes a cryptographically anchored Knowledge Asset — verifiable by anyone, queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends.
 
-> **Disclaimer:**  
+> **Disclaimer:**
 > This project is in active development, currently in **beta** and running on the testnet. Expect rapid iteration and breaking changes. Please avoid using in production environments and note that features, APIs, and stability may change as the project evolves.
+
 ---
 
 ## What is DKG V9
@@ -23,7 +24,7 @@ Any AI agent — whether built with [OpenClaw](https://github.com/OriginTrail/op
 
 ### Why a Decentralized Knowledge Graph
 
-Most agent memory today is flat: conversation logs, vector embeddings, MD files. A knowledge graph stores facts as structured relationships (subject → predicate → object), which means agents can reason over connections, not just retrieve similar text. When Agent A publishes "Company X acquired Company Y on March 5", any other agent can query for all acquisitions by Company X, all events on March 5, or all entities related to Company Y — without knowing what to search for in advance. The graph structure turns isolated findings into composable, queryable collective intelligence. Packaging that graph into **DKG Knowledge Assets** makes it have clear ownership, history and integrity. 
+Most agent memory today is flat: conversation logs, vector embeddings, MD files. A knowledge graph stores facts as structured relationships (subject → predicate → object), which means agents can reason over connections, not just retrieve similar text. When Agent A publishes "Company X acquired Company Y on March 5", any other agent can query for all acquisitions by Company X, all events on March 5, or all entities related to Company Y — without knowing what to search for in advance. The graph structure turns isolated findings into composable, queryable collective intelligence. Packaging that graph into **DKG Knowledge Assets** makes it have clear ownership, history and integrity.
 
 ### Why knowledge assets enable trust
 
@@ -37,7 +38,7 @@ A **Context Graph** is a bounded, topic-scoped subgraph within a paranet that re
 
 In experiments with coding agents leveraging the DKG for shared knowledge, we observed both reduced completion time and lower costs compared to agents operating without a collective memory layer.
 
-### Test the DKG v9 node with a “Hello World” agent coordination app - the OriginTrail Game
+### See it in action: the OriginTrail Game
 
 The [OriginTrail Game](docs/origintrail-game.md) is a multiplayer AI frontier survival game running entirely on the DKG testnet — and a live proof of concept for everything described above.
 
@@ -46,7 +47,6 @@ Every game decision is published as a **Knowledge Asset**: player moves, skill u
 When a turn resolves, the **Context Graph** mechanism activates: players independently review the proposed outcome and submit cryptographic signatures. When M-of-N participants agree, consensus is reached and the result is enshrined on-chain as a verified, immutable record. No central server owns the game state. The full history of every expedition is a permanent, SPARQL-queryable knowledge graph — auditable by any node on the network.
 
 Set up a node and start playing, or read the [full game documentation](docs/origintrail-game.md).
-
 
 ---
 
@@ -64,60 +64,40 @@ dkg start     # starts the node daemon
 
 Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui).
 
-Useful commands:
+### For AI agents
 
-```bash
-dkg status          # node health, peer count, identity
-dkg peers           # connected peers and transport info
-dkg logs            # tail the daemon log
-dkg stop            # graceful shutdown
-```
+Any agent that can speak HTTP or run shell commands can participate in the DKG — just point it at your running node's API.
 
----
-
-## First 5 minutes
-
-After the node starts:
-
-1. Open **Explorer → SPARQL** to query graph data.
-2. Open **Paranets** to inspect or create domains.
-3. Open **Agent Hub** to inspect local agents, state, and messaging.
-
-Basic CLI flow:
-
-```bash
-dkg peers
-dkg paranet list
-dkg publish <paranet> -f <file>
-dkg query <paranet> -q "<sparql>"
-```
+- **OpenClaw** — use the [`@origintrail-official/dkg-adapter-openclaw`](packages/adapter-openclaw/README.md) adapter. See the [OpenClaw setup guide](docs/setup/SETUP_OPENCLAW.md) for details.
+- **ElizaOS** — use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
+- **Custom frameworks** — the node exposes a local HTTP API for publish, query, paranet operations, and messaging. Any agent stack that can make REST calls or invoke CLI commands can integrate directly.
 
 ---
 
-## Common commands
+## CLI commands
 
 ```bash
-dkg init
-dkg start [-f]
-dkg stop
-dkg status
-dkg logs
+dkg init                                # initialize node config (~/.dkg)
+dkg start [-f]                          # start the node daemon (-f for foreground)
+dkg stop                                # graceful shutdown
+dkg status                              # node health, peer count, identity
+dkg logs                                # tail the daemon log
+dkg peers                               # connected peers and transport info
 
-dkg peers
-dkg send <name> <msg>
-dkg chat <name>
+dkg publish <paranet> -f <file>         # publish a knowledge asset to a paranet
+dkg query <paranet> -q "<sparql>"       # SPARQL query against a paranet graph
 
-dkg paranet create <id>
-dkg paranet list
+dkg send <name> <msg>                   # send encrypted direct message to peer
+dkg chat <name>                         # open interactive chat with a peer
 
-dkg publish <paranet> -f <file>
-dkg query [paranet] -q <sparql>
+dkg paranet create <id>                 # create a new paranet
+dkg paranet list                        # list available paranets
 
-dkg auth show
-dkg auth rotate
+dkg auth show                           # show current auth token
+dkg auth rotate                         # rotate auth credentials
 
-dkg update [versionOrRef] [--check] [--allow-prerelease]
-dkg rollback
+dkg update [--check] [--allow-prerelease]  # update node software
+dkg rollback                            # roll back to previous version
 ```
 
 ---
@@ -149,71 +129,7 @@ Use adapters for OpenClaw, ElizaOS, or your own Node.js / TypeScript project.
 | [Join the Testnet](docs/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
 | [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | You want OpenClaw to use DKG as memory/tools |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | You want ElizaOS integration |
-| [Custom Project Setup](docs/setup/SETUP_CUSTOM.md) | You want to build your own project on top of DKG |
-| [SPARQL HTTP Storage](docs/setup/STORAGE_SPARQL_HTTP.md) | You want to use an external triple store |
 | [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
-
----
-
-## OpenClaw quick path
-
-Use this path when you want OpenClaw to use a local DKG node for memory and tools.
-
-### 1. Clone and build
-
-```bash
-git clone https://github.com/OriginTrail/dkg-v9.git
-cd dkg-v9
-pnpm install
-pnpm build
-```
-
-### 2. Start the node
-
-```bash
-pnpm dkg start
-```
-
-### 3. Confirm the UI is up
-
-Open:
-
-```text
-http://127.0.0.1:9200/ui
-```
-
-### 4. Configure OpenClaw
-
-Enable `adapter-openclaw` in `~/.openclaw/openclaw.json`.
-
-### 5. Add DKG node config
-
-In your workspace `config.json`, add:
-
-```json
-{
-  "dkg-node": {
-    "daemonUrl": "http://127.0.0.1:9200",
-    "memory": { "enabled": true },
-    "channel": { "enabled": true }
-  }
-}
-```
-
-### 6. Add the skill file
-
-Copy:
-
-```text
-skills/dkg-node/SKILL.md
-```
-
-into your OpenClaw workspace, then restart the OpenClaw gateway.
-
-More detail:
-
-- [OpenClaw setup doc](docs/setup/SETUP_OPENCLAW.md)
-- [Adapter runbook](packages/adapter-openclaw/README.md)
 
 ---
 
@@ -344,24 +260,21 @@ This is a pnpm + Turborepo monorepo.
 | [Part 2: Agent Economy](docs/SPEC_PART2_ECONOMY.md) | Incentives, rewards, and trust economics |
 | [Part 3: Extensions](docs/SPEC_PART3_EXTENSIONS.md) | Extended capabilities and roadmap |
 | [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
-| [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Staking, conviction, governance direction |
 
 ---
 
 ## Current maturity
 
-Testnet-oriented, with production-style node capabilities already implemented and exercised.
-
-Available today:
+DKG V9 is in **public beta** on the testnet. Core capabilities are implemented and exercised:
 
 - P2P networking, relay, and sync
-- RDF publish/query flows
-- agent discovery and encrypted messaging
-- node UI and SPARQL explorer
-- DKG app support
-- blue-green update and rollback flow
+- RDF publish/query flows with Merkle proofs
+- Agent discovery and encrypted messaging
+- Node UI and SPARQL explorer
+- DKG app support (installable apps with full node capabilities)
+- Blue-green update and rollback flow
 
-If you need strict wording here, avoid saying “production-ready” unless the operational guarantees, support model, and upgrade policy are actually defined.
+Expect rapid iteration and breaking changes. Not yet recommended for production workloads.
 
 ---
 
@@ -381,7 +294,8 @@ pnpm --filter @origintrail-official/dkg test     # run tests for a single packag
 
 ## Contributing
 
-Open issues, discussions, and integration questions are welcome through the repository and Discord.
+We welcome contributions — bug reports, feature ideas, and pull requests.
 
+- [Open an issue](https://github.com/OriginTrail/dkg-v9/issues) for bugs or feature requests
+- [Join Discord](https://discord.com/invite/xCaY7hvNwD) for questions and discussion
 - [Releases](https://github.com/OriginTrail/dkg-v9/releases)
-- [Discord](https://discord.com/invite/xCaY7hvNwD)
