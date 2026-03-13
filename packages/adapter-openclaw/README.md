@@ -76,7 +76,8 @@ Write `~/.dkg/config.json` directly (skip `dkg init` — it just prompts for the
     "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
     "chainId": "base:84532"
   },
-  "auth": { "enabled": true }
+  "auth": { "enabled": true },
+  "openclawAdapter": true
 }
 ```
 
@@ -275,7 +276,7 @@ If another agent is performing the setup, these are the exact steps:
 2. Clone this repo to a stable path such as `~/dkg-v9`, then `pnpm install && pnpm build`.
 3. Read `network/testnet.json` for relay, chain, and paranet defaults.
 4. Read the agent name from `WORKSPACE_DIR/IDENTITY.md`.
-5. Write `~/.dkg/config.json` programmatically using the agent name and network defaults.
+5. Write `~/.dkg/config.json` programmatically using the agent name and network defaults. Include `"openclawAdapter": true`.
 6. Run `pnpm dkg start` — wallets, auth token, and identity key are auto-generated on first start.
 7. Read `~/.dkg/wallets.json` and show the public addresses so the user can fund them with testnet ETH + TRAC for on-chain operations. Remind the user to back up `~/.dkg/wallets.json` securely — never paste private keys into chat, logs, or screenshots. Fund the wallets by calling `POST https://euphoria.origin-trail.network/faucet/fund` with `{"mode": "v9_base_sepolia", "wallets": ["0xADDR1", "0xADDR2", "0xADDR3"]}`. Include an `Idempotency-Key` header. See [Testnet Faucet](../../docs/setup/TESTNET_FAUCET.md) for details.
 8. Merge into `~/.openclaw/openclaw.json`: add `"adapter-openclaw"` to `plugins.allow`, add the adapter path to `plugins.load.paths`, and add `adapter-openclaw` to `plugins.entries`.

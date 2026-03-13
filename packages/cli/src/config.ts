@@ -83,6 +83,8 @@ export interface DkgConfig {
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
   store?: { backend: string; options?: Record<string, unknown> };
+  /** Set to true when this node is used with the OpenClaw adapter. Controls Agent Hub tab visibility. */
+  openclawAdapter?: boolean;
   /** Optional OpenClaw bridge/gateway routing hints for the local channel transport. */
   openclawChannel?: {
     bridgeUrl?: string;

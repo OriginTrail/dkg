@@ -31,6 +31,7 @@ describe('dkg_list_paranets tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -57,8 +58,7 @@ describe('dkg_list_paranets tool', () => {
 
     expect(parsed.paranets).toEqual(SAMPLE_PARANETS);
     expect(parsed.count).toBe(2);
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/paranet/list');
+    expect(fetchSpy.mock.calls[1][0]).toBe('http://localhost:9200/api/paranet/list');
   });
 
   it('returns error when daemon request fails', async () => {
@@ -88,6 +88,7 @@ describe('dkg_status tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -144,6 +145,7 @@ describe('dkg_publish tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -164,7 +166,7 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaCount).toBe(1);
     expect(parsed.triplesPublished).toBe(2);
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.paranetId).toBe('testing');
     expect(body.quads).toHaveLength(2);
     expect(body.quads[0].subject).toBe('urn:alice');
@@ -176,7 +178,7 @@ describe('dkg_publish tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('No valid N-Quads');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('skips comment and blank lines in N-Quads', async () => {
@@ -198,6 +200,7 @@ describe('dkg_query tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -215,7 +218,7 @@ describe('dkg_query tool', () => {
 
     expect(parsed.result.bindings).toHaveLength(1);
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.sparql).toContain('SELECT');
     expect(body.paranetId).toBe('testing');
   });
@@ -228,7 +231,7 @@ describe('dkg_query tool', () => {
     const tool = findTool('dkg_query');
     await tool.execute('call-2', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.paranetId).toBeUndefined();
   });
 });
@@ -238,6 +241,7 @@ describe('dkg_read_messages tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -252,7 +256,7 @@ describe('dkg_read_messages tool', () => {
     const tool = findTool('dkg_read_messages');
     await tool.execute('call-1', { peer: 'agent-bob', limit: '10', since: '1710000000000' });
 
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = fetchSpy.mock.calls[1][0] as string;
     expect(url).toContain('peer=agent-bob');
     expect(url).toContain('limit=10');
     expect(url).toContain('since=1710000000000');
@@ -267,7 +271,7 @@ describe('dkg_read_messages tool', () => {
     await tool.execute('call-2', { limit: 'abc', since: '' });
 
     // Non-numeric values should not appear in URL
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = fetchSpy.mock.calls[1][0] as string;
     expect(url).not.toContain('limit=');
     expect(url).not.toContain('since=');
   });
