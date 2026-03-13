@@ -138,7 +138,7 @@ sequenceDiagram
 
         opt privateQuads present
             Pub->>Pub: computePrivateRoot(private quads)
-            Pub->>Pub: Add synthetic private commitment hash to leaf set
+            Pub->>Pub: Add synthetic private Merkle root hash to leaf set
         end
         Pub->>Pub: Compute kcMerkleRoot (flat tree over all public triple hashes)
         Pub->>Pub: Compute publicByteSize (canonical N-Triples encoding)
@@ -156,7 +156,7 @@ sequenceDiagram
 
     Pub-->>Agent: preBroadcast(preparedPublish)
     Agent->>GS: publish(paranetPublishTopic, PublishRequest)
-    Note over GS: Message contains:<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize<br/>NO txHash, NO blockNumber (not yet on-chain)
+    Note over GS: Message contains: type=PUBLISH,<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize<br/>NO txHash, NO blockNumber (not yet on-chain)
     GS-->>Peers: PublishRequest (relayed through mesh)
 
     rect rgb(232, 245, 233)
@@ -198,8 +198,8 @@ sequenceDiagram
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
     Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
-    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
-    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
+    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
     Agent-->>App: PublishResult
 
@@ -259,6 +259,7 @@ before committing on-chain.
 sequenceDiagram
     participant App as Application
     participant Agent as DKGAgent
+    participant Pub as DKGPublisher
     participant Store as TripleStore
     participant GS as GossipSub
     participant Peers as Receiver Nodes
@@ -267,15 +268,16 @@ sequenceDiagram
     Note over App,Peers: Step A — Write to workspace (can happen many times)
 
     App->>Agent: writeToWorkspace(paranetId, quads)
+    Agent->>Pub: writeToWorkspace(paranetId, quads)
 
     rect rgb(240, 240, 255)
-        Note over Agent,Store: LOCAL: validate + store in workspace
-        Agent->>Agent: autoPartition(quads) → group by rootEntity
-        Agent->>Agent: Build manifest + KA metadata
-        Agent->>Agent: validatePublishRequest(quads, manifest, paranetId)
-        Note over Agent: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
-        Agent->>Store: insert(quads → workspace graph)
-        Agent->>Store: insert(workspace metadata → workspace_meta graph)
+        Note over Pub,Store: LOCAL: validate + store in workspace
+        Pub->>Pub: autoPartition(quads) → group by rootEntity
+        Pub->>Pub: Build manifest + KA metadata
+        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
+        Pub->>Store: insert(quads → workspace graph)
+        Pub->>Store: insert(workspace metadata → workspace_meta graph)
     end
 
     Agent->>GS: publish(paranetWorkspaceTopic, WorkspacePublishRequest)
@@ -287,18 +289,19 @@ sequenceDiagram
     Note over App,Peers: Step B — Enshrine from workspace (triggers publish flow)
 
     App->>Agent: enshrineFromWorkspace(paranetId, selection)
+    Agent->>Pub: enshrineFromWorkspace(paranetId, selection)
 
     rect rgb(240, 240, 255)
-        Note over Agent,Store: Phase 1–3 — Read staged data + compute Merkle root
+        Note over Pub,Store: Phase 1–3 — Read staged data + compute Merkle root
 
-        Agent->>Store: CONSTRUCT quads from workspace graph (by selection)
+        Pub->>Store: CONSTRUCT quads from workspace graph (by selection)
 
         opt privateQuads present in workspace
-            Agent->>Agent: computePrivateRoot(private quads)
-            Agent->>Agent: Add synthetic private commitment hash to leaf set
+            Pub->>Pub: computePrivateRoot(private quads)
+            Pub->>Pub: Add synthetic private root hash to leaf set
         end
-        Agent->>Agent: Compute kcMerkleRoot (flat tree over all public triple hashes)
-        Agent->>Agent: Compute publicByteSize (canonical N-Triples encoding)
+        Pub->>Pub: Compute kcMerkleRoot (flat tree over all public triple hashes)
+        Pub->>Pub: Compute publicByteSize (canonical N-Triples encoding)
     end
 
     Note over Agent,Peers: Phase 4 — No data broadcast needed (peers already have workspace data)
@@ -306,8 +309,9 @@ sequenceDiagram
     rect rgb(232, 245, 233)
         Note over Agent,Peers: Phase 5 — Peer-push attestation (Direct RPC)
 
-        Agent->>GS: publish(paranetPublishTopic, PublishRequest with publisherPeerId)
-        Note over GS: Message contains: kcMerkleRoot, publicByteSize,<br/>publisherPeerId (return address), operationId, deadline
+        Pub-->>Agent: preBroadcast(preparedPublish)
+        Agent->>GS: publish(paranetPublishTopic, EnshrineRequest with publisherPeerId)
+        Note over GS: Message contains: type=ENSHRINE, kcMerkleRoot, publicByteSize,<br/>publisherPeerId (return address), operationId, deadline<br/>NO nquads (peers already have workspace data)
 
         Note over Peers: Each peer that received workspace data:
         Peers->>Peers: Recompute kcMerkleRoot from workspace quads
@@ -323,28 +327,29 @@ sequenceDiagram
     end
 
     rect rgb(232, 245, 233)
-        Note over Agent,Chain: Phase 6 — Submit on-chain publish
+        Note over Pub,Chain: Phase 6 — Submit on-chain publish
 
-        Agent->>Agent: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
-        Agent->>Chain: publishKnowledgeAssets({kaCount, kcMerkleRoot, publicByteSize,<br/>tokenAmount, publisherSignature, receiverSignatures[]})
+        Pub->>Pub: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
+        Pub->>Chain: publishKnowledgeAssets({kaCount, kcMerkleRoot, publicByteSize,<br/>tokenAmount, publisherSignature, receiverSignatures[]})
         Note over Chain: Contract verifies publisher + receiver signatures
         Note over Chain: Contract checks minimumRequiredSignatures threshold
-        Chain-->>Agent: OnChainPublishResult {txHash, batchId, blockNumber, startKAId, endKAId}
+        Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber, startKAId, endKAId}
         Note over Chain: Emits: UALRangeReserved, KnowledgeBatchCreated
     end
 
-    Note over Agent,Store: Phase 7 — Promote workspace → data graph (publisher side)
+    Note over Pub,Store: Phase 7 — Promote workspace → data graph (publisher side)
 
-    Agent->>Store: Copy quads: workspace graph → data graph
-    Agent->>Store: Delete quads from workspace graph
-    Agent->>Agent: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
-    Agent->>Store: insert(confirmed metadata + chain provenance → meta graph)
-    Agent->>Agent: Track ownedEntities + batch→paranet binding
+    Pub->>Store: Copy quads: workspace graph → data graph
+    Pub->>Store: Delete quads from workspace graph
+    Pub->>Pub: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
+    Pub->>Store: insert(confirmed metadata + chain provenance → meta graph)
+    Pub->>Pub: Track ownedEntities + batch→paranet binding
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
-    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
-    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
+    Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
+    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
     Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
 
@@ -417,7 +422,8 @@ signatures). If either set of signatures is insufficient, nothing is published.
 ```mermaid
 sequenceDiagram
     participant App as Application / Game Coordinator
-    participant Agent as DKGAgent (Publisher)
+    participant Agent as DKGAgent
+    participant Pub as DKGPublisher
     participant Store as TripleStore
     participant GS as GossipSub
     participant ParaPeers as Paranet Peers
@@ -427,37 +433,39 @@ sequenceDiagram
     Note over App,Chain: Prerequisites: context graph already created on-chain<br/>with participantIdentityIds[] and requiredSignatures (M of N)
 
     App->>Agent: publish(paranetId, quads, {contextGraphId})
+    Agent->>Pub: publish(paranetId, quads, {contextGraphId})
 
     rect rgb(240, 240, 255)
-        Note over Agent,Store: Phases 1–3 are LOCAL to the publishing node
+        Note over Pub,Store: Phases 1–3 are LOCAL to the publishing node
 
-        Note over Agent: Phase 1 — Prepare + validate
+        Note over Pub: Phase 1 — Prepare + validate
 
-        Agent->>Agent: ensureParanet(paranetId)
-        Agent->>Agent: autoPartition(quads) → group by rootEntity
-        Agent->>Agent: Build manifest + KA metadata
-        Agent->>Agent: validatePublishRequest(quads, manifest, paranetId)
-        Note over Agent: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
+        Pub->>Pub: ensureParanet(paranetId)
+        Pub->>Pub: autoPartition(quads) → group by rootEntity
+        Pub->>Pub: Build manifest + KA metadata
+        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
 
-        Note over Agent: Phase 2 — Compute Merkle roots
+        Note over Pub: Phase 2 — Compute Merkle roots
 
         opt privateQuads present
-            Agent->>Agent: computePrivateRoot(private quads)
-            Agent->>Agent: Add synthetic private commitment hash to leaf set
+            Pub->>Pub: computePrivateRoot(private quads)
+            Pub->>Pub: Add synthetic private root hash to leaf set
         end
-        Agent->>Agent: Compute kcMerkleRoot (flat tree over all public triple hashes)
-        Agent->>Agent: Compute publicByteSize (canonical N-Triples encoding)
+        Pub->>Pub: Compute kcMerkleRoot (flat tree over all public triple hashes)
+        Pub->>Pub: Compute publicByteSize (canonical N-Triples encoding)
 
-        Note over Agent,Store: Phase 3 — Store in workspace (local staging)
+        Note over Pub,Store: Phase 3 — Store in workspace (local staging)
 
-        Agent->>Store: insert(quads → workspace graph)
-        Agent->>Store: insert(workspace metadata → workspace_meta graph)
+        Pub->>Store: insert(quads → workspace graph)
+        Pub->>Store: insert(workspace metadata → workspace_meta graph)
     end
 
     Note over Agent,ParaPeers: Phase 4 — Broadcast via GossipSub (to all paranet peers)
 
+    Pub-->>Agent: preBroadcast(preparedPublish)
     Agent->>GS: publish(paranetPublishTopic, PublishRequest)
-    Note over GS: Message contains:<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
+    Note over GS: Message contains: type=PUBLISH,<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
     GS-->>ParaPeers: PublishRequest (relayed through mesh)
     ParaPeers->>ParaPeers: Validate + store in workspace graph
     Note over CGPeers: Participants are a governance role, not a storage role.<br/>They may or may not be paranet peers.<br/>If they are paranet peers, they receive data via gossip.<br/>If not, they only verify and sign via the app coordination<br/>mechanism in Phase 5b — they do NOT store the data.
@@ -495,29 +503,30 @@ sequenceDiagram
     end
 
     rect rgb(232, 245, 233)
-        Note over Agent,Chain: Phase 6 — Atomic on-chain publish
+        Note over Pub,Chain: Phase 6 — Atomic on-chain publish
 
-        Agent->>Agent: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
-        Agent->>Chain: publishToContextGraph({<br/>  kaCount, kcMerkleRoot, publicByteSize, tokenAmount,<br/>  publisherSignature,<br/>  receiverSignatures[],<br/>  contextGraphId, participantSignatures[]<br/>})
+        Pub->>Pub: Sign publisher commitment: keccak256(identityId, kcMerkleRoot)
+        Pub->>Chain: publishToContextGraph({<br/>  kaCount, kcMerkleRoot, publicByteSize, tokenAmount,<br/>  publisherSignature,<br/>  receiverSignatures[],<br/>  contextGraphId, participantSignatures[]<br/>})
         Note over Chain: Contract verifies ALL signatures atomically:<br/>• Publisher commitment<br/>• Receiver attestations (≥ minimumRequired)<br/>• Participant governance (≥ context graph M-of-N)
-        Chain-->>Agent: {txHash, batchId, blockNumber, startKAId, endKAId, contextGraphExpanded}
+        Chain-->>Pub: {txHash, batchId, blockNumber, startKAId, endKAId, contextGraphExpanded}
         Note over Chain: Emits: KnowledgeBatchCreated + ContextGraphExpanded
     end
 
-    Note over Agent,Store: Phase 7 — Promote workspace → context graph (publisher side)
-    Note over Agent,Store: ⚠ OPEN QUESTION (OQ-22): Should data also live in the<br/>paranet data graph, or ONLY in the context graph URI?
+    Note over Pub,Store: Phase 7 — Promote workspace → context graph (publisher side)
+    Note over Pub,Store: ⚠ OPEN QUESTION (OQ-22): Should data also live in the<br/>paranet data graph, or ONLY in the context graph URI?
 
-    Agent->>Store: Copy quads: workspace → context graph data URI
-    Agent->>Store: Delete quads from workspace graph
-    Agent->>Agent: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
-    Agent->>Store: insert(confirmed metadata + chain provenance → context graph meta URI)
-    Agent->>Agent: Track ownedEntities + batch→paranet binding
+    Pub->>Store: Copy quads: workspace → context graph data URI
+    Pub->>Store: Delete quads from workspace graph
+    Pub->>Pub: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
+    Pub->>Store: insert(confirmed metadata + chain provenance → context graph meta URI)
+    Pub->>Pub: Track ownedEntities + batch→paranet binding
     Note over Store: Data lives at did:dkg:paranet:{id}/context/{ctxId}<br/>NOT in the paranet data graph
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
-    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
-    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress, contextGraphId
+    Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
+    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress, contextGraphId
 
     Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
 
@@ -657,7 +666,7 @@ sequenceDiagram
     loop Every 12 seconds
         Poller->>Poller: Check: hasUnconfirmedWorkspaceData?
         alt Has unconfirmed workspace data
-            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, types: ["KnowledgeBatchCreated"]})
+            Poller->>Chain: listenForEvents({fromBlock: lastBlock+1,<br/>types: ["KnowledgeBatchCreated", "ContextGraphExpanded"]})
 
             loop For each KnowledgeBatchCreated event
                 Chain-->>Poller: {kcMerkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
@@ -672,6 +681,19 @@ sequenceDiagram
                     PH-->>Poller: promoted = true
                 else No match or already confirmed
                     PH-->>Poller: promoted = false
+                end
+            end
+
+            loop For each ContextGraphExpanded event
+                Chain-->>Poller: {contextGraphId, batchId}
+                Poller->>PH: confirmContextGraphExpansion(contextGraphId, batchId)
+                PH->>PH: Find workspace data tagged with contextGraphId
+                PH->>PH: Verify batchId matches promoted batch
+                alt Match found and not yet promoted to context graph
+                    PH->>Store: Copy quads: workspace → context graph data URI
+                    PH->>Store: Delete quads from workspace graph
+                    PH->>Store: Insert confirmed metadata → context graph meta
+                    PH-->>Poller: promoted = true
                 end
             end
 
@@ -714,7 +736,7 @@ sequenceDiagram
     Agent->>Pub: update(kcId, options)
 
     Pub->>Pub: Validate quads (same rules)
-    Pub->>Pub: Compute new merkle root
+    Pub->>Pub: Compute new kcMerkleRoot
 
     Pub->>Store: Delete old data for affected rootEntities
     Pub->>Store: Insert new quads into data graph
@@ -839,7 +861,7 @@ sequenceDiagram
 
     Note over A: Flat Merkle verification:
     Note over A: 1. Hash each quad → leaf hashes
-    Note over A: 2. Add privateCommitmentHash to leaf set (if present in metadata)
+    Note over A: 2. Add privateMerkleRoot to leaf set (if present in metadata)
     Note over A: 3. Sort all leaf hashes → build flat Merkle tree → kcMerkleRoot
     Note over A: 4. Compare computed kcMerkleRoot === metadata.kcMerkleRoot
 
@@ -984,7 +1006,7 @@ graph TB
 
 The KC Merkle root (`kcMerkleRoot`) is a **flat tree** over all triple hashes
 in the knowledge collection. There is no per-KA sub-tree hierarchy — all public
-triple hashes (plus private commitment hashes, if any) are collected into a
+triple hashes (plus private Merkle root hashes, if any) are collected into a
 single sorted leaf set and hashed into one root.
 
 ```mermaid
@@ -998,7 +1020,7 @@ graph TB
         T2["sha256(triple₂)"]
         T3["sha256(triple₃)"]
         TN["sha256(tripleₙ)"]
-        PC["sha256(privateCommitment)<br/>(synthetic leaf, if private quads exist)"]
+        PC["sha256(privateMerkleRoot)<br/>(synthetic leaf, if private quads exist)"]
     end
 
     KC_ROOT --- T1
@@ -1012,21 +1034,21 @@ graph TB
 
 1. **Triple hash:** SHA-256 of the canonical N-Triples serialization of each public triple.
 2. **Private commitment (if private quads exist):** The publisher computes a
-   private commitment hash from the private triples and adds it as a synthetic
+   private Merkle root hash from the private triples and adds it as a synthetic
    leaf to the leaf set. Peers do not have the private triples — they receive
-   the private commitment hash as part of the manifest and include it in their
+   the private Merkle root hash as part of the manifest and include it in their
    leaf set for verification.
 3. **kcMerkleRoot:** Flat Merkle tree over the sorted leaf set (all public
-   triple hashes + private commitment hash if present).
+   triple hashes + private Merkle root hash if present).
 4. **On-chain:** Only the `kcMerkleRoot` (32 bytes) goes on-chain.
 
 ### Verification
 
 ```
-Verifier receives: quads[], manifest{kcMerkleRoot, privateCommitmentHash?}
+Verifier receives: quads[], manifest{kcMerkleRoot, privateMerkleRoot?}
 
 1. Hash each received quad → leaf hashes
-2. If privateCommitmentHash present, add it to leaf set
+2. If privateMerkleRoot present, add it to leaf set
 3. Sort all leaf hashes
 4. Build flat Merkle tree → computedKcMerkleRoot
 5. Compare computedKcMerkleRoot === manifest.kcMerkleRoot ✓
@@ -1035,7 +1057,7 @@ Verifier receives: quads[], manifest{kcMerkleRoot, privateCommitmentHash?}
 ### Private data and the Merkle root
 
 Private triples are **never propagated** to peers. Only the publisher stores
-them. However, the private commitment hash IS shared in the manifest so that
+them. However, the private Merkle root hash IS shared in the manifest so that
 peers can include it in their flat tree computation and still arrive at the
 same `kcMerkleRoot`. This means:
 
@@ -1218,7 +1240,7 @@ remaining items need design decisions before implementation.
 | ~~OQ-2~~ | Flat Merkle tree confirmed as the correct model. Section 10 rewritten. |
 | ~~OQ-3~~ | Sync verification updated to use flat tree (Section 6). Consistent with publish. |
 | ~~OQ-4~~ | Standardized on `kcMerkleRoot` terminology throughout the document. |
-| ~~OQ-8~~ | Private triples are never propagated. The publisher computes a private commitment hash and shares it in the manifest. Peers include this hash as a synthetic leaf in the flat tree. Section 10 now documents this. |
+| ~~OQ-8~~ | Private triples are never propagated. The publisher computes a `privateMerkleRoot` and shares it in the manifest. Peers include this as a synthetic leaf in the flat tree. Section 10 now documents this. |
 | ~~OQ-15~~ | P3 in Section 12.1 updated — `operationId` already exists, issue is missing dedup window. |
 
 ### Open — Update flow (deferred)
@@ -1247,6 +1269,19 @@ deferred until the update flow is redesigned.
 | OQ-20 | **Workspace conflict resolution undefined.** Creator-only upsert handles single-owner entities, but what about two publishers writing overlapping (non-identical) entities? Is this prevented by validation rules, or is it a race condition? | Section 2.2, Section 12.2 W1 |
 | OQ-21 | **Who collects participant signatures — the App or the DKG Agent?** The current diagram shows the App/Game Coordinator collecting M-of-N participant signatures and passing them to the Agent. But this means the App must somehow halt/resume the publish flow mid-execution. Alternatives: **(a)** App provides participant signatures upfront in the `publish()` call (requires app to pre-coordinate before calling publish). **(b)** Agent exposes a callback/event that the app subscribes to (agent pauses, app collects, agent resumes). **(c)** Agent collects internally via a protocol (but how does it know the app-specific coordination mechanism?). Each has trade-offs for API design and flow control. | Section 2.3 Phase 5b |
 | OQ-22 | **Should context graph data also live in the paranet data graph?** Currently, data published to a context graph lands ONLY at `did:dkg:paranet:{id}/context/{ctxId}`, NOT in the paranet data graph. This means paranet-scoped queries won't find context graph data. Options: **(a)** Context graph only (current) — clean separation, but requires explicit context graph queries. **(b)** Both graphs — data is queryable from either scope, but creates duplication. **(c)** Paranet graph with a context graph link — data in paranet, metadata links it to the context graph. | Section 2.3 Phase 7 |
+| OQ-23 | **How are context graph queries scoped?** Section 5 shows queries against the paranet data graph and optionally workspace. Context graph data lives at a different URI. Can the app specify a `contextGraphId`? Is there a union query across all context graphs in a paranet? | Section 5 vs Section 2.3 |
+| OQ-24 | **Update conflict resolution.** Two publishers updating overlapping entities in the same block — the first tx wins by txIndex but the second publisher gets no notification. What is the conflict resolution strategy? | Section 4, REVIEW note |
+| OQ-25 | **Context graph updates — do they require re-collecting participant signatures?** Section 4 only covers paranet data updates. For context graph data, does an update need M-of-N participant governance again? | Section 4 vs Section 2.3 |
+| OQ-26 | **Sync trust model — should syncing node verify chain provenance?** Current sync verifies kcMerkleRoot but not that the data was actually committed on-chain. A malicious peer could fabricate confirmed metadata. | Section 6 |
+| OQ-27 | **When does a node initiate sync? How does a new node catch up?** Section 6 shows the sync protocol but not when/why a node triggers it. Manual? Automatic on paranet join? Periodic? | Section 6 |
+| OQ-28 | **Workspace sync is unauthenticated.** Workspace data has no Merkle root yet, so there is nothing to verify against. A malicious peer can send arbitrary workspace triples. Is this acceptable? | Section 6 |
+| OQ-29 | **`tokenAmount` / TRAC economics undefined.** All publish flows include `tokenAmount` in the chain tx but the document never explains: how is it determined? Per-KA, per-KC, per-byte? What if insufficient? Locked or burned? | Throughout Section 2 |
+| OQ-30 | **Context graph participant lifecycle.** Can participants be added/removed after creation? What if a participant goes offline permanently — does M-of-N become unachievable? | Section 2.3 |
+| OQ-31 | **Paranet unsubscribe/leave mechanism.** Section 7 covers discovery and subscription but not leaving a paranet. Can a node unsubscribe and garbage-collect local graphs? | Section 7 |
+| OQ-32 | **GossipSub message type discrimination.** The `paranetPublishTopic` carries three message types: `PUBLISH` (full data), `ENSHRINE` (attestation-only), `CONFIRMED` (chain proof). These need a type field in the message envelope. Currently implied but not formally specified. | Sections 2.1/2.2/2.3, Section 8 |
+| OQ-33 | **Finalization dedup atomicity.** Both gossip and ChainEventPoller check UAL confirmation status. If both fire concurrently, the dedup check must be atomic to prevent double-promotion (TOCTOU race). | Section 2.1 Phase 9 |
+| OQ-34 | **Data-to-chain convenience linking.** User-facing triples have no direct link to their on-chain proof (requires 4-step SPARQL joins via meta graph). Should the protocol add `<rootEntity> dkg:knowledgeAsset <ual>` as a convenience triple? | Section 11, REVIEW note |
+| OQ-35 | **Manifest schema never defined.** Referenced in Sections 2.1, 2.3, and 10 but the field list and format are never specified. | Throughout |
 
 ### Known Issues (not blocking, tracked for future work)
 
