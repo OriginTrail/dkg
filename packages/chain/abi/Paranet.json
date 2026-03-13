@@ -1,0 +1,1782 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "hubAddress",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8[]",
+        "name": "expectedAccessPolicies",
+        "type": "uint8[]"
+      },
+      {
+        "internalType": "uint8",
+        "name": "actualAccessPolicy",
+        "type": "uint8"
+      }
+    ],
+    "name": "InvalidParanetMinersAccessPolicy",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8[]",
+        "name": "expectedAccessPolicies",
+        "type": "uint8[]"
+      },
+      {
+        "internalType": "uint8",
+        "name": "actualAccessPolicy",
+        "type": "uint8"
+      }
+    ],
+    "name": "InvalidParanetNodesAccessPolicy",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "KnowledgeCollectionIsAPartOfOtherParanet",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "KnowledgeCollectionNotInFirstEpoch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "miner",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAccessRequestDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "miner",
+        "type": "address"
+      },
+      {
+        "internalType": "enum ParanetLib.RequestStatus",
+        "name": "status",
+        "type": "uint8"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAccessRequestInvalidStatus",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "miner",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "miner",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerHasAlreadyBeenAdded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeHasAlreadyBeenAdded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeJoinRequestDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "enum ParanetLib.RequestStatus",
+        "name": "status",
+        "type": "uint8"
+      }
+    ],
+    "name": "ParanetPermissionedNodeJoinRequestInvalidStatus",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeAssetTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ParanetServiceDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "paranetServiceId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "ParanetServiceHasAlreadyBeenAdded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageAddress",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeAssetTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ParanetServiceHasAlreadyBeenRegistered",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileDoesntExist",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "msg",
+        "type": "string"
+      }
+    ],
+    "name": "UnauthorizedAccess",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddressHub",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "knowledgeCollectionId",
+        "type": "uint256"
+      }
+    ],
+    "name": "KnowledgeCollectionSubmittedToParanet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "string",
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "internalType": "address",
+            "name": "storageAddr",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "rewardTokenAddress",
+            "type": "address"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct ParanetLib.IncentivesPool",
+        "name": "incentivesPool",
+        "type": "tuple"
+      }
+    ],
+    "name": "ParanetIncetivesPoolDeployed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "newParanetName",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "newParanetDescription",
+        "type": "string"
+      }
+    ],
+    "name": "ParanetMetadataUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAccessRequestAccepted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAccessRequestCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAccessRequestRejected",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "ParanetPermissionedMinerRemoved",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeJoinRequestAccepted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeJoinRequestCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeJoinRequestRejected",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ParanetPermissionedNodeRemoved",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "parnetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "paranetName",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "paranetDescription",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "nodesAccessPolicy",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "minersAccessPolicy",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "knowledgeCollectionsSubmissionPolicy",
+        "type": "uint8"
+      }
+    ],
+    "name": "ParanetRegistered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "paranetServiceKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "paranetServiceKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "paranetServiceKATokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ParanetServiceAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetServiceKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetServiceKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetServiceKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "newParanetServiceName",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "newParanetServiceDescription",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "newParanetServiceAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "ParanetServiceMetadataUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "paranetServiceKCStorageContract",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetServiceKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "paranetServiceKATokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "paranetServiceName",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "paranetServiceDescription",
+        "type": "string"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "paranetServiceAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "ParanetServiceRegistered",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeAssetTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "curator",
+        "type": "address"
+      }
+    ],
+    "name": "addCurator",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address[]",
+        "name": "minerAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "addParanetPermissionedMiners",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "addParanetPermissionedNodes",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "knowledgeCollectionStorageContract",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "knowledgeCollectionTokenId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "knowledgeAssetTokenId",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ParanetLib.UniversalAssetLocator[]",
+        "name": "services",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "addParanetServices",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "approvePermissionedMiner",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "approvePermissionedNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "chronos",
+    "outputs": [
+      {
+        "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "paranetId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "offset",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "limit",
+        "type": "uint256"
+      }
+    ],
+    "name": "getKnowledgeCollectionLocatorsWithPagination",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "knowledgeCollectionStorageContract",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "knowledgeCollectionTokenId",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ParanetLib.UniversalAssetCollectionLocator[]",
+        "name": "",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "hub",
+    "outputs": [
+      {
+        "internalType": "contract Hub",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "identityStorage",
+    "outputs": [
+      {
+        "internalType": "contract IdentityStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "name",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "paranetKnowledgeCollectionsRegistry",
+    "outputs": [
+      {
+        "internalType": "contract ParanetKnowledgeCollectionsRegistry",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "paranetKnowledgeMinersRegistry",
+    "outputs": [
+      {
+        "internalType": "contract ParanetKnowledgeMinersRegistry",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "paranetServicesRegistry",
+    "outputs": [
+      {
+        "internalType": "contract ParanetServicesRegistry",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "paranetStagingRegistry",
+    "outputs": [
+      {
+        "internalType": "contract ParanetStagingRegistry",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "paranetsRegistry",
+    "outputs": [
+      {
+        "internalType": "contract ParanetsRegistry",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "profileStorage",
+    "outputs": [
+      {
+        "internalType": "contract ProfileStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetName",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetDescription",
+        "type": "string"
+      },
+      {
+        "internalType": "uint8",
+        "name": "nodesAccessPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint8",
+        "name": "minersAccessPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint8",
+        "name": "knowledgeCollectionsSubmissionPolicy",
+        "type": "uint8"
+      }
+    ],
+    "name": "registerParanet",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetServiceKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetServiceKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetServiceKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetServiceName",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetServiceDescription",
+        "type": "string"
+      },
+      {
+        "internalType": "address[]",
+        "name": "paranetServiceAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "registerParanetService",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "minerAddress",
+        "type": "address"
+      }
+    ],
+    "name": "rejectPermissionedMiner",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "rejectPermissionedNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeAssetTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "curator",
+        "type": "address"
+      }
+    ],
+    "name": "removeCurator",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address[]",
+        "name": "minerAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "removeParanetPermissionedMiners",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "removeParanetPermissionedNodes",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "requestParanetPermissionedMinerAccess",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "requestParanetPermissionedNodeAccess",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeAssetTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "accepted",
+        "type": "bool"
+      }
+    ],
+    "name": "reviewKnowledgeCollection",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "_status",
+        "type": "bool"
+      }
+    ],
+    "name": "setStatus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeAssetTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "stageKnowledgeCollection",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "status",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeCollectionTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKnowledgeAssetTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "knowledgeCollectionStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "knowledgeCollectionTokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "submitKnowledgeCollection",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetName",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetDescription",
+        "type": "string"
+      }
+    ],
+    "name": "updateParanetMetadata",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "paranetServiceKCStorageContract",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetServiceKCTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paranetServiceKATokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetServiceName",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "paranetServiceDescription",
+        "type": "string"
+      },
+      {
+        "internalType": "address[]",
+        "name": "paranetServiceAddresses",
+        "type": "address[]"
+      }
+    ],
+    "name": "updateParanetServiceMetadata",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "version",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]

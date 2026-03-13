@@ -1,5 +1,8 @@
 import { ethers, JsonRpcProvider, Wallet, Contract, Interface } from 'ethers';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -23,8 +26,14 @@ import type {
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const localAbiDir = join(__dirname, '..', 'abi');
 
 function loadAbi(contractName: string): ethers.InterfaceAbi {
+  const localPath = join(localAbiDir, `${contractName}.json`);
+  if (existsSync(localPath)) {
+    return JSON.parse(readFileSync(localPath, 'utf-8'));
+  }
   return require(`@origintrail-official/dkg-evm-module/abi/${contractName}.json`);
 }
 

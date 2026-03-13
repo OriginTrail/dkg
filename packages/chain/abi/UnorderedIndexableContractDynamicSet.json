@@ -1,0 +1,34 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "id",
+        "type": "uint8"
+      }
+    ],
+    "name": "ContractAlreadyExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "id",
+        "type": "uint8"
+      }
+    ],
+    "name": "ContractDoesNotExist",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroId",
+    "type": "error"
+  }
+]

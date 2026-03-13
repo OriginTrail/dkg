@@ -6,7 +6,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'v*'
 
 permissions:
   contents: write
@@ -22,6 +22,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Validate tag format
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag '$TAG' does not match semver format v*.*.*"
+            exit 1
+          fi
 
       - name: Set version from tag
         id: version
@@ -71,6 +79,11 @@ jobs:
             echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/v$V/CHANGELOG.md) for details." >> release_notes.md
           fi
 
+      - name: Publish to npm
+        run: pnpm -r publish --no-git-checks --tag ${{ steps.prerelease.outputs.NPM_TAG }} || true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -81,8 +94,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to npm
-        run: pnpm -r publish --no-git-checks --tag ${{ steps.prerelease.outputs.NPM_TAG }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

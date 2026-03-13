@@ -12,14 +12,17 @@
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
-    "@origintrail-official/dkg-evm-module": "workspace:*",
     "ethers": "^6"
+  },
+  "optionalDependencies": {
+    "@origintrail-official/dkg-evm-module": "workspace:*"
   },
   "publishConfig": {
     "access": "public"
   },
   "files": [
     "dist",
+    "abi",
     "README.md",
     "LICENSE"
   ],
