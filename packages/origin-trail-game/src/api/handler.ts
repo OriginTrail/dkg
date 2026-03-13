@@ -131,9 +131,15 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (subpath === '/leave') {
         let { swarmId } = body;
         if (!swarmId) {
-          const active = coordinator.findMySwarm();
-          if (!active) return json(res, 400, { error: 'No active swarm to leave' });
-          swarmId = active.id;
+          const activeSwarms = coordinator.findMyActiveSwarms();
+          if (activeSwarms.length === 0) return json(res, 400, { error: 'No active swarm to leave' });
+          if (activeSwarms.length > 1) {
+            return json(res, 400, {
+              error: 'Multiple active swarms found. Please provide swarmId.',
+              activeSwarmIds: activeSwarms.map((s) => s.id),
+            });
+          }
+          swarmId = activeSwarms[0].id;
         }
         const wagon = await coordinator.leaveSwarm(swarmId);
         return json(res, 200, wagon ? coordinator.formatSwarmState(wagon) : { disbanded: true });

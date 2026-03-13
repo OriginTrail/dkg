@@ -117,6 +117,60 @@ describe('OriginTrail Game API handler', () => {
     expect(lobby.mySwarms[0].players[0].isLeader).toBe(true);
   });
 
+  it('allows creating multiple active swarms for the same player', async () => {
+    const req1 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm A' });
+    const mock1 = createMockRes();
+    await handler(req1, mock1.res, new URL(req1.url, 'http://localhost'));
+    expect(mock1.status).toBe(200);
+
+    const req2 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm B' });
+    const mock2 = createMockRes();
+    await handler(req2, mock2.res, new URL(req2.url, 'http://localhost'));
+    expect(mock2.status).toBe(200);
+
+    const reqLobby = createMockReq('GET', '/api/apps/origin-trail-game/lobby');
+    const mockLobby = createMockRes();
+    await handler(reqLobby, mockLobby.res, new URL(reqLobby.url, 'http://localhost'));
+    const lobby = JSON.parse(mockLobby.body);
+    expect(lobby.mySwarms.length).toBe(2);
+  });
+
+  it('POST /leave without swarmId returns explicit error when multiple active swarms exist', async () => {
+    const req1 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm A' });
+    const mock1 = createMockRes();
+    await handler(req1, mock1.res, new URL(req1.url, 'http://localhost'));
+    const created1 = JSON.parse(mock1.body);
+
+    const req2 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm B' });
+    const mock2 = createMockRes();
+    await handler(req2, mock2.res, new URL(req2.url, 'http://localhost'));
+    const created2 = JSON.parse(mock2.body);
+
+    const reqLeave = createMockReq('POST', '/api/apps/origin-trail-game/leave', {});
+    const mockLeave = createMockRes();
+    await handler(reqLeave, mockLeave.res, new URL(reqLeave.url, 'http://localhost'));
+
+    expect(mockLeave.status).toBe(400);
+    const payload = JSON.parse(mockLeave.body);
+    expect(payload.error).toContain('Multiple active swarms');
+    expect(payload.activeSwarmIds).toContain(created1.id);
+    expect(payload.activeSwarmIds).toContain(created2.id);
+  });
+
+  it('POST /leave without swarmId still works when exactly one active swarm exists', async () => {
+    const reqCreate = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Solo Swarm' });
+    const mockCreate = createMockRes();
+    await handler(reqCreate, mockCreate.res, new URL(reqCreate.url, 'http://localhost'));
+    expect(mockCreate.status).toBe(200);
+
+    const reqLeave = createMockReq('POST', '/api/apps/origin-trail-game/leave', {});
+    const mockLeave = createMockRes();
+    await handler(reqLeave, mockLeave.res, new URL(reqLeave.url, 'http://localhost'));
+    expect(mockLeave.status).toBe(200);
+    const payload = JSON.parse(mockLeave.body);
+    expect(payload.disbanded).toBe(true);
+  });
+
   it('GET /swarm/:id returns formatted swarm with leader info', async () => {
     const reqCreate = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Bob', swarmName: 'My Swarm' });
     const mockCreate = createMockRes();
@@ -1373,6 +1427,94 @@ describe('Graph-based lobby sync', () => {
     expect(lobby.openSwarms.length).toBe(0);
     expect(lobby.mySwarms.length).toBe(0);
   }, 10_000);
+
+  it('graph sync does not re-add members who already left via gossip', async () => {
+    const syncAgent = makeMockAgent('sync-peer');
+    const now = Date.now();
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-abc123',
+            name: '"Graph Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/leader-peer',
+            createdAt: `"${now}"`,
+            maxPlayers: '"3"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"' },
+            // Stale graph membership (already left by gossip)
+            { agent: 'https://origintrail-game.dkg.io/player/leaver-peer', displayName: '"Leaver"' },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    await (coordinator as any).loadLobbyFromGraph();
+
+    // Simulate leave via gossip so local state removes member and records tombstone.
+    (coordinator as any).onRemotePlayerLeft({
+      app: 'origin-trail-game',
+      type: 'swarm:left',
+      swarmId: 'swarm-abc123',
+      peerId: 'leaver-peer',
+      timestamp: now + 1,
+    });
+
+    await (coordinator as any).loadLobbyFromGraph();
+
+    const swarm = coordinator.getSwarm('swarm-abc123');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.players.some(p => p.peerId === 'leaver-peer')).toBe(false);
+    coordinator.destroy();
+  });
+
+  it('graph sync applies deterministic player ordering for restored swarms', async () => {
+    const syncAgent = makeMockAgent('sync-peer');
+    const now = Date.now();
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-order',
+            name: '"Order Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/peer-b',
+            createdAt: `"${now}"`,
+            maxPlayers: '"4"',
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        // Intentionally unsorted response order.
+        return {
+          bindings: [
+            { agent: 'https://origintrail-game.dkg.io/player/peer-c', displayName: '"C"' },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-a', displayName: '"A"' },
+            { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"' },
+          ],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    await (coordinator as any).loadLobbyFromGraph();
+
+    const swarm = coordinator.getSwarm('swarm-order');
+    expect(swarm).toBeTruthy();
+    expect(swarm!.players.map(p => p.peerId)).toEqual(['peer-a', 'peer-b', 'peer-c']);
+    coordinator.destroy();
+  });
 });
 
 describe('Network topology hints (V3)', () => {

@@ -219,6 +219,9 @@ export class OriginTrailGameCoordinator {
   private graphSyncLastErrorLogAt = 0;
   private graphSyncLastPlayerCount: number | null = null;
   private graphSyncLastSwarmCount: number | null = null;
+  // Local tombstones prevent stale graph memberships from re-adding leavers/disbanded swarms.
+  private readonly swarmTombstones = new Set<string>();
+  private readonly swarmMemberTombstones = new Map<string, Set<string>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -372,6 +375,7 @@ export class OriginTrailGameCoordinator {
       const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
       if (!swarmIdMatch) continue;
       const swarmId = swarmIdMatch[1];
+      if (this.swarmTombstones.has(swarmId)) continue;
 
       const statusRaw = stripQuotes(row['status'] ?? '');
       const status = statusRaw === 'recruiting' || statusRaw === 'traveling' || statusRaw === 'finished'
@@ -399,12 +403,13 @@ export class OriginTrailGameCoordinator {
                       <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
                       <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
                       <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
-        }`,
+        } ORDER BY ?agent ?displayName`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
 
       const existingSwarm = this.swarms.get(swarmId);
       const existingPlayersByPeerId = new Map((existingSwarm?.players ?? []).map((p) => [p.peerId, p]));
+      const tombstonedMembers = this.swarmMemberTombstones.get(swarmId);
       const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
         const pUri = m['agent'] ?? '';
         const pid = pUri.replace(/.*player\//, '');
@@ -416,7 +421,8 @@ export class OriginTrailGameCoordinator {
           isLeader: pid === orchestratorId,
           identityId: existingPlayer?.identityId,
         };
-      });
+      }).filter((p: SwarmMember) => !tombstonedMembers?.has(p.peerId))
+        .sort((a: SwarmMember, b: SwarmMember) => a.peerId.localeCompare(b.peerId));
 
       if (existingSwarm) {
         let changed = false;
@@ -442,17 +448,37 @@ export class OriginTrailGameCoordinator {
           changed = true;
         }
 
-        // Reconcile recruiting roster from graph to heal missed join/leave gossip.
+        // Reconcile recruiting roster additively (no removals) to avoid
+        // stale graph memberships resurrecting players who already left.
         if (status === 'recruiting' && players.length > 0) {
-          const samePlayers = existingSwarm.players.length === players.length
-            && existingSwarm.players.every((p, i) =>
-              p.peerId === players[i]?.peerId
-              && p.displayName === players[i]?.displayName
-              && p.isLeader === players[i]?.isLeader
-              && p.identityId === players[i]?.identityId
-            );
-          if (!samePlayers) {
-            existingSwarm.players = players;
+          const existingByPeerId = new Map(existingSwarm.players.map((p) => [p.peerId, p]));
+          for (const graphPlayer of players) {
+            const local = existingByPeerId.get(graphPlayer.peerId);
+            if (!local) {
+              existingSwarm.players.push(graphPlayer);
+              changed = true;
+              continue;
+            }
+            if (local.displayName !== graphPlayer.displayName) {
+              local.displayName = graphPlayer.displayName;
+              changed = true;
+            }
+            if (local.identityId == null && graphPlayer.identityId != null) {
+              local.identityId = graphPlayer.identityId;
+              changed = true;
+            }
+          }
+          for (const player of existingSwarm.players) {
+            const shouldLead = player.peerId === orchestratorId;
+            if (player.isLeader !== shouldLead) {
+              player.isLeader = shouldLead;
+              changed = true;
+            }
+          }
+          const sortedPlayers = [...existingSwarm.players].sort((a, b) => a.peerId.localeCompare(b.peerId));
+          const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
+          if (needsReorder) {
+            existingSwarm.players = sortedPlayers;
             changed = true;
           }
         }
@@ -511,11 +537,6 @@ export class OriginTrailGameCoordinator {
   // ── Lobby operations ──────────────────────────────────────────────
 
   async createSwarm(playerName: string, swarmName: string, maxPlayers = 3): Promise<SwarmState> {
-    const existing = this.findMySwarm();
-    if (existing && existing.status !== 'finished') {
-      throw new Error('You already have an active swarm. Leave it first.');
-    }
-
     const swarmId = `swarm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const now = Date.now();
 
@@ -585,6 +606,7 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
       identityId: myIdentityId,
     });
+    this.clearMemberTombstone(swarmId, this.myPeerId);
 
     const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
     const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
@@ -610,6 +632,7 @@ export class OriginTrailGameCoordinator {
     if (!swarm.players.some(p => p.peerId === this.myPeerId)) throw new Error('You are not in this swarm');
 
     if (swarm.leaderPeerId === this.myPeerId && swarm.status === 'recruiting') {
+      this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
       this.workspaceOps.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
@@ -625,6 +648,7 @@ export class OriginTrailGameCoordinator {
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
+    this.markMemberTombstone(swarmId, this.myPeerId);
     const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
     await this.broadcast(msg);
     return swarm;
@@ -1281,6 +1305,7 @@ export class OriginTrailGameCoordinator {
   };
 
   private onRemoteSwarmCreated(msg: proto.SwarmCreatedMsg): void {
+    if (this.swarmTombstones.has(msg.swarmId)) return;
     if (this.swarms.has(msg.swarmId)) return;
     const swarm: SwarmState = {
       id: msg.swarmId,
@@ -1324,6 +1349,7 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
       identityId: msg.identityId,
     });
+    this.clearMemberTombstone(msg.swarmId, msg.peerId);
     this.pushNotification({
       type: 'player_joined', swarmId: msg.swarmId, swarmName: swarm.name,
       playerName: msg.playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1338,6 +1364,7 @@ export class OriginTrailGameCoordinator {
     const player = swarm.players.find(p => p.peerId === msg.peerId);
     const playerName = player?.displayName ?? msg.peerId.slice(0, 8);
     if (msg.peerId === swarm.leaderPeerId && swarm.status === 'recruiting') {
+      this.markSwarmTombstone(msg.swarmId);
       this.pushNotification({
         type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
         playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1348,6 +1375,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
+    this.markMemberTombstone(msg.swarmId, msg.peerId);
     this.pushNotification({
       type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
       playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1689,6 +1717,17 @@ export class OriginTrailGameCoordinator {
     return null;
   }
 
+  findMyActiveSwarms(): SwarmState[] {
+    const active: SwarmState[] = [];
+    for (const swarm of this.swarms.values()) {
+      if (swarm.players.some(p => p.peerId === this.myPeerId) && swarm.status !== 'finished') {
+        active.push(swarm);
+      }
+    }
+    active.sort((a, b) => b.createdAt - a.createdAt);
+    return active;
+  }
+
   formatSwarmState(swarm: SwarmState) {
     const allVoted = this.allAliveVoted(swarm);
     const voteStatus = swarm.status === 'traveling' ? {
@@ -1879,6 +1918,25 @@ export class OriginTrailGameCoordinator {
     } catch (err: any) {
       this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
     }
+  }
+
+  private markSwarmTombstone(swarmId: string): void {
+    this.swarmTombstones.add(swarmId);
+    this.swarmMemberTombstones.delete(swarmId);
+  }
+
+  private markMemberTombstone(swarmId: string, peerId: string): void {
+    if (!this.swarmMemberTombstones.has(swarmId)) {
+      this.swarmMemberTombstones.set(swarmId, new Set());
+    }
+    this.swarmMemberTombstones.get(swarmId)!.add(peerId);
+  }
+
+  private clearMemberTombstone(swarmId: string, peerId: string): void {
+    const set = this.swarmMemberTombstones.get(swarmId);
+    if (!set) return;
+    set.delete(peerId);
+    if (set.size === 0) this.swarmMemberTombstones.delete(swarmId);
   }
 
   // ── Network topology snapshots ──────────────────────────────────
