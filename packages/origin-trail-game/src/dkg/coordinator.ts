@@ -206,10 +206,15 @@ export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
   private readonly topic: string;
+  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
+  private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private graphSyncInitialTimer: ReturnType<typeof setTimeout> | null = null;
+  private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private graphSyncInFlight = false;
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -289,8 +294,31 @@ export class OriginTrailGameCoordinator {
 
   // ── Graph-based lobby sync ────────────────────────────────────────
 
+  private async runGraphSyncOnce(): Promise<void> {
+    // Prevent overlapping sync runs if one query round is slow.
+    if (this.graphSyncInFlight) return;
+    this.graphSyncInFlight = true;
+    try {
+      await this.loadLobbyFromGraph();
+    } finally {
+      this.graphSyncInFlight = false;
+    }
+  }
+
+  private startGraphSyncInterval(): void {
+    if (this.graphSyncTimer) return;
+    this.graphSyncTimer = setInterval(() => {
+      this.runGraphSyncOnce().catch(() => {});
+    }, OriginTrailGameCoordinator.GRAPH_SYNC_INTERVAL_MS);
+    this.graphSyncTimer.unref?.();
+  }
+
   private scheduleGraphSync(): void {
-    setTimeout(() => this.loadLobbyFromGraph().catch(() => {}), 5_000);
+    this.graphSyncInitialTimer = setTimeout(() => {
+      this.runGraphSyncOnce().catch(() => {});
+      this.startGraphSyncInterval();
+    }, OriginTrailGameCoordinator.GRAPH_SYNC_INITIAL_DELAY_MS);
+    this.graphSyncInitialTimer.unref?.();
   }
 
   async loadLobbyFromGraph(): Promise<void> {
@@ -1571,7 +1599,7 @@ export class OriginTrailGameCoordinator {
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         mySwarms.push(swarm);
-      } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
+      } else if (swarm.status === 'recruiting') {
         openSwarms.push(swarm);
       }
     }
@@ -1911,6 +1939,14 @@ export class OriginTrailGameCoordinator {
   }
 
   destroy(): void {
+    if (this.graphSyncInitialTimer) {
+      clearTimeout(this.graphSyncInitialTimer);
+      this.graphSyncInitialTimer = null;
+    }
+    if (this.graphSyncTimer) {
+      clearInterval(this.graphSyncTimer);
+      this.graphSyncTimer = null;
+    }
     if (this.topologyTimer) {
       clearInterval(this.topologyTimer);
       this.topologyTimer = null;

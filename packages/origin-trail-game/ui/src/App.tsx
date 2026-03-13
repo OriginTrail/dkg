@@ -518,11 +518,11 @@ export function App() {
           <h2>Open Swarms</h2>
           {lobby?.openSwarms?.length ? lobby.openSwarms.map((w: any) => (
             <div key={w.id} className="ot-card">
-              <strong>{w.name}</strong> — {w.players?.length ?? 0}/{w.maxPlayers} players
+              <strong>{w.name}</strong> — {w.players?.length ?? 0}/{w.maxPlayers} players {(w.players?.length ?? 0) >= w.maxPlayers ? '(Full)' : ''}
               <button onClick={async () => {
                 try { setLoading(true); const res = await api.join(w.id, playerName); setSwarm(res); setView('swarm'); }
                 catch (e: any) { setError(e.message); } finally { setLoading(false); }
-              }} disabled={loading}>Join</button>
+              }} disabled={loading || (w.players?.length ?? 0) >= w.maxPlayers}>{(w.players?.length ?? 0) >= w.maxPlayers ? 'Full' : 'Join'}</button>
             </div>
           )) : <p className="ot-muted">No open swarms</p>}
         </div>

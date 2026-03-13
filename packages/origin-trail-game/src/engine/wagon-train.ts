@@ -224,7 +224,7 @@ export function getLobby(playerId: string): SwarmLobby {
   const mySwarms: Swarm[] = [];
   for (const swarm of swarms.values()) {
     if (swarm.players.some(p => p.playerId === playerId)) mySwarms.push(swarm);
-    else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) openSwarms.push(swarm);
+    else if (swarm.status === 'recruiting') openSwarms.push(swarm);
   }
   openSwarms.sort((a, b) => b.createdAt - a.createdAt);
   mySwarms.sort((a, b) => b.createdAt - a.createdAt);
