@@ -212,17 +212,6 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 @origintrail-official/dkg-adapter-elizaos    ElizaOS adapter
 @origintrail-official/dkg-adapter-autoresearch AutoResearch adapter
 ```
-
-## Specs
-
-| Spec | Focus |
-|---|---|
-| [Part 1: Agent Marketplace](docs/SPEC_PART1_MARKETPLACE.md) | Protocol and agent-level flows |
-| [Part 2: Agent Economy](docs/SPEC_PART2_ECONOMY.md) | Incentives, rewards, trust-layer economics |
-| [Part 3: Extensions](docs/SPEC_PART3_EXTENSIONS.md) | Extended capabilities and roadmap |
-| [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
-| [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Staking, conviction, and governance direction |
-
 ## Production Readiness
 
 On-chain publishing is live on Base Sepolia. Core node capabilities are production-oriented and actively exercised on testnet:
@@ -236,10 +225,12 @@ On-chain publishing is live on Base Sepolia. Core node capabilities are producti
 
 ## Development
 
+Clone the repo and use pnpm (v9+) with Node.js 22+ to work across all 17 packages:
+
 ```bash
-pnpm install
-pnpm build
-pnpm test
-pnpm test:coverage
-pnpm --filter @origintrail-official/dkg test
+pnpm install                                    # install all workspace deps
+pnpm build                                      # compile every package (Turborepo)
+pnpm test                                       # run the full test suite
+pnpm test:coverage                              # tests + coverage report
+pnpm --filter @origintrail-official/dkg test     # run tests for a single package
 ```
