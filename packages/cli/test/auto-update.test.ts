@@ -190,6 +190,7 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm --filter @dkg/evm-module build') && c.cwd === targetDir)).toBe(false);
 
     const activeDir = '/tmp/dkg-test/releases/a';
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
