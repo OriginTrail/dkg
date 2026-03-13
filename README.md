@@ -1,23 +1,19 @@
-# DKG V9
+# OriginTrail DKG v9 — Testnet Node 🦞
 <img width="1536" height="1024" alt="dkg_img" src="https://github.com/user-attachments/assets/7be9c4a1-0ade-4bad-8f16-27d457d39e19" />
 
 [![CI](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)
 [![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg-v9/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
-DKG V9 is a node for publishing, querying, and exchanging verifiable knowledge.
+**Give your AI agents the ultimate memory that survives the session.**
 
-It gives users and agents a shared RDF-based memory layer with:
+> **Disclaimer:**  
+> This project is in active development, currently in **beta** and running on the testnet. Expect rapid iteration and breaking changes. Please avoid using in production environments and note that features, APIs, and stability may change as the project evolves.
 
-- verifiable knowledge publishing
-- SPARQL querying
-- peer discovery
-- encrypted agent messaging
-- topic-scoped collaboration through paranets
-- a local UI for graph exploration and node operations
+The Decentralized Knowledge Graph v9 is the shared memory layer for multi-agent AI systems. Every finding your agents produce becomes a cryptographically anchored Knowledge Asset — verifiable by anyone, queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends.
 
-**Start here:** [Join the Testnet](docs/setup/JOIN_TESTNET.md) · [Releases](https://github.com/OriginTrail/dkg-v9/releases) · [Discord](https://discord.com/invite/xCaY7hvNwD)
 
 ---
 
@@ -36,27 +32,27 @@ This repository contains the node, CLI, UI, core protocol packages, adapters, an
 
 ---
 
-## Quick start
+## Quick Start
 
-Install the CLI and start a local node:
+**Prerequisites:** Node.js 22+, npm 10+
 
-```bash
-npm install -g @dkg/cli
-dkg init
-dkg start
-```
-
-Open the UI:
-
-```text
-http://127.0.0.1:9200/ui
-```
-
-Useful checks:
+Install the CLI globally and spin up a node:
 
 ```bash
-dkg status
-dkg logs
+npm install -g @origintrail-official/dkg
+dkg init      # creates ~/.dkg with default config
+dkg start     # starts the node daemon
+```
+
+Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui).
+
+Useful commands:
+
+```bash
+dkg status          # node health, peer count, identity
+dkg peers           # connected peers and transport info
+dkg logs            # tail the daemon log
+dkg stop            # graceful shutdown
 ```
 
 ---
@@ -296,28 +292,28 @@ This is a pnpm + Turborepo monorepo.
 ### Core packages
 
 ```text
-@dkg/core               P2P networking, protocol, crypto
-@dkg/storage            Triple-store interfaces and adapters
-@dkg/chain              Blockchain abstraction
-@dkg/publisher          Publish and finalization flow
-@dkg/query              Query execution and retrieval
-@dkg/agent              Identity, discovery, messaging
-@dkg/cli                CLI and node lifecycle
-@dkg/node-ui            Web dashboard and graph tooling
-@dkg/graph-viz          RDF visualization
-@dkg/evm-module         Solidity contracts and deployment assets
-@dkg/network-sim        Multi-node simulation tooling
-@dkg/attested-assets    Attested asset protocol components
-@dkg/mcp-server         MCP integration
+@origintrail-official/dkg                    CLI and node lifecycle
+@origintrail-official/dkg-core               P2P networking, protocol, crypto
+@origintrail-official/dkg-storage            Triple-store interfaces and adapters
+@origintrail-official/dkg-chain              Blockchain abstraction
+@origintrail-official/dkg-publisher          Publish and finalization flow
+@origintrail-official/dkg-query              Query execution and retrieval
+@origintrail-official/dkg-agent              Identity, discovery, messaging
+@origintrail-official/dkg-node-ui            Web dashboard and graph tooling
+@origintrail-official/dkg-graph-viz          RDF visualization
+@origintrail-official/dkg-evm-module         Solidity contracts and deployment assets
+@origintrail-official/dkg-network-sim        Multi-node simulation tooling
+@origintrail-official/dkg-attested-assets    Attested asset protocol components
+@origintrail-official/dkg-mcp-server         MCP integration
 ```
 
 ### Adapters and apps
 
 ```text
-@dkg/adapter-openclaw
-@dkg/adapter-elizaos
-@dkg/adapter-autoresearch
-dkg-app-origin-trail-game
+@origintrail-official/dkg-adapter-openclaw
+@origintrail-official/dkg-adapter-elizaos
+@origintrail-official/dkg-adapter-autoresearch
+@origintrail-official/dkg-app-origin-trail-game
 ```
 
 ---
@@ -353,14 +349,14 @@ If you need strict wording here, avoid saying “production-ready” unless the 
 
 ## Development
 
-Install dependencies and run the standard workspace tasks:
+Clone the repo and use pnpm (v9+) with Node.js 22+ to work across all 17 packages:
 
 ```bash
-pnpm install
-pnpm build
-pnpm test
-pnpm test:coverage
-pnpm --filter @dkg/cli test
+pnpm install                                    # install all workspace deps
+pnpm build                                      # compile every package (Turborepo)
+pnpm test                                       # run the full test suite
+pnpm test:coverage                              # tests + coverage report
+pnpm --filter @origintrail-official/dkg test     # run tests for a single package
 ```
 
 ---
