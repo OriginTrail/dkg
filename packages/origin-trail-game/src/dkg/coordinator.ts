@@ -217,6 +217,8 @@ export class OriginTrailGameCoordinator {
   private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
   private graphSyncInFlight = false;
   private graphSyncLastErrorLogAt = 0;
+  private graphSyncLastPlayerCount: number | null = null;
+  private graphSyncLastSwarmCount: number | null = null;
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -342,7 +344,10 @@ export class OriginTrailGameCoordinator {
     );
 
     const playerCount = playersResult.bindings?.length ?? 0;
-    this.log(`Graph sync: found ${playerCount} registered players`);
+    if (this.graphSyncLastPlayerCount !== playerCount) {
+      this.log(`Graph sync: found ${playerCount} registered players`);
+      this.graphSyncLastPlayerCount = playerCount;
+    }
 
     const swarmsResult = await this.agent.query(
       `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
@@ -357,7 +362,10 @@ export class OriginTrailGameCoordinator {
     );
 
     const newSwarms = swarmsResult.bindings?.length ?? 0;
-    this.log(`Graph sync: found ${newSwarms} swarms in graph`);
+    if (this.graphSyncLastSwarmCount !== newSwarms) {
+      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
+      this.graphSyncLastSwarmCount = newSwarms;
+    }
 
     for (const row of swarmsResult.bindings ?? []) {
       const swarmUri = row['swarm'] ?? '';
@@ -365,10 +373,11 @@ export class OriginTrailGameCoordinator {
       if (!swarmIdMatch) continue;
       const swarmId = swarmIdMatch[1];
 
-      if (this.swarms.has(swarmId)) continue;
-
       const statusRaw = stripQuotes(row['status'] ?? '');
-      if (statusRaw !== 'recruiting') continue;
+      const status = statusRaw === 'recruiting' || statusRaw === 'traveling' || statusRaw === 'finished'
+        ? statusRaw
+        : null;
+      if (!status) continue;
 
       const orchestratorUri = row['orchestrator'] ?? '';
       const orchestratorId = orchestratorUri.replace(/.*player\//, '');
@@ -394,16 +403,67 @@ export class OriginTrailGameCoordinator {
         { paranetId: this.paranetId, includeWorkspace: true },
       );
 
+      const existingSwarm = this.swarms.get(swarmId);
+      const existingPlayersByPeerId = new Map((existingSwarm?.players ?? []).map((p) => [p.peerId, p]));
       const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
         const pUri = m['agent'] ?? '';
         const pid = pUri.replace(/.*player\//, '');
+        const existingPlayer = existingPlayersByPeerId.get(pid);
         return {
           peerId: pid,
           displayName: stripQuotes(m['displayName'] ?? ''),
-          joinedAt: createdAt,
+          joinedAt: existingPlayer?.joinedAt ?? createdAt,
           isLeader: pid === orchestratorId,
+          identityId: existingPlayer?.identityId,
         };
       });
+
+      if (existingSwarm) {
+        let changed = false;
+
+        if (swarmName && existingSwarm.name !== swarmName) {
+          existingSwarm.name = swarmName;
+          changed = true;
+        }
+        if (orchestratorId && existingSwarm.leaderPeerId !== orchestratorId) {
+          existingSwarm.leaderPeerId = orchestratorId;
+          changed = true;
+        }
+        if (existingSwarm.maxPlayers !== restoredMaxPlayers) {
+          existingSwarm.maxPlayers = restoredMaxPlayers;
+          changed = true;
+        }
+        if (createdAt > 0 && existingSwarm.createdAt !== createdAt) {
+          existingSwarm.createdAt = createdAt;
+          changed = true;
+        }
+        if (existingSwarm.status !== status) {
+          existingSwarm.status = status;
+          changed = true;
+        }
+
+        // Reconcile recruiting roster from graph to heal missed join/leave gossip.
+        if (status === 'recruiting' && players.length > 0) {
+          const samePlayers = existingSwarm.players.length === players.length
+            && existingSwarm.players.every((p, i) =>
+              p.peerId === players[i]?.peerId
+              && p.displayName === players[i]?.displayName
+              && p.isLeader === players[i]?.isLeader
+              && p.identityId === players[i]?.identityId
+            );
+          if (!samePlayers) {
+            existingSwarm.players = players;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          this.log(`Graph sync: reconciled swarm "${existingSwarm.name}" (${swarmId})`);
+        }
+        continue;
+      }
+
+      if (status !== 'recruiting') continue;
 
       const swarm: SwarmState = {
         id: swarmId,
@@ -411,7 +471,7 @@ export class OriginTrailGameCoordinator {
         leaderPeerId: orchestratorId,
         maxPlayers: restoredMaxPlayers,
         players,
-        status: 'recruiting',
+        status,
         gameState: null,
         currentTurn: 0,
         votes: [],
