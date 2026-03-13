@@ -1,11 +1,12 @@
-import type { Quad } from '@dkg/storage';
+import type { Quad, TripleStore } from '@dkg/storage';
+import { GraphManager } from '@dkg/storage';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
-function toHex(bytes: Uint8Array): string {
+export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
@@ -38,6 +39,21 @@ export interface OnChainProvenance {
   publisherAddress: string;
   batchId: bigint;
   chainId: string;
+}
+
+function assertSafeParanetIdForSparql(paranetId: string): void {
+  // Reject characters that can break GRAPH <...> IRI delimiters and enable injection.
+  // Keep "/" allowed because existing paranets may use path-like IDs.
+  if (/[<>"{}|^`\\\s]/.test(paranetId)) {
+    throw new Error(`Unsafe paranetId for SPARQL graph IRI: "${paranetId}"`);
+  }
+}
+
+function assertSafeGraphIriForSparql(graphIri: string): void {
+  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
+  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
+    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
+  }
 }
 
 /**
@@ -88,7 +104,7 @@ export function generateKCMetadata(
       mq(kaUri, `${RDF}type`, `${DKG}KnowledgeAsset`, metaGraph),
       mq(kaUri, `${DKG}rootEntity`, ka.rootEntity, metaGraph),
       mq(kaUri, `${DKG}partOf`, ka.kcUal, metaGraph),
-      mq(kaUri, `${DKG}tokenId`, intLit(Number(ka.tokenId)), metaGraph),
+      mq(kaUri, `${DKG}tokenId`, intLit(ka.tokenId), metaGraph),
       mq(
         kaUri,
         `${DKG}publicTripleCount`,
@@ -177,7 +193,7 @@ export function generateConfirmedMetadata(
       metaGraph,
     ),
     mq(ual, `${DKG}publisherAddress`, lit(provenance.publisherAddress), metaGraph),
-    mq(ual, `${DKG}batchId`, intLit(Number(provenance.batchId)), metaGraph),
+    mq(ual, `${DKG}batchId`, intLit(provenance.batchId), metaGraph),
     mq(ual, `${DKG}chainId`, lit(provenance.chainId), metaGraph),
   ];
   return quads;
@@ -206,7 +222,7 @@ function lit(val: string): string {
   return `"${val}"`;
 }
 
-function intLit(val: number): string {
+function intLit(val: number | bigint): string {
   return `"${val}"^^<${XSD}integer>`;
 }
 
@@ -271,4 +287,79 @@ export function generateOwnershipQuads(
   return rootEntities.map((entry) =>
     mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), workspaceMetaGraph),
   );
+}
+
+/**
+ * Resolve a KC's UAL from the _meta graph by its batchId.
+ * Uses String(batchId) to avoid Number precision loss for large bigints.
+ */
+export async function resolveUalByBatchId(
+  store: TripleStore,
+  metaGraph: string,
+  batchId: bigint,
+): Promise<string | undefined> {
+  assertSafeGraphIriForSparql(metaGraph);
+  const result = await store.query(
+    `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+  return result.bindings[0]['ual'] ?? undefined;
+}
+
+/**
+ * Update the merkle root for a KC in the _meta graph after a data update.
+ * Shared between DKGPublisher (local updates) and UpdateHandler (gossip).
+ */
+export async function updateMetaMerkleRoot(
+  store: TripleStore,
+  graphManager: GraphManager,
+  paranetId: string,
+  batchId: bigint,
+  newMerkleRoot: Uint8Array,
+): Promise<void> {
+  assertSafeParanetIdForSparql(paranetId);
+  const metaGraph = graphManager.metaGraphUri(paranetId);
+  const ual = await resolveUalByBatchId(store, metaGraph, batchId);
+  if (!ual) return;
+  assertSafeGraphIriForSparql(ual);
+
+  const rootLiteral = `"${toHex(newMerkleRoot)}"`;
+
+  // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
+  // state with no dkg:merkleRoot when update succeeds.
+  try {
+    await store.query(
+      `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?oldRoot } }
+       INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
+       WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
+    );
+    return;
+  } catch {
+    // Some backends may not support SPARQL updates via query().
+    // Fallback preserves correctness by inserting first, then pruning old roots.
+  }
+
+  const existing = await store.query(
+    `SELECT ?root WHERE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?root } }`,
+  );
+  await store.insert([{
+    subject: ual,
+    predicate: `${DKG}merkleRoot`,
+    object: rootLiteral,
+    graph: metaGraph,
+  }]);
+  if (existing.type !== 'bindings' || existing.bindings.length === 0) return;
+
+  const staleRootQuads: Quad[] = existing.bindings
+    .map((row) => row['root'])
+    .filter((root): root is string => typeof root === 'string' && root.length > 0 && root !== rootLiteral)
+    .map((root) => ({
+      subject: ual,
+      predicate: `${DKG}merkleRoot`,
+      object: root,
+      graph: metaGraph,
+    }));
+  if (staleRootQuads.length > 0) {
+    await store.delete(staleRootQuads);
+  }
 }

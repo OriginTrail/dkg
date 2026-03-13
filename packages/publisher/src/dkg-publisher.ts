@@ -13,6 +13,8 @@ import {
   generateConfirmedFullMetadata,
   generateWorkspaceMetadata,
   generateOwnershipQuads,
+  toHex,
+  updateMetaMerkleRoot,
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
@@ -894,6 +896,15 @@ export class DKGPublisher implements Publisher {
       if (entityPrivateQuads.length > 0) {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
+    }
+
+    try {
+      await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, kcId, kcMerkleRoot);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to sync _meta merkleRoot for kcId=${kcId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     onPhase?.('store', 'end');
 
