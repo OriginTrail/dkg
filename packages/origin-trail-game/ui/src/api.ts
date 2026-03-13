@@ -5,8 +5,24 @@ function getBaseUrl(): string {
   return origin ? `${origin}${API_PATH}` : API_PATH;
 }
 
-async function request(method: string, path: string, body?: unknown) {
+async function waitForToken(timeoutMs = 3000): Promise<string | undefined> {
   const token = (window as any).__DKG_TOKEN__;
+  if (token) return token;
+  if (window.parent === window) return undefined;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(undefined), timeoutMs);
+    const check = setInterval(() => {
+      if ((window as any).__DKG_TOKEN__) {
+        clearTimeout(timer);
+        clearInterval(check);
+        resolve((window as any).__DKG_TOKEN__);
+      }
+    }, 100);
+  });
+}
+
+async function request(method: string, path: string, body?: unknown) {
+  const token = (window as any).__DKG_TOKEN__ ?? await waitForToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
@@ -16,7 +32,10 @@ async function request(method: string, path: string, body?: unknown) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('Connection to node lost — try refreshing the page');
+    throw new Error(data.error || 'Request failed');
+  }
   return data;
 }
 
