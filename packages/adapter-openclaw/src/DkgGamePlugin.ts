@@ -934,17 +934,21 @@ export class DkgGamePlugin {
           try {
             const swarmId = params.swarm_id ? String(params.swarm_id) : undefined;
 
-            // Stop autopilot if running for this swarm (or any swarm if no ID given)
-            if (this.gameService!.isRunning && (!swarmId || this.gameService!.activeSwarmId === swarmId)) {
+            // Call API first — only clean up autopilot/watcher after a successful leave
+            const result = await this.gameClient!.leaveSwarm(swarmId);
+
+            // Determine which swarm was actually left (for targeted cleanup)
+            const leftSwarmId = swarmId ?? ('id' in result ? (result as SwarmState).id : undefined);
+
+            // Stop autopilot if it was running for the swarm we just left
+            if (this.gameService!.isRunning && (!leftSwarmId || this.gameService!.activeSwarmId === leftSwarmId)) {
               await this.gameService!.stop();
             }
 
-            // Stop watcher if active for this swarm (or any swarm if no ID given)
-            if (this.watchState && (!swarmId || this.watchState.swarmId === swarmId)) {
+            // Stop watcher if it was watching the swarm we just left
+            if (this.watchState && (!leftSwarmId || this.watchState.swarmId === leftSwarmId)) {
               this.stopWatch();
             }
-
-            const result = await this.gameClient!.leaveSwarm(swarmId);
 
             if ('disbanded' in result && result.disbanded) {
               return this.json({

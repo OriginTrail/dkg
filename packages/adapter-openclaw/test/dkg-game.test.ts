@@ -937,6 +937,58 @@ describe('game_leave tool', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('does not stop autopilot when leave API fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const travelingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'traveling', playerCount: 2, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 1,
+      gameState: { sessionId: 's', player: 'p', epochs: 10, trainingTokens: 500,
+        apiCredits: 5, computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+        party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+        status: 'active', moveCount: 1 },
+      voteStatus: null, lastTurn: null,
+    };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      if (urlStr.includes('/leave')) {
+        // Simulate API 400 error (e.g., multiple active swarms)
+        return Promise.resolve({ ok: false, status: 400, text: () => Promise.resolve('Multiple active swarms found') });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start autopilot for sw-1
+      await plugin.getService().start('sw-1');
+      expect(plugin.getService().isRunning).toBe(true);
+
+      // Leave with no swarm_id — API fails with 400
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', {});
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain('400');
+
+      // Autopilot should still be running since leave failed
+      expect(plugin.getService().isRunning).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
