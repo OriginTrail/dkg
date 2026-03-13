@@ -64,7 +64,7 @@ function getCurrentCommitShort(): string {
       const slotDir = existsSync(join(rDir, 'current'))
         ? join(rDir, 'current')
         : dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
+      return execSync('git rev-parse --short=8 HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
     } catch { return ''; }
   }
 }
