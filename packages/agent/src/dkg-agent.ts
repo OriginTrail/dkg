@@ -134,6 +134,8 @@ export class DKGAgent {
   private readonly chain: ChainAdapter;
   /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  /** Shared write locks so gossip writes serialize against local CAS writes. */
+  private readonly writeLocks: Map<string, Promise<void>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
@@ -159,6 +161,7 @@ export class DKGAgent {
     eventBus: TypedEventBus,
     chain: ChainAdapter,
     workspaceOwnedEntities: Map<string, Map<string, string>>,
+    writeLocks: Map<string, Promise<void>>,
   ) {
     this.config = config;
     this.wallet = wallet;
@@ -167,6 +170,7 @@ export class DKGAgent {
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;
+    this.writeLocks = writeLocks;
     this.eventBus = eventBus;
     this.chain = chain;
     this.discovery = new DiscoveryClient(queryEngine);
@@ -240,6 +244,7 @@ export class DKGAgent {
 
     const node = new DKGNode(nodeConfig);
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
+    const writeLocks = new Map<string, Promise<void>>();
     const publisher = new DKGPublisher({
       store,
       chain,
@@ -247,6 +252,7 @@ export class DKGAgent {
       keypair,
       publisherPrivateKey: opKeys?.[0],
       workspaceOwnedEntities,
+      writeLocks,
     });
 
     try {
@@ -264,7 +270,7 @@ export class DKGAgent {
 
     return new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities,
+      workspaceOwnedEntities, writeLocks,
     );
   }
 
@@ -1560,6 +1566,7 @@ export class DKGAgent {
     if (!this.workspaceHandler) {
       this.workspaceHandler = new WorkspaceHandler(this.store, this.eventBus, {
         workspaceOwnedEntities: this.workspaceOwnedEntities,
+        writeLocks: this.writeLocks,
       });
     }
     return this.workspaceHandler;

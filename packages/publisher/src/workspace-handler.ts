@@ -20,18 +20,42 @@ export class WorkspaceHandler {
   private readonly eventBus: EventBus;
   /** Per-paranet map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>> = new Map();
+  private readonly writeLocks: Map<string, Promise<void>>;
   private readonly log = new Logger('WorkspaceHandler');
 
   constructor(
     store: TripleStore,
     eventBus: EventBus,
-    options?: { workspaceOwnedEntities?: Map<string, Map<string, string>> },
+    options?: {
+      workspaceOwnedEntities?: Map<string, Map<string, string>>;
+      writeLocks?: Map<string, Promise<void>>;
+    },
   ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
     this.eventBus = eventBus;
     if (options?.workspaceOwnedEntities) {
       this.workspaceOwnedEntities = options.workspaceOwnedEntities;
+    }
+    this.writeLocks = options?.writeLocks ?? new Map();
+  }
+
+  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    const uniqueKeys = [...new Set(keys)].sort();
+    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
+    let resolve!: () => void;
+    const gate = new Promise<void>(r => { resolve = r; });
+    for (const k of uniqueKeys) {
+      this.writeLocks.set(k, gate);
+    }
+    await predecessor;
+    try {
+      return await fn();
+    } finally {
+      resolve();
+      for (const k of uniqueKeys) {
+        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
+      }
     }
   }
 
@@ -94,71 +118,75 @@ export class WorkspaceHandler {
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
+      const subjects = [...new Set(quads.map(q => q.subject))];
+      const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
+
       onPhase?.('store', 'start');
-      // Delete-then-insert for upserted entities.
-      // Delete exact root + skolemized children only to avoid prefix collisions.
-      // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
-      for (const m of manifestForValidation) {
-        if (wsOwned.has(m.rootEntity)) {
-          await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
-          await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
-          await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
+      await this.withWriteLocks(lockKeys, async () => {
+        // Delete-then-insert for upserted entities.
+        // Delete exact root + skolemized children only to avoid prefix collisions.
+        // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
+        for (const m of manifestForValidation) {
+          if (wsOwned.has(m.rootEntity)) {
+            await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+            await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+            await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
+          }
         }
-      }
 
-      const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
-      await this.store.insert(normalized);
+        const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
+        await this.store.insert(normalized);
 
-      const rootEntities = manifestForValidation.map((m) => m.rootEntity);
-      const metaQuads = generateWorkspaceMetadata(
-        {
-          workspaceOperationId,
-          paranetId,
-          rootEntities,
-          publisherPeerId,
-          timestamp: new Date(Number(timestampMs)),
-        },
-        workspaceMetaGraph,
-      );
+        const rootEntities = manifestForValidation.map((m) => m.rootEntity);
+        const metaQuads = generateWorkspaceMetadata(
+          {
+            workspaceOperationId,
+            paranetId,
+            rootEntities,
+            publisherPeerId,
+            timestamp: new Date(Number(timestampMs)),
+          },
+          workspaceMetaGraph,
+        );
 
-      for (const m of manifestForValidation) {
-        if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
-          const hex = '0x' + Array.from(m.privateMerkleRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-          metaQuads.push({
-            subject: m.rootEntity,
-            predicate: 'http://dkg.io/ontology/privateMerkleRoot',
-            object: `"${hex}"`,
-            graph: workspaceMetaGraph,
-          });
+        for (const m of manifestForValidation) {
+          if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
+            const hex = '0x' + Array.from(m.privateMerkleRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+            metaQuads.push({
+              subject: m.rootEntity,
+              predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+              object: `"${hex}"`,
+              graph: workspaceMetaGraph,
+            });
+          }
         }
-      }
 
-      await this.store.insert(metaQuads);
+        await this.store.insert(metaQuads);
 
-      if (!this.workspaceOwnedEntities.has(paranetId)) {
-        this.workspaceOwnedEntities.set(paranetId, new Map());
-      }
-      const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
-      const newOwnershipEntries: Array<{ rootEntity: string; creatorPeerId: string }> = [];
-      for (const r of rootEntities) {
-        if (!liveOwned.has(r)) {
-          newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
+        if (!this.workspaceOwnedEntities.has(paranetId)) {
+          this.workspaceOwnedEntities.set(paranetId, new Map());
         }
-      }
-      if (newOwnershipEntries.length > 0) {
-        for (const entry of newOwnershipEntries) {
-          await this.store.deleteByPattern({
-            graph: workspaceMetaGraph,
-            subject: entry.rootEntity,
-            predicate: 'http://dkg.io/ontology/workspaceOwner',
-          });
+        const liveOwned = this.workspaceOwnedEntities.get(paranetId)!;
+        const newOwnershipEntries: Array<{ rootEntity: string; creatorPeerId: string }> = [];
+        for (const r of rootEntities) {
+          if (!liveOwned.has(r)) {
+            newOwnershipEntries.push({ rootEntity: r, creatorPeerId: publisherPeerId });
+          }
         }
-        await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
-        for (const entry of newOwnershipEntries) {
-          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+        if (newOwnershipEntries.length > 0) {
+          for (const entry of newOwnershipEntries) {
+            await this.store.deleteByPattern({
+              graph: workspaceMetaGraph,
+              subject: entry.rootEntity,
+              predicate: 'http://dkg.io/ontology/workspaceOwner',
+            });
+          }
+          await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
+          for (const entry of newOwnershipEntries) {
+            liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+          }
         }
-      }
-
+      });
       onPhase?.('store', 'end');
       this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
     } catch (err) {

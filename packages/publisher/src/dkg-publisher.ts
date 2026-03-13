@@ -37,6 +37,8 @@ export interface DKGPublisherConfig {
   workspaceOwnedEntities?: Map<string, Map<string, string>>;
   /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
   knownBatchParanets?: Map<string, string>;
+  /** Shared write lock map. Pass to WorkspaceHandler so gossip writes serialize against CAS writes. */
+  writeLocks?: Map<string, Promise<void>>;
 }
 
 export interface WriteToWorkspaceOptions {
@@ -104,7 +106,7 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
-  private readonly writeLocks = new Map<string, Promise<void>>();
+  readonly writeLocks: Map<string, Promise<void>>;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
@@ -132,6 +134,7 @@ export class DKGPublisher implements Publisher {
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
     this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
     this.knownBatchParanets = config.knownBatchParanets ?? new Map();
+    this.writeLocks = config.writeLocks ?? new Map();
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
@@ -348,24 +351,21 @@ export class DKGPublisher implements Publisher {
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
 
     for (const cond of options.conditions) {
-      if (cond.expectedValue === null) {
-        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
-        const result = await this.store.query(ask);
-        if (result.type === 'boolean' && result.value) {
-          const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
-          const cur = await this.store.query(sel);
-          const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
-          throw new StaleWriteError(cond, actual);
-        }
-      } else {
-        const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
-        const result = await this.store.query(ask);
-        if (result.type !== 'boolean' || !result.value) {
-          const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
-          const cur = await this.store.query(sel);
-          const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
-          throw new StaleWriteError(cond, actual);
-        }
+      const ask = cond.expectedValue === null
+        ? `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
+        : `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+      const result = await this.store.query(ask);
+
+      if (result.type !== 'boolean') {
+        throw new Error(`CAS condition query returned unexpected type "${result.type}" for <${cond.subject}> <${cond.predicate}>`);
+      }
+
+      const shouldExist = cond.expectedValue !== null;
+      if (result.value !== shouldExist) {
+        const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
+        const cur = await this.store.query(sel);
+        const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
+        throw new StaleWriteError(cond, actual);
       }
     }
 
