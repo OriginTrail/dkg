@@ -647,7 +647,7 @@ export function parseActionResponse(text: string): { action: ActionType; params?
     if (lowerText.includes(act.toLowerCase())) {
       // Try to extract intensity for advance
       if (act === 'advance') {
-        const intensityMatch = text.match(/intensity\s*[=:]?\s*(\d+)/i);
+        const intensityMatch = text.match(/intensity\s{0,10}[=:]?\s{0,10}(\d+)/i);
         if (intensityMatch) {
           const intensity = Math.min(3, Math.max(1, parseInt(intensityMatch[1], 10)));
           return { action: 'advance', params: { intensity } };
@@ -656,7 +656,7 @@ export function parseActionResponse(text: string): { action: ActionType; params?
       // Try to extract trade params
       if (act === 'trade') {
         const itemMatch = text.match(/(trainingTokens|apiCredits|computeUnits|modelWeights)/i);
-        const qtyMatch = text.match(/quantity\s*[=:]?\s*(\d+)/i);
+        const qtyMatch = text.match(/quantity\s{0,10}[=:]?\s{0,10}(\d+)/i);
         if (itemMatch) {
           const item = canonicalizeTradeItem(itemMatch[1]);
           if (!item) continue; // unrecognized item — skip trade, try next action
