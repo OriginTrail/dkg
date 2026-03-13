@@ -1,9 +1,0 @@
-@prefix schema: <http://schema.org/> .
-@prefix dkg:    <http://dkg.io/ontology/> .
-
-<did:dkg:testnet:zivojin-secret-project>
-  a schema:CreativeWork ;
-  schema:name "Project Nightingale" ;
-  schema:description "A classified research initiative by Zivojin — details are access-controlled" ;
-  schema:creator <did:dkg:testnet:zivojin> ;
-  dkg:accessPolicy "restricted" .

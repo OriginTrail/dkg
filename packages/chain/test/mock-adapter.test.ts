@@ -398,4 +398,100 @@ describe('MockChainAdapter V9', () => {
     expect(await adapter.verifyPublisherOwnsRange!(signer, 6n, 6n)).toBe(false);
     expect(await adapter.verifyPublisherOwnsRange!(signer, 0n, 1n)).toBe(false);
   });
+
+  // =====================================================================
+  // Context graph operations
+  // =====================================================================
+
+  it('createContextGraph returns an incrementing contextGraphId and stores the graph config', async () => {
+    const adapter = createAdapter();
+    const result = await adapter.createContextGraph!({
+      participantIdentityIds: [1n, 2n],
+      requiredSignatures: 2,
+      metadataBatchId: 5n,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.contextGraphId).toBe(1n);
+
+    const graph = adapter.getContextGraph!(1n);
+    expect(graph).toBeDefined();
+    expect(graph!.manager).toBe(MOCK_DEFAULT_SIGNER);
+    expect(graph!.participantIdentityIds).toEqual([1n, 2n]);
+    expect(graph!.requiredSignatures).toBe(2);
+    expect(graph!.metadataBatchId).toBe(5n);
+    expect(graph!.active).toBe(true);
+    expect(graph!.batches).toEqual([]);
+  });
+
+  it('addBatchToContextGraph succeeds when the batch exists', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.createContextGraph!({
+      participantIdentityIds: [1n, 2n],
+      requiredSignatures: 1,
+    });
+
+    await adapter.batchMintKnowledgeAssets({
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      startKAId: 1n,
+      endKAId: 3n,
+      publicByteSize: 1024n,
+      epochs: 2,
+      tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const result = await adapter.addBatchToContextGraph!({
+      contextGraphId: 1n,
+      batchId: 1n,
+      signerSignatures: [{ identityId: 1n, ...sig }],
+    });
+
+    expect(result.success).toBe(true);
+
+    const graph = adapter.getContextGraph!(1n);
+    expect(graph!.batches).toEqual([1n]);
+  });
+
+  it('addBatchToContextGraph fails when the context graph does not exist', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    const result = await adapter.addBatchToContextGraph!({
+      contextGraphId: 999n,
+      batchId: 1n,
+      signerSignatures: [{ identityId: 1n, ...sig }],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('multiple context graphs get unique IDs', async () => {
+    const adapter = createAdapter();
+
+    const r1 = await adapter.createContextGraph!({
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    });
+    const r2 = await adapter.createContextGraph!({
+      participantIdentityIds: [2n],
+      requiredSignatures: 1,
+    });
+    const r3 = await adapter.createContextGraph!({
+      participantIdentityIds: [3n],
+      requiredSignatures: 1,
+    });
+
+    expect(r1.contextGraphId).toBe(1n);
+    expect(r2.contextGraphId).toBe(2n);
+    expect(r3.contextGraphId).toBe(3n);
+
+    expect(adapter.getContextGraph!(1n)!.participantIdentityIds).toEqual([1n]);
+    expect(adapter.getContextGraph!(2n)!.participantIdentityIds).toEqual([2n]);
+    expect(adapter.getContextGraph!(3n)!.participantIdentityIds).toEqual([3n]);
+  });
 });

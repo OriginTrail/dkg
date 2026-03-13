@@ -23,6 +23,23 @@ export function computePrivateRoot(
   return new MerkleTree(hashes).root;
 }
 
+/**
+ * Compute flat KC merkle root from public triple hashes plus any
+ * private merkle roots as synthetic leaves.  This anchors private
+ * content commitments to the on-chain root so they cannot be
+ * mutated after confirmation without invalidating the root.
+ */
+export function computeFlatKCRoot(
+  publicQuads: Quad[],
+  privateRoots: Uint8Array[],
+): Uint8Array {
+  const leaves: Uint8Array[] = publicQuads.map(computeTripleHash);
+  for (const root of privateRoots) {
+    leaves.push(root);
+  }
+  return new MerkleTree(leaves).root;
+}
+
 export function computeKARoot(
   publicRoot?: Uint8Array,
   privateRoot?: Uint8Array,

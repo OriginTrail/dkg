@@ -121,6 +121,27 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       expect(await store.countQuads()).toBeGreaterThanOrEqual(2);
     });
 
+    it('round-trips literals with embedded quotes and newlines', async () => {
+      const raw = '{"name":"Alice \\"The Great\\"","bio":"line1\\nline2"}';
+      const escaped = escapeNQuads(raw);
+      await store.insert([{
+        subject: 'http://ex.org/s',
+        predicate: 'http://ex.org/data',
+        object: `"${escaped}"`,
+        graph: 'http://ex.org/g',
+      }]);
+
+      const result = await store.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+      );
+      expect(result.type).toBe('quads');
+      if (result.type === 'quads') {
+        expect(result.quads.length).toBe(1);
+        const obj = result.quads[0].object;
+        expect(obj).toContain('Alice');
+      }
+    });
+
     it('close is idempotent', async () => {
       await store.close();
       await store.close();
@@ -271,6 +292,108 @@ describe('GraphManager', () => {
     ]);
     await gm.dropParanet('x');
     expect(await gm.hasParanet('x')).toBe(false);
+  });
+});
+
+function escapeNQuads(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+}
+
+describe('N-Quads literal escaping (regression for parser errors)', () => {
+  it('OxigraphStore: CONSTRUCT returns valid N-Quads for JSON-like literals', async () => {
+    const store = new OxigraphStore();
+    const gameStateJson = '{"party":[{"name":"Alice","health":100}],"morale":80}';
+    await store.insert([
+      {
+        subject: 'urn:test:turn:1',
+        predicate: 'http://ex.org/gameState',
+        object: `"${escapeNQuads(gameStateJson)}"`,
+        graph: 'http://ex.org/workspace',
+      },
+      {
+        subject: 'urn:test:turn:1',
+        predicate: 'http://ex.org/message',
+        object: `"${escapeNQuads('Line1\nLine2\r\nLine3')}"`,
+        graph: 'http://ex.org/workspace',
+      },
+    ]);
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/workspace> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.length).toBe(2);
+
+    for (const q of result.quads) {
+      expect(q.object.startsWith('"')).toBe(true);
+    }
+    await store.close();
+  });
+
+  it('OxigraphStore: re-inserting CONSTRUCT output succeeds (no parser error)', async () => {
+    const store = new OxigraphStore();
+    const raw = '{"key":"value with \\"quotes\\"","multi":"line1\\nline2"}';
+    await store.insert([{
+      subject: 'urn:test:entity',
+      predicate: 'http://ex.org/data',
+      object: `"${escapeNQuads(raw)}"`,
+      graph: 'http://ex.org/ws',
+    }]);
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/ws> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+
+    const store2 = new OxigraphStore();
+    await expect(
+      store2.insert(result.quads.map(q => ({ ...q, graph: 'http://ex.org/target' }))),
+    ).resolves.not.toThrow();
+
+    expect(await store2.countQuads('http://ex.org/target')).toBe(1);
+    await store.close();
+    await store2.close();
+  });
+
+  it('OxigraphStore: deeply nested JSON round-trips through CONSTRUCT', async () => {
+    const store = new OxigraphStore();
+    const json = JSON.stringify({
+      party: [{ name: 'Alice "The Great"', health: 100, bio: 'line1\nline2' }],
+      morale: 80,
+    });
+    await store.insert([{
+      subject: 'urn:test:turn:deep',
+      predicate: 'http://ex.org/state',
+      object: `"${escapeNQuads(json)}"`,
+      graph: 'http://ex.org/ws',
+    }]);
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/ws> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.length).toBe(1);
+
+    const store2 = new OxigraphStore();
+    await expect(
+      store2.insert(result.quads.map(q => ({ ...q, graph: 'http://ex.org/target' }))),
+    ).resolves.not.toThrow();
+
+    const final = await store2.query(
+      'SELECT ?o WHERE { GRAPH <http://ex.org/target> { ?s <http://ex.org/state> ?o } }',
+    );
+    expect(final.type).toBe('bindings');
+    if (final.type === 'bindings') {
+      const nquadVal = final.bindings[0]['o'];
+      expect(nquadVal).toContain('Alice');
+      expect(nquadVal).toContain('The Great');
+    }
+
+    await store.close();
+    await store2.close();
   });
 });
 

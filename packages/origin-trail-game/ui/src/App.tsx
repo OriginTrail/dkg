@@ -456,6 +456,7 @@ export function App() {
   const [swarm, setSwarm] = useState<any>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
 
   useEffect(() => {
     api.info().then((data: any) => {
@@ -481,6 +482,11 @@ export function App() {
     const interval = setInterval(() => refreshSwarm(swarm.id), 3000);
     return () => clearInterval(interval);
   }, [view, swarm?.id, refreshSwarm]);
+
+  useEffect(() => {
+    // Reset leave confirmation when swarm/view changes.
+    setConfirmLeave(false);
+  }, [view, swarm?.id]);
 
   if (view === 'lobby') {
     return (
@@ -534,6 +540,17 @@ export function App() {
 
   if (view === 'swarm' && swarm) {
     const isPlaying = swarm.status === 'traveling' || swarm.status === 'finished';
+    const leaveCurrentSwarm = async () => {
+      try {
+        await api.leave(swarm.id);
+        setSwarm(null);
+        setView('lobby');
+      } catch (e: any) {
+        setError(e.message);
+      } finally {
+        setConfirmLeave(false);
+      }
+    };
 
     return (
       <div className={isPlaying ? 'ot-container ot-container--wide' : 'ot-container'}>
@@ -542,23 +559,31 @@ export function App() {
           <div className="ot-header-right" style={{ display: 'flex', gap: 8 }}>
             {swarm.status === 'traveling' && (
               <button className="ot-danger" onClick={async () => {
-                if (!confirm('Leave this swarm? The game is in progress — it will end for everyone.')) return;
-                try {
-                  await api.leave(swarm.id);
-                  setSwarm(null);
-                  setView('lobby');
-                } catch (e: any) { setError(e.message); }
+                setConfirmLeave(true);
               }}>Leave Swarm</button>
             )}
             <button className="ot-secondary" onClick={async () => {
               try {
-                if (swarm.status === 'recruiting') await api.leave(swarm.id);
+                if (swarm.status === 'recruiting') {
+                  await leaveCurrentSwarm();
+                  return;
+                }
                 setSwarm(null);
                 setView('lobby');
               } catch (e: any) { setError(e.message); }
             }}>Back to Lobby</button>
           </div>
         </div>
+
+        {confirmLeave && swarm.status === 'traveling' && (
+          <div className="ot-card" style={{ borderColor: 'var(--red)' }}>
+            <p>Leave this swarm? The game is in progress and leaving will end it for everyone.</p>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="ot-danger" onClick={leaveCurrentSwarm}>Confirm Leave</button>
+              <button className="ot-secondary" onClick={() => setConfirmLeave(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
 
         <div className="ot-status-bar">
           <span>Status: <strong>{swarm.status}</strong></span>

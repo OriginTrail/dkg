@@ -5,12 +5,15 @@ export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connec
 export interface OperationContext {
   operationId: string;
   operationName: OperationName;
+  /** The originating node's operation ID, present when this operation was triggered by a remote message. */
+  sourceOperationId?: string;
 }
 
 export type LogSink = (entry: {
   level: string;
   operationName: string;
   operationId: string;
+  sourceOperationId?: string;
   module: string;
   message: string;
 }) => void;
@@ -34,27 +37,28 @@ export class Logger {
   }
 
   debug(ctx: OperationContext, message: string): void {
-    Logger.sink?.({ level: 'debug', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
+    Logger.sink?.({ level: 'debug', operationName: ctx.operationName, operationId: ctx.operationId, sourceOperationId: ctx.sourceOperationId, module: this.moduleName, message });
   }
 
   info(ctx: OperationContext, message: string): void {
     process.stdout.write(`${this.format(ctx, message)}\n`);
-    Logger.sink?.({ level: 'info', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
+    Logger.sink?.({ level: 'info', operationName: ctx.operationName, operationId: ctx.operationId, sourceOperationId: ctx.sourceOperationId, module: this.moduleName, message });
   }
 
   warn(ctx: OperationContext, message: string): void {
     process.stderr.write(`${this.format(ctx, message)} [WARN]\n`);
-    Logger.sink?.({ level: 'warn', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
+    Logger.sink?.({ level: 'warn', operationName: ctx.operationName, operationId: ctx.operationId, sourceOperationId: ctx.sourceOperationId, module: this.moduleName, message });
   }
 
   error(ctx: OperationContext, message: string): void {
     process.stderr.write(`${this.format(ctx, message)} [ERROR]\n`);
-    Logger.sink?.({ level: 'error', operationName: ctx.operationName, operationId: ctx.operationId, module: this.moduleName, message });
+    Logger.sink?.({ level: 'error', operationName: ctx.operationName, operationId: ctx.operationId, sourceOperationId: ctx.sourceOperationId, module: this.moduleName, message });
   }
 
   private format(ctx: OperationContext, message: string): string {
     const ts = formatTimestamp(new Date());
-    return `${ts} ${ctx.operationName} ${ctx.operationId} [${this.prefix}] ${message}`;
+    const src = ctx.sourceOperationId ? ` [from:${ctx.sourceOperationId}]` : '';
+    return `${ts} ${ctx.operationName} ${ctx.operationId}${src} [${this.prefix}] ${message}`;
   }
 }
 
@@ -66,6 +70,6 @@ function formatTimestamp(d: Date): string {
   );
 }
 
-export function createOperationContext(operationName: OperationName): OperationContext {
-  return { operationId: randomUUID(), operationName };
+export function createOperationContext(operationName: OperationName, sourceOperationId?: string): OperationContext {
+  return { operationId: randomUUID(), operationName, sourceOperationId };
 }

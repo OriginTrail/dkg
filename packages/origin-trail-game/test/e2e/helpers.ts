@@ -5,7 +5,7 @@
  * chain and deploy contracts, then starts N daemon processes.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execSync, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, createWriteStream } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,10 +14,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Resolve to monorepo root: test/e2e -> origin-trail-game -> packages -> dkg-v9
 const DKG_V9_ROOT = join(__dirname, '..', '..', '..', '..');
 const CLI_JS = join(DKG_V9_ROOT, 'packages', 'cli', 'dist', 'cli.js');
+const EVM_MODULE = join(DKG_V9_ROOT, 'packages', 'evm-module');
 const TEST_DIR = join(__dirname, '..', '..', '.test-nodes');
 
 const API_PORT_BASE = 19200;
 const LIBP2P_PORT_BASE = 19300;
+const HARDHAT_E2E_PORT = 18545;
+
+// Hardhat well-known accounts 5-9 (accounts 0-4 reserved for devnet)
+const HARDHAT_WALLETS = [
+  { key: '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba', address: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc' },
+  { key: '0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e', address: '0x976EA74026E726554dB657fA54763abd0C3a0aa9' },
+  { key: '0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356', address: '0x14dC79964da2C08b23698B3D3cc7Ca32193d9955' },
+  { key: '0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97', address: '0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f' },
+  { key: '0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6', address: '0xa0Ee7A142d267C1f36714E4a8F75612F20a79720' },
+];
 
 export interface TestNode {
   index: number;
@@ -26,6 +37,13 @@ export interface TestNode {
   homeDir: string;
   process: ChildProcess;
   authToken: string;
+}
+
+export interface HardhatChain {
+  process: ChildProcess;
+  rpcUrl: string;
+  hubAddress: string;
+  port: number;
 }
 
 async function httpGet(url: string, token?: string): Promise<any> {
@@ -58,11 +76,132 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-export async function startTestCluster(nodeCount: number): Promise<TestNode[]> {
+export interface ClusterOptions {
+  chain?: boolean;
+}
+
+export async function startHardhatChain(): Promise<HardhatChain> {
+  const logDir = join(TEST_DIR, 'hardhat');
+  mkdirSync(logDir, { recursive: true });
+
+  // Remove stale deployment artifacts
+  try {
+    rmSync(join(EVM_MODULE, 'deployments', 'hardhat_contracts.json'), { force: true });
+    rmSync(join(EVM_MODULE, 'deployments', 'localhost_contracts.json'), { force: true });
+  } catch { /* ignore */ }
+
+  const child = spawn(
+    'npx',
+    ['hardhat', 'node', '--port', String(HARDHAT_E2E_PORT), '--no-deploy'],
+    { cwd: EVM_MODULE, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const logStream = createWriteStream(join(logDir, 'node.log'), { flags: 'a' });
+  child.stdout?.pipe(logStream);
+  child.stderr?.pipe(logStream);
+
+  const rpcUrl = `http://127.0.0.1:${HARDHAT_E2E_PORT}`;
+
+  // Wait for Hardhat RPC to be responsive
+  const start = Date.now();
+  while (Date.now() - start < 30_000) {
+    try {
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 }),
+      });
+      if (res.ok) break;
+    } catch { /* not ready */ }
+    await sleep(500);
+  }
+
+  // Deploy contracts
+  const deployLog = execSync(
+    `npx hardhat deploy --network localhost`,
+    {
+      cwd: EVM_MODULE,
+      env: { ...process.env, RPC_LOCALHOST: rpcUrl },
+      timeout: 60_000,
+    },
+  ).toString();
+
+  // Extract Hub address from deploy output
+  const hubMatch = deployLog.match(/deploying "Hub".*deployed at (0x[a-fA-F0-9]+)/);
+  let hubAddress = hubMatch?.[1] ?? '';
+  if (!hubAddress) {
+    try {
+      const contracts = JSON.parse(
+        readFileSync(join(EVM_MODULE, 'deployments', 'localhost_contracts.json'), 'utf-8'),
+      );
+      hubAddress = contracts.contracts?.Hub?.evmAddress ?? '';
+    } catch { /* ignore */ }
+  }
+  if (!hubAddress) throw new Error('Failed to extract Hub address from deploy');
+
+  // Lower minimumRequiredSignatures to 1 (default is 3, but the agent
+  // doesn't yet collect peer receiver signatures via RTP).
+  try {
+    const contractsPath = join(EVM_MODULE, 'deployments', 'localhost_contracts.json');
+    const contracts = JSON.parse(readFileSync(contractsPath, 'utf-8'));
+    const psAddr = contracts.contracts?.ParametersStorage?.evmAddress;
+    if (psAddr) {
+      const body = JSON.stringify({
+        jsonrpc: '2.0', id: 1,
+        method: 'eth_sendTransaction',
+        params: [{
+          from: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266', // hardhat account 0
+          to: psAddr,
+          data: '0xf7ae9b6e' + '0000000000000000000000000000000000000000000000000000000000000001', // setMinimumRequiredSignatures(1)
+        }],
+      });
+      const resp = execSync(`curl -s -X POST "${rpcUrl}" -H "Content-Type: application/json" -d '${body}'`, { timeout: 5_000 }).toString();
+      try {
+        const parsed = JSON.parse(resp);
+        if (parsed.error) console.warn(`setMinimumRequiredSignatures failed: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+      } catch { /* non-JSON response */ }
+    }
+  } catch { /* best-effort */ }
+
+  return { process: child, rpcUrl, hubAddress, port: HARDHAT_E2E_PORT };
+}
+
+export async function stopHardhat(chain: HardhatChain): Promise<void> {
+  if (!chain.process || chain.process.exitCode !== null) return;
+
+  chain.process.kill('SIGTERM');
+  const exited = await Promise.race([
+    new Promise<boolean>(resolve => chain.process!.once('exit', () => resolve(true))),
+    sleep(3000).then(() => false),
+  ]);
+  if (!exited && chain.process.exitCode === null) {
+    chain.process.kill('SIGKILL');
+    await Promise.race([
+      new Promise<void>(resolve => chain.process!.once('exit', () => resolve())),
+      sleep(2000),
+    ]);
+  }
+}
+
+function fundWallet(rpcUrl: string, address: string): void {
+  const amount = '0x56BC75E2D63100000'; // 100 ETH
+  execSync(`curl -s -X POST "${rpcUrl}" -H "Content-Type: application/json" -d '${JSON.stringify({
+    jsonrpc: '2.0', method: 'hardhat_setBalance', params: [address, amount], id: 1,
+  })}'`, { timeout: 5_000 });
+}
+
+export async function startTestCluster(nodeCount: number, options?: ClusterOptions): Promise<TestNode[]> {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   mkdirSync(TEST_DIR, { recursive: true });
 
   const authToken = 'test-token-for-e2e';
+
+  // Optionally start Hardhat chain
+  let chain: HardhatChain | undefined;
+  if (options?.chain) {
+    chain = await startHardhatChain();
+    // Store chain ref so stopTestCluster can clean it up
+    (globalThis as any).__e2eHardhat = chain;
+  }
 
   const nodes: TestNode[] = [];
 
@@ -85,6 +224,23 @@ export async function startTestCluster(nodeCount: number): Promise<TestNode[]> {
 
     if (isRelay) {
       config.relay = 'none';
+    }
+
+    if (chain) {
+      config.chain = {
+        type: 'evm',
+        rpcUrl: chain.rpcUrl,
+        hubAddress: chain.hubAddress,
+        chainId: 'evm:31337',
+      };
+
+      const hw = HARDHAT_WALLETS[i % HARDHAT_WALLETS.length];
+      writeFileSync(
+        join(homeDir, 'wallets.json'),
+        JSON.stringify({ wallets: [{ privateKey: hw.key, address: hw.address }] }, null, 2),
+      );
+
+      fundWallet(chain.rpcUrl, hw.address);
     }
 
     writeFileSync(join(homeDir, 'config.json'), JSON.stringify(config, null, 2));
@@ -117,8 +273,56 @@ export async function startTestCluster(nodeCount: number): Promise<TestNode[]> {
   // Wait for all nodes to be ready
   await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort)));
 
-  // Wait for gossipsub mesh to form
-  await sleep(3000);
+  // Set default ask price for node identities (otherwise stakeWeightedAverageAsk = 0
+  // and publish tokenAmount calculates to 0 which the contract rejects).
+  if (chain) {
+    try {
+      const contractsPath = join(EVM_MODULE, 'deployments', 'localhost_contracts.json');
+      const contracts = JSON.parse(readFileSync(contractsPath, 'utf-8'));
+      const profileAddr = contracts.contracts?.Profile?.evmAddress;
+      if (profileAddr) {
+        // updateAsk(uint72 identityId, uint96 ask) — 1 TRAC = 0x0de0b6b3a7640000
+        // Resolve each node's identity ID via IdentityStorage.getIdentityId(address)
+        // selector: 0xd7236ebf (getIdentityId(address))
+        const askData = '0000000000000000000000000000000000000000000000000de0b6b3a7640000';
+        const identityStorageAddr = contracts.contracts?.IdentityStorage?.evmAddress;
+        for (let i = 0; i < nodeCount; i++) {
+          const hw = HARDHAT_WALLETS[i % HARDHAT_WALLETS.length];
+          let identityId = i + 1;
+          if (identityStorageAddr) {
+            try {
+              const callData = '0xd7236ebf' + hw.address.slice(2).padStart(64, '0');
+              const callBody = JSON.stringify({
+                jsonrpc: '2.0', id: 1, method: 'eth_call',
+                params: [{ to: identityStorageAddr, data: callData }, 'latest'],
+              });
+              const result = execSync(
+                `curl -s -X POST "${chain.rpcUrl}" -H "Content-Type: application/json" -d '${callBody}'`,
+                { timeout: 5_000 },
+              ).toString();
+              const parsed = JSON.parse(result);
+              if (parsed.error) {
+                console.warn(`getIdentityId failed for node ${i}: ${parsed.error.message ?? JSON.stringify(parsed.error)}`);
+              } else if (parsed.result && parsed.result !== '0x' && parsed.result !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+                identityId = parseInt(parsed.result, 16);
+              }
+            } catch { /* fall back to sequential i+1 */ }
+          }
+          const idHex = identityId.toString(16).padStart(64, '0');
+          const data = '0xc740e04c' + idHex + askData;
+          const body = JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'eth_sendTransaction',
+            params: [{ from: hw.address, to: profileAddr, data }],
+          });
+          execSync(`curl -s -X POST "${chain.rpcUrl}" -H "Content-Type: application/json" -d '${body}'`, { timeout: 5_000 });
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // Wait for gossipsub mesh to form (extra time with chain for identity creation)
+  await sleep(chain ? 8000 : 3000);
 
   return nodes;
 }
@@ -128,6 +332,7 @@ function startDaemon(node: TestNode): ChildProcess {
     process.execPath,
     [CLI_JS, 'start', '--foreground'],
     {
+      cwd: DKG_V9_ROOT,
       env: { ...process.env, DKG_HOME: node.homeDir },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -142,16 +347,22 @@ function startDaemon(node: TestNode): ChildProcess {
 }
 
 export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
-  for (const node of nodes) {
-    if (node.process && !node.process.killed) {
-      node.process.kill('SIGTERM');
-    }
+  const alive = nodes.filter(n => n.process && n.process.exitCode === null);
+  for (const node of alive) {
+    node.process!.kill('SIGTERM');
   }
   await sleep(2000);
-  for (const node of nodes) {
-    if (node.process && !node.process.killed) {
-      node.process.kill('SIGKILL');
+  for (const node of alive) {
+    if (node.process!.exitCode === null) {
+      node.process!.kill('SIGKILL');
     }
+  }
+
+  // Stop Hardhat if it was started for this cluster
+  const chain = (globalThis as any).__e2eHardhat as HardhatChain | undefined;
+  if (chain) {
+    await stopHardhat(chain);
+    (globalThis as any).__e2eHardhat = undefined;
   }
 }
 
@@ -190,4 +401,21 @@ export async function httpGetRaw(url: string, token?: string): Promise<Response>
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return fetch(url, { headers });
+}
+
+/** Read a test node's daemon log file. */
+export function readNodeLog(node: TestNode): string {
+  const logFile = join(node.homeDir, 'test-daemon.log');
+  try {
+    return readFileSync(logFile, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+/** Extract [OriginTrailGame] lines from a node's log. */
+export function gameLogLines(node: TestNode): string[] {
+  return readNodeLog(node)
+    .split('\n')
+    .filter(l => l.includes('[OriginTrailGame]') || l.includes('Context graph') || l.includes('enshrine') || l.includes('identityId'));
 }

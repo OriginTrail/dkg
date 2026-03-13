@@ -79,6 +79,37 @@ describe('Workspace TTL', () => {
   }, 5000);
 });
 
+describe('setWorkspaceTtlMs timer lifecycle', () => {
+  let node: DKGAgent;
+
+  afterAll(async () => {
+    try { await node?.stop(); } catch {}
+  });
+
+  it('starts cleanup timer when TTL transitions from 0 to positive', async () => {
+    node = await DKGAgent.create({
+      name: 'TtlLifecycleNode',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter('mock:31337'),
+      workspaceTtlMs: 0, // disabled
+    });
+
+    await node.start();
+    await sleep(300);
+
+    // Timer should not be running (TTL=0)
+    expect((node as any).workspaceCleanupTimer).toBeNull();
+
+    // Enable TTL at runtime
+    node.setWorkspaceTtlMs(60_000);
+    expect((node as any).workspaceCleanupTimer).not.toBeNull();
+
+    // Disable again
+    node.setWorkspaceTtlMs(0);
+    expect((node as any).workspaceCleanupTimer).toBeNull();
+  }, 10000);
+});
+
 describe('Workspace TTL sync filtering', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;

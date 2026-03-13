@@ -5,9 +5,7 @@ import { Logger, createOperationContext } from '@dkg/core';
 import type { PhaseCallback } from './publisher.js';
 import { decodeWorkspacePublishRequest } from '@dkg/core';
 import { validatePublishRequest } from './validation.js';
-import { computePublicRoot, computeKARoot } from './merkle.js';
 import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
-import { autoPartition } from './auto-partition.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
 
@@ -42,10 +40,13 @@ export class WorkspaceHandler {
    * Validates, stores to workspace + workspace_meta, updates workspaceOwnedEntities.
    */
   async handle(data: Uint8Array, fromPeerId: string, onPhase?: PhaseCallback): Promise<void> {
-    const ctx = createOperationContext('workspace');
+    let ctx = createOperationContext('workspace');
     try {
       onPhase?.('decode', 'start');
       const request = decodeWorkspacePublishRequest(data);
+      if (request.operationId) {
+        ctx = createOperationContext('workspace', request.operationId);
+      }
       const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 
@@ -88,15 +89,6 @@ export class WorkspaceHandler {
         return;
       }
 
-      const partitioned = autoPartition(quads);
-      for (const m of manifestForValidation) {
-        const publicQuads = partitioned.get(m.rootEntity) ?? [];
-        const publicRoot = computePublicRoot(publicQuads);
-        const kaEntry = manifest?.find((e) => e.rootEntity === m.rootEntity);
-        const privateRoot = kaEntry?.privateMerkleRoot?.length ? new Uint8Array(kaEntry.privateMerkleRoot) : undefined;
-        computeKARoot(publicRoot, privateRoot);
-      }
-
       onPhase?.('validate', 'end');
 
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
@@ -128,6 +120,19 @@ export class WorkspaceHandler {
         },
         workspaceMetaGraph,
       );
+
+      for (const m of manifestForValidation) {
+        if (m.privateMerkleRoot && m.privateMerkleRoot.length > 0) {
+          const hex = '0x' + Array.from(m.privateMerkleRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+          metaQuads.push({
+            subject: m.rootEntity,
+            predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+            object: `"${hex}"`,
+            graph: workspaceMetaGraph,
+          });
+        }
+      }
+
       await this.store.insert(metaQuads);
 
       if (!this.workspaceOwnedEntities.has(paranetId)) {

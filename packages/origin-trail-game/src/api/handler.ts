@@ -128,8 +128,12 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       }
 
       if (subpath === '/leave') {
-        const { swarmId } = body;
-        if (!swarmId) return json(res, 400, { error: 'Missing swarmId' });
+        let { swarmId } = body;
+        if (!swarmId) {
+          const active = coordinator.findMySwarm();
+          if (!active) return json(res, 400, { error: 'No active swarm to leave' });
+          swarmId = active.id;
+        }
         const wagon = await coordinator.leaveSwarm(swarmId);
         return json(res, 200, wagon ? coordinator.formatSwarmState(wagon) : { disbanded: true });
       }

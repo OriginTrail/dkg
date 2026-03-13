@@ -1252,7 +1252,7 @@ describe('MockChainAdapter KnowledgeBatchCreated event txHash', () => {
       epochs: 1,
       tokenAmount: 1n,
       publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      receiverSignatures: [],
+      receiverSignatures: [{ identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) }],
     });
 
     const events: { txHash: unknown }[] = [];

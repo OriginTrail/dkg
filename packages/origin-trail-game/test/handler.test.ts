@@ -6,11 +6,14 @@ import { EventEmitter } from 'node:events';
 function makeMockAgent(peerId = 'test-peer-1') {
   const published: any[] = [];
   const workspaceWrites: any[] = [];
+  const enshrined: any[] = [];
+  const contextGraphs: any[] = [];
   const subscriptions = new Set<string>();
   const messageHandlers = new Map<string, Function[]>();
 
   return {
     peerId,
+    identityId: 0n,
     gossip: {
       subscribe(topic: string) { subscriptions.add(topic); },
       publish: async (_topic: string, _data: Uint8Array) => {},
@@ -28,9 +31,25 @@ function makeMockAgent(peerId = 'test-peer-1') {
       published.push(quads);
       return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
-    query: async (..._args: any[]): Promise<any> => ({ bindings: [] }),
+    enshrineFromWorkspace: async (_paranetId: string, selection: any, options?: any) => {
+      enshrined.push({ selection, options });
+      return { onChainResult: { txHash: '0xenshrine123', blockNumber: 100 }, ual: 'did:dkg:test:enshrined' };
+    },
+    createContextGraph: async (params: any) => {
+      const id = BigInt(contextGraphs.length + 1);
+      contextGraphs.push(params);
+      return { contextGraphId: id, success: true };
+    },
+    signContextGraphDigest: async (_contextGraphId: bigint, _merkleRoot: Uint8Array) => ({
+      identityId: 0n,
+      r: new Uint8Array(32),
+      vs: new Uint8Array(32),
+    }),
+    query: async () => ({ bindings: [] }),
     _published: published,
     _workspaceWrites: workspaceWrites,
+    _enshrined: enshrined,
+    _contextGraphs: contextGraphs,
     _subscriptions: subscriptions,
     _messageHandlers: messageHandlers,
   };
@@ -163,7 +182,7 @@ describe('OriginTrail Game API handler', () => {
     expect(decode(ours)!.type).toBe('swarm:created');
   });
 
-  it('POST /create publishes player profile to game paranet', async () => {
+  it('POST /create writes player profile to workspace', async () => {
     const req = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Zara', swarmName: 'Profile Swarm' });
     const mock = createMockRes();
     await handler(req, mock.res, new URL(req.url, 'http://localhost'));
@@ -171,11 +190,13 @@ describe('OriginTrail Game API handler', () => {
 
     await new Promise(r => setTimeout(r, 50));
 
-    expect(agent._published.length).toBeGreaterThanOrEqual(1);
-    const profileQuads = agent._published[0];
-    expect(profileQuads.some((q: any) => q.predicate.includes('schema.org/name') && q.object.includes('Zara'))).toBe(true);
-    expect(profileQuads.some((q: any) => q.predicate.includes('peerId'))).toBe(true);
-    expect(profileQuads.some((q: any) => q.object.includes('Player'))).toBe(true);
+    expect(agent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
+    const profileQuads = agent._workspaceWrites.find((batch: any[]) =>
+      batch.some((q: any) => q.object?.includes('Player')),
+    );
+    expect(profileQuads).toBeDefined();
+    expect(profileQuads!.some((q: any) => q.predicate.includes('schema.org/name') && q.object.includes('Zara'))).toBe(true);
+    expect(profileQuads!.some((q: any) => q.predicate.includes('peerId'))).toBe(true);
   });
 
   it('expeditionLaunchedQuads generates correct RDF triples (C3)', async () => {
@@ -395,7 +416,7 @@ describe('Entity exclusivity — no duplicate root entities', () => {
     expect(q1[0].subject).toBe(q2[0].subject);
   });
 
-  it('publishPlayerProfile skips publish when profile already exists', async () => {
+  it('publishPlayerProfile skips write when profile already exists', async () => {
     const profileAgent = makeMockAgent('existing-peer');
     let queryCallCount = 0;
     profileAgent.query = async (sparql: string) => {
@@ -405,29 +426,20 @@ describe('Entity exclusivity — no duplicate root entities', () => {
       }
       return { bindings: [] };
     };
-    profileAgent.publish = async (_paranetId: string, quads: any[]) => {
-      profileAgent._published.push(quads);
-      return {};
-    };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const coordinator = new OriginTrailGameCoordinator(profileAgent as any, { paranetId: 'origin-trail-game' });
 
     await coordinator.publishPlayerProfile('ExistingPlayer');
 
-    // Should have queried for existence but NOT published
     expect(queryCallCount).toBeGreaterThanOrEqual(1);
-    expect(profileAgent._published.length).toBe(0);
+    expect(profileAgent._workspaceWrites.length).toBe(0);
   });
 
-  it('publishPlayerProfile publishes when profile does not exist', async () => {
+  it('publishPlayerProfile writes to workspace when profile does not exist', async () => {
     const freshAgent = makeMockAgent('new-peer');
     freshAgent.query = async () => {
       return { bindings: [] };
-    };
-    freshAgent.publish = async (_paranetId: string, quads: any[]) => {
-      freshAgent._published.push(quads);
-      return {};
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
@@ -435,8 +447,8 @@ describe('Entity exclusivity — no duplicate root entities', () => {
 
     await coordinator.publishPlayerProfile('NewPlayer');
 
-    expect(freshAgent._published.length).toBe(1);
-    expect(freshAgent._published[0].some((q: any) => q.object.includes('Player'))).toBe(true);
+    expect(freshAgent._workspaceWrites.length).toBe(1);
+    expect(freshAgent._workspaceWrites[0].some((q: any) => q.object.includes('Player'))).toBe(true);
   });
 
   it('creating a swarm writes workspace quads without Rule 4 risk for the player', async () => {
@@ -515,6 +527,8 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(quads.find(q => q.predicate.includes('transactionHash'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('blockNumber'))).toBeUndefined();
     expect(quads.find(q => q.predicate.includes('/ual'))).toBeUndefined();
+    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
   it('turnProvenanceQuads omits blockNumber when undefined', async () => {
@@ -898,6 +912,10 @@ describe('Consensus attestation triples (V1)', () => {
     for (const lq of linkQuads) {
       expect(lq.subject).toBe(root);
     }
+
+    // Graph must stay publish-compatible (no context suffix).
+    expect(quads.every((q) => q.graph === 'did:dkg:paranet:test-paranet')).toBe(true);
+    expect(quads.some((q) => q.graph.includes('/context/'))).toBe(false);
   });
 
   it('forceResolveTurn publishes turn and attestation triples in a single call', async () => {
@@ -948,7 +966,7 @@ describe('Consensus attestation triples (V1)', () => {
     expect(signerQuad).toBeDefined();
     expect(signerQuad.object).toContain(leaderPeerId);
 
-    const attLogs = logs.filter(l => l.includes('attestation published'));
+    const attLogs = logs.filter(l => l.includes('Force-resolve') && l.includes('published'));
     expect(attLogs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1030,9 +1048,9 @@ describe('Consensus attestation triples (V1)', () => {
     expect(forTurnQuad).toBeDefined();
     expect(forTurnQuad.subject).toBe(attRoot);
 
-    // Should have attestations from both leader and follower
+    // Should have attestations from all voters (leader + 2 followers)
     const signerQuads = combinedPublish.filter((q: any) => q.predicate?.includes('/signer'));
-    expect(signerQuads.length).toBe(2);
+    expect(signerQuads.length).toBe(3);
 
     // Approval timestamps must be local Date.now(), never the forged msg.timestamp (999)
     const attestedAtQuads = combinedPublish.filter((q: any) => q.predicate?.includes('attestedAt'));
@@ -1289,7 +1307,7 @@ describe('Graph-based lobby sync', () => {
             name: '"Graph Swarm"',
             status: '"recruiting"',
             orchestrator: 'https://origintrail-game.dkg.io/player/other-peer',
-            createdAt: '"1700000000000"',
+            createdAt: `"${Date.now()}"`,
           }],
         };
       }
@@ -1318,6 +1336,42 @@ describe('Graph-based lobby sync', () => {
     expect(lobby.openSwarms[0].players.length).toBe(1);
     expect(lobby.openSwarms[0].players[0].displayName).toBe('OtherPlayer');
     expect(queryCount).toBeGreaterThanOrEqual(3);
+  }, 10_000);
+
+  it('loadLobbyFromGraph skips swarms older than 24 hours', async () => {
+    const syncAgent = makeMockAgent('stale-peer');
+    const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000; // 25 hours ago
+    syncAgent.query = async (sparql: string) => {
+      if (sparql.includes('AgentSwarm')) {
+        return {
+          bindings: [{
+            swarm: 'https://origintrail-game.dkg.io/swarm/swarm-stale',
+            name: '"Stale Swarm"',
+            status: '"recruiting"',
+            orchestrator: 'https://origintrail-game.dkg.io/player/stale-leader',
+            createdAt: `"${staleTimestamp}"`,
+          }],
+        };
+      }
+      if (sparql.includes('displayName')) {
+        return {
+          bindings: [{
+            agent: 'https://origintrail-game.dkg.io/player/stale-leader',
+            displayName: '"StalePlayer"',
+          }],
+        };
+      }
+      return { bindings: [] };
+    };
+
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+
+    await new Promise(r => setTimeout(r, 6_000));
+
+    const lobby = coordinator.getLobby();
+    expect(lobby.openSwarms.length).toBe(0);
+    expect(lobby.mySwarms.length).toBe(0);
   }, 10_000);
 });
 
@@ -2061,7 +2115,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
 
 describe('V5: Strategy pattern RDF quads', () => {
   it('strategyPatternQuads generates correct RDF structure', async () => {
-    const { strategyPatternQuads, contextGraph } = await import('../src/dkg/rdf.js');
+    const { strategyPatternQuads, workspaceGraph } = await import('../src/dkg/rdf.js');
     const stats = {
       totalVotes: 5,
       actionCounts: { advance: 3, syncMemory: 1, upgradeSkills: 1 } as Record<string, number>,
@@ -2070,7 +2124,7 @@ describe('V5: Strategy pattern RDF quads', () => {
     };
     const quads = strategyPatternQuads('origin-trail-game', 'swarm-abc', 'peer-1', stats);
 
-    const expectedGraph = contextGraph('origin-trail-game', 'swarm-abc');
+    const expectedGraph = workspaceGraph('origin-trail-game');
     expect(quads.every(q => q.graph === expectedGraph)).toBe(true);
 
     const subject = quads[0].subject;
@@ -2218,8 +2272,6 @@ describe('V5: Strategy patterns published when game finishes', () => {
         await coordinator.castVote(swarm.id, action);
       } catch (err: any) {
         if (!/eliminated|cannot vote/i.test(err.message)) throw err;
-        // Leader was eliminated; simulate a surviving player's vote so
-        // forceResolveTurn can pick a meaningful action (not just syncMemory).
         swarm.votes.push({ peerId: 'finish-p2', action, turn: swarm.currentTurn, timestamp: Date.now() });
       }
       await new Promise(r => setTimeout(r, 5));

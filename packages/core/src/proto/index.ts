@@ -54,3 +54,9 @@ export {
   encodeKAUpdateRequest,
   decodeKAUpdateRequest,
 } from './ka-update.js';
+
+export {
+  type FinalizationMessageMsg,
+  encodeFinalizationMessage,
+  decodeFinalizationMessage,
+} from './finalization.js';

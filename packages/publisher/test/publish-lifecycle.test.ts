@@ -67,7 +67,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
 
-  it('produces entityProofs kcMerkleRoot when enabled', async () => {
+  it('always produces flat kcMerkleRoot regardless of options', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -79,7 +79,6 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    // Use multiple triples per entity so the flat vs tree strategies diverge
     const entityA = 'did:dkg:agent:QmEntityA';
     const entityB = 'did:dkg:agent:QmEntityB';
     const triples = [
@@ -89,32 +88,17 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       q(entityB, 'http://schema.org/version', '"2"'),
     ];
 
-    const resultDefault = await publisher.publish({
+    const result = await publisher.publish({
       paranetId: PARANET,
       quads: triples,
     });
 
-    const store2 = new OxigraphStore();
-    const chain2 = new MockChainAdapter('mock:31337', TEST_WALLET.address);
-    const publisher2 = new DKGPublisher({
-      store: store2, chain: chain2, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
-    });
+    expect(result.merkleRoot).toHaveLength(32);
 
-    const resultEntity = await publisher2.publish({
-      paranetId: PARANET,
-      quads: triples,
-      entityProofs: true,
-    });
-
-    expect(resultDefault.merkleRoot).toHaveLength(32);
-    expect(resultEntity.merkleRoot).toHaveLength(32);
-    // The flat mode hashes all triples into one tree; entityProofs
-    // builds per-entity roots first, then a tree of those roots.
-    // With multiple triples per entity the two strategies diverge.
-    expect(Buffer.from(resultDefault.merkleRoot).toString('hex'))
-      .not.toBe(Buffer.from(resultEntity.merkleRoot).toString('hex'));
+    const hashes = triples.map(computeTripleHash);
+    const flatTree = new MerkleTree(hashes);
+    expect(Buffer.from(result.merkleRoot).toString('hex'))
+      .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
 
   it('full-pipeline golden: fixed quads produce known merkle root', async () => {
@@ -196,7 +180,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     );
   });
 
-  it('anchors privateMerkleRoot as a synthetic triple', async () => {
+  it('anchors private merkle root as synthetic leaf in flat KC root', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
     const bus = new TypedEventBus();
@@ -208,26 +192,22 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    await publisher.publish({
+    const result = await publisher.publish({
       paranetId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"PrivBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/secret', '"s3cret"')],
       publisherPeerId: '12D3KooWTestPublisher',
     });
 
-    const result = await store.query(
-      `SELECT ?root WHERE {
-        GRAPH <${GRAPH}> {
-          <urn:dkg:kc> <http://dkg.io/ontology/privateContentRoot> ?root
-        }
-      }`,
-    );
+    expect(result.kaManifest).toHaveLength(1);
+    expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
+    expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
 
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      expect(result.bindings).toHaveLength(1);
-      expect(result.bindings[0]['root']).toMatch(/0x[0-9a-f]+/);
-    }
+    const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
+    const privateRoot = result.kaManifest[0].privateMerkleRoot!;
+    const expectedRoot = new MerkleTree([...publicHashes, privateRoot]).root;
+    expect(Buffer.from(result.merkleRoot).toString('hex'))
+      .toBe(Buffer.from(expectedRoot).toString('hex'));
   });
 
   it('sends N-Triples (no graph component) in publish request', () => {
@@ -248,6 +228,119 @@ describe('Publish lifecycle (aligned with diagram)', () => {
       const beforeDot = parts.slice(0, -1);
       expect(beforeDot).toHaveLength(3);
     }
+  });
+});
+
+describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
+  it('multi-entity publish: receiver flat merkle matches publisher merkle', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const entityA = 'did:dkg:agent:QmEntityAlpha';
+    const entityB = 'did:dkg:agent:QmEntityBeta';
+    const triples = [
+      q(entityA, 'http://schema.org/name', '"Alpha"'),
+      q(entityA, 'http://schema.org/version', '"1"'),
+      q(entityA, 'http://schema.org/description', '"First entity"'),
+      q(entityB, 'http://schema.org/name', '"Beta"'),
+      q(entityB, 'http://schema.org/version', '"2"'),
+    ];
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: triples,
+    });
+
+    expect(result.merkleRoot).toHaveLength(32);
+    const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
+
+    // Simulate what a receiver does: hash all received public quads with
+    // computeTripleHash and build a flat MerkleTree. This MUST match the
+    // publisher's root — if it doesn't, the finalization handler will log
+    // "merkle mismatch" and fall back to full-payload sync.
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
+    const receiverRoot = new MerkleTree(receiverHashes).root;
+    const receiverHex = Buffer.from(receiverRoot).toString('hex');
+
+    expect(receiverHex).toBe(publisherHex);
+  });
+
+  it('single-entity publish: receiver flat merkle matches publisher merkle', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const triples = [
+      q(ENTITY, 'http://schema.org/name', '"SingleBot"'),
+      q(ENTITY, 'http://schema.org/version', '"3"'),
+    ];
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      quads: triples,
+    });
+
+    const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
+    const receiverRoot = new MerkleTree(receiverHashes).root;
+    const receiverHex = Buffer.from(receiverRoot).toString('hex');
+
+    expect(receiverHex).toBe(publisherHex);
+  });
+
+  it('publish with private quads: receiver flat merkle from public quads matches', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: TEST_WALLET.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+
+    const publicTriples = [
+      q(ENTITY, 'http://schema.org/name', '"PrivateTestBot"'),
+      q(ENTITY, 'http://schema.org/description', '"Has secrets"'),
+    ];
+    const privateTriples = [
+      q(ENTITY, 'http://ex.org/apiKey', '"sk-secret"'),
+    ];
+
+    const result = await publisher.publish({
+      paranetId: PARANET,
+      publisherPeerId: 'test-peer',
+      quads: publicTriples,
+      privateQuads: privateTriples,
+    });
+
+    const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
+
+    // Receiver sees public quads + private roots from manifest as synthetic leaves
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
+    const privateRoots = result.kaManifest
+      .filter(m => m.privateMerkleRoot)
+      .map(m => m.privateMerkleRoot!);
+    const receiverRoot = new MerkleTree([...receiverHashes, ...privateRoots]).root;
+    const receiverHex = Buffer.from(receiverRoot).toString('hex');
+
+    expect(receiverHex).toBe(publisherHex);
   });
 });
 

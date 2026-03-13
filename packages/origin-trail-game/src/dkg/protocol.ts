@@ -41,11 +41,13 @@ export interface SwarmCreatedMsg extends BaseMessage {
   swarmName: string;
   playerName: string;
   maxPlayers: number;
+  identityId?: string;
 }
 
 export interface SwarmJoinedMsg extends BaseMessage {
   type: 'swarm:joined';
   playerName: string;
+  identityId?: string;
 }
 
 export interface SwarmLeftMsg extends BaseMessage {
@@ -56,6 +58,8 @@ export interface ExpeditionLaunchedMsg extends BaseMessage {
   type: 'expedition:launched';
   gameStateJson: string;
   partyOrder?: string[];
+  contextGraphId?: string;
+  requiredSignatures?: number;
 }
 
 export interface VoteCastMsg extends BaseMessage {
@@ -76,12 +80,17 @@ export interface TurnProposalMsg extends BaseMessage {
   resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
   deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
   event?: { type: string; description: string };
+  merkleRoot?: string;
+  contextGraphId?: string;
 }
 
 export interface TurnApproveMsg extends BaseMessage {
   type: 'turn:approve';
   turn: number;
   proposalHash: string;
+  identityId?: string;
+  signatureR?: string;
+  signatureVS?: string;
 }
 
 export interface TurnResolvedMsg extends BaseMessage {

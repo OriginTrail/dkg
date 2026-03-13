@@ -1,20 +1,21 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic,
+  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
+  encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, MerkleTree, withRetry,
+  Logger, createOperationContext, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@dkg/core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@dkg/storage';
-import { EVMChainAdapter, NoChainAdapter, type EVMAdapterConfig, type ChainAdapter } from '@dkg/chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@dkg/chain';
 import {
   DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal,
-  computeTripleHash, computePublicRoot, computeKARoot, computeKCRoot, autoPartition,
+  computeTripleHash, computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata,
 } from '@dkg/publisher';
 import { ethers } from 'ethers';
@@ -29,12 +30,13 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
 
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
-const DEFAULT_WORKSPACE_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
+const DEFAULT_WORKSPACE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
 /** Health status of a peer from the last ping round. */
@@ -130,6 +132,7 @@ export class DKGAgent {
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   private workspaceHandler?: WorkspaceHandler;
   private gossipPublishHandler?: GossipPublishHandler;
+  private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
@@ -816,7 +819,6 @@ export class DKGAgent {
     const ctx = createOperationContext('sync');
     const includeWorkspace = options?.includeWorkspace ?? false;
 
-    // Keep runtime sync scope up to date so future peer:connect syncs include this paranet.
     this.trackSyncParanet(paranetId);
 
     const peers = [...new Map(
@@ -858,6 +860,26 @@ export class DKGAgent {
       dataSynced,
       workspaceSynced,
     };
+  }
+
+  /**
+   * Update the workspace TTL at runtime. Takes effect immediately for queries
+   * and the next cleanup cycle without requiring a restart.
+   */
+  setWorkspaceTtlMs(ttlMs: number): void {
+    const oldTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+    (this.config as any).workspaceTtlMs = ttlMs;
+
+    if (oldTtl <= 0 && ttlMs > 0 && !this.workspaceCleanupTimer) {
+      this.cleanupExpiredWorkspace().catch(() => {});
+      this.workspaceCleanupTimer = setInterval(() => {
+        this.cleanupExpiredWorkspace().catch(() => {});
+      }, WORKSPACE_CLEANUP_INTERVAL_MS);
+      if (this.workspaceCleanupTimer.unref) this.workspaceCleanupTimer.unref();
+    } else if (ttlMs <= 0 && this.workspaceCleanupTimer) {
+      clearInterval(this.workspaceCleanupTimer);
+      this.workspaceCleanupTimer = null;
+    }
   }
 
   /**
@@ -1140,6 +1162,7 @@ export class DKGAgent {
           blockNumber: result.onChainResult.blockNumber,
           newMerkleRoot: result.merkleRoot,
           timestampMs: Date.now(),
+          operationId: ctx.operationId,
         });
         const topic = paranetUpdateTopic(paranetId);
         await this.gossip.publish(topic, message);
@@ -1178,17 +1201,138 @@ export class DKGAgent {
 
   /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
+   * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
+   * workspace state can promote it to canonical without re-downloading the full payload.
    */
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
-    options?: { clearWorkspaceAfter?: boolean; operationCtx?: OperationContext; onPhase?: PhaseCallback },
+    options?: {
+      clearWorkspaceAfter?: boolean;
+      operationCtx?: OperationContext;
+      onPhase?: PhaseCallback;
+      contextGraphId?: string | bigint;
+      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+    },
   ): Promise<PublishResult> {
-    return this.publisher.enshrineFromWorkspace(paranetId, selection, {
-      operationCtx: options?.operationCtx ?? createOperationContext('enshrine'),
+    const ctx = options?.operationCtx ?? createOperationContext('enshrine');
+    const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
+
+    const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
+      operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       onPhase: options?.onPhase,
+      contextGraphId: ctxGraphIdStr,
+      contextGraphSignatures: options?.contextGraphSignatures,
     });
+
+    if (result.status === 'confirmed' && result.onChainResult) {
+      const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
+
+      const msg: FinalizationMessageMsg = {
+        ual: result.ual,
+        paranetId,
+        kcMerkleRoot: result.merkleRoot,
+        txHash: result.onChainResult.txHash ?? '',
+        blockNumber: result.onChainResult.blockNumber ?? 0,
+        batchId: result.onChainResult.batchId ?? 0n,
+        startKAId: result.onChainResult.startKAId ?? 0n,
+        endKAId: result.onChainResult.endKAId ?? 0n,
+        publisherAddress: result.onChainResult.publisherAddress ?? '',
+        rootEntities,
+        timestampMs: Date.now(),
+        operationId: ctx.operationId,
+        contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+      };
+
+      const topic = paranetFinalizationTopic(paranetId);
+      try {
+        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
+        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Create a new context graph on-chain.
+   * A context graph is a bounded, M/N signature-gated subgraph within a paranet.
+   */
+  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+    const ctx = createOperationContext('system');
+    if (typeof this.chain.createContextGraph !== 'function') {
+      throw new Error('createContextGraph not available on chain adapter');
+    }
+    const result = await this.chain.createContextGraph(params);
+    this.log.info(ctx, `Created context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
+    return result;
+  }
+
+  /**
+   * Link an already-published KC batch to a context graph.
+   * Collects participant signatures and calls addBatchToContextGraph on-chain.
+   */
+  async addBatchToContextGraph(params: {
+    contextGraphId: string | bigint;
+    batchId: bigint;
+    merkleRoot?: Uint8Array;
+    participantSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  }): Promise<{ success: boolean }> {
+    const ctx = createOperationContext('system');
+    if (typeof this.chain.addBatchToContextGraph !== 'function') {
+      throw new Error('addBatchToContextGraph not available on chain adapter');
+    }
+
+    let merkleRoot = params.merkleRoot;
+    if (!merkleRoot) {
+      const batch = (this.chain as any).getBatch?.(params.batchId);
+      if (!batch?.merkleRoot) {
+        throw new Error(
+          `Cannot resolve merkle root for batch ${params.batchId}. ` +
+          `Provide merkleRoot explicitly or use a chain adapter that supports getBatch.`,
+        );
+      }
+      merkleRoot = batch.merkleRoot;
+    }
+
+    const result = await this.chain.addBatchToContextGraph({
+      contextGraphId: BigInt(params.contextGraphId),
+      batchId: params.batchId,
+      merkleRoot: merkleRoot!,
+      signerSignatures: params.participantSignatures ?? [],
+    });
+    this.log.info(ctx, `addBatchToContextGraph: batch=${params.batchId} → ctxGraph=${params.contextGraphId} success=${result.success}`);
+    return { success: result.success };
+  }
+
+  /**
+   * (Re-)attempt on-chain identity registration. Safe to call multiple times.
+   * Returns the identityId (>0n on success, 0n if chain is not configured).
+   */
+  async ensureIdentity(): Promise<bigint> {
+    if (this.chain.chainId === 'none') return 0n;
+    const ctx = createOperationContext('system');
+    let identityId = 0n;
+    try {
+      identityId = await this.chain.getIdentityId();
+      if (identityId === 0n) {
+        this.log.info(ctx, 'ensureIdentity: no on-chain identity, creating profile...');
+        identityId = await this.chain.ensureProfile({ nodeName: this.config.name });
+        this.log.info(ctx, `ensureIdentity: profile created, identityId=${identityId}`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `ensureIdentity error: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        identityId = await this.chain.getIdentityId();
+      } catch { /* ignore */ }
+    }
+    if (identityId > 0n) {
+      this.publisher.setIdentityId(identityId);
+    }
+    return identityId;
   }
 
   async query(
@@ -1328,6 +1472,13 @@ export class DKGAgent {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
+
+    const finalizationTopic = paranetFinalizationTopic(paranetId);
+    this.gossip.subscribe(finalizationTopic);
+    this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
+      const fh = this.getOrCreateFinalizationHandler();
+      await fh.handleFinalizationMessage(data, paranetId);
+    });
   }
 
   /**
@@ -1379,6 +1530,16 @@ export class DKGAgent {
     return this.updateHandler;
   }
 
+  private getOrCreateFinalizationHandler(): FinalizationHandler {
+    if (!this.finalizationHandler) {
+      this.finalizationHandler = new FinalizationHandler(
+        this.store,
+        this.chain.chainId === 'none' ? undefined : this.chain,
+      );
+    }
+    return this.finalizationHandler;
+  }
+
   /**
    * Create a paranet by registering it on-chain (if a chain adapter is
    * available) and publishing its definition triples into the system
@@ -1428,8 +1589,9 @@ export class DKGAgent {
         onChainId = result.paranetId;
         this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
+        const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           this.log.info(ctx, `Paranet "${opts.id}" already registered on-chain — creating local definition`);
         } else {
           this.log.warn(ctx, `On-chain paranet registration failed: ${msg} — creating locally without chain finality`);
@@ -1562,8 +1724,9 @@ export class DKGAgent {
         onChainId = result.paranetId;
         this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
+        const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           alreadyOnChain = true;
           onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
           this.log.info(ctx, `Paranet "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
@@ -1757,6 +1920,30 @@ export class DKGAgent {
 
   get peerId(): string {
     return this.node.peerId;
+  }
+
+  get identityId(): bigint {
+    return this.publisher.getIdentityId();
+  }
+
+  /**
+   * Sign the context graph participant digest: keccak256(contextGraphId, merkleRoot).
+   * Returns the caller's identity ID and compact ECDSA (r, vs) values that the
+   * ContextGraphs contract can verify via ecrecover.
+   */
+  async signContextGraphDigest(
+    contextGraphId: bigint,
+    merkleRoot: Uint8Array,
+  ): Promise<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> {
+    if (typeof this.chain.signMessage !== 'function') {
+      throw new Error('Chain adapter does not support signMessage');
+    }
+    const digest = ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32'],
+      [contextGraphId, ethers.hexlify(merkleRoot)],
+    );
+    const sig = await this.chain.signMessage(ethers.getBytes(digest));
+    return { identityId: this.identityId, ...sig };
   }
 
   get multiaddrs(): string[] {
@@ -2007,6 +2194,7 @@ export class DKGAgent {
       publisherSignatureVs: new Uint8Array(0),
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
+      operationId: ctx.operationId,
     });
 
     const topic = paranetPublishTopic(paranetId);
@@ -2202,33 +2390,45 @@ function verifySyncedData(
         allQuadsForKC.push(...quads);
       }
 
-      // Try flat mode first (publisher default: single merkle over all triple hashes)
-      const flatHashes = allQuadsForKC.map(computeTripleHash);
-      const flatRoot = new MerkleTree(flatHashes).root;
+      // Collect private merkle roots from KA metadata for this KC
+      const kcPrivateRoots: Uint8Array[] = [];
+      for (const [kaUri, kcUri] of kaToKc) {
+        if (kcUri !== kcUal) continue;
+        for (const mq of metaQuads) {
+          if (mq.subject === kaUri && mq.predicate === `${DKG_NS}privateMerkleRoot`) {
+            const hex = stripLiteral(mq.object).replace(/^0x/, '');
+            if (hex.length === 64) {
+              const bytes = new Uint8Array(32);
+              for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+              kcPrivateRoots.push(bytes);
+            }
+          }
+        }
+      }
+
+      const flatRoot = computeFlatKCRoot(allQuadsForKC, kcPrivateRoots);
       const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
-        continue;
-      }
-
-      // Try entity-proofs mode (two-level: per-entity KA roots → KC root)
-      const kaRoots: Uint8Array[] = [];
-      for (const re of rootEntities) {
-        const quads = partitioned.get(re) ?? [];
-        const publicRoot = computePublicRoot(quads);
-        kaRoots.push(computeKARoot(publicRoot, undefined));
-      }
-      const epRoot = computeKCRoot(kaRoots);
-      const epHex = Array.from(epRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-
-      if (epHex === claimedHex) {
-        verifiedKcUals.add(kcUal);
+      } else if (kcPrivateRoots.length > 0) {
+        const legacyRoot = computeFlatKCRoot(allQuadsForKC, []);
+        const legacyHex = Array.from(legacyRoot).map(b => b.toString(16).padStart(2, '0')).join('');
+        if (legacyHex === claimedHex) {
+          log.debug(ctx, `KC ${kcUal} verified via legacy flat root (without private root anchoring)`);
+          verifiedKcUals.add(kcUal);
+        } else if (acceptUnverified) {
+          log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        } else {
+          log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          rejected++;
+        }
       } else if (acceptUnverified) {
-        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;
       } else {
-        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…, ep ${epHex.slice(0, 16)}…`);
+        log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;
       }
     } catch {

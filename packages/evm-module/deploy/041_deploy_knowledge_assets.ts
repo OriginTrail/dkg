@@ -17,4 +17,5 @@ func.dependencies = [
   'ParametersStorage',
   'IdentityStorage',
   'PaymasterManager',
+  'ContextGraphs',
 ];

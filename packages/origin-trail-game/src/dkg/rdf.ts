@@ -117,7 +117,9 @@ export interface ChainProvenance {
 }
 
 export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[]): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  // Publish validation requires graph URI to match the target paranet graph exactly.
+  // Context graph routing is handled during enshrinement, not by quad graph value.
+  const g = workspaceGraph(paranetId);
   const t = turnUri(swarmId, turn);
   const quads = [
     quad(t, `${RDF}type`, otUri('TurnResult'), g),
@@ -164,7 +166,8 @@ export function consensusAttestationQuads(
   resolution: string,
   proposalHash: string,
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  // Keep attestation quads publish-compatible with paranet graph validation.
+  const g = workspaceGraph(paranetId);
   const t = turnUri(swarmId, turn);
   const root = `urn:dkg:attestation:${swarmId}:turn${turn}:${proposalHash}`;
   const quads: Quad[] = [
@@ -284,7 +287,7 @@ export function strategyPatternQuads(
   peerId: string,
   stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number },
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const s = otUri(`strategy/${swarmId}/${peerId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('StrategyPattern'), g),
@@ -316,7 +319,7 @@ export function leaderboardEntryQuads(
   partySize: number,
   finishedAt: number,
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const entry = otUri(`swarm/${swarmId}/leaderboard/${peerId}`);
   return [
     quad(entry, `${RDF}type`, otUri('LeaderboardEntry'), g),
@@ -339,7 +342,7 @@ export function syncMemoryDkgQuads(
   peerId: string,
   tracSpent: number,
 ): Quad[] {
-  const g = contextGraph(paranetId, swarmId);
+  const g = workspaceGraph(paranetId);
   const s = otUri(`swarm/${swarmId}/turn/${turn}/sync/${peerId}`);
   return [
     quad(s, `${RDF}type`, otUri('SyncMemoryViaDKG'), g),

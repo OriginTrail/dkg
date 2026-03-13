@@ -5,7 +5,9 @@ import {
   paranetAppTopic,
   paranetDataGraphUri,
   paranetSessionsTopic,
+  paranetFinalizationTopic,
 } from '../src/constants.js';
+import { createOperationContext } from '../src/logger.js';
 
 describe('paranet topic helpers', () => {
   it('paranetPublishTopic returns correct format', () => {
@@ -27,5 +29,26 @@ describe('paranet topic helpers', () => {
 
   it('paranetSessionsTopic returns correct format', () => {
     expect(paranetSessionsTopic('testing')).toBe('dkg/paranet/testing/sessions');
+  });
+
+  it('paranetFinalizationTopic returns correct format', () => {
+    expect(paranetFinalizationTopic('testing')).toBe('dkg/paranet/testing/finalization');
+  });
+});
+
+describe('createOperationContext', () => {
+  it('generates a unique operationId', () => {
+    const ctx = createOperationContext('publish');
+    expect(ctx.operationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ctx.operationName).toBe('publish');
+    expect(ctx.sourceOperationId).toBeUndefined();
+  });
+
+  it('accepts a sourceOperationId for cross-node correlation', () => {
+    const sourceId = '550e8400-e29b-41d4-a716-446655440000';
+    const ctx = createOperationContext('gossip', sourceId);
+    expect(ctx.operationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ctx.operationId).not.toBe(sourceId);
+    expect(ctx.sourceOperationId).toBe(sourceId);
   });
 });
