@@ -12,6 +12,7 @@ import {
   fetchAgents,
   sendPeerMessage,
   fetchMessages,
+  fetchStatus,
   streamOpenClawLocalChat,
   fetchOpenClawLocalHealth,
   fetchOpenClawLocalHistory,
@@ -1042,13 +1043,20 @@ function OpenClawChatView() {
             onClick={() => setShowGraph(g => !g)}
             title={showGraph ? 'Hide graph' : 'Show knowledge graph'}
             style={{
-              padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border)',
-              background: showGraph ? 'rgba(74,222,128,.12)' : 'transparent',
-              color: showGraph ? 'var(--green)' : 'var(--text-muted)',
+              padding: '5px 12px', borderRadius: 6,
+              border: showGraph ? '1px solid rgba(34,211,238,.5)' : '1px solid var(--border)',
+              background: showGraph ? 'rgba(34,211,238,.1)' : 'var(--surface)',
+              color: showGraph ? '#22d3ee' : 'var(--text-muted)',
               fontSize: 11, cursor: 'pointer', fontWeight: 600,
+              display: 'flex', alignItems: 'center', gap: 5,
+              transition: 'all .15s ease',
             }}
           >
-            Graph
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>
+              <line x1="8.5" y1="7.5" x2="10.5" y2="16"/><line x1="15.5" y1="7.5" x2="13.5" y2="16"/>
+            </svg>
+            {showGraph ? 'Hide Graph' : 'Show Graph'}
           </button>
         </div>
 
@@ -1209,6 +1217,9 @@ function OpenClawChatView() {
                 {publishNotice}
               </div>
             )}
+            <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+              Publish session enshrines the OpenClaw conversation currently in view on the DKG privately. New writes remain in workspace until you publish again.
+            </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             {graphLoading && !graphTriples && (
@@ -1272,6 +1283,15 @@ function OpenClawChatView() {
 
 export function AgentHubPage() {
   const [mode, setMode] = useState<'agent' | 'peers' | 'openclaw'>('agent');
+  const [nodeStatus, setNodeStatus] = useState<{ name?: string; hasOpenClawChannel?: boolean } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchStatus().then((s: any) => { if (!cancelled) setNodeStatus(s); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (nodeStatus?.hasOpenClawChannel) setMode(prev => prev === 'agent' ? 'openclaw' : prev);
+  }, [nodeStatus]);
   const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -2351,6 +2371,9 @@ export function AgentHubPage() {
             {visiblePublishNotice}
           </div>
         )}
+        <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
+          Publish session enshrines the agent conversation currently in view on the DKG privately. New writes remain in workspace until you publish again.
+        </div>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
@@ -2368,7 +2391,7 @@ export function AgentHubPage() {
 
         {!graphLoading && graphTriples && graphTriples.length === 0 && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
-            No triples found for this OpenClaw memory graph yet.
+            No triples found for this session graph yet.
           </div>
         )}
 
@@ -2627,7 +2650,7 @@ export function AgentHubPage() {
     <div className="page-section" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 0 }}>
       {/* Mode tabs */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg)', padding: '0 16px', gap: 0, flexShrink: 0 }}>
-        {(['agent', 'openclaw', 'peers'] as const).map(m => (
+        {(nodeStatus?.hasOpenClawChannel ? ['openclaw', 'peers'] as const : ['agent', 'peers'] as const).map(m => (
           <button
             key={m}
             onClick={() => setMode(m)}
@@ -2645,7 +2668,7 @@ export function AgentHubPage() {
             ) : (
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             )}
-            {m === 'agent' ? 'My Agent' : m === 'openclaw' ? 'OpenClaw' : 'Peer Chat'}
+            {m === 'agent' ? 'My Agent' : m === 'openclaw' ? `OpenClaw${nodeStatus?.name ? ` (${nodeStatus.name})` : ''}` : 'Peer Chat'}
           </button>
         ))}
       </div>

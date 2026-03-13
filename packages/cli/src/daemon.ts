@@ -1090,6 +1090,7 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      hasOpenClawChannel: !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
       autoUpdate: config.autoUpdate?.enabled ?? false,
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
