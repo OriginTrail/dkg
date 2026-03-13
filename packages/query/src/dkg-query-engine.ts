@@ -1,7 +1,7 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
-import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri } from '@dkg/core';
+import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
 import { validateReadOnlySparql } from './sparql-guard.js';
 
 /**
@@ -73,8 +73,8 @@ export class DKGQueryEngine implements QueryEngine {
       `SELECT ?rootEntity ?paranet WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
-          ?ka <http://dkg.io/ontology/partOf> <${ual}> .
-          <${ual}> <http://dkg.io/ontology/paranet> ?paranet .
+          ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
+          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?paranet .
         }
       }`,
     );
@@ -91,11 +91,11 @@ export class DKGQueryEngine implements QueryEngine {
     // Fetch all triples for this entity
     const dataResult = await this.store.query(
       `SELECT ?s ?p ?o WHERE {
-        GRAPH <${dataGraph}> {
+        GRAPH <${assertSafeIri(dataGraph)}> {
           ?s ?p ?o .
           FILTER(
-            ?s = <${rootEntity}>
-            || STRSTARTS(STR(?s), "${rootEntity}/.well-known/genid/")
+            ?s = <${assertSafeIri(rootEntity)}>
+            || STRSTARTS(STR(?s), "${escapeSparqlLiteral(rootEntity)}/.well-known/genid/")
           )
         }
       }`,

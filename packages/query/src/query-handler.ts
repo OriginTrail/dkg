@@ -1,5 +1,6 @@
 import type { PeerId } from '@dkg/core';
-import { paranetDataGraphUri } from '@dkg/core';
+import { paranetDataGraphUri, assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
+import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
 import type {
@@ -229,7 +230,7 @@ export class QueryHandler {
     }
 
     const dataGraph = paranetDataGraphUri(paranetId);
-    const sparql = `SELECT DISTINCT ?entity WHERE { GRAPH <${dataGraph}> { ?entity a <${rdfType}> } } LIMIT ${limit}`;
+    const sparql = `SELECT DISTINCT ?entity WHERE { GRAPH <${assertSafeIri(dataGraph)}> { ?entity a <${assertSafeIri(rdfType)}> } } LIMIT ${limit}`;
 
     const result = await this.queryEngine.query(sparql);
     const entityUris = result.bindings.map(b => b['entity']);
@@ -253,7 +254,7 @@ export class QueryHandler {
     }
 
     const dataGraph = paranetDataGraphUri(paranetId);
-    const sparql = `SELECT ?p ?o WHERE { GRAPH <${dataGraph}> { <${entityUri}> ?p ?o } }`;
+    const sparql = `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(dataGraph)}> { <${assertSafeIri(entityUri)}> ?p ?o } }`;
     const result = await this.queryEngine.query(sparql);
 
     const ntriples = result.bindings
@@ -360,89 +361,3 @@ function encode(response: QueryResponse): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(response));
 }
 
-/**
- * Linear-time state-machine that replaces string literals, IRIs, and
- * line comments with spaces so keyword regexes only see "code" tokens.
- *
- * Handles: triple-quoted strings ("""/'''), regular strings ("/'),
- * IRIs (<...> only when preceded by whitespace/start — not comparison
- * operators like `< 1`), and line comments (# outside strings/IRIs).
- *
- * No regex backtracking — O(n) single pass, immune to ReDoS.
- */
-function stripLiteralsAndComments(sparql: string): string {
-  const out = new Array<string>(sparql.length);
-  let i = 0;
-  const n = sparql.length;
-
-  while (i < n) {
-    const ch = sparql[i];
-
-    // Triple-quoted strings: """ or '''
-    if (
-      (ch === '"' || ch === "'") &&
-      sparql[i + 1] === ch &&
-      sparql[i + 2] === ch
-    ) {
-      const delim = ch + ch + ch;
-      const start = i;
-      i += 3;
-      while (i < n) {
-        if (sparql[i] === '\\') { i += 2; continue; }
-        if (sparql[i] === ch && sparql[i + 1] === ch && sparql[i + 2] === ch) {
-          i += 3;
-          break;
-        }
-        i++;
-      }
-      for (let j = start; j < i && j < n; j++) out[j] = ' ';
-      continue;
-    }
-
-    // Single/double quoted string
-    if (ch === '"' || ch === "'") {
-      const start = i;
-      i++;
-      while (i < n) {
-        if (sparql[i] === '\\') { i += 2; continue; }
-        if (sparql[i] === ch) { i++; break; }
-        i++;
-      }
-      for (let j = start; j < i && j < n; j++) out[j] = ' ';
-      continue;
-    }
-
-    // IRI: <...> — '<' is an IRI only when NOT preceded by a word character
-    // (letter, digit, ?, $, _) or closing paren/bracket. Those mean comparison.
-    // Everything else (operators, whitespace, punctuation, start-of-input) is
-    // a valid IRI boundary — covers =, !, +, -, *, /, ^, :, (, {, etc.
-    if (ch === '<') {
-      const prev = i > 0 ? sparql[i - 1] : '';
-      const isComparison = prev && (/[a-zA-Z0-9?$_]/.test(prev) || prev === ')' || prev === ']');
-      if (!isComparison) {
-        const next = sparql[i + 1];
-        if (next && (/[a-zA-Z]/.test(next) || next === '#' || next === '/' || next === '.' || next === '_')) {
-          const start = i;
-          i++;
-          while (i < n && sparql[i] !== '>' && sparql[i] !== '\n') i++;
-          if (i < n && sparql[i] === '>') i++;
-          for (let j = start; j < i; j++) out[j] = ' ';
-          continue;
-        }
-      }
-    }
-
-    // Line comment: # (only in code context — we already handled strings/IRIs)
-    if (ch === '#') {
-      const start = i;
-      while (i < n && sparql[i] !== '\n') i++;
-      for (let j = start; j < i; j++) out[j] = ' ';
-      continue;
-    }
-
-    out[i] = ch;
-    i++;
-  }
-
-  return out.join('');
-}

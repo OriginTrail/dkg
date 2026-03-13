@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@dkg/storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@dkg/chain';
 import type { EventBus, OperationContext } from '@dkg/core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, type Ed25519Keypair } from '@dkg/core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, type Ed25519Keypair } from '@dkg/core';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -47,9 +47,6 @@ export interface WriteToWorkspaceResult {
   message: Uint8Array;
 }
 
-function isSafeIri(value: string): boolean {
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(value);
-}
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;

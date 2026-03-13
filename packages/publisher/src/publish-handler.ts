@@ -7,6 +7,7 @@ import {
   encodePublishAck,
   Logger,
   createOperationContext,
+  assertSafeIri,
   type PublishRequestMsg,
 } from '@dkg/core';
 import type { ChainAdapter } from '@dkg/chain';
@@ -528,7 +529,7 @@ export class PublishHandler {
     const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
     const DKG_STATUS = 'http://dkg.io/ontology/status';
     const result = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${metaGraph}> { <${ual}> <${DKG_STATUS}> ?status } } LIMIT 1`,
+      `SELECT ?status WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <${DKG_STATUS}> ?status } } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return false;
     const status = result.bindings[0]?.['status'] ?? '';

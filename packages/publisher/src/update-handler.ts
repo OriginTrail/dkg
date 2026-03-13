@@ -2,7 +2,7 @@ import type { TripleStore, Quad } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { EventBus } from '@dkg/core';
 import type { ChainAdapter, KAUpdateVerification } from '@dkg/chain';
-import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
+import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
@@ -207,7 +207,7 @@ export class UpdateHandler {
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
     const result = await this.store.query(
       `SELECT ?g WHERE {
-        GRAPH ?g { ?ka <${DKG}batchId> "${batchId}"^^<${XSD}integer> }
+        GRAPH ?g { ?ka <${DKG}batchId> "${sparqlInt(batchId)}"^^<${XSD}integer> }
       } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;

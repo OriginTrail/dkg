@@ -324,37 +324,37 @@ describe('ContextOracle', () => {
     it('rejects entityUri with angle brackets', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com> } } SELECT * WHERE { <x'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with double quotes', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com"'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with curly braces', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/path{inject}'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with backslash', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com\\path'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with control characters', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/\x00inject'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with space', async () => {
       await expect(
         oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/some path'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('allows safe IRIs through', async () => {
@@ -368,7 +368,7 @@ describe('ContextOracle', () => {
     it('proveTriple rejects unsafe subject IRI', async () => {
       await expect(
         oracle.proveTriple(PARANET, CG_ID, 'http://x"> DROP ALL', 'http://schema.org/name', '"Alice"'),
-      ).rejects.toThrow('Unsafe characters in IRI');
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('proveTriple rejects literal with unbalanced quotes (SPARQL injection)', async () => {

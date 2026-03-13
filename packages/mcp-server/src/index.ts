@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { DkgClient } from './connection.js';
+import { escapeSparqlLiteral } from '@dkg/core';
 
 const PARANET = 'dev-coordination';
 const DG = 'https://ontology.dkg.io/devgraph#';
@@ -387,9 +388,7 @@ server.registerTool(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function esc(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
+const esc = escapeSparqlLiteral;
 
 // ---------------------------------------------------------------------------
 // Adapter loading — DKG_ADAPTERS=autoresearch,other,...

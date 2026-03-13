@@ -17,3 +17,11 @@ export {
   type GenesisQuad,
 } from './genesis.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export {
+  assertSafeIri,
+  isSafeIri,
+  sparqlIri,
+  escapeSparqlLiteral,
+  sparqlString,
+  sparqlInt,
+} from './sparql-safe.js';
