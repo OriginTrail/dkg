@@ -663,6 +663,20 @@ describe('serveStatic path traversal prevention', () => {
     expect(state.body).toContain('<html>');
   });
 
+  it('allows filenames starting with .. that are not traversals', async () => {
+    setup();
+    writeFileSync(join(staticDir, '..config.json'), '{"ok":true}');
+    const { req } = createMockReq({ method: 'GET', path: '/ui/..config.json' });
+    const { res, state } = createMockRes();
+    const rawUrl = { pathname: '/ui/..config.json', searchParams: new URLSearchParams() } as unknown as URL;
+
+    await handleNodeUIRequest(
+      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).not.toBe(403);
+  });
+
   it('serves valid /ui/ root normally', async () => {
     setup();
     const { req, url } = createMockReq({ method: 'GET', path: '/ui/' });
