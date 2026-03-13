@@ -205,5 +205,9 @@ export interface DkgOpenClawConfig {
     pollIntervalMs?: number;
     /** Timeout in ms for agent consultation per turn. Default: 15000. */
     decisionTimeoutMs?: number;
+    /** Poll interval in ms for the swarm watcher (waiting for game start / lobby fill). Default: 5000. */
+    watchIntervalMs?: number;
+    /** Timeout in ms for swarm watcher — stop watching if game never starts. Default: 600000 (10 min). */
+    watchTimeoutMs?: number;
   };
 }

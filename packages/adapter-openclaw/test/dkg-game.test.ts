@@ -397,6 +397,243 @@ describe('parseActionResponse', () => {
 // Tool error handling
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SwarmWatcher — auto-engage autopilot after join/create
+// ---------------------------------------------------------------------------
+
+describe('SwarmWatcher', () => {
+  const recruitingSwarm = {
+    id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+    leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+    voteStatus: null, lastTurn: null,
+  };
+
+  const travelingSwarm = {
+    ...recruitingSwarm, status: 'traveling',
+    gameState: { sessionId: 's', player: 'p', epochs: 1, trainingTokens: 500, apiCredits: 5,
+      computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+      party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+      status: 'active', moveCount: 1 },
+  };
+
+  const fullSwarm = { ...recruitingSwarm, playerCount: 3 };
+
+  function mockFetchForSwarm(swarmResponse: any) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(swarmResponse) });
+      }
+      if (String(url).includes('/join')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(swarmResponse) });
+      }
+      if (String(url).includes('/create')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(swarmResponse) });
+      }
+      if (String(url).includes('/start')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...swarmResponse, status: 'traveling', gameState: travelingSwarm.gameState }) });
+      }
+      if (String(url).includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+  }
+
+  it('game_join with recruiting swarm starts a watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      const result = await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.watcher).toContain('Watching for game start');
+
+      const ws = plugin.getWatchState();
+      expect(ws.active).toBe(true);
+      expect(ws.mode).toBe('wait-for-start');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('game_create starts a wait-for-full watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const createTool = api.tools.find(t => t.name === 'game_create')!;
+      const result = await createTool.execute('test', { swarm_name: 'Test', player_name: 'Bot' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.watcher).toContain('auto-start expedition');
+
+      const ws = plugin.getWatchState();
+      expect(ws.active).toBe(true);
+      expect(ws.mode).toBe('wait-for-full');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('no watcher without consultAgent', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      const api = mockApi();
+      plugin.register(api);
+
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      const result = await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.watcher).toBeUndefined();
+      expect(plugin.getWatchState().active).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('game_autopilot_stop stops the watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start a watcher via join
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Stop via autopilot_stop
+      const stopTool = api.tools.find(t => t.name === 'game_autopilot_stop')!;
+      await stopTool.execute('test', {});
+      expect(plugin.getWatchState().active).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('game_start stops an active watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // game_start now switches fetch to return traveling
+      globalThis.fetch = mockFetchForSwarm(travelingSwarm);
+      const startTool = api.tools.find(t => t.name === 'game_start')!;
+      await startTool.execute('test', { swarm_id: 'sw-1' });
+      expect(plugin.getWatchState().active).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('second game_join replaces existing watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().swarmId).toBe('sw-1');
+
+      // Join a different swarm — replace the watcher
+      const swarm2 = { ...recruitingSwarm, id: 'sw-2' };
+      globalThis.fetch = mockFetchForSwarm(swarm2);
+      await joinTool.execute('test', { swarm_id: 'sw-2', player_name: 'Bot' });
+      expect(plugin.getWatchState().swarmId).toBe('sw-2');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('plugin.stop() cleans up watcher', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      await plugin.stop();
+      expect(plugin.getWatchState().active).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('game_status includes watcher state', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mockFetchForSwarm(recruitingSwarm);
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+
+      // Check status
+      const statusTool = api.tools.find(t => t.name === 'game_status')!;
+      const result = await statusTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.watcher.active).toBe(true);
+      expect(parsed.watcher.mode).toBe('wait-for-start');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool error handling
+// ---------------------------------------------------------------------------
+
 describe('game tool error handling', () => {
   it('returns friendly error when daemon is unreachable', async () => {
     const originalFetch = globalThis.fetch;
