@@ -2,11 +2,12 @@ import type { TripleStore, Quad } from '@dkg/storage';
 import { GraphManager } from '@dkg/storage';
 import type { EventBus } from '@dkg/core';
 import type { ChainAdapter, KAUpdateVerification } from '@dkg/chain';
-import { Logger, createOperationContext, DKGEvent } from '@dkg/core';
+import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@dkg/core';
 import { decodeKAUpdateRequest } from '@dkg/core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
 import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
+import { updateMetaMerkleRoot } from './metadata.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
 const EXPECTED_MERKLE_ROOT_LEN = 32;
@@ -181,6 +182,15 @@ export class UpdateHandler {
       // Binding was already established from a trusted source (local publish or metadata lookup).
       // Do NOT set from gossip — that would allow first-message-wins paranet spoofing.
 
+      try {
+        await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, BigInt(batchId), computedRoot);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to update _meta merkleRoot for batchId=${batchId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 
       this.eventBus.emit(DKGEvent.KA_UPDATED, {
@@ -207,7 +217,7 @@ export class UpdateHandler {
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
     const result = await this.store.query(
       `SELECT ?g WHERE {
-        GRAPH ?g { ?ka <${DKG}batchId> "${batchId}"^^<${XSD}integer> }
+        GRAPH ?g { ?ka <${DKG}batchId> "${sparqlInt(batchId)}"^^<${XSD}integer> }
       } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGNode } from '../src/node.js';
-import { ProtocolRouter } from '../src/protocol-router.js';
+import { ProtocolRouter, DEFAULT_MAX_READ_BYTES } from '../src/protocol-router.js';
 import { GossipSubManager } from '../src/gossipsub-manager.js';
 import { TypedEventBus } from '../src/event-bus.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
@@ -158,6 +158,69 @@ describe('ProtocolRouter', () => {
     );
     expect(Array.from(response)).toEqual([5, 4, 3, 2, 1]);
   }, 15000);
+
+  it('rejects oversized response from handler', async () => {
+    const node1 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    const node2 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+
+    const tinyLimit = 64;
+    const router1 = new ProtocolRouter(node1, { maxReadBytes: tinyLimit });
+    const router2 = new ProtocolRouter(node2);
+
+    router2.register('/test/big-response/1.0.0', async () => {
+      return new Uint8Array(tinyLimit + 100);
+    });
+
+    await connectNodes(node1, node2);
+
+    await expect(
+      router1.send(node2.peerId, '/test/big-response/1.0.0', new Uint8Array(1)),
+    ).rejects.toThrow('Read limit exceeded');
+  }, 15000);
+
+  it('rejects oversized request from sender', async () => {
+    const node1 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    const node2 = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+
+    const tinyLimit = 64;
+    const router1 = new ProtocolRouter(node1);
+    const router2 = new ProtocolRouter(node2, { maxReadBytes: tinyLimit });
+
+    let handlerCalled = false;
+    router2.register('/test/big-request/1.0.0', async (data) => {
+      handlerCalled = true;
+      return new Uint8Array(1);
+    });
+
+    await connectNodes(node1, node2);
+
+    await expect(
+      router1.send(node2.peerId, '/test/big-request/1.0.0', new Uint8Array(tinyLimit + 100)),
+    ).rejects.toThrow();
+    expect(handlerCalled).toBe(false);
+  }, 15000);
+
+  it('DEFAULT_MAX_READ_BYTES is 10 MB', () => {
+    expect(DEFAULT_MAX_READ_BYTES).toBe(10 * 1024 * 1024);
+  });
 });
 
 describe('GossipSubManager', () => {

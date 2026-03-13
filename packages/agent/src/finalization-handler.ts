@@ -3,6 +3,7 @@ import {
   paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
   Logger, createOperationContext,
+  assertSafeIri, isSafeIri,
   type OperationContext,
 } from '@dkg/core';
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
@@ -100,7 +101,7 @@ export class FinalizationHandler {
   private async isAlreadyConfirmed(ual: string, metaGraph: string): Promise<boolean> {
     try {
       const result = await this.store.query(
-        `ASK { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> "confirmed" } }`,
+        `ASK { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <http://dkg.io/ontology/status> "confirmed" } }`,
       );
       return result.type === 'boolean' && result.value === true;
     } catch {
@@ -385,7 +386,7 @@ export class FinalizationHandler {
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
     const DKG = 'http://dkg.io/ontology/';
     const result = await this.store.query(
-      `SELECT ?op WHERE { GRAPH <${metaGraph}> { ?op <${DKG}rootEntity> <${rootEntity}> } }`,
+      `SELECT ?op WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ?op <${DKG}rootEntity> <${assertSafeIri(rootEntity)}> } }`,
     );
     if (result.type !== 'bindings') return;
     for (const row of result.bindings) {
@@ -395,7 +396,7 @@ export class FinalizationHandler {
         subject: op, predicate: `${DKG}rootEntity`, object: rootEntity, graph: metaGraph,
       }]);
       const remaining = await this.store.query(
-        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> <${DKG}rootEntity> ?r } }`,
+        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(op)}> <${DKG}rootEntity> ?r } }`,
       );
       const rawCount = remaining.type === 'bindings' && remaining.bindings[0]?.['c'];
       const countVal = typeof rawCount === 'string'
@@ -420,7 +421,3 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
-function isSafeIri(value: string): boolean {
-  if (!value) return false;
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]*$/.test(value);
-}

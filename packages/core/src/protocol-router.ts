@@ -2,21 +2,27 @@ import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
 
+/** Default max bytes readAll will buffer before aborting (10 MB). */
+export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
+
 export class ProtocolRouter {
   private readonly node: DKGNode;
   private handlers = new Map<string, DKGStreamHandler>();
+  readonly maxReadBytes: number;
 
-  constructor(node: DKGNode) {
+  constructor(node: DKGNode, options?: { maxReadBytes?: number }) {
     this.node = node;
+    this.maxReadBytes = options?.maxReadBytes ?? DEFAULT_MAX_READ_BYTES;
   }
 
   register(protocolId: string, handler: DKGStreamHandler): void {
     this.handlers.set(protocolId, handler);
     const libp2p = this.node.libp2p;
 
+    const limit = this.maxReadBytes;
     libp2p.handle(protocolId, async (stream: Stream, connection) => {
       try {
-        const requestData = await readAll(stream);
+        const requestData = await readAll(stream, limit);
         const peerId = {
           toString: () => connection.remotePeer.toString(),
           toBytes: () => connection.remotePeer.toMultihash().bytes,
@@ -72,7 +78,7 @@ export class ProtocolRouter {
         stream.send(data);
         await stream.close({ signal });
 
-        return await readAll(stream);
+        return await readAll(stream, this.maxReadBytes);
       } catch (err: unknown) {
         lastErr = err;
         const msg = err instanceof Error ? err.message.toLowerCase() : '';
@@ -90,12 +96,22 @@ export class ProtocolRouter {
   }
 }
 
-async function readAll(stream: Stream | AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+async function readAll(
+  stream: Stream | AsyncIterable<Uint8Array>,
+  maxBytes = DEFAULT_MAX_READ_BYTES,
+): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
+  let total = 0;
   for await (const chunk of stream) {
-    chunks.push(
-      chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray()),
-    );
+    const buf = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk.subarray());
+    total += buf.length;
+    if (total > maxBytes) {
+      if ('abort' in stream && typeof (stream as Stream).abort === 'function') {
+        (stream as Stream).abort(new Error('read limit exceeded'));
+      }
+      throw new Error(`Read limit exceeded (${maxBytes} bytes)`);
+    }
+    chunks.push(buf);
   }
   return concat(chunks);
 }

@@ -154,3 +154,29 @@ describe('wagon-train: leave during travel', () => {
     expect(result).toBeNull();
   });
 });
+
+describe('wagon-train: multi-swarm participation', () => {
+  it('allows the same leader to create multiple active swarms', () => {
+    const leader = uid('multi-leader');
+    const swarmA = createSwarm(leader, 'Leader', `MultiA-${testSeq}`);
+    const swarmB = createSwarm(leader, 'Leader', `MultiB-${testSeq}`);
+    expect(swarmA.id).not.toBe(swarmB.id);
+    expect(swarmA.status).toBe('recruiting');
+    expect(swarmB.status).toBe('recruiting');
+  });
+
+  it('allows a player to join multiple swarms', () => {
+    const leaderA = uid('leader-a');
+    const leaderB = uid('leader-b');
+    const player = uid('multi-player');
+
+    const swarmA = createSwarm(leaderA, 'LeaderA', `JoinA-${testSeq}`);
+    const swarmB = createSwarm(leaderB, 'LeaderB', `JoinB-${testSeq}`);
+
+    joinSwarm(swarmA.id, player, 'MultiPlayer');
+    joinSwarm(swarmB.id, player, 'MultiPlayer');
+
+    expect(swarmA.players.some((p) => p.playerId === player)).toBe(true);
+    expect(swarmB.players.some((p) => p.playerId === player)).toBe(true);
+  });
+});

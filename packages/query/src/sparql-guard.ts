@@ -6,6 +6,8 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
+import { stripLiteralsAndComments } from './sparql-utils.js';
+
 const MUTATING_KEYWORDS = [
   'INSERT',
   'DELETE',
@@ -37,7 +39,7 @@ export interface SparqlGuardResult {
  * Returns `{ safe: false, reason }` for anything that could mutate data.
  */
 export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
-  const stripped = stripSparqlComments(sparql);
+  const stripped = stripLiteralsAndComments(sparql);
 
   if (!READ_ONLY_FORMS.test(stripped)) {
     return {
@@ -59,12 +61,3 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
   return { safe: true };
 }
 
-function stripSparqlComments(sparql: string): string {
-  return sparql
-    .split('\n')
-    .map((line) => {
-      const hashIdx = line.indexOf('#');
-      return hashIdx >= 0 ? line.slice(0, hashIdx) : line;
-    })
-    .join('\n');
-}

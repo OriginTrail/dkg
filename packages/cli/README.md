@@ -5,7 +5,12 @@ Command-line interface and daemon for DKG V9. This is the main entry point for r
 ## Installation
 
 ```bash
-# From the monorepo
+npm install -g @dkg/cli
+```
+
+**From source** (monorepo development):
+
+```bash
 pnpm build
 pnpm link --global --filter @dkg/cli
 
@@ -57,7 +62,7 @@ dkg query "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 
 ## HTTP API
 
-When the daemon is running, it exposes a local HTTP API (default: `http://localhost:8900`). Endpoints include:
+When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Endpoints include:
 
 - `POST /api/publish` — publish RDF data
 - `POST /api/query` — execute SPARQL queries

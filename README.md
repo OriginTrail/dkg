@@ -1,8 +1,73 @@
+```
+██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗ 
+██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██║     ██║╚══███╔╝██╔════╝██╔══██╗
+██║  ██║█████╗  ██║     █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     ██║  ███╔╝ █████╗  ██║  ██║
+██║  ██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██║ ███╔╝  ██╔══╝  ██║  ██║
+██████╔╝███████╗╚██████╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║███████╗██║███████╗███████╗██████╔╝
+╚═════╝ ╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═════╝ 
+
+██╗  ██╗███╗   ██╗ ██████╗ ██╗    ██╗██╗     ███████╗██████╗  ██████╗ ███████╗
+██║ ██╔╝████╗  ██║██╔═══██╗██║    ██║██║     ██╔════╝██╔══██╗██╔════╝ ██╔════╝
+█████╔╝ ██╔██╗ ██║██║   ██║██║ █╗ ██║██║     █████╗  ██║  ██║██║  ███╗█████╗
+██╔═██╗ ██║╚██╗██║██║   ██║██║███╗██║██║     ██╔══╝  ██║  ██║██║   ██║██╔══╝
+██║  ██╗██║ ╚████║╚██████╔╝╚███╔███╔╝███████╗███████╗██████╔╝╚██████╔╝███████╗
+╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝
+
+ ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
+██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝  
+```
+
 # DKG V9 - Decentralized Knowledge Graph
+
+[![Build Passing](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
+[![Release Version](https://img.shields.io/badge/Release-latest-2ea44f)](https://github.com/OriginTrail/dkg-v9/releases)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
 Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF knowledge, query shared context, discover peers, exchange encrypted messages, and coordinate across topic-specific paranets.
 
-## What You Get
+[Join the Testnet](docs/setup/JOIN_TESTNET.md) · [Node UI](http://127.0.0.1:9200/ui) · [Releases](https://github.com/OriginTrail/dkg-v9/releases) · [Discord](https://discord.com/invite/xCaY7hvNwD)
+
+## Quick Start (60 seconds)
+
+```bash
+npm install -g @dkg/cli
+dkg init
+dkg start
+```
+
+Open `http://127.0.0.1:9200/ui`, then start with:
+
+- **Explorer -> SPARQL** to query graph data.
+- **Agent Hub** to inspect local state and interact with agents.
+- **Paranets** to navigate data domains.
+
+Terminal checks:
+
+```bash
+dkg status
+dkg logs
+```
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Architecture At a Glance](#architecture-at-a-glance)
+- [Setup Guides](#setup-guides)
+- [Common Commands](#common-commands)
+- [Updating and Rollback](#updating-and-rollback)
+- [API Authentication](#api-authentication)
+- [Key Concepts](#key-concepts-first-time-friendly)
+- [Monorepo Packages](#monorepo-packages)
+- [Specs](#specs)
+- [Production Readiness](#production-readiness)
+- [Development](#development)
+
+## Highlights
 
 - Shared memory across agents through RDF + SPARQL.
 - Cryptographic verifiability of published knowledge.
@@ -11,70 +76,32 @@ Trusted shared memory for AI agents. DKG nodes let agents publish verifiable RDF
 - Node UI for querying, graph exploration, and app interactions.
 - Blue-green updates with `dkg update` and safe rollback with `dkg rollback`.
 
-## Quick Start (UI First)
+## Architecture At a Glance
 
-### Install CLI
-
-```bash
-npm install -g @dkg/cli
+```text
+Agents / CLI / Apps
+        |
+        v
+     DKG Node (Daemon + UI)
+    /        |           \
+  P2P     Storage       Chain
+Network   (RDF/SPARQL)  (KA/KC finalization)
 ```
-
-### Initialize and Start Node
-
-```bash
-dkg init
-dkg start
-```
-
-### Open the Node UI
-
-```bash
-# Browser:
-http://127.0.0.1:9200/ui
-```
-
-From the UI, start with:
-
-- **Explorer -> SPARQL** to query graph data.
-- **Agent Hub** to inspect local state and interact with agents.
-- **Paranets** to navigate data domains.
-
-If you prefer terminal checks while keeping UI as primary workflow:
-
-```bash
-dkg status
-dkg logs
-```
-
-For the full testnet onboarding (wallet funding, config, publish/query walkthrough), use [Join the Testnet](docs/setup/JOIN_TESTNET.md).
-
-## Updating and Rollback
-
-DKG uses a blue-green slot strategy for safer upgrades.
-
-```bash
-dkg update --check                 # check if update is available
-dkg update                         # update to configured target
-dkg update 9.0.0-beta.2 --allow-prerelease
-dkg rollback                       # swap back to previous slot
-```
-
-Release and tagging workflow is documented in [RELEASE_PROCESS.md](RELEASE_PROCESS.md).
 
 ## Setup Guides
 
 | Guide | For |
 |---|---|
 | [Join the Testnet](docs/setup/JOIN_TESTNET.md) | End-to-end node setup and first publish/query |
-| [OpenClaw Setup](https://github.com/OriginTrail/dkg-v9/blob/docs/readme-refresh/packages/adapter-openclaw/README.md) | OpenClaw integration |
+| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | OpenClaw integration |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | ElizaOS integration |
 | [Custom Project Setup](docs/setup/SETUP_CUSTOM.md) | Standalone Node.js/TypeScript projects |
 | [SPARQL HTTP Storage](docs/setup/STORAGE_SPARQL_HTTP.md) | External triple store backends |
-| [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | Getting Base Sepolia ETH/TRAC |
+| [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | Getting Base Sepolia ETH and TRAC |
 
 ### Run With OpenClaw (Quick Path)
 
-Use this when you want OpenClaw to use a local DKG node for memory + tools while still driving most workflows from the DKG UI.
+Use this when you want OpenClaw to use a local DKG node for memory and tools while driving most workflows from the DKG UI.
 
 1. Install and build this repository:
    ```bash
@@ -98,6 +125,58 @@ Use this when you want OpenClaw to use a local DKG node for memory + tools while
 Complete reference and troubleshooting:
 - [OpenClaw setup doc](docs/setup/SETUP_OPENCLAW.md)
 - [Adapter runbook](packages/adapter-openclaw/README.md)
+
+## Common Commands
+
+```bash
+dkg init
+dkg start [-f]
+dkg stop
+dkg status
+dkg peers
+dkg send <name> <msg>
+dkg chat <name>
+dkg publish <paranet> -f <file>
+dkg query [paranet] -q <sparql>
+dkg paranet create <id>
+dkg paranet list
+dkg update [versionOrRef] [--check] [--allow-prerelease]
+dkg rollback
+dkg auth show
+dkg auth rotate
+dkg logs
+```
+
+## Updating and Rollback
+
+DKG uses a blue-green slot strategy for safer upgrades.
+
+```bash
+dkg update --check                 # check if update is available
+dkg update                         # update to configured target
+dkg update 9.0.0-beta.2 --allow-prerelease
+dkg rollback                       # swap back to previous slot
+```
+
+Release and tagging workflow is documented in [RELEASE_PROCESS.md](RELEASE_PROCESS.md).
+
+## API Authentication
+
+Node APIs use bearer token auth by default. Token is created on first run and stored in `~/.dkg/auth.token`.
+
+```bash
+TOKEN=$(dkg auth show)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
+```
+
+## Key Concepts (First-Time Friendly)
+
+- **Knowledge Asset (KA)**: the core unit of published knowledge. Think of it as one entity plus its RDF statements, with cryptographic proof and optional private portions.
+- **Paranet**: a topic-specific domain where agents coordinate and exchange knowledge (for example, a game paranet or app-specific paranet).
+- **Context graph**: the named graph that scopes triples for a specific context (turn, workflow, app state, etc.), making provenance and querying more precise.
+- **Workspace graph**: a collaborative staging layer for in-progress writes before they are finalized/enshrined as durable knowledge.
+- **Knowledge Collection (KC)**: a batch commit of multiple KAs finalized together on-chain.
+- **DKG App**: an installable app running with node capabilities (publish/query/messaging) and often surfaced through Node UI.
 
 ## Monorepo Packages
 
@@ -123,55 +202,6 @@ dkg-app-origin-trail-game Installable game app package
 @dkg/adapter-autoresearch AutoResearch adapter
 ```
 
-## Key Concepts (First-Time Friendly)
-
-- **Knowledge Asset (KA)**: the core unit of published knowledge. Think of it as one entity plus its RDF statements, with cryptographic proof and optional private portions.
-- **Paranet**: a topic-specific domain where agents coordinate and exchange knowledge (for example, a game paranet or app-specific paranet).
-- **Context graph**: the named graph that scopes triples for a specific context (turn, workflow, app state, etc.), making provenance and querying more precise.
-- **Workspace graph**: a collaborative staging layer for in-progress writes before they are finalized/enshrined as durable knowledge.
-- **Knowledge Collection (KC)**: a batch commit of multiple KAs finalized together on-chain.
-- **DKG App**: an installable app running with node capabilities (publish/query/messaging) and often surfaced through Node UI.
-
-## CLI Reference (Common)
-
-```bash
-dkg init
-dkg start [-f]
-dkg stop
-dkg status
-dkg peers
-dkg send <name> <msg>
-dkg chat <name>
-dkg publish <paranet> -f <file>
-dkg query [paranet] -q <sparql>
-dkg paranet create <id>
-dkg paranet list
-dkg update [versionOrRef] [--check] [--allow-prerelease]
-dkg rollback
-dkg auth show
-dkg auth rotate
-dkg logs
-```
-
-## Development
-
-```bash
-pnpm install
-pnpm build
-pnpm test
-pnpm test:coverage
-pnpm --filter @dkg/cli test
-```
-
-## API Authentication
-
-Node APIs use bearer token auth by default. Token is created on first run and stored in `~/.dkg/auth.token`.
-
-```bash
-TOKEN=$(dkg auth show)
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
-```
-
 ## Specs
 
 | Spec | Focus |
@@ -182,7 +212,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 | [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
 | [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Staking, conviction, and governance direction |
 
-## Current Status
+## Production Readiness
 
 On-chain publishing is live on Base Sepolia. Core node capabilities are production-oriented and actively exercised on testnet:
 
@@ -192,3 +222,13 @@ On-chain publishing is live on Base Sepolia. Core node capabilities are producti
 - Node UI explorer and SPARQL tooling
 - DKG Apps support (including OriginTrail Game)
 - Blue-green update and rollback lifecycle
+
+## Development
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm test:coverage
+pnpm --filter @dkg/cli test
+```

@@ -1,3 +1,4 @@
+import { assertSafeIri, escapeSparqlLiteral } from '@dkg/core';
 import type { TripleStore, Quad } from './triple-store.js';
 import type { GraphManager } from './graph-manager.js';
 
@@ -44,11 +45,11 @@ export class PrivateContentStore {
     const graphUri = this.graphManager.privateGraphUri(paranetId);
     const sparql = `
       SELECT ?s ?p ?o WHERE {
-        GRAPH <${graphUri}> {
+        GRAPH <${assertSafeIri(graphUri)}> {
           ?s ?p ?o .
           FILTER(
-            ?s = <${rootEntity}>
-            || STRSTARTS(STR(?s), "${rootEntity}/.well-known/genid/")
+            ?s = <${assertSafeIri(rootEntity)}>
+            || STRSTARTS(STR(?s), "${escapeSparqlLiteral(rootEntity)}/.well-known/genid/")
           )
         }
       }

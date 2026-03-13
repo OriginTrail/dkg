@@ -50,14 +50,12 @@ export interface TurnResult {
 export interface SwarmLobby {
   openSwarms: Swarm[];
   mySwarms: Swarm[];
+  recruitingSwarms?: Swarm[];
 }
 
 const swarms = new Map<string, Swarm>();
 
 export function createSwarm(leaderId: string, leaderName: string, swarmName: string, maxPlayers: number = 3): Swarm {
-  const existing = findPlayerSwarm(leaderId);
-  if (existing && existing.status !== 'finished') throw new Error('You already have an active swarm. Leave it first.');
-
   const swarm: Swarm = {
     id: `swarm-${uuid().slice(0, 8)}`,
     name: swarmName,
@@ -82,9 +80,6 @@ export function joinSwarm(swarmId: string, playerId: string, displayName: string
   if (swarm.status !== 'recruiting') throw new Error('Swarm is not accepting new members');
   if (swarm.players.length >= swarm.maxPlayers) throw new Error('Swarm is full');
   if (swarm.players.some(p => p.playerId === playerId)) throw new Error('You are already in this swarm');
-  const existing = findPlayerSwarm(playerId);
-  if (existing && existing.status !== 'finished' && existing.id !== swarmId) throw new Error('You are already in another swarm. Leave it first.');
-
   swarm.players.push({ playerId, displayName, joinedAt: Date.now(), isLeader: false });
   return swarm;
 }
@@ -222,13 +217,20 @@ function resolveTurn(swarm: Swarm): void {
 export function getLobby(playerId: string): SwarmLobby {
   const openSwarms: Swarm[] = [];
   const mySwarms: Swarm[] = [];
+  const recruitingSwarms: Swarm[] = [];
   for (const swarm of swarms.values()) {
     if (swarm.players.some(p => p.playerId === playerId)) mySwarms.push(swarm);
-    else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) openSwarms.push(swarm);
+    else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
+      openSwarms.push(swarm);
+      recruitingSwarms.push(swarm);
+    } else if (swarm.status === 'recruiting') {
+      recruitingSwarms.push(swarm);
+    }
   }
   openSwarms.sort((a, b) => b.createdAt - a.createdAt);
   mySwarms.sort((a, b) => b.createdAt - a.createdAt);
-  return { openSwarms, mySwarms };
+  recruitingSwarms.sort((a, b) => b.createdAt - a.createdAt);
+  return { openSwarms, mySwarms, recruitingSwarms };
 }
 
 export function getSwarm(swarmId: string): Swarm | null {

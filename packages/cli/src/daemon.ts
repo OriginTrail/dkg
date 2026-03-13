@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { execSync, exec, execFile } from 'node:child_process';
+import { execSync, exec, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -53,9 +53,34 @@ function getNodeVersion(): string {
     return pkg.version ?? '0.0.0';
   } catch { return '0.0.0'; }
 }
+
+function getCurrentCommitShort(): string {
+  try {
+    const commitFile = join(dkgDir(), '.current-commit');
+    return readFileSync(commitFile, 'utf-8').trim().slice(0, 8);
+  } catch {
+    try {
+      const rDir = releasesDir();
+      const slotDir = existsSync(join(rDir, 'current'))
+        ? join(rDir, 'current')
+        : dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+      return execSync('git rev-parse --short HEAD', { encoding: 'utf-8', stdio: 'pipe', cwd: slotDir }).trim();
+    } catch { return ''; }
+  }
+}
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
+
+const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '' };
+
+function resolveDaemonEntryPoint(): string {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(rDir) && existsSync(currentLink)
+    ? currentLink
+    : fileURLToPath(import.meta.url);
+}
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -148,21 +173,35 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   const role = config.nodeRole ?? 'edge';
 
-  const banner = String.raw`
-__/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\\\\\\\\\____        
- _\/\\\////////\\\__\/\\\_____/\\\//____/\\\//////////__\/\\\_______\/\\\____/\\\///////\\\__       
-  _\/\\\______\//\\\_\/\\\__/\\\//______/\\\_____________\//\\\______/\\\____/\\\______\//\\\_      
-   _\/\\\_______\/\\\_\/\\\\\\//\\\_____\/\\\____/\\\\\\\__\//\\\____/\\\____\//\\\_____/\\\\\_     
-    _\/\\\_______\/\\\_\/\\\//_\//\\\____\/\\\___\/////\\\___\//\\\__/\\\______\///\\\\\\\\/\\\_    
-     _\/\\\_______\/\\\_\/\\\____\//\\\___\/\\\_______\/\\\____\//\\\/\\\_________\////////\/\\\_   
-      _\/\\\_______/\\\__\/\\\_____\//\\\__\/\\\_______\/\\\_____\//\\\\\________/\\________/\\\__  
-       _\/\\\\\\\\\\\\/___\/\\\______\//\\\_\//\\\\\\\\\\\\/_______\//\\\________\//\\\\\\\\\\\/___ 
-        _\////////////_____\///________\///___\////////////__________\///__________\///////////_____
+  const banner = `
+██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗ 
+██╔══██╗██╔════╝██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██╔══██╗██║     ██║╚══███╔╝██╔════╝██╔══██╗
+██║  ██║█████╗  ██║     █████╗  ██╔██╗ ██║   ██║   ██████╔╝███████║██║     ██║  ███╔╝ █████╗  ██║  ██║
+██║  ██║██╔══╝  ██║     ██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██╔══██║██║     ██║ ███╔╝  ██╔══╝  ██║  ██║
+██████╔╝███████╗╚██████╗███████╗██║ ╚████║   ██║   ██║  ██║██║  ██║███████╗██║███████╗███████╗██████╔╝
+╚═════╝ ╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═════╝ 
+
+██╗  ██╗███╗   ██╗ ██████╗ ██╗    ██╗██╗     ███████╗██████╗  ██████╗ ███████╗
+██║ ██╔╝████╗  ██║██╔═══██╗██║    ██║██║     ██╔════╝██╔══██╗██╔════╝ ██╔════╝
+█████╔╝ ██╔██╗ ██║██║   ██║██║ █╗ ██║██║     █████╗  ██║  ██║██║  ███╗█████╗
+██╔═██╗ ██║╚██╗██║██║   ██║██║███╗██║██║     ██╔══╝  ██║  ██║██║   ██║██╔══╝
+██║  ██╗██║ ╚████║╚██████╔╝╚███╔███╔╝███████╗███████╗██████╔╝╚██████╔╝███████╗
+╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝ ╚══════╝
+
+ ██████╗ ██████╗  █████╗ ██████╗ ██╗  ██╗              ██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
+██╔════╝ ██╔══██╗██╔══██╗██╔══██╗██║  ██║              ██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
+██║  ███╗██████╔╝███████║██████╔╝███████║    █████╗    ██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
+██║   ██║██╔══██╗██╔══██║██╔═══╝ ██╔══██║    ╚════╝    ██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
+╚██████╔╝██║  ██║██║  ██║██║     ██║  ██║              ██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
+ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝              ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝
 `;
   origStdoutWrite(banner + '\n');
   appendFile(logFile, banner + '\n').catch(() => {});
 
-  log(`Starting DKG ${role} node "${config.name}"...`);
+  const nodeVersion = getNodeVersion();
+  const nodeCommit = getCurrentCommitShort(); // cached once at startup — avoids execSync in hot path
+  const versionTag = nodeCommit ? `v${nodeVersion}, ${nodeCommit}` : `v${nodeVersion}`;
+  log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
   const syncParanets = [...new Set([
@@ -311,21 +350,42 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Auto-update
+  // Version check + auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
-  if (config.autoUpdate?.enabled) {
-    const au = config.autoUpdate;
-    log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
-    updateInterval = setInterval(
-      async () => {
+  let pendingForegroundRestart = false;
+  const au = config.autoUpdate;
+  if (au?.repo && au?.branch) {
+    const checkIntervalMs = (au.checkIntervalMinutes || 30) * 60_000;
+    if (au.enabled) {
+      log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
+    } else {
+      log(`Auto-update disabled — version check only: ${au.repo}@${au.branch}`);
+    }
+
+    const runCheck = async () => {
+      const commitStatus = await checkForNewCommitWithStatus(au, log);
+      if (commitStatus.status !== 'error') {
+        lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
+        lastUpdateCheck.checkedAt = Date.now();
+        if (commitStatus.commit) lastUpdateCheck.latestCommit = commitStatus.commit.slice(0, 8);
+      }
+      if (au.enabled && commitStatus.status === 'available') {
         const updated = await checkForUpdate(au, log);
         if (updated) {
+          if (foreground) {
+            log('Auto-update: update activated; restarting foreground daemon in-place.');
+            pendingForegroundRestart = true;
+            await shutdown(0);
+            return;
+          }
           log('Auto-update: update activated; restarting daemon process.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
         }
-      },
-      au.checkIntervalMinutes * 60_000,
-    );
+      }
+    };
+
+    setTimeout(runCheck, 15_000);
+    updateInterval = setInterval(runCheck, checkIntervalMs);
   }
 
   // --- Dashboard DB + Metrics ---
@@ -414,6 +474,10 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
       peerId: agent.peerId,
       network: networkKey,
       nodeName: config.name,
+      version: nodeVersion,
+      commit: nodeCommit,
+      role: config.nodeRole ?? 'edge',
+      autoUpdate: config.autoUpdate?.enabled ?? false,
     });
     logPusher.start();
     log(`Telemetry: log streaming enabled → ${syslogEndpoint.host}:${syslogEndpoint.port}`);
@@ -697,6 +761,8 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
         tracker,
         memoryManager,
         bridgeAuthToken,
+        nodeVersion,
+        nodeCommit,
         catchupTracker,
       );
     } catch (err: any) {
@@ -735,6 +801,25 @@ __/\\\\\\\\\\\\_____/\\\________/\\\_____/\\\\\\\\\\\\__/\\\________/\\\______/\
     await removePid();
     await removeApiPort();
     log('Stopped.');
+
+    if (pendingForegroundRestart) {
+      pendingForegroundRestart = false;
+      const entryPoint = resolveDaemonEntryPoint();
+      log(`Auto-update: launching updated foreground daemon from ${entryPoint}`);
+      try {
+        spawn(
+          process.execPath,
+          [...process.execArgv, entryPoint, 'start', '--foreground'],
+          {
+            stdio: 'inherit',
+            env: process.env,
+          },
+        );
+      } catch (err: any) {
+        log(`Auto-update: failed to relaunch foreground daemon — ${err.message}`);
+        process.exit(1);
+      }
+    }
     process.exit(exitCode);
   }
 
@@ -970,6 +1055,8 @@ async function handleRequest(
   tracker: OperationTracker,
   memoryManager: ChatMemoryManager,
   bridgeAuthToken: string | undefined,
+  nodeVersion: string,
+  nodeCommit: string,
   catchupTracker: CatchupTracker,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
@@ -988,6 +1075,8 @@ async function handleRequest(
     const identityId = agent.publisher.getIdentityId();
     return jsonResponse(res, 200, {
       name: config.name,
+      version: nodeVersion,
+      commit: nodeCommit || null,
       peerId: agent.peerId,
       nodeRole: config.nodeRole ?? 'edge',
       networkId: networkId.slice(0, 16),
@@ -1001,6 +1090,9 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
+      autoUpdate: config.autoUpdate?.enabled ?? false,
+      updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
+      latestCommit: lastUpdateCheck.latestCommit || null,
     });
   }
 
@@ -2606,9 +2698,62 @@ async function _performUpdateInner(
     await execAsync('pnpm install --frozen-lockfile', {
       cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
     });
-    await execAsync('pnpm build', {
-      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
-    });
+    let usedFullBuildFallback = false;
+    let hasRuntimeBuildScript = false;
+    try {
+      const rootPkgRaw = await readFile(join(targetDir, 'package.json'), 'utf-8');
+      const rootPkg = JSON.parse(rootPkgRaw) as { scripts?: Record<string, string> };
+      hasRuntimeBuildScript = typeof rootPkg.scripts?.['build:runtime'] === 'string';
+    } catch {
+      hasRuntimeBuildScript = false;
+    }
+
+    if (hasRuntimeBuildScript) {
+      await execAsync('pnpm build:runtime', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+    } else {
+      log('Auto-update: target repo has no build:runtime script; falling back to pnpm build.');
+      await execAsync('pnpm build', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+      usedFullBuildFallback = true;
+    }
+
+    if (usedFullBuildFallback) {
+      log('Auto-update: contract build check skipped (full build fallback already executed).');
+    } else {
+      let shouldBuildContracts = false;
+      try {
+        if (/^[0-9a-f]{6,40}$/i.test(currentCommit) && /^[0-9a-f]{6,40}$/i.test(checkedOutCommit)) {
+          const { stdout } = await execFileAsync('git', ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`], {
+            cwd: targetDir,
+            encoding: 'utf-8',
+            timeout: 30_000,
+          });
+          const changedPaths = String(stdout)
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+          shouldBuildContracts = changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
+        }
+      } catch (diffErr: any) {
+        log(`Auto-update: contract-change check failed (${diffErr.message}); skipping contract build.`);
+        shouldBuildContracts = false;
+      }
+
+      if (shouldBuildContracts) {
+        log('Auto-update: contract folder changes detected; building @dkg/evm-module...');
+        await execAsync('pnpm --filter @dkg/evm-module build', {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          timeout: 300_000,
+        });
+        log('Auto-update: @dkg/evm-module build completed.');
+      } else {
+        log('Auto-update: no contract folder changes detected; skipping @dkg/evm-module build.');
+      }
+    }
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';

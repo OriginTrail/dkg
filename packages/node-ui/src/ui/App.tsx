@@ -136,6 +136,7 @@ function useLiveStatus() {
   return status;
 }
 
+
 const NOTIF_ICONS: Record<string, string> = {
   chat_message: '\u{1F4AC}',
   peer_connected: '\u{1F7E2}',
@@ -269,13 +270,17 @@ function NotificationBell() {
 export function App() {
   const installedApps = useInstalledApps();
   const liveStatus = useLiveStatus();
+  const currentVersion = liveStatus?.version;
+  const commitShort = liveStatus?.commit;
+  const updateAvailable = liveStatus?.updateAvailable === true;
+  const latestCommit = liveStatus?.latestCommit;
 
   return (
     <div className="app-layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
+          <style>{`@keyframes pulse-fade{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
           <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 500 }}>DKG v9 Node</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 6 }}>
             <span style={{ fontSize: 9, color: 'var(--text-dim)', letterSpacing: '0.02em' }}>powered by</span>
             <svg width="60" height="13" viewBox="0 0 180 40" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ opacity: 0.55 }}>
@@ -310,16 +315,44 @@ export function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
             <span className="pulse-dot" style={{ width: 7, height: 7, borderRadius: '50%', background: liveStatus ? 'var(--green)' : 'var(--text-dim)', boxShadow: liveStatus ? '0 0 8px rgba(74,222,128,.4)' : 'none', display: 'inline-block' }} />
             <span style={{ color: liveStatus ? 'var(--green)' : 'var(--text-muted)', fontWeight: 600 }}>{liveStatus ? 'Online' : 'Connecting…'}</span>
             <span className="mono" style={{ color: 'var(--text-dim)', marginLeft: 'auto', fontSize: 10 }}>
               {liveStatus?.connectedPeers != null ? `${liveStatus.connectedPeers} peers` : liveStatus?.peerCount != null ? `${liveStatus.peerCount} peers` : '…'}
             </span>
           </div>
-          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+          <div className="mono" style={{ color: 'var(--text-dim)', fontSize: 10, marginBottom: 6 }}>
             {liveStatus?.networkName ?? liveStatus?.networkId ?? 'unknown network'}{liveStatus?.syncing ? ' · syncing…' : ''}
           </div>
+          {currentVersion && (
+            <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', marginBottom: 2 }}>
+                v{currentVersion}
+              </div>
+              {updateAvailable ? (
+                <div className="mono" style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, marginBottom: 2 }}>
+                  <span style={{ color: 'var(--text-dim)' }}>{commitShort}</span>
+                  <span style={{ color: '#fbbf24' }}>→</span>
+                  <span style={{ color: '#fbbf24', fontWeight: 600 }}>{latestCommit || '?'}</span>
+                  <span title={liveStatus?.autoUpdate ? 'Auto-update will apply the new version' : 'Update manually'} style={{
+                    fontSize: 8, fontWeight: 600, padding: '1px 5px', borderRadius: 3, marginLeft: 2,
+                    background: 'rgba(251,191,36,.12)', color: '#fbbf24', cursor: 'default',
+                    animation: 'pulse-fade 2.5s ease-in-out infinite',
+                  }}>{liveStatus?.autoUpdate ? 'updating' : 'update available'}</span>
+                </div>
+              ) : commitShort ? (
+                <div className="mono" style={{ fontSize: 10, marginBottom: 2 }}>
+                  <span style={{ color: liveStatus?.updateAvailable === false ? 'var(--green)' : 'var(--text-dim)' }}>
+                    {commitShort}{liveStatus?.updateAvailable === false ? ' · latest' : ''}
+                  </span>
+                </div>
+              ) : null}
+              <div style={{ fontSize: 10, color: liveStatus?.autoUpdate ? 'var(--green)' : 'var(--text-dim)', opacity: 0.7 }}>
+                Auto-updater: {liveStatus?.autoUpdate ? 'enabled' : 'disabled'}
+              </div>
+            </div>
+          )}
         </div>
       </aside>
 

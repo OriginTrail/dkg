@@ -202,14 +202,30 @@ function nextNotifId(): string {
   return `notif-${Date.now()}-${++notifSeq}`;
 }
 
+function compareSwarmMembers(a: SwarmMember, b: SwarmMember): number {
+  return a.joinedAt - b.joinedAt || a.peerId.localeCompare(b.peerId);
+}
+
 export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
   private readonly topic: string;
+  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
+  private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
+  private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
   private log: (msg: string) => void;
   private voteHeartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private graphSyncInitialTimer: ReturnType<typeof setTimeout> | null = null;
+  private graphSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private graphSyncInFlight = false;
+  private graphSyncLastErrorLogAt = 0;
+  private graphSyncLastPlayerCount: number | null = null;
+  private graphSyncLastSwarmCount: number | null = null;
+  // Local tombstones prevent stale graph memberships from re-adding leavers/disbanded swarms.
+  private readonly swarmTombstones = new Set<string>();
+  private readonly swarmMemberTombstones = new Map<string, Map<string, number>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
@@ -289,107 +305,237 @@ export class OriginTrailGameCoordinator {
 
   // ── Graph-based lobby sync ────────────────────────────────────────
 
-  private scheduleGraphSync(): void {
-    setTimeout(() => this.loadLobbyFromGraph().catch(() => {}), 5_000);
+  private async runGraphSyncOnce(): Promise<void> {
+    // Prevent overlapping sync runs if one query round is slow.
+    if (this.graphSyncInFlight) return;
+    this.graphSyncInFlight = true;
+    try {
+      await this.loadLobbyFromGraph();
+    } catch (err) {
+      const now = Date.now();
+      if (now - this.graphSyncLastErrorLogAt >= OriginTrailGameCoordinator.GRAPH_SYNC_ERROR_LOG_INTERVAL_MS) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log(`Graph sync failed: ${msg}`);
+        this.graphSyncLastErrorLogAt = now;
+      }
+    } finally {
+      this.graphSyncInFlight = false;
+    }
   }
 
-  async loadLobbyFromGraph(): Promise<void> {
-    try {
-      const playersResult = await this.agent.query(
-        `SELECT ?player ?name ?peerId ?registeredAt WHERE {
-          ?player a <${rdf.SPARQL_PREFIXES.OT}Player> ;
-                  <${rdf.SPARQL_PREFIXES.SCHEMA}name> ?name ;
-                  <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
-          OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
-        }`,
-        { paranetId: this.paranetId },
-      );
+  private startGraphSyncInterval(): void {
+    if (this.graphSyncTimer) return;
+    this.graphSyncTimer = setInterval(() => {
+      void this.runGraphSyncOnce();
+    }, OriginTrailGameCoordinator.GRAPH_SYNC_INTERVAL_MS);
+    this.graphSyncTimer.unref?.();
+  }
 
-      const playerCount = playersResult.bindings?.length ?? 0;
+  private scheduleGraphSync(): void {
+    this.graphSyncInitialTimer = setTimeout(() => {
+      void this.runGraphSyncOnce();
+      this.startGraphSyncInterval();
+    }, OriginTrailGameCoordinator.GRAPH_SYNC_INITIAL_DELAY_MS);
+    this.graphSyncInitialTimer.unref?.();
+  }
+
+  private async loadLobbyFromGraph(): Promise<void> {
+    const playersResult = await this.agent.query(
+      `SELECT ?player ?name ?peerId ?registeredAt WHERE {
+        ?player a <${rdf.SPARQL_PREFIXES.OT}Player> ;
+                <${rdf.SPARQL_PREFIXES.SCHEMA}name> ?name ;
+                <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
+        OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
+      }`,
+      { paranetId: this.paranetId },
+    );
+
+    const playerCount = playersResult.bindings?.length ?? 0;
+    if (this.graphSyncLastPlayerCount !== playerCount) {
       this.log(`Graph sync: found ${playerCount} registered players`);
+      this.graphSyncLastPlayerCount = playerCount;
+    }
 
-      const swarmsResult = await this.agent.query(
-        `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
-          ?swarm a <${rdf.SPARQL_PREFIXES.OT}AgentSwarm> ;
-                 <${rdf.SPARQL_PREFIXES.OT}name> ?name ;
-                 <${rdf.SPARQL_PREFIXES.OT}status> ?status .
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}orchestrator> ?orchestrator }
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
-          OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
-        }`,
+    const swarmsResult = await this.agent.query(
+      `SELECT ?swarm ?name ?status ?orchestrator ?createdAt ?maxPlayers WHERE {
+        ?swarm a <${rdf.SPARQL_PREFIXES.OT}AgentSwarm> ;
+               <${rdf.SPARQL_PREFIXES.OT}name> ?name ;
+               <${rdf.SPARQL_PREFIXES.OT}status> ?status .
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}orchestrator> ?orchestrator }
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
+        OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
+      }`,
+      { paranetId: this.paranetId, includeWorkspace: true },
+    );
+
+    const newSwarms = swarmsResult.bindings?.length ?? 0;
+    if (this.graphSyncLastSwarmCount !== newSwarms) {
+      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
+      this.graphSyncLastSwarmCount = newSwarms;
+    }
+
+    for (const row of swarmsResult.bindings ?? []) {
+      const swarmUri = row['swarm'] ?? '';
+      const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
+      if (!swarmIdMatch) continue;
+      const swarmId = swarmIdMatch[1];
+      if (this.swarmTombstones.has(swarmId)) continue;
+
+      const statusRaw = stripQuotes(row['status'] ?? '');
+      const status = statusRaw === 'recruiting' || statusRaw === 'traveling' || statusRaw === 'finished'
+        ? statusRaw
+        : null;
+      if (!status) continue;
+
+      const orchestratorUri = row['orchestrator'] ?? '';
+      const orchestratorId = orchestratorUri.replace(/.*player\//, '');
+      const swarmName = stripQuotes(row['name'] ?? '');
+      const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
+
+      if (createdAt > 0 && Date.now() - createdAt > STALE_SWARM_TTL_MS) {
+        this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
+        continue;
+      }
+      const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
+      const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
+        ? graphMaxPlayers
+        : MAX_PLAYERS;
+
+      const membersResult = await this.agent.query(
+        `SELECT ?agent ?displayName ?joinedAt WHERE {
+          ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
+                      <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
+                      <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
+                      <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
+          OPTIONAL { ?membership <${rdf.SPARQL_PREFIXES.OT}joinedAt> ?joinedAt }
+        } ORDER BY ?joinedAt ?agent ?displayName`,
         { paranetId: this.paranetId, includeWorkspace: true },
       );
 
-      const newSwarms = swarmsResult.bindings?.length ?? 0;
-      this.log(`Graph sync: found ${newSwarms} swarms in graph`);
-
-      for (const row of swarmsResult.bindings ?? []) {
-        const swarmUri = row['swarm'] ?? '';
-        const swarmIdMatch = swarmUri.match(/swarm\/(swarm-.+)$/);
-        if (!swarmIdMatch) continue;
-        const swarmId = swarmIdMatch[1];
-
-        if (this.swarms.has(swarmId)) continue;
-
-        const statusRaw = stripQuotes(row['status'] ?? '');
-        if (statusRaw !== 'recruiting') continue;
-
-        const orchestratorUri = row['orchestrator'] ?? '';
-        const orchestratorId = orchestratorUri.replace(/.*player\//, '');
-        const swarmName = stripQuotes(row['name'] ?? '');
-        const createdAt = Number(stripQuotes(row['createdAt'] ?? '0'));
-
-        if (createdAt > 0 && Date.now() - createdAt > STALE_SWARM_TTL_MS) {
-          this.log(`Graph sync: skipping stale swarm "${swarmName}" (${swarmId}), created ${Math.round((Date.now() - createdAt) / 3_600_000)}h ago`);
-          continue;
-        }
-        const graphMaxPlayers = Number(stripQuotes(row['maxPlayers'] ?? '0'));
-        const restoredMaxPlayers = graphMaxPlayers >= MIN_PLAYERS && graphMaxPlayers <= MAX_PLAYERS
-          ? graphMaxPlayers
-          : MAX_PLAYERS;
-
-        const membersResult = await this.agent.query(
-          `SELECT ?agent ?displayName WHERE {
-            ?membership a <${rdf.SPARQL_PREFIXES.OT}SwarmMembership> ;
-                        <${rdf.SPARQL_PREFIXES.OT}agent> ?agent ;
-                        <${rdf.SPARQL_PREFIXES.OT}displayName> ?displayName ;
-                        <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
-          }`,
-          { paranetId: this.paranetId, includeWorkspace: true },
-        );
-
-        const players: SwarmMember[] = (membersResult.bindings ?? []).map((m: any) => {
-          const pUri = m['agent'] ?? '';
-          const pid = pUri.replace(/.*player\//, '');
-          return {
-            peerId: pid,
-            displayName: stripQuotes(m['displayName'] ?? ''),
-            joinedAt: createdAt,
-            isLeader: pid === orchestratorId,
-          };
-        });
-
-        const swarm: SwarmState = {
-          id: swarmId,
-          name: swarmName,
-          leaderPeerId: orchestratorId,
-          maxPlayers: restoredMaxPlayers,
-          players,
-          status: 'recruiting',
-          gameState: null,
-          currentTurn: 0,
-          votes: [],
-          turnDeadline: null,
-          pendingProposal: null,
-          turnHistory: [],
-          createdAt,
-          playerIndexMap: new Map(),
+      const existingSwarm = this.swarms.get(swarmId);
+      const existingPlayersByPeerId = new Map((existingSwarm?.players ?? []).map((p) => [p.peerId, p]));
+      const tombstonedMembers = this.swarmMemberTombstones.get(swarmId);
+      const graphPlayers = (membersResult.bindings ?? []).map((m: any) => {
+        const pUri = m['agent'] ?? '';
+        const pid = pUri.replace(/.*player\//, '');
+        const existingPlayer = existingPlayersByPeerId.get(pid);
+        const graphJoinedAtRaw = stripQuotes(m['joinedAt'] ?? '0');
+        const graphJoinedAt = Number(graphJoinedAtRaw);
+        const joinedAt = Number.isFinite(graphJoinedAt) && graphJoinedAt > 0
+          ? graphJoinedAt
+          : (existingPlayer?.joinedAt ?? createdAt);
+        return {
+          peerId: pid,
+          displayName: stripQuotes(m['displayName'] ?? ''),
+          joinedAt,
+          isLeader: pid === orchestratorId,
+          identityId: existingPlayer?.identityId,
         };
-        this.swarms.set(swarmId, swarm);
-        this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
+      });
+      const playersByPeerId = new Map<string, SwarmMember>();
+      for (const graphPlayer of graphPlayers) {
+        const existingGraphPlayer = playersByPeerId.get(graphPlayer.peerId);
+        if (!existingGraphPlayer || compareSwarmMembers(graphPlayer, existingGraphPlayer) < 0) {
+          playersByPeerId.set(graphPlayer.peerId, graphPlayer);
+        }
       }
-    } catch (err: any) {
-      this.log(`Graph sync failed: ${err.message}`);
+      const players: SwarmMember[] = [...playersByPeerId.values()].filter((p: SwarmMember) => {
+        const tombstonedAt = tombstonedMembers?.get(p.peerId);
+        if (tombstonedAt == null) return true;
+        if (p.joinedAt > tombstonedAt) {
+          this.clearMemberTombstone(swarmId, p.peerId);
+          return true;
+        }
+        return false;
+      })
+        .sort(compareSwarmMembers);
+
+      if (existingSwarm) {
+        let changed = false;
+
+        if (swarmName && existingSwarm.name !== swarmName) {
+          existingSwarm.name = swarmName;
+          changed = true;
+        }
+        if (orchestratorId && existingSwarm.leaderPeerId !== orchestratorId) {
+          existingSwarm.leaderPeerId = orchestratorId;
+          changed = true;
+        }
+        if (existingSwarm.maxPlayers !== restoredMaxPlayers) {
+          existingSwarm.maxPlayers = restoredMaxPlayers;
+          changed = true;
+        }
+        if (createdAt > 0 && existingSwarm.createdAt !== createdAt) {
+          existingSwarm.createdAt = createdAt;
+          changed = true;
+        }
+        if (existingSwarm.status !== status) {
+          existingSwarm.status = status;
+          changed = true;
+        }
+
+        // Reconcile recruiting roster additively (no removals) to avoid
+        // stale graph memberships resurrecting players who already left.
+        if (status === 'recruiting' && players.length > 0) {
+          const existingByPeerId = new Map(existingSwarm.players.map((p) => [p.peerId, p]));
+          for (const graphPlayer of players) {
+            const local = existingByPeerId.get(graphPlayer.peerId);
+            if (!local) {
+              existingSwarm.players.push(graphPlayer);
+              existingByPeerId.set(graphPlayer.peerId, graphPlayer);
+              changed = true;
+              continue;
+            }
+            if (local.displayName !== graphPlayer.displayName) {
+              local.displayName = graphPlayer.displayName;
+              changed = true;
+            }
+            if (local.identityId == null && graphPlayer.identityId != null) {
+              local.identityId = graphPlayer.identityId;
+              changed = true;
+            }
+          }
+          for (const player of existingSwarm.players) {
+            const shouldLead = player.peerId === orchestratorId;
+            if (player.isLeader !== shouldLead) {
+              player.isLeader = shouldLead;
+              changed = true;
+            }
+          }
+          const sortedPlayers = [...existingSwarm.players].sort(compareSwarmMembers);
+          const needsReorder = sortedPlayers.some((p, i) => p.peerId !== existingSwarm.players[i]?.peerId);
+          if (needsReorder) {
+            existingSwarm.players = sortedPlayers;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          this.log(`Graph sync: reconciled swarm "${existingSwarm.name}" (${swarmId})`);
+        }
+        continue;
+      }
+
+      if (status !== 'recruiting') continue;
+
+      const swarm: SwarmState = {
+        id: swarmId,
+        name: swarmName,
+        leaderPeerId: orchestratorId,
+        maxPlayers: restoredMaxPlayers,
+        players,
+        status,
+        gameState: null,
+        currentTurn: 0,
+        votes: [],
+        turnDeadline: null,
+        pendingProposal: null,
+        turnHistory: [],
+        createdAt,
+        playerIndexMap: new Map(),
+      };
+      this.swarms.set(swarmId, swarm);
+      this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
     }
   }
 
@@ -418,11 +564,6 @@ export class OriginTrailGameCoordinator {
   // ── Lobby operations ──────────────────────────────────────────────
 
   async createSwarm(playerName: string, swarmName: string, maxPlayers = 3): Promise<SwarmState> {
-    const existing = this.findMySwarm();
-    if (existing && existing.status !== 'finished') {
-      throw new Error('You already have an active swarm. Leave it first.');
-    }
-
     const swarmId = `swarm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const now = Date.now();
 
@@ -455,7 +596,7 @@ export class OriginTrailGameCoordinator {
 
     const quads = [
       ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
-      ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName),
+      ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now),
     ];
     const wsResult = await this.agent.writeToWorkspace(this.paranetId, quads);
     this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, quads);
@@ -492,8 +633,9 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
       identityId: myIdentityId,
     });
+    this.clearMemberTombstone(swarmId, this.myPeerId);
 
-    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName);
+    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now);
     const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
     this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, joinQuads);
 
@@ -517,6 +659,7 @@ export class OriginTrailGameCoordinator {
     if (!swarm.players.some(p => p.peerId === this.myPeerId)) throw new Error('You are not in this swarm');
 
     if (swarm.leaderPeerId === this.myPeerId && swarm.status === 'recruiting') {
+      this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
       this.workspaceOps.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
@@ -532,6 +675,7 @@ export class OriginTrailGameCoordinator {
     }
 
     swarm.players = swarm.players.filter(p => p.peerId !== this.myPeerId);
+    this.markMemberTombstone(swarmId, this.myPeerId, Date.now());
     const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
     await this.broadcast(msg);
     return swarm;
@@ -1188,6 +1332,7 @@ export class OriginTrailGameCoordinator {
   };
 
   private onRemoteSwarmCreated(msg: proto.SwarmCreatedMsg): void {
+    if (this.swarmTombstones.has(msg.swarmId)) return;
     if (this.swarms.has(msg.swarmId)) return;
     const swarm: SwarmState = {
       id: msg.swarmId,
@@ -1231,6 +1376,7 @@ export class OriginTrailGameCoordinator {
       isLeader: false,
       identityId: msg.identityId,
     });
+    this.clearMemberTombstone(msg.swarmId, msg.peerId);
     this.pushNotification({
       type: 'player_joined', swarmId: msg.swarmId, swarmName: swarm.name,
       playerName: msg.playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1245,6 +1391,7 @@ export class OriginTrailGameCoordinator {
     const player = swarm.players.find(p => p.peerId === msg.peerId);
     const playerName = player?.displayName ?? msg.peerId.slice(0, 8);
     if (msg.peerId === swarm.leaderPeerId && swarm.status === 'recruiting') {
+      this.markSwarmTombstone(msg.swarmId);
       this.pushNotification({
         type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
         playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1255,6 +1402,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
+    this.markMemberTombstone(msg.swarmId, msg.peerId, msg.timestamp);
     this.pushNotification({
       type: 'player_left', swarmId: msg.swarmId, swarmName: swarm.name,
       playerName, peerId: msg.peerId, timestamp: msg.timestamp,
@@ -1565,19 +1713,24 @@ export class OriginTrailGameCoordinator {
 
   // ── Query helpers ─────────────────────────────────────────────────
 
-  getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[] } {
+  getLobby(): { openSwarms: SwarmState[]; mySwarms: SwarmState[]; recruitingSwarms: SwarmState[] } {
     const openSwarms: SwarmState[] = [];
     const mySwarms: SwarmState[] = [];
+    const recruitingSwarms: SwarmState[] = [];
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         mySwarms.push(swarm);
       } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
         openSwarms.push(swarm);
+        recruitingSwarms.push(swarm);
+      } else if (swarm.status === 'recruiting') {
+        recruitingSwarms.push(swarm);
       }
     }
     openSwarms.sort((a, b) => b.createdAt - a.createdAt);
     mySwarms.sort((a, b) => b.createdAt - a.createdAt);
-    return { openSwarms, mySwarms };
+    recruitingSwarms.sort((a, b) => b.createdAt - a.createdAt);
+    return { openSwarms, mySwarms, recruitingSwarms };
   }
 
   getSwarm(swarmId: string): SwarmState | null {
@@ -1589,6 +1742,17 @@ export class OriginTrailGameCoordinator {
       if (swarm.players.some(p => p.peerId === this.myPeerId) && swarm.status !== 'finished') return swarm;
     }
     return null;
+  }
+
+  findMyActiveSwarms(): SwarmState[] {
+    const active: SwarmState[] = [];
+    for (const swarm of this.swarms.values()) {
+      if (swarm.players.some(p => p.peerId === this.myPeerId) && swarm.status !== 'finished') {
+        active.push(swarm);
+      }
+    }
+    active.sort((a, b) => b.createdAt - a.createdAt);
+    return active;
   }
 
   formatSwarmState(swarm: SwarmState) {
@@ -1783,6 +1947,25 @@ export class OriginTrailGameCoordinator {
     }
   }
 
+  private markSwarmTombstone(swarmId: string): void {
+    this.swarmTombstones.add(swarmId);
+    this.swarmMemberTombstones.delete(swarmId);
+  }
+
+  private markMemberTombstone(swarmId: string, peerId: string, timestamp: number): void {
+    if (!this.swarmMemberTombstones.has(swarmId)) {
+      this.swarmMemberTombstones.set(swarmId, new Map());
+    }
+    this.swarmMemberTombstones.get(swarmId)!.set(peerId, timestamp);
+  }
+
+  private clearMemberTombstone(swarmId: string, peerId: string): void {
+    const tombstones = this.swarmMemberTombstones.get(swarmId);
+    if (!tombstones) return;
+    tombstones.delete(peerId);
+    if (tombstones.size === 0) this.swarmMemberTombstones.delete(swarmId);
+  }
+
   // ── Network topology snapshots ──────────────────────────────────
 
   private scheduleTopologySnapshots(): void {
@@ -1911,6 +2094,14 @@ export class OriginTrailGameCoordinator {
   }
 
   destroy(): void {
+    if (this.graphSyncInitialTimer) {
+      clearTimeout(this.graphSyncInitialTimer);
+      this.graphSyncInitialTimer = null;
+    }
+    if (this.graphSyncTimer) {
+      clearInterval(this.graphSyncTimer);
+      this.graphSyncTimer = null;
+    }
     if (this.topologyTimer) {
       clearInterval(this.topologyTimer);
       this.topologyTimer = null;

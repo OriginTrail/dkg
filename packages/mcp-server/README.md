@@ -31,7 +31,7 @@
       "command": "npx",
       "args": ["@dkg/mcp-server"],
       "env": {
-        "DKG_NODE_URL": "http://localhost:8900",
+        "DKG_NODE_URL": "http://localhost:9200",
         "DKG_API_TOKEN": "your-token-here"
       }
     }
@@ -45,7 +45,7 @@ The MCP server requires a running DKG node. It connects to the node's HTTP API u
 
 ```bash
 # Run directly (usually configured in your AI assistant instead)
-DKG_NODE_URL=http://localhost:8900 DKG_API_TOKEN=xxx dkg-mcp
+DKG_NODE_URL=http://localhost:9200 DKG_API_TOKEN=xxx dkg-mcp
 ```
 
 ## Internal Dependencies

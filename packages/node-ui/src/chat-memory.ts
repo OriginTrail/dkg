@@ -1,3 +1,4 @@
+import { isSafeIri } from '@dkg/core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 
@@ -121,9 +122,6 @@ function sumBindingValues(bindings: Array<Record<string, string>> | undefined, k
   return bindings.reduce((sum, b) => sum + parseRdfInt(b[key] ?? '0'), 0);
 }
 
-function isSafeIri(value: string): boolean {
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]+$/.test(value);
-}
 
 function buildSessionRootPattern(sessionUri: string): string {
   const clauses = [

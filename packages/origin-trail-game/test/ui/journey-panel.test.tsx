@@ -34,8 +34,10 @@ vi.mock('../../ui/src/api.js', () => ({
     info: vi.fn(),
     lobby: vi.fn(),
     swarm: vi.fn(),
+    leaderboard: vi.fn(),
     create: vi.fn(),
     join: vi.fn(),
+    leave: vi.fn(),
     start: vi.fn(),
     vote: vi.fn(),
     forceResolve: vi.fn(),
@@ -45,12 +47,14 @@ vi.mock('../../ui/src/api.js', () => ({
 import { App } from '../../ui/src/App.js';
 import { api } from '../../ui/src/api.js';
 
-const mockApi = api as {
+const mockApi = api as unknown as {
   info: ReturnType<typeof vi.fn>;
   lobby: ReturnType<typeof vi.fn>;
   swarm: ReturnType<typeof vi.fn>;
+  leaderboard: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
   join: ReturnType<typeof vi.fn>;
+  leave: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   vote: ReturnType<typeof vi.fn>;
   forceResolve: ReturnType<typeof vi.fn>;
@@ -61,7 +65,7 @@ function getCapturedRdfGraphProps(): any {
 }
 
 function makeTravelingSwarm(turnCount = 0) {
-  const turnHistory = [];
+  const turnHistory: any[] = [];
   for (let i = 1; i <= turnCount; i++) {
     turnHistory.push({
       turn: i,
@@ -156,6 +160,7 @@ describe('Journey Panel visualization in play view', () => {
     mockApi.info.mockResolvedValue({ id: 'origin-trail-game', peerId: 'peer-aaa111', nodeName: 'Alice' });
     mockApi.lobby.mockResolvedValue({ mySwarms: [], openSwarms: [] });
     mockApi.swarm.mockResolvedValue(makeTravelingSwarm(2));
+    mockApi.leaderboard.mockResolvedValue({ entries: [] });
   });
 
   afterEach(() => {
@@ -706,5 +711,107 @@ describe('Journey Panel visualization in play view', () => {
 
     const eventNodes = triples.filter(t => t.object === 'https://origintrail-game.dkg.io/GameEvent');
     expect(eventNodes.length).toBe(1);
+  });
+
+  it('uses in-app leave confirmation instead of window.confirm for traveling swarms', async () => {
+    const swarm = makeTravelingSwarm(1);
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: swarm.id, name: swarm.name, players: [1, 2, 3], status: 'traveling' }],
+      openSwarms: [],
+    });
+    mockApi.swarm.mockResolvedValue(swarm);
+    mockApi.leave.mockResolvedValue({ ok: true });
+
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    try {
+      render(<App />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+      const swarmCard = await screen.findByText('Test Expedition');
+      await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+      const leaveButton = await screen.findByText('Leave Swarm');
+      await act(async () => { fireEvent.click(leaveButton); });
+
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(await screen.findByText(/Leave this swarm\?/)).toBeInTheDocument();
+
+      const confirmLeaveButton = await screen.findByText('Confirm Leave');
+      await act(async () => { fireEvent.click(confirmLeaveButton); });
+
+      await waitFor(() => {
+        expect(mockApi.leave).toHaveBeenCalledWith(swarm.id);
+      });
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('creates swarms with a configurable max player count from the UI', async () => {
+    const createdSwarm = {
+      ...makeTravelingSwarm(0),
+      id: 'swarm-created-123',
+      name: 'Big Crew',
+      status: 'recruiting',
+      maxPlayers: 5,
+      currentTurn: 0,
+      gameState: null,
+    };
+    mockApi.create.mockResolvedValue(createdSwarm);
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const nameInput = screen.getByPlaceholderText('Swarm name...');
+    await act(async () => { fireEvent.change(nameInput, { target: { value: 'Big Crew' } }); });
+
+    expect(screen.getByText('3')).toBeInTheDocument();
+
+    const increaseButton = screen.getByLabelText('Increase max players');
+    await act(async () => { fireEvent.click(increaseButton); });
+    await act(async () => { fireEvent.click(increaseButton); });
+
+    expect(screen.getByText('5')).toBeInTheDocument();
+
+    const launchButton = screen.getByRole('button', { name: 'Launch Swarm' });
+    await act(async () => { fireEvent.click(launchButton); });
+
+    await waitFor(() => {
+      expect(mockApi.create).toHaveBeenCalledWith('Alice', 'Big Crew', 5);
+    });
+  });
+
+  it('shows recruiting swarm capacity instead of only minimum-start threshold', async () => {
+    const recruitingSwarm = {
+      ...makeTravelingSwarm(0),
+      status: 'recruiting',
+      maxPlayers: 4,
+      playerCount: 1,
+      currentTurn: 0,
+      gameState: null,
+      turnHistory: [],
+      voteStatus: null,
+      pendingProposal: null,
+      lastTurn: null,
+    };
+
+    mockApi.lobby.mockResolvedValue({
+      mySwarms: [{ id: recruitingSwarm.id, name: recruitingSwarm.name, players: [1], status: 'recruiting' }],
+      openSwarms: [],
+    });
+    mockApi.swarm.mockResolvedValue(recruitingSwarm);
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const swarmCard = await screen.findByText('Test Expedition');
+    await act(async () => { fireEvent.click(swarmCard.closest('.ot-clickable')!); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    expect(screen.getByText('Waiting for players (1/4 joined)')).toBeInTheDocument();
+    expect(screen.getByText('Swarm capacity is set to 4 players. Minimum to start is 1.')).toBeInTheDocument();
+    expect(screen.getByText('Players:')).toBeInTheDocument();
+    expect(screen.getByText('1/4')).toBeInTheDocument();
   });
 });

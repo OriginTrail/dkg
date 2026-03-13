@@ -1,3 +1,5 @@
+import { escapeSparqlLiteral } from '@dkg/core';
+
 /**
  * DkgMemoryPlugin — DKG-backed memory search.
  *
@@ -316,11 +318,4 @@ function bindingValue(v: unknown): string | undefined {
   return String(v);
 }
 
-function escapeSparqlString(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t');
-}
+const escapeSparqlString = escapeSparqlLiteral;
