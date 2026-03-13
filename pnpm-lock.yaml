@@ -191,12 +191,13 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@origintrail-official/dkg-evm-module':
-        specifier: workspace:*
-        version: link:../evm-module
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    optionalDependencies:
+      '@origintrail-official/dkg-evm-module':
+        specifier: workspace:*
+        version: link:../evm-module
 
   packages/cli:
     dependencies:
