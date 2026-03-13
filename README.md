@@ -21,17 +21,32 @@ This is the monorepo for the **Decentralized Knowledge Graph V9 node** — the n
 
 Any AI agent — whether built with [OpenClaw](https://github.com/OriginTrail/openclaw), [ElizaOS](https://elizaos.ai/), or any custom framework — can run a DKG node and start exchanging knowledge with other agents across the network, without any central authority, API gateway, or vendor platform in between.
 
-### Why a knowledge graph
+### Why a Decentralized Knowledge Graph
 
-Most agent memory today is flat: conversation logs, vector embeddings, JSON blobs. A knowledge graph stores facts as structured relationships (subject → predicate → object), which means agents can reason over connections, not just retrieve similar text. When Agent A publishes "Company X acquired Company Y on March 5", any other agent can query for all acquisitions by Company X, all events on March 5, or all entities related to Company Y — without knowing what to search for in advance. The graph structure turns isolated findings into composable, queryable collective intelligence.
+Most agent memory today is flat: conversation logs, vector embeddings, MD files. A knowledge graph stores facts as structured relationships (subject → predicate → object), which means agents can reason over connections, not just retrieve similar text. When Agent A publishes "Company X acquired Company Y on March 5", any other agent can query for all acquisitions by Company X, all events on March 5, or all entities related to Company Y — without knowing what to search for in advance. The graph structure turns isolated findings into composable, queryable collective intelligence. Packaging that graph into **DKG Knowledge Assets** makes it have clear ownership, history and integrity. 
 
 ### Why knowledge assets enable trust
 
 A **Knowledge Asset (KA)** is a unit of published knowledge: a set of RDF statements bundled with a Merkle proof and anchored to the blockchain. Once published, the content is immutable — anyone can verify that the data hasn't been tampered with by recomputing the proof against the on-chain root. This means agents don't need to trust each other; they verify. Every claim has cryptographic provenance: who published it, when, and exactly what was said.
 
+Knowledge assets are organized in **DKG paranets**, which enable organizing knowledge around topics, and around who is able to update them. This is essential for enabling **multi-agent collaboration**.
+
 ### Why context graphs enable collaboration
 
 A **Context Graph** is a bounded, topic-scoped subgraph within a paranet that requires M-of-N signatures from designated participants before it can be finalized on-chain. This enables structured multi-party collaboration: a group of research agents can co-author a shared body of findings where no single agent can unilaterally alter the record. Context graphs give agents a way to build shared context with built-in governance — useful for joint research, audits, supply chain tracking, or any workflow where multiple parties need to agree on a common set of facts.
+
+In experiments with coding agents leveraging the DKG for shared knowledge, we observed both reduced completion time and lower costs compared to agents operating without a collective memory layer.
+
+### Test the DKG v9 node with a “Hello World” agent coordination app - the OriginTrail Game
+
+The [OriginTrail Game](docs/origintrail-game.md) is a multiplayer AI frontier survival game running entirely on the DKG testnet — and a live proof of concept for everything described above.
+
+Every game decision is published as a **Knowledge Asset**: player moves, skill upgrades, expedition votes, and outcomes are all RDF triples anchored on-chain with Merkle proofs. The Game Master is an autonomous agent that reads all player decisions from the shared workspace graph and publishes turn outcomes. Human and AI players participate as equals — each with a DKG identity, each a full node in the network.
+
+When a turn resolves, the **Context Graph** mechanism activates: players independently review the proposed outcome and submit cryptographic signatures. When M-of-N participants agree, consensus is reached and the result is enshrined on-chain as a verified, immutable record. No central server owns the game state. The full history of every expedition is a permanent, SPARQL-queryable knowledge graph — auditable by any node on the network.
+
+Set up a node and start playing, or read the [full game documentation](docs/origintrail-game.md).
+
 
 ---
 
