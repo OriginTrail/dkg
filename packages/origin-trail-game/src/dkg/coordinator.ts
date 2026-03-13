@@ -155,6 +155,10 @@ function stateRootFromState(state: GameState | null): string | undefined {
   return hashStateJson(JSON.stringify(state));
 }
 
+function currentStateRoot(swarm: SwarmState): string | undefined {
+  return swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+}
+
 function detectDeaths(
   oldState: GameState | null,
   newState: GameState,
@@ -939,7 +943,7 @@ export class OriginTrailGameCoordinator {
     const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
 
     const newStateJson = JSON.stringify(result.newState);
-    const previousStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const previousStateRoot = currentStateRoot(swarm);
     const newStateRoot = hashStateJson(newStateJson);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
     const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
@@ -1212,7 +1216,7 @@ export class OriginTrailGameCoordinator {
     const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
 
     const newStateJson = JSON.stringify(result.newState);
-    const previousStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const previousStateRoot = currentStateRoot(swarm);
     const newStateRoot = hashStateJson(newStateJson);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
     const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
@@ -1531,29 +1535,7 @@ export class OriginTrailGameCoordinator {
       return;
     }
     swarm.gameState = JSON.parse(msg.gameStateJson);
-    if (msg.partyOrder) {
-      let appliedPartyOrder = false;
-      if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
-        swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
-        this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
-        appliedPartyOrder = true;
-      } else if (this.canBackfillPlayersFromPartyOrder(msg.partyOrder, swarm)) {
-        // Join gossip can be delayed. Backfill only from a safe partyOrder shape
-        // so malformed payloads cannot mutate existing local membership.
-        this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
-        if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
-          swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
-          this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
-          appliedPartyOrder = true;
-        }
-      }
-      if (!appliedPartyOrder) {
-        this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
-        swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
-      }
-    } else {
-      swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
-    }
+    this.applyAuthoritativePartyOrder(swarm, msg.partyOrder, msg.timestamp, { allowFallbackToLocalOrder: true });
     swarm.status = 'traveling';
     swarm.currentTurn = 1;
     swarm.votes = [];
@@ -1611,6 +1593,52 @@ export class OriginTrailGameCoordinator {
     this.reorderPlayersToPartyOrder(swarm, partyOrder);
   }
 
+  private applyAuthoritativePartyOrder(
+    swarm: SwarmState,
+    partyOrder: string[] | undefined,
+    timestamp: number,
+    options?: { allowFallbackToLocalOrder?: boolean },
+  ): void {
+    if (!partyOrder) {
+      if (options?.allowFallbackToLocalOrder) {
+        swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+      }
+      return;
+    }
+
+    let appliedPartyOrder = false;
+    if (this.isValidPartyOrder(partyOrder, swarm)) {
+      swarm.playerIndexMap = new Map(partyOrder.map((pid, i) => [pid, i]));
+      this.reorderPlayersToPartyOrder(swarm, partyOrder);
+      appliedPartyOrder = true;
+    } else if (this.canBackfillPlayersFromPartyOrder(partyOrder, swarm)) {
+      this.backfillPlayersFromPartyOrder(swarm, partyOrder, timestamp);
+      if (this.isValidPartyOrder(partyOrder, swarm)) {
+        swarm.playerIndexMap = new Map(partyOrder.map((pid, i) => [pid, i]));
+        this.reorderPlayersToPartyOrder(swarm, partyOrder);
+        appliedPartyOrder = true;
+      }
+    }
+
+    if (!appliedPartyOrder && options?.allowFallbackToLocalOrder) {
+      this.log(`Invalid partyOrder for ${swarm.id}, falling back to local order`);
+      swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+    }
+  }
+
+  private applySnapshotLifecycleState(swarm: SwarmState, msg: proto.StateSnapshotMsg): void {
+    swarm.status = msg.status;
+    swarm.currentTurn = msg.currentTurn;
+    swarm.pendingProposal = null;
+    if (swarm.status === 'traveling') {
+      swarm.turnDeadline = Date.now() + 30_000;
+      swarm.votes = swarm.votes.filter(v => v.turn === swarm.currentTurn);
+    } else {
+      swarm.turnDeadline = null;
+      swarm.votes = [];
+    }
+  }
+
   private async requestAuthoritativeSnapshot(
     swarm: SwarmState,
     reason: 'proposal-mismatch' | 'reconnect' | 'manual',
@@ -1663,7 +1691,7 @@ export class OriginTrailGameCoordinator {
     if (msg.targetPeerId && msg.targetPeerId !== this.myPeerId) return;
 
     const localTurn = swarm.currentTurn;
-    const localRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const localRoot = currentStateRoot(swarm);
     const localLastResolvedTurn = swarm.turnHistory[swarm.turnHistory.length - 1]?.turn ?? 0;
     const msgLastResolvedTurn = msg.lastResolvedTurn?.turn ?? 0;
     if (msg.currentTurn < localTurn) {
@@ -1691,17 +1719,8 @@ export class OriginTrailGameCoordinator {
       swarm.stateRoot = msg.stateRoot;
     }
 
-    if (msg.partyOrder && this.canBackfillPlayersFromPartyOrder(msg.partyOrder, swarm)) {
-      this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
-      if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
-        swarm.playerIndexMap = new Map(msg.partyOrder.map((pid, i) => [pid, i]));
-        this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
-      }
-    }
-
-    swarm.status = msg.status;
-    swarm.currentTurn = msg.currentTurn;
-    swarm.pendingProposal = null;
+    this.applyAuthoritativePartyOrder(swarm, msg.partyOrder, msg.timestamp);
+    this.applySnapshotLifecycleState(swarm, msg);
     if (msg.lastResolvedTurn) {
       const existingIndex = swarm.turnHistory.findIndex((turn) => turn.turn === msg.lastResolvedTurn!.turn);
       if (existingIndex >= 0) {
@@ -1710,13 +1729,6 @@ export class OriginTrailGameCoordinator {
         swarm.turnHistory.push(msg.lastResolvedTurn);
         swarm.turnHistory.sort((a, b) => a.turn - b.turn);
       }
-    }
-    if (swarm.status === 'traveling') {
-      swarm.turnDeadline = Date.now() + 30_000;
-      swarm.votes = swarm.votes.filter(v => v.turn === swarm.currentTurn);
-    } else {
-      swarm.turnDeadline = null;
-      swarm.votes = [];
     }
     this.log(`Applied authoritative snapshot for ${swarm.id} (turn ${msg.currentTurn})`);
   }
@@ -1858,7 +1870,7 @@ export class OriginTrailGameCoordinator {
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];
-    const localStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const localStateRoot = currentStateRoot(swarm);
     const stateRootMismatch = !!(msg.previousStateRoot && localStateRoot && msg.previousStateRoot !== localStateRoot);
     const derivedNewStateRoot = hashStateJson(msg.newStateJson);
     if (msg.newStateRoot && msg.newStateRoot !== derivedNewStateRoot) {
@@ -2066,7 +2078,7 @@ export class OriginTrailGameCoordinator {
     },
     source: 'proposal' | 'resolved',
   ): void {
-    const localStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const localStateRoot = currentStateRoot(swarm);
     if (data.previousStateRoot && localStateRoot && data.previousStateRoot !== localStateRoot) {
       this.log(`Authoritative ${source} state mismatch for ${swarm.id} turn ${data.turn}: local root differs, replacing local state`);
     }
