@@ -91,6 +91,8 @@ export interface ParticipantSignature {
 export interface TurnProposal {
   turn: number;
   hash: string;
+  previousStateRoot?: string;
+  newStateRoot?: string;
   winningAction: string;
   newStateJson: string;
   resultMessage: string;
@@ -123,6 +125,7 @@ export interface SwarmState {
   createdAt: number;
   finishedAt?: number;
   playerIndexMap: Map<string, number>;
+  stateRoot?: string;
   contextGraphId?: string;
   requiredSignatures?: number;
 }
@@ -141,6 +144,15 @@ export interface ResolvedTurn {
 
 function hashProposal(swarmId: string, turn: number, stateJson: string): string {
   return createHash('sha256').update(`${swarmId}:${turn}:${stateJson}`).digest('hex');
+}
+
+function hashStateJson(stateJson: string): string {
+  return createHash('sha256').update(stateJson).digest('hex');
+}
+
+function stateRootFromState(state: GameState | null): string | undefined {
+  if (!state) return undefined;
+  return hashStateJson(JSON.stringify(state));
 }
 
 function detectDeaths(
@@ -235,8 +247,10 @@ export class OriginTrailGameCoordinator {
   private readonly swarmMemberTombstones = new Map<string, Map<string, number>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
+  private snapshotRequestCooldowns = new Map<string, number>();
   private notifications: GameNotification[] = [];
   private static readonly MAX_NOTIFICATIONS = 200;
+  private static readonly SNAPSHOT_REQUEST_COOLDOWN_MS = 5_000;
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
@@ -318,6 +332,7 @@ export class OriginTrailGameCoordinator {
     this.graphSyncInFlight = true;
     try {
       await this.loadLobbyFromGraph();
+      await this.requestLeaderSnapshotsForActiveFollowers();
     } catch (err) {
       const now = Date.now();
       if (now - this.graphSyncLastErrorLogAt >= OriginTrailGameCoordinator.GRAPH_SYNC_ERROR_LOG_INTERVAL_MS) {
@@ -555,9 +570,23 @@ export class OriginTrailGameCoordinator {
         turnHistory: [],
         createdAt,
         playerIndexMap: new Map(),
+        stateRoot: undefined,
       };
       this.swarms.set(swarmId, swarm);
       this.log(`Graph sync: restored swarm "${swarmName}" (${swarmId}) with ${players.length} players`);
+    }
+  }
+
+  private async requestLeaderSnapshotsForActiveFollowers(): Promise<void> {
+    const now = Date.now();
+    for (const swarm of this.swarms.values()) {
+      if (swarm.status !== 'traveling') continue;
+      if (swarm.leaderPeerId === this.myPeerId) continue;
+      const key = `${swarm.id}:reconnect`;
+      const last = this.snapshotRequestCooldowns.get(key) ?? 0;
+      if (now - last < OriginTrailGameCoordinator.SNAPSHOT_REQUEST_COOLDOWN_MS) continue;
+      this.snapshotRequestCooldowns.set(key, now);
+      await this.requestAuthoritativeSnapshot(swarm, 'reconnect');
     }
   }
 
@@ -612,6 +641,7 @@ export class OriginTrailGameCoordinator {
       turnHistory: [],
       createdAt: now,
       playerIndexMap: new Map(),
+      stateRoot: undefined,
     };
 
     this.swarms.set(swarmId, swarm);
@@ -716,6 +746,7 @@ export class OriginTrailGameCoordinator {
     const partyNames = swarm.players.map(p => p.displayName);
     const newGameState = gameEngine.createGame(partyNames, this.myPeerId);
     const gameStateJson = JSON.stringify(newGameState);
+    const stateRoot = hashStateJson(gameStateJson);
     const now = Date.now();
 
     const launchQuads = rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now);
@@ -771,6 +802,7 @@ export class OriginTrailGameCoordinator {
     swarm.currentTurn = 1;
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
+    swarm.stateRoot = stateRoot;
 
     const msg: proto.ExpeditionLaunchedMsg = {
       app: proto.APP_ID,
@@ -779,6 +811,7 @@ export class OriginTrailGameCoordinator {
       peerId: this.myPeerId,
       timestamp: now,
       gameStateJson,
+      stateRoot,
       partyOrder: swarm.players.map(p => p.peerId),
       contextGraphId: swarm.contextGraphId,
       requiredSignatures: swarm.requiredSignatures,
@@ -906,6 +939,8 @@ export class OriginTrailGameCoordinator {
     const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
 
     const newStateJson = JSON.stringify(result.newState);
+    const previousStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const newStateRoot = hashStateJson(newStateJson);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
     const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const resolution = tieBreaker === 'leader' ? 'leader-tiebreak' as const : 'consensus' as const;
@@ -938,6 +973,8 @@ export class OriginTrailGameCoordinator {
     swarm.pendingProposal = {
       turn: swarm.currentTurn,
       hash,
+      previousStateRoot,
+      newStateRoot,
       winningAction,
       newStateJson,
       resultMessage: result.message,
@@ -962,6 +999,8 @@ export class OriginTrailGameCoordinator {
       timestamp: proposalTimestamp,
       turn: swarm.currentTurn,
       proposalHash: hash,
+      previousStateRoot,
+      newStateRoot,
       winningAction,
       newStateJson,
       resultMessage: result.message,
@@ -1032,7 +1071,10 @@ export class OriginTrailGameCoordinator {
     this.stopVoteHeartbeat(swarm.id);
 
     const newState: GameState = JSON.parse(proposal.newStateJson);
-    if (proposal.winningAction) swarm.gameState = newState;
+    if (proposal.winningAction) {
+      swarm.gameState = newState;
+      swarm.stateRoot = proposal.newStateRoot ?? hashStateJson(proposal.newStateJson);
+    }
 
     swarm.turnHistory.push({
       turn: proposal.turn,
@@ -1134,6 +1176,16 @@ export class OriginTrailGameCoordinator {
         timestamp: Date.now(),
         turn: proposal.turn,
         proposalHash: proposal.hash,
+        previousStateRoot: proposal.previousStateRoot,
+        newStateRoot: proposal.newStateRoot,
+        winningAction: proposal.winningAction,
+        newStateJson: proposal.newStateJson,
+        resultMessage: proposal.resultMessage,
+        votes: proposal.votes,
+        approvers: [...proposal.approvals],
+        resolution: proposal.resolution,
+        deaths: proposal.deaths,
+        event: proposal.event,
       };
       await this.broadcast(resolvedMsg);
     }
@@ -1160,6 +1212,8 @@ export class OriginTrailGameCoordinator {
     const result = gameEngine.executeAction(swarm.gameState, { type: winningAction as any, params });
 
     const newStateJson = JSON.stringify(result.newState);
+    const previousStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const newStateRoot = hashStateJson(newStateJson);
     const hash = hashProposal(swarm.id, swarm.currentTurn, newStateJson);
     const votes = swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const event = result.event ? { type: result.event.type, description: result.event.description, affectedMember: result.event.affectedMember } : undefined;
@@ -1174,6 +1228,7 @@ export class OriginTrailGameCoordinator {
     this.stopVoteHeartbeat(swarm.id);
 
     swarm.gameState = result.newState;
+    swarm.stateRoot = newStateRoot;
 
     swarm.turnHistory.push({
       turn: turnNumber,
@@ -1204,6 +1259,8 @@ export class OriginTrailGameCoordinator {
       timestamp: Date.now(),
       turn: turnNumber,
       proposalHash: hash,
+      previousStateRoot,
+      newStateRoot,
       winningAction,
       newStateJson,
       resultMessage: result.message,
@@ -1263,6 +1320,16 @@ export class OriginTrailGameCoordinator {
       timestamp: Date.now(),
       turn: turnNumber,
       proposalHash: hash,
+      previousStateRoot,
+      newStateRoot,
+      winningAction,
+      newStateJson,
+      resultMessage: result.message,
+      votes,
+      approvers: [this.myPeerId],
+      resolution: 'force-resolved',
+      deaths,
+      event: turnEvent,
     };
     await this.broadcast(resolvedMsg);
 
@@ -1361,6 +1428,8 @@ export class OriginTrailGameCoordinator {
           case 'swarm:joined': this.onRemotePlayerJoined(msg as proto.SwarmJoinedMsg); break;
           case 'swarm:left': this.onRemotePlayerLeft(msg as proto.SwarmLeftMsg); break;
           case 'expedition:launched': await this.onRemoteExpeditionLaunched(msg as proto.ExpeditionLaunchedMsg); break;
+          case 'state:request': await this.onRemoteStateRequest(msg as proto.StateRequestMsg); break;
+          case 'state:snapshot': this.onRemoteStateSnapshot(msg as proto.StateSnapshotMsg); break;
           case 'vote:cast': this.onRemoteVoteCast(msg as proto.VoteCastMsg); break;
           case 'turn:proposal': await this.onRemoteTurnProposal(msg as proto.TurnProposalMsg); break;
           case 'turn:approve': await this.onRemoteTurnApproval(msg as proto.TurnApproveMsg); break;
@@ -1395,6 +1464,7 @@ export class OriginTrailGameCoordinator {
       turnHistory: [],
       createdAt: msg.timestamp,
       playerIndexMap: new Map(),
+      stateRoot: undefined,
     };
     this.swarms.set(msg.swarmId, swarm);
     this.pushNotification({
@@ -1455,6 +1525,11 @@ export class OriginTrailGameCoordinator {
     if (!swarm) return;
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
+    const derivedStateRoot = hashStateJson(msg.gameStateJson);
+    if (msg.stateRoot && msg.stateRoot !== derivedStateRoot) {
+      this.log(`Rejected expedition launch for ${msg.swarmId}: stateRoot mismatch`);
+      return;
+    }
     swarm.gameState = JSON.parse(msg.gameStateJson);
     if (msg.partyOrder) {
       let appliedPartyOrder = false;
@@ -1483,6 +1558,7 @@ export class OriginTrailGameCoordinator {
     swarm.currentTurn = 1;
     swarm.votes = [];
     swarm.turnDeadline = Date.now() + 30_000;
+    swarm.stateRoot = msg.stateRoot ?? derivedStateRoot;
     if (msg.contextGraphId) swarm.contextGraphId = msg.contextGraphId;
     if (msg.requiredSignatures != null) swarm.requiredSignatures = msg.requiredSignatures;
 
@@ -1535,6 +1611,116 @@ export class OriginTrailGameCoordinator {
     this.reorderPlayersToPartyOrder(swarm, partyOrder);
   }
 
+  private async requestAuthoritativeSnapshot(
+    swarm: SwarmState,
+    reason: 'proposal-mismatch' | 'reconnect' | 'manual',
+  ): Promise<void> {
+    const msg: proto.StateRequestMsg = {
+      app: proto.APP_ID,
+      type: 'state:request',
+      swarmId: swarm.id,
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      turn: swarm.currentTurn,
+      knownStateRoot: swarm.stateRoot,
+      reason,
+    };
+    await this.broadcast(msg);
+    this.log(`Requested authoritative snapshot for ${swarm.id} (${reason})`);
+  }
+
+  private async onRemoteStateRequest(msg: proto.StateRequestMsg): Promise<void> {
+    const swarm = this.swarms.get(msg.swarmId);
+    if (!swarm) return;
+    if (this.myPeerId !== swarm.leaderPeerId) return;
+    if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
+
+    const gameStateJson = swarm.gameState ? JSON.stringify(swarm.gameState) : undefined;
+    const lastResolvedTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
+    const snapshotMsg: proto.StateSnapshotMsg = {
+      app: proto.APP_ID,
+      type: 'state:snapshot',
+      swarmId: swarm.id,
+      peerId: this.myPeerId,
+      targetPeerId: msg.peerId,
+      timestamp: Date.now(),
+      status: swarm.status,
+      currentTurn: swarm.currentTurn,
+      stateRoot: swarm.stateRoot,
+      gameStateJson,
+      partyOrder: swarm.players.map((p) => p.peerId),
+      resultMessage: swarm.turnHistory[swarm.turnHistory.length - 1]?.resultMessage,
+      lastResolvedTurn,
+    };
+    await this.broadcast(snapshotMsg);
+    this.log(`Broadcast authoritative snapshot for ${swarm.id} to ${msg.peerId.slice(0, 8)}`);
+  }
+
+  private onRemoteStateSnapshot(msg: proto.StateSnapshotMsg): void {
+    const swarm = this.swarms.get(msg.swarmId);
+    if (!swarm) return;
+    if (msg.peerId !== swarm.leaderPeerId) return;
+    if (msg.targetPeerId && msg.targetPeerId !== this.myPeerId) return;
+
+    const localTurn = swarm.currentTurn;
+    const localRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const localLastResolvedTurn = swarm.turnHistory[swarm.turnHistory.length - 1]?.turn ?? 0;
+    const msgLastResolvedTurn = msg.lastResolvedTurn?.turn ?? 0;
+    if (msg.currentTurn < localTurn) {
+      this.log(`Ignoring authoritative snapshot for ${swarm.id}: stale turn ${msg.currentTurn} < ${localTurn}`);
+      return;
+    }
+    if (msg.currentTurn === localTurn && msgLastResolvedTurn < localLastResolvedTurn) {
+      this.log(`Ignoring authoritative snapshot for ${swarm.id}: stale resolved turn ${msgLastResolvedTurn} < ${localLastResolvedTurn}`);
+      return;
+    }
+    const sameTurn = msg.currentTurn === localTurn;
+    const sameRoot = (!msg.stateRoot && !localRoot) || (!!msg.stateRoot && !!localRoot && msg.stateRoot === localRoot);
+    if (sameTurn && sameRoot) return;
+
+    if (msg.gameStateJson) {
+      const derivedRoot = hashStateJson(msg.gameStateJson);
+      if (msg.stateRoot && msg.stateRoot !== derivedRoot) {
+        this.log(`Ignoring authoritative snapshot for ${swarm.id}: stateRoot mismatch`);
+        return;
+      }
+      swarm.gameState = JSON.parse(msg.gameStateJson);
+      swarm.stateRoot = msg.stateRoot ?? derivedRoot;
+    } else {
+      swarm.gameState = null;
+      swarm.stateRoot = msg.stateRoot;
+    }
+
+    if (msg.partyOrder && this.canBackfillPlayersFromPartyOrder(msg.partyOrder, swarm)) {
+      this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
+      if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
+        swarm.playerIndexMap = new Map(msg.partyOrder.map((pid, i) => [pid, i]));
+        this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+      }
+    }
+
+    swarm.status = msg.status;
+    swarm.currentTurn = msg.currentTurn;
+    swarm.pendingProposal = null;
+    if (msg.lastResolvedTurn) {
+      const existingIndex = swarm.turnHistory.findIndex((turn) => turn.turn === msg.lastResolvedTurn!.turn);
+      if (existingIndex >= 0) {
+        swarm.turnHistory[existingIndex] = msg.lastResolvedTurn;
+      } else {
+        swarm.turnHistory.push(msg.lastResolvedTurn);
+        swarm.turnHistory.sort((a, b) => a.turn - b.turn);
+      }
+    }
+    if (swarm.status === 'traveling') {
+      swarm.turnDeadline = Date.now() + 30_000;
+      swarm.votes = swarm.votes.filter(v => v.turn === swarm.currentTurn);
+    } else {
+      swarm.turnDeadline = null;
+      swarm.votes = [];
+    }
+    this.log(`Applied authoritative snapshot for ${swarm.id} (turn ${msg.currentTurn})`);
+  }
+
   private reorderPlayersToPartyOrder(swarm: SwarmState, partyOrder: string[]): void {
     const playersByPeerId = new Map(swarm.players.map(p => [p.peerId, p]));
     const ordered: SwarmMember[] = [];
@@ -1570,7 +1756,13 @@ export class OriginTrailGameCoordinator {
 
   private onRemoteVoteCast(msg: proto.VoteCastMsg): void {
     const swarm = this.swarms.get(msg.swarmId);
-    if (!swarm || swarm.currentTurn !== msg.turn) return;
+    if (!swarm) return;
+    if (swarm.currentTurn !== msg.turn) {
+      if (msg.turn > swarm.currentTurn && swarm.leaderPeerId !== this.myPeerId) {
+        void this.requestAuthoritativeSnapshot(swarm, 'reconnect');
+      }
+      return;
+    }
     if (!swarm.players.some(p => p.peerId === msg.peerId)) return;
     if (!this.isPeerAlive(swarm, msg.peerId)) {
       this.log(`Rejected vote from dead peer ${msg.peerId.slice(0, 8)} on ${msg.swarmId}`);
@@ -1666,6 +1858,13 @@ export class OriginTrailGameCoordinator {
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];
+    const localStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    const stateRootMismatch = !!(msg.previousStateRoot && localStateRoot && msg.previousStateRoot !== localStateRoot);
+    const derivedNewStateRoot = hashStateJson(msg.newStateJson);
+    if (msg.newStateRoot && msg.newStateRoot !== derivedNewStateRoot) {
+      this.log(`Proposal state root mismatch for ${msg.swarmId} turn ${msg.turn} - rejecting`);
+      return;
+    }
 
     // Leader force-resolved proposals bypass both tally validation and quorum.
     // Followers may have partial/lagging vote state, so comparing the local
@@ -1677,10 +1876,14 @@ export class OriginTrailGameCoordinator {
         this.log(`Invalid game state in force-resolved proposal for ${msg.swarmId} turn ${msg.turn} — rejecting`);
         return;
       }
+      if (stateRootMismatch) {
+        this.log(`Force-resolved turn ${msg.turn} for ${msg.swarmId} replaces diverged local state`);
+      }
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
       this.workspaceOps.delete(msg.swarmId);
       swarm.gameState = newState;
+      swarm.stateRoot = msg.newStateRoot ?? hashStateJson(msg.newStateJson);
 
       swarm.turnHistory.push({
         turn: msg.turn,
@@ -1710,7 +1913,10 @@ export class OriginTrailGameCoordinator {
     // We do NOT replay through the game engine because it contains
     // non-deterministic elements (Math.random for events, loot, etc.)
     // that would produce different state on each node.
-    if (swarm.gameState && swarm.votes.length > 0) {
+    if (stateRootMismatch) {
+      this.log(`Authoritative proposal for ${msg.swarmId} turn ${msg.turn} detected local state mismatch - skipping local tally validation`);
+      void this.requestAuthoritativeSnapshot(swarm, 'proposal-mismatch');
+    } else if (swarm.gameState && swarm.votes.length > 0) {
       const { winningAction } = this.tallyVotes(swarm);
       if (winningAction !== msg.winningAction) {
         this.log(`Proposal winning action mismatch: local=${winningAction} proposed=${msg.winningAction} — rejecting`);
@@ -1767,6 +1973,8 @@ export class OriginTrailGameCoordinator {
     swarm.pendingProposal = {
       turn: msg.turn,
       hash: msg.proposalHash,
+      previousStateRoot: msg.previousStateRoot,
+      newStateRoot: msg.newStateRoot ?? derivedNewStateRoot,
       winningAction: msg.winningAction,
       newStateJson: msg.newStateJson,
       resultMessage: msg.resultMessage,
@@ -1839,6 +2047,64 @@ export class OriginTrailGameCoordinator {
     await this.checkProposalThreshold(swarm);
   }
 
+  private applyResolvedTurnSnapshot(
+    swarm: SwarmState,
+    data: {
+      turn: number;
+      proposalHash: string;
+      previousStateRoot?: string;
+      newStateJson: string;
+      newStateRoot?: string;
+      winningAction: string;
+      resultMessage: string;
+      votes: Array<{ peerId: string; action: string }>;
+      resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+      deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
+      event?: { type: string; description: string };
+      approvers: string[];
+      timestamp: number;
+    },
+    source: 'proposal' | 'resolved',
+  ): void {
+    const localStateRoot = swarm.stateRoot ?? stateRootFromState(swarm.gameState);
+    if (data.previousStateRoot && localStateRoot && data.previousStateRoot !== localStateRoot) {
+      this.log(`Authoritative ${source} state mismatch for ${swarm.id} turn ${data.turn}: local root differs, replacing local state`);
+    }
+
+    const newState: GameState = JSON.parse(data.newStateJson);
+    swarm.pendingProposal = null;
+    this.stopVoteHeartbeat(swarm.id);
+    this.workspaceOps.delete(swarm.id);
+    swarm.gameState = newState;
+    swarm.stateRoot = data.newStateRoot ?? hashStateJson(data.newStateJson);
+    swarm.turnHistory.push({
+      turn: data.turn,
+      winningAction: data.winningAction,
+      resultMessage: data.resultMessage,
+      approvers: data.approvers,
+      votes: data.votes,
+      resolution: data.resolution,
+      deaths: data.deaths,
+      event: data.event,
+      timestamp: Date.now(),
+    });
+
+    if (newState.status !== 'active') {
+      swarm.status = 'finished';
+    } else {
+      swarm.currentTurn = data.turn + 1;
+      swarm.votes = [];
+      swarm.turnDeadline = Date.now() + 30_000;
+    }
+
+    this.pushNotification({
+      type: 'turn_resolved', swarmId: swarm.id, swarmName: swarm.name,
+      peerId: swarm.leaderPeerId, timestamp: data.timestamp, turn: data.turn,
+      action: data.winningAction,
+      message: `Turn ${data.turn} resolved - ${data.winningAction}`,
+    });
+  }
+
   private onRemoteTurnResolved(msg: proto.TurnResolvedMsg): void {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
@@ -1846,40 +2112,48 @@ export class OriginTrailGameCoordinator {
     // If we have a matching pending proposal but haven't resolved yet, apply it
     if (swarm.pendingProposal && swarm.pendingProposal.hash === msg.proposalHash) {
       const proposal = swarm.pendingProposal;
-      swarm.pendingProposal = null;
-      this.stopVoteHeartbeat(swarm.id);
-      this.workspaceOps.delete(msg.swarmId);
-
-      const newState: GameState = JSON.parse(proposal.newStateJson);
-      swarm.gameState = newState;
-      swarm.turnHistory.push({
+      this.applyResolvedTurnSnapshot(swarm, {
         turn: proposal.turn,
+        proposalHash: proposal.hash,
+        previousStateRoot: proposal.previousStateRoot,
+        newStateJson: proposal.newStateJson,
+        newStateRoot: proposal.newStateRoot,
         winningAction: proposal.winningAction,
         resultMessage: proposal.resultMessage,
-        approvers: [...proposal.approvals],
         votes: proposal.votes,
         resolution: proposal.resolution,
         deaths: proposal.deaths,
         event: proposal.event,
-        timestamp: Date.now(),
-      });
-
-      if (newState.status !== 'active') {
-        swarm.status = 'finished';
-        swarm.finishedAt = Date.now();
-      } else {
-        swarm.currentTurn++;
-        swarm.votes = [];
-        swarm.turnDeadline = Date.now() + 30_000;
-      }
-      this.pushNotification({
-        type: 'turn_resolved', swarmId: swarm.id, swarmName: swarm.name,
-        peerId: msg.peerId, timestamp: msg.timestamp, turn: proposal.turn,
-        action: proposal.winningAction,
-        message: `Turn ${proposal.turn} resolved — ${proposal.winningAction}`,
-      });
+        approvers: [...proposal.approvals],
+        timestamp: msg.timestamp,
+      }, 'proposal');
       this.log(`Applied resolved turn ${proposal.turn} for ${swarm.id} (via turn:resolved)`);
+      return;
     }
+
+    if (msg.peerId !== swarm.leaderPeerId) return;
+    if (msg.turn !== swarm.currentTurn) return;
+    if (!msg.newStateJson || !msg.winningAction || !msg.resultMessage || !msg.resolution || !msg.votes || !msg.deaths) {
+      this.log(`Ignoring turn:resolved for ${swarm.id} turn ${msg.turn}: missing authoritative snapshot`);
+      return;
+    }
+
+    this.applyResolvedTurnSnapshot(swarm, {
+      turn: msg.turn,
+      proposalHash: msg.proposalHash,
+      previousStateRoot: msg.previousStateRoot,
+      newStateJson: msg.newStateJson,
+      newStateRoot: msg.newStateRoot,
+      winningAction: msg.winningAction,
+      resultMessage: msg.resultMessage,
+      votes: msg.votes,
+      resolution: msg.resolution,
+      deaths: msg.deaths,
+      event: msg.event,
+      approvers: msg.approvers ?? [msg.peerId],
+      timestamp: msg.timestamp,
+    }, 'resolved');
+    this.log(`Recovered turn ${msg.turn} for ${swarm.id} from authoritative turn:resolved snapshot`);
   }
 
   // ── Query helpers ─────────────────────────────────────────────────
@@ -1962,11 +2236,14 @@ export class OriginTrailGameCoordinator {
       players: swarm.players.map(p => ({ id: p.peerId, name: p.displayName, isLeader: p.isLeader })),
       status: swarm.status,
       currentTurn: swarm.currentTurn,
+      stateRoot: swarm.stateRoot ?? null,
       gameState: swarm.gameState,
       voteStatus,
       pendingProposal: swarm.pendingProposal ? {
         turn: swarm.pendingProposal.turn,
         hash: swarm.pendingProposal.hash.slice(0, 12),
+        previousStateRoot: swarm.pendingProposal.previousStateRoot ?? null,
+        newStateRoot: swarm.pendingProposal.newStateRoot ?? null,
         approvals: swarm.pendingProposal.approvals.size,
         threshold: signatureThreshold(swarm.players.length),
       } : null,

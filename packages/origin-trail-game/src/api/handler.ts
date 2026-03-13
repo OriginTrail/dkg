@@ -62,9 +62,23 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
 
       if (req.method === 'GET' && subpath.startsWith('/swarm/')) {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-        const swarmId = subpath.slice('/swarm/'.length);
+        const snapshot = subpath.endsWith('/snapshot');
+        const swarmId = snapshot
+          ? subpath.slice('/swarm/'.length, -'/snapshot'.length)
+          : subpath.slice('/swarm/'.length);
         const wagon = coordinator.getSwarm(swarmId);
         if (!wagon) return json(res, 404, { error: 'Swarm not found' });
+        if (snapshot) {
+          return json(res, 200, {
+            swarmId: wagon.id,
+            status: wagon.status,
+            currentTurn: wagon.currentTurn,
+            stateRoot: wagon.stateRoot ?? null,
+            gameState: wagon.gameState,
+            players: wagon.players.map((p) => ({ id: p.peerId, name: p.displayName, isLeader: p.isLeader })),
+            turnHistory: wagon.turnHistory,
+          });
+        }
         return json(res, 200, coordinator.formatSwarmState(wagon));
       }
 

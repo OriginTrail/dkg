@@ -83,6 +83,21 @@ function createCoordinator(agent: MockAgent) {
   );
 }
 
+function bridgeAgents(agents: MockAgent[], options?: { canDeliver?: (from: string, to: string, msg: proto.OTMessage) => boolean }) {
+  const topic = proto.appTopic('origin-trail-game');
+  for (const agent of agents) {
+    agent.gossip.publish = async (_topic: string, data: Uint8Array) => {
+      const msg = proto.decode(data);
+      if (msg) agent._broadcasts.push(msg);
+      for (const other of agents) {
+        if (other.peerId === agent.peerId) continue;
+        if (msg && options?.canDeliver && !options.canDeliver(agent.peerId, other.peerId, msg)) continue;
+        other._injectMessage(topic, data, agent.peerId);
+      }
+    };
+  }
+}
+
 async function setupThreePlayerGame(leaderAgent: MockAgent) {
   const coord = createCoordinator(leaderAgent);
 
@@ -688,6 +703,62 @@ describe('Context Graph Integration', () => {
       expect(formatted.contextGraphId).toBeNull();
 
       coord.destroy();
+    });
+  });
+
+  describe('authoritative snapshot repair', () => {
+    it('repairs a follower that missed a resolved turn after reconnect', async () => {
+      const leaderAgent = makeMockAgent('peer-A', 1n);
+      const followerAgent = makeMockAgent('peer-B', 2n);
+      let followerConnected = true;
+
+      bridgeAgents([leaderAgent, followerAgent], {
+        canDeliver: (_from, to) => !(to === followerAgent.peerId && !followerConnected),
+      });
+
+      const leader = createCoordinator(leaderAgent);
+      const follower = createCoordinator(followerAgent);
+
+      const swarm = await leader.createSwarm('Alice', 'RepairSwarm', 2);
+      await new Promise(r => setTimeout(r, 50));
+
+      await follower.joinSwarm(swarm.id, 'Bob');
+      await new Promise(r => setTimeout(r, 50));
+
+      await leader.launchExpedition(swarm.id);
+      await new Promise(r => setTimeout(r, 100));
+
+      const followerBefore = follower.getSwarm(swarm.id);
+      expect(followerBefore?.currentTurn).toBe(1);
+      expect(typeof followerBefore?.stateRoot).toBe('string');
+
+      followerConnected = false;
+
+      await leader.castVote(swarm.id, 'syncMemory');
+      await new Promise(r => setTimeout(r, 50));
+      await leader.forceResolveTurn(swarm.id);
+      await new Promise(r => setTimeout(r, 100));
+
+      const leaderAfterResolve = leader.getSwarm(swarm.id);
+      expect(leaderAfterResolve?.currentTurn).toBe(2);
+
+      followerConnected = true;
+      await leader.castVote(swarm.id, 'advance', { pace: 2 });
+      await new Promise(r => setTimeout(r, 250));
+
+      const leaderFinal = leader.getSwarm(swarm.id);
+      const followerFinal = follower.getSwarm(swarm.id);
+      expect(followerFinal?.currentTurn).toBe(leaderFinal?.currentTurn);
+      expect(followerFinal?.stateRoot).toBe(leaderFinal?.stateRoot);
+      expect(followerFinal?.gameState).toEqual(leaderFinal?.gameState);
+      expect(followerFinal?.turnHistory.at(-1)?.approvers).toEqual(leaderFinal?.turnHistory.at(-1)?.approvers);
+
+      expect(followerAgent._broadcasts.some((m) => m.type === 'state:request')).toBe(true);
+      expect(leaderAgent._broadcasts.some((m) => m.type === 'state:snapshot' && m.targetPeerId === followerAgent.peerId)).toBe(true);
+      expect(followerAgent._broadcasts.some((m) => m.type === 'state:snapshot')).toBe(false);
+
+      leader.destroy();
+      follower.destroy();
     });
   });
 

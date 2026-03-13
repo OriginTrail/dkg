@@ -23,6 +23,8 @@ export type MessageType =
   | 'swarm:joined'
   | 'swarm:left'
   | 'expedition:launched'
+  | 'state:request'
+  | 'state:snapshot'
   | 'vote:cast'
   | 'turn:proposal'
   | 'turn:approve'
@@ -58,6 +60,7 @@ export interface SwarmLeftMsg extends BaseMessage {
 export interface ExpeditionLaunchedMsg extends BaseMessage {
   type: 'expedition:launched';
   gameStateJson: string;
+  stateRoot?: string;
   partyOrder?: string[];
   contextGraphId?: string;
   requiredSignatures?: number;
@@ -70,10 +73,41 @@ export interface VoteCastMsg extends BaseMessage {
   params?: Record<string, any>;
 }
 
+export interface StateRequestMsg extends BaseMessage {
+  type: 'state:request';
+  turn?: number;
+  knownStateRoot?: string;
+  reason?: 'proposal-mismatch' | 'reconnect' | 'manual';
+}
+
+export interface StateSnapshotMsg extends BaseMessage {
+  type: 'state:snapshot';
+  targetPeerId?: string;
+  status: 'recruiting' | 'traveling' | 'finished';
+  currentTurn: number;
+  stateRoot?: string;
+  gameStateJson?: string;
+  partyOrder?: string[];
+  resultMessage?: string;
+  lastResolvedTurn?: {
+    turn: number;
+    winningAction: string;
+    resultMessage: string;
+    approvers: string[];
+    votes: Array<{ peerId: string; action: string }>;
+    resolution: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+    deaths: Array<{ name: string; cause: string; partyIndex?: number }>;
+    event?: { type: string; description: string };
+    timestamp: number;
+  };
+}
+
 export interface TurnProposalMsg extends BaseMessage {
   type: 'turn:proposal';
   turn: number;
   proposalHash: string;
+  previousStateRoot?: string;
+  newStateRoot?: string;
   winningAction: string;
   newStateJson: string;
   resultMessage: string;
@@ -98,6 +132,16 @@ export interface TurnResolvedMsg extends BaseMessage {
   type: 'turn:resolved';
   turn: number;
   proposalHash: string;
+  previousStateRoot?: string;
+  newStateRoot?: string;
+  winningAction?: string;
+  newStateJson?: string;
+  resultMessage?: string;
+  votes?: Array<{ peerId: string; action: string }>;
+  approvers?: string[];
+  resolution?: 'consensus' | 'leader-tiebreak' | 'force-resolved';
+  deaths?: Array<{ name: string; cause: string; partyIndex?: number }>;
+  event?: { type: string; description: string };
 }
 
 export interface ChatMsg extends BaseMessage {
@@ -112,6 +156,8 @@ export type OTMessage =
   | SwarmJoinedMsg
   | SwarmLeftMsg
   | ExpeditionLaunchedMsg
+  | StateRequestMsg
+  | StateSnapshotMsg
   | VoteCastMsg
   | TurnProposalMsg
   | TurnApproveMsg

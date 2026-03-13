@@ -124,6 +124,23 @@ describe('OriginTrail Game API handler', () => {
     expect(lobby.mySwarms[0].players[0].isLeader).toBe(true);
   });
 
+  it('GET /swarm/:id/snapshot returns authoritative swarm snapshot metadata', async () => {
+    const reqCreate = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Snapshot Swarm' });
+    const mockCreate = createMockRes();
+    await handler(reqCreate, mockCreate.res, new URL(reqCreate.url, 'http://localhost'));
+    const created = JSON.parse(mockCreate.body);
+
+    const reqSnapshot = createMockReq('GET', `/api/apps/origin-trail-game/swarm/${created.id}/snapshot`);
+    const mockSnapshot = createMockRes();
+    await handler(reqSnapshot, mockSnapshot.res, new URL(reqSnapshot.url, 'http://localhost'));
+    const snapshot = JSON.parse(mockSnapshot.body);
+
+    expect(snapshot.swarmId).toBe(created.id);
+    expect(snapshot.currentTurn).toBe(0);
+    expect(snapshot.stateRoot).toBeNull();
+    expect(snapshot.gameState).toBeNull();
+  });
+
   it('allows creating multiple active swarms for the same player', async () => {
     const req1 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm A' });
     const mock1 = createMockRes();
@@ -2597,6 +2614,69 @@ describe('Turn proposal accepts non-deterministic state', () => {
     expect(actionMismatchLogs).toHaveLength(1);
   });
 
+  it('follower requests authoritative snapshot when proposal previousStateRoot mismatches local root', async () => {
+    const leaderPeerId = 'leader-root-mismatch-1';
+    const followerPeerId = 'follower-root-mismatch-1';
+    const broadcasts: any[] = [];
+
+    const followerAgent = makeMockAgent(followerPeerId);
+    followerAgent.gossip.publish = async (_topic: string, data: Uint8Array) => {
+      broadcasts.push(JSON.parse(new TextDecoder().decode(data)));
+    };
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'root-mismatch-test' });
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/root-mismatch-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/root-mismatch-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-root-mismatch',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Mismatch', playerName: 'Leader', maxPlayers: 4,
+    }), leaderPeerId);
+    handle('dkg/paranet/root-mismatch-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-root-mismatch',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    const launchStateJson = JSON.stringify(gameState);
+    const { createHash } = await import('node:crypto');
+    const launchStateRoot = createHash('sha256').update(launchStateJson).digest('hex');
+
+    handle('dkg/paranet/root-mismatch-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-root-mismatch',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: launchStateJson, stateRoot: launchStateRoot,
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const swarm = coordinator.getSwarm('swarm-root-mismatch')!;
+    swarm.stateRoot = 'deadbeef';
+
+    const leaderResult = engine.executeAction(gameState, { type: 'advance' });
+    const newStateJson = JSON.stringify(leaderResult.newState);
+    const proposalHash = createHash('sha256').update(`swarm-root-mismatch:1:${newStateJson}`).digest('hex');
+
+    handle('dkg/paranet/root-mismatch-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:proposal', swarmId: 'swarm-root-mismatch',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1,
+      proposalHash, previousStateRoot: launchStateRoot,
+      newStateRoot: createHash('sha256').update(newStateJson).digest('hex'),
+      winningAction: 'advance', newStateJson,
+      resultMessage: leaderResult.message,
+      votes: [{ peerId: leaderPeerId, action: 'advance' }],
+      resolution: 'consensus', deaths: [],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const snapshotReq = broadcasts.find((b: any) => b.type === 'state:request');
+    expect(snapshotReq).toBeDefined();
+    expect(snapshotReq.reason).toBe('proposal-mismatch');
+  });
+
   it('leader force-resolved proposal bypasses tally validation (no action mismatch rejection)', async () => {
     const leaderPeerId = 'leader-force-1';
     const followerPeerId = 'follower-force-1';
@@ -2716,6 +2796,270 @@ describe('Turn proposal accepts non-deterministic state', () => {
 
     const appliedLogs = logs.filter(l => l.includes('Applied force-resolved'));
     expect(appliedLogs).toHaveLength(0);
+  });
+
+  it('follower recovers from authoritative turn:resolved snapshot after missing proposal', async () => {
+    const leaderPeerId = 'leader-recover-1';
+    const followerPeerId = 'follower-recover-1';
+
+    const logs: string[] = [];
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'recover-test' }, (msg) => logs.push(msg));
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/recover-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/recover-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-recover',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Recover', playerName: 'Leader', maxPlayers: 4,
+    }), leaderPeerId);
+    handle('dkg/paranet/recover-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-recover',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const gameState = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    const launchStateJson = JSON.stringify(gameState);
+    const { createHash } = await import('node:crypto');
+    const launchStateRoot = createHash('sha256').update(launchStateJson).digest('hex');
+
+    handle('dkg/paranet/recover-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-recover',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: launchStateJson, stateRoot: launchStateRoot,
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const leaderResult = engine.executeAction(gameState, { type: 'advance' });
+    const newStateJson = JSON.stringify(leaderResult.newState);
+    const newStateRoot = createHash('sha256').update(newStateJson).digest('hex');
+    const proposalHash = createHash('sha256').update(`swarm-recover:1:${newStateJson}`).digest('hex');
+
+    handle('dkg/paranet/recover-test/app', encode({
+      app: 'origin-trail-game', type: 'turn:resolved', swarmId: 'swarm-recover',
+      peerId: leaderPeerId, timestamp: Date.now(), turn: 1, proposalHash,
+      previousStateRoot: launchStateRoot,
+      newStateRoot,
+      winningAction: 'advance',
+      newStateJson,
+      resultMessage: leaderResult.message,
+      votes: [{ peerId: leaderPeerId, action: 'advance' }],
+      resolution: 'consensus',
+      deaths: [],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const swarm = coordinator.getSwarm('swarm-recover');
+    expect(swarm).not.toBeNull();
+    expect(swarm!.currentTurn).toBe(2);
+    expect(swarm!.stateRoot).toBe(newStateRoot);
+    expect(swarm!.turnHistory).toHaveLength(1);
+    expect(swarm!.gameState).toEqual(leaderResult.newState);
+    expect(swarm!.turnHistory[0].approvers).toEqual([leaderPeerId]);
+
+    const recoveryLogs = logs.filter(l => l.includes('Recovered turn 1'));
+    expect(recoveryLogs).toHaveLength(1);
+  });
+
+  it('follower applies authoritative state:snapshot from leader to repair local state', async () => {
+    const leaderPeerId = 'leader-snapshot-1';
+    const followerPeerId = 'follower-snapshot-1';
+
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'snapshot-repair-test' });
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/snapshot-repair-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/snapshot-repair-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-snapshot-repair',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'SnapshotRepair', playerName: 'Leader', maxPlayers: 4,
+    }), leaderPeerId);
+    handle('dkg/paranet/snapshot-repair-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-snapshot-repair',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const initial = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    const initialJson = JSON.stringify(initial);
+    const { createHash } = await import('node:crypto');
+    const initialRoot = createHash('sha256').update(initialJson).digest('hex');
+
+    handle('dkg/paranet/snapshot-repair-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-snapshot-repair',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: initialJson, stateRoot: initialRoot,
+      partyOrder: [leaderPeerId, followerPeerId],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const repairedState = engine.executeAction(initial, { type: 'advance' }).newState;
+    const repairedJson = JSON.stringify(repairedState);
+    const repairedRoot = createHash('sha256').update(repairedJson).digest('hex');
+
+    handle('dkg/paranet/snapshot-repair-test/app', encode({
+      app: 'origin-trail-game', type: 'state:snapshot', swarmId: 'swarm-snapshot-repair',
+      peerId: leaderPeerId, timestamp: Date.now(), status: 'traveling', currentTurn: 2,
+      stateRoot: repairedRoot, gameStateJson: repairedJson,
+      partyOrder: [leaderPeerId, followerPeerId],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const swarm = coordinator.getSwarm('swarm-snapshot-repair')!;
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.stateRoot).toBe(repairedRoot);
+    expect(swarm.gameState).toEqual(repairedState);
+  });
+
+  it('follower ignores state:snapshot targeted at another peer', async () => {
+    const leaderPeerId = 'leader-snapshot-target-1';
+    const followerPeerId = 'follower-snapshot-target-1';
+
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'snapshot-target-test' });
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/snapshot-target-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/snapshot-target-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-snapshot-target',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'SnapshotTarget', playerName: 'Leader', maxPlayers: 4,
+    }), leaderPeerId);
+    handle('dkg/paranet/snapshot-target-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-snapshot-target',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const initial = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    const initialJson = JSON.stringify(initial);
+    const { createHash } = await import('node:crypto');
+    const initialRoot = createHash('sha256').update(initialJson).digest('hex');
+
+    handle('dkg/paranet/snapshot-target-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-snapshot-target',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: initialJson, stateRoot: initialRoot,
+      partyOrder: [leaderPeerId, followerPeerId],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const repairedState = engine.executeAction(initial, { type: 'advance' }).newState;
+    const repairedJson = JSON.stringify(repairedState);
+    const repairedRoot = createHash('sha256').update(repairedJson).digest('hex');
+
+    handle('dkg/paranet/snapshot-target-test/app', encode({
+      app: 'origin-trail-game', type: 'state:snapshot', swarmId: 'swarm-snapshot-target',
+      peerId: leaderPeerId, targetPeerId: 'someone-else', timestamp: Date.now(), status: 'traveling', currentTurn: 2,
+      stateRoot: repairedRoot, gameStateJson: repairedJson,
+      partyOrder: [leaderPeerId, followerPeerId],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const swarm = coordinator.getSwarm('swarm-snapshot-target')!;
+    expect(swarm.currentTurn).toBe(1);
+    expect(swarm.stateRoot).toBe(initialRoot);
+    expect(swarm.gameState).toEqual(initial);
+  });
+
+  it('follower ignores stale authoritative snapshot from an older turn', async () => {
+    const leaderPeerId = 'leader-stale-snapshot-1';
+    const followerPeerId = 'follower-stale-snapshot-1';
+
+    const followerAgent = makeMockAgent(followerPeerId);
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'stale-snapshot-test' });
+
+    const { encode } = await import('../src/dkg/protocol.js');
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/stale-snapshot-test/app');
+    const handle = handlers![0];
+
+    handle('dkg/paranet/stale-snapshot-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-stale-snapshot',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'StaleSnapshot', playerName: 'Leader', maxPlayers: 4,
+    }), leaderPeerId);
+    handle('dkg/paranet/stale-snapshot-test/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-stale-snapshot',
+      peerId: followerPeerId, timestamp: Date.now(), playerName: 'Follower',
+    }), followerPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+    const engine = new GameEngine();
+    const initial = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    const initialJson = JSON.stringify(initial);
+    const { createHash } = await import('node:crypto');
+    const initialRoot = createHash('sha256').update(initialJson).digest('hex');
+
+    handle('dkg/paranet/stale-snapshot-test/app', encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-stale-snapshot',
+      peerId: leaderPeerId, timestamp: Date.now(), gameStateJson: initialJson, stateRoot: initialRoot,
+      partyOrder: [leaderPeerId, followerPeerId],
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const resolvedState = engine.executeAction(initial, { type: 'advance' }).newState;
+    const resolvedJson = JSON.stringify(resolvedState);
+    const resolvedRoot = createHash('sha256').update(resolvedJson).digest('hex');
+    const resolvedTurnTimestamp = Date.now();
+
+    handle('dkg/paranet/stale-snapshot-test/app', encode({
+      app: 'origin-trail-game', type: 'state:snapshot', swarmId: 'swarm-stale-snapshot',
+      peerId: leaderPeerId, targetPeerId: followerPeerId, timestamp: Date.now(), status: 'traveling', currentTurn: 2,
+      stateRoot: resolvedRoot, gameStateJson: resolvedJson,
+      partyOrder: [leaderPeerId, followerPeerId],
+      lastResolvedTurn: {
+        turn: 1,
+        winningAction: 'advance',
+        resultMessage: 'resolved',
+        approvers: [leaderPeerId],
+        votes: [{ peerId: leaderPeerId, action: 'advance' }],
+        resolution: 'consensus',
+        deaths: [],
+        timestamp: resolvedTurnTimestamp,
+      },
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const staleState = engine.createGame(['Leader', 'Follower'], leaderPeerId);
+    staleState.epochs = 999;
+    const staleJson = JSON.stringify(staleState);
+    const staleRoot = createHash('sha256').update(staleJson).digest('hex');
+
+    handle('dkg/paranet/stale-snapshot-test/app', encode({
+      app: 'origin-trail-game', type: 'state:snapshot', swarmId: 'swarm-stale-snapshot',
+      peerId: leaderPeerId, targetPeerId: followerPeerId, timestamp: Date.now(), status: 'traveling', currentTurn: 1,
+      stateRoot: staleRoot, gameStateJson: staleJson,
+      partyOrder: [leaderPeerId, followerPeerId],
+      lastResolvedTurn: {
+        turn: 0,
+        winningAction: 'launch',
+        resultMessage: 'launch',
+        approvers: [leaderPeerId],
+        votes: [],
+        resolution: 'force-resolved',
+        deaths: [],
+        timestamp: resolvedTurnTimestamp - 1000,
+      },
+    }), leaderPeerId);
+    await new Promise(r => setTimeout(r, 50));
+
+    const swarm = coordinator.getSwarm('swarm-stale-snapshot')!;
+    expect(swarm.currentTurn).toBe(2);
+    expect(swarm.stateRoot).toBe(resolvedRoot);
+    expect(swarm.gameState).toEqual(resolvedState);
+    expect(swarm.turnHistory.at(-1)?.turn).toBe(1);
   });
 });
 

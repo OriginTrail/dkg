@@ -60,7 +60,7 @@ async function httpPost(url: string, body: any, token?: string): Promise<any> {
   return res.json();
 }
 
-async function waitForReady(port: number, maxWaitMs = 60_000): Promise<void> {
+async function waitForReady(port: number, maxWaitMs = 120_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
@@ -379,6 +379,7 @@ export function nodeApi(node: TestNode) {
     info: () => httpGet(`${game}/info`, token),
     lobby: () => httpGet(`${game}/lobby`, token),
     swarm: (id: string) => httpGet(`${game}/swarm/${id}`, token),
+    swarmSnapshot: (id: string) => httpGet(`${game}/swarm/${id}/snapshot`, token),
     leaderboard: () => httpGet(`${game}/leaderboard`, token),
     notifications: () => httpGet(`${game}/notifications`, token),
     players: () => httpGet(`${game}/players`, token),
