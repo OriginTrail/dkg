@@ -1,5 +1,5 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve, relative } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
@@ -806,6 +806,15 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
+
+  const resolved = resolve(filePath);
+  const resolvedBase = resolve(staticDir);
+  const rel = relative(resolvedBase, resolved);
+  if (rel.startsWith('..') || resolve(resolvedBase, rel) !== resolved) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
 
   // SPA fallback: if not a file with extension, serve index.html
   const ext = filePath.slice(filePath.lastIndexOf('.'));
