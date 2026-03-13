@@ -741,6 +741,122 @@ describe('WorkspaceHandler: CAS gossip enforcement', () => {
       expect(result.bindings[0]['o']).toContain('traveling');
     }
   });
+
+  it('expectAbsent: allows write when triple does not exist', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-pass';
+
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-pass',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(msg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `ASK { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('boolean');
+    if (result.type === 'boolean') expect(result.value).toBe(true);
+  });
+
+  it('expectAbsent: rejects write when triple already exists', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:absent-fail';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-absent-reject',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://example.org/status',
+        expectedValue: '',
+        expectAbsent: true,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://example.org/status> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('recruiting');
+    }
+  });
+
+  it('rejects non-absent CAS condition with empty expectedValue (protobuf default)', async () => {
+    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const peerId = '12D3KooWPeer';
+    const entity = 'urn:test:empty-expected';
+
+    const setupMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-setup',
+      timestampMs: Date.now(),
+    });
+    await handler.handle(setupMsg, peerId);
+
+    const updateMsg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
+      manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
+      publisherPeerId: peerId,
+      workspaceOperationId: 'ws-empty-update',
+      timestampMs: Date.now(),
+      casConditions: [{
+        subject: entity,
+        predicate: 'http://schema.org/name',
+        expectedValue: '',
+        expectAbsent: false,
+      }],
+    });
+    await handler.handle(updateMsg, peerId);
+
+    const gm = new GraphManager(store);
+    const wsGraph = gm.workspaceGraphUri(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${wsGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(1);
+      expect(result.bindings[0]['o']).toContain('Setup');
+    }
+  });
 });
 
 describe('Workspace: writeConditionalToWorkspace (CAS)', () => {

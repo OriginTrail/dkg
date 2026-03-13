@@ -75,7 +75,11 @@ export class WorkspaceHandler {
       try {
         assertSafeIri(cond.subject);
         assertSafeIri(cond.predicate);
-        if (!cond.expectAbsent && cond.expectedValue) {
+        if (!cond.expectAbsent) {
+          if (!cond.expectedValue) {
+            this.log.warn(ctx, `CAS rejected: empty expectedValue for non-absent condition`);
+            return false;
+          }
           assertSafeRdfTerm(cond.expectedValue);
         }
       } catch {
@@ -144,7 +148,7 @@ export class WorkspaceHandler {
       const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
 
       onPhase?.('store', 'start');
-      await this.withWriteLocks(lockKeys, async () => {
+      const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
         const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
         const existing = new Set<string>([...wsOwned.keys()]);
 
@@ -162,7 +166,7 @@ export class WorkspaceHandler {
         );
         if (!validation.valid) {
           this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
-          return;
+          return false;
         }
         onPhase?.('validate', 'end');
 
@@ -170,7 +174,7 @@ export class WorkspaceHandler {
           const passed = await this.enforceCASConditions(casConditions, workspaceGraph, ctx);
           if (!passed) {
             this.log.info(ctx, `Skipping workspace write ${workspaceOperationId} — remote CAS conditions not met`);
-            return;
+            return false;
           }
         }
 
@@ -234,9 +238,14 @@ export class WorkspaceHandler {
             liveOwned.set(entry.rootEntity, entry.creatorPeerId);
           }
         }
+
+        return true;
       });
-      onPhase?.('store', 'end');
-      this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
+
+      if (applied) {
+        onPhase?.('store', 'end');
+        this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
+      }
     } catch (err) {
       this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);
     }
