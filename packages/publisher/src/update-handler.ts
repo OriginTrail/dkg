@@ -182,7 +182,14 @@ export class UpdateHandler {
       // Binding was already established from a trusted source (local publish or metadata lookup).
       // Do NOT set from gossip — that would allow first-message-wins paranet spoofing.
 
-      await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, BigInt(batchId), computedRoot);
+      try {
+        await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, BigInt(batchId), computedRoot);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to update _meta merkleRoot for batchId=${batchId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 

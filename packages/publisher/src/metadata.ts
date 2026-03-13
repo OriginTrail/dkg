@@ -49,6 +49,13 @@ function assertSafeParanetIdForSparql(paranetId: string): void {
   }
 }
 
+function assertSafeGraphIriForSparql(graphIri: string): void {
+  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
+  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
+    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
+  }
+}
+
 /**
  * Generate RDF metadata triples for a Knowledge Collection.
  * These go into the paranet's meta graph.
@@ -291,6 +298,7 @@ export async function resolveUalByBatchId(
   metaGraph: string,
   batchId: bigint,
 ): Promise<string | undefined> {
+  assertSafeGraphIriForSparql(metaGraph);
   const result = await store.query(
     `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <${DKG}batchId> "${batchId}"^^<${XSD}integer> } } LIMIT 1`,
   );
