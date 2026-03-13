@@ -898,7 +898,14 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, kcId, kcMerkleRoot);
+    try {
+      await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, kcId, kcMerkleRoot);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to sync _meta merkleRoot for kcId=${kcId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     onPhase?.('store', 'end');
 
     const result: PublishResult = {

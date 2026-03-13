@@ -321,12 +321,45 @@ export async function updateMetaMerkleRoot(
   const metaGraph = graphManager.metaGraphUri(paranetId);
   const ual = await resolveUalByBatchId(store, metaGraph, batchId);
   if (!ual) return;
+  assertSafeGraphIriForSparql(ual);
 
-  await store.deleteByPattern({ graph: metaGraph, subject: ual, predicate: `${DKG}merkleRoot` });
+  const rootLiteral = `"${toHex(newMerkleRoot)}"`;
+
+  // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
+  // state with no dkg:merkleRoot when update succeeds.
+  try {
+    await store.query(
+      `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?oldRoot } }
+       INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
+       WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
+    );
+    return;
+  } catch {
+    // Some backends may not support SPARQL updates via query().
+    // Fallback preserves correctness by inserting first, then pruning old roots.
+  }
+
+  const existing = await store.query(
+    `SELECT ?root WHERE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?root } }`,
+  );
   await store.insert([{
     subject: ual,
     predicate: `${DKG}merkleRoot`,
-    object: `"${toHex(newMerkleRoot)}"`,
+    object: rootLiteral,
     graph: metaGraph,
   }]);
+  if (existing.type !== 'bindings' || existing.bindings.length === 0) return;
+
+  const staleRootQuads: Quad[] = existing.bindings
+    .map((row) => row['root'])
+    .filter((root): root is string => typeof root === 'string' && root.length > 0 && root !== rootLiteral)
+    .map((root) => ({
+      subject: ual,
+      predicate: `${DKG}merkleRoot`,
+      object: root,
+      graph: metaGraph,
+    }));
+  if (staleRootQuads.length > 0) {
+    await store.delete(staleRootQuads);
+  }
 }

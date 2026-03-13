@@ -804,7 +804,8 @@ describe('UpdateHandler', () => {
 
   it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
     const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
-    const gm = new GraphManager(store);
+    const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
     const original = await publisher.publish({
       paranetId: PARANET,
@@ -814,6 +815,22 @@ describe('UpdateHandler', () => {
     const ual = await resolveUalByBatchId(store, META_GRAPH, original.kcId);
     expect(ual).toBeDefined();
     expect(ual).toContain('did:dkg:');
+
+    const largeBatchId = (1n << 60n) + 1337n;
+    const largeUal = 'did:dkg:mock:31337/0x1234567890abcdef1234567890abcdef12345678/large-kc';
+    await store.insert([{
+      subject: largeUal,
+      predicate: `${DKG}batchId`,
+      object: `"${largeBatchId}"^^<${XSD}integer>`,
+      graph: META_GRAPH,
+    }]);
+    const largeResolved = await resolveUalByBatchId(store, META_GRAPH, largeBatchId);
+    expect(largeResolved).toBe(largeUal);
+
+    const roundedViaNumber = BigInt(Number(largeBatchId));
+    expect(roundedViaNumber).not.toBe(largeBatchId);
+    const roundedLookup = await resolveUalByBatchId(store, META_GRAPH, roundedViaNumber);
+    expect(roundedLookup).toBeUndefined();
 
     const noMatch = await resolveUalByBatchId(store, META_GRAPH, 999999n);
     expect(noMatch).toBeUndefined();
