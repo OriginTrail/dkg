@@ -36,8 +36,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 const SYNC_PAGE_SIZE = 500;
 const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 const SYNC_TOTAL_TIMEOUT_MS = 120_000;
-/** Per-page timeout for sync (relay links can be slow; default protocol timeout may be too short). */
+/** Per-page timeout for sync when we have budget (relay links can be slow). */
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
+/** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
+const SYNC_ROUTER_ATTEMPTS = 3;
 const DEFAULT_WORKSPACE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -594,8 +596,15 @@ export class DKGAgent {
 
           const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
 
+          // Cap per-call timeout so ProtocolRouter.send (3 internal retries) stays within deadline
+          const remainingMs = Math.max(0, deadline - Date.now());
+          const timeoutMs = Math.min(
+            SYNC_PAGE_TIMEOUT_MS,
+            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
+          );
+
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, SYNC_PAGE_TIMEOUT_MS),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
@@ -684,8 +693,14 @@ export class DKGAgent {
 
           const payload = new TextEncoder().encode(`workspace:${pid}|${offset}|${SYNC_PAGE_SIZE}`);
 
+          const remainingMs = Math.max(0, deadline - Date.now());
+          const timeoutMs = Math.min(
+            SYNC_PAGE_TIMEOUT_MS,
+            Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
+          );
+
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, SYNC_PAGE_TIMEOUT_MS),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
