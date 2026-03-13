@@ -1607,6 +1607,7 @@ describe('Graph-based lobby sync', () => {
   it('graph sync does not regress a traveling swarm back to recruiting', async () => {
     const syncAgent = makeMockAgent('leader-peer');
     const now = Date.now();
+    let includeStalePlayer = false;
     syncAgent.query = async (sparql: string) => {
       if (sparql.includes('AgentSwarm')) {
         return {
@@ -1621,12 +1622,15 @@ describe('Graph-based lobby sync', () => {
         };
       }
       if (sparql.includes('displayName')) {
-        return {
-          bindings: [
-            { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
-            { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"', joinedAt: `"${now + 10}"` },
-          ],
-        };
+        const bindings = [
+          { agent: 'https://origintrail-game.dkg.io/player/leader-peer', displayName: '"Leader"', joinedAt: `"${now}"` },
+          { agent: 'https://origintrail-game.dkg.io/player/peer-b', displayName: '"B"', joinedAt: `"${now + 10}"` },
+        ];
+        // Second sync adds a stale graph member that should NOT be merged
+        if (includeStalePlayer) {
+          bindings.push({ agent: 'https://origintrail-game.dkg.io/player/stale-peer', displayName: '"Stale"', joinedAt: `"${now + 20}"` });
+        }
+        return { bindings };
       }
       return { bindings: [] };
     };
@@ -1644,12 +1648,16 @@ describe('Graph-based lobby sync', () => {
     swarm!.status = 'traveling';
     swarm!.gameState = { sessionId: 'test', status: 'active', party: [], month: 1, epochs: 0 } as any;
     swarm!.currentTurn = 1;
+    const rosterSnapshot = swarm!.players.map(p => p.peerId);
 
-    // Graph sync runs again — graph still says 'recruiting' (publish lag)
+    // Graph sync runs again — graph still says 'recruiting' with a new stale member
+    includeStalePlayer = true;
     await (coordinator as any).loadLobbyFromGraph();
 
     // Status must NOT regress back to recruiting
     expect(swarm!.status).toBe('traveling');
+    // Roster must NOT be mutated by stale graph data for a traveling swarm
+    expect(swarm!.players.map(p => p.peerId)).toEqual(rosterSnapshot);
     coordinator.destroy();
   });
 
