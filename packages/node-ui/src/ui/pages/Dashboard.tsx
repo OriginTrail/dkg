@@ -2,9 +2,10 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { useFetch, formatDuration } from '../hooks.js';
 import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, fetchOperation, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
-import { isDevModeEnabled } from './Settings.js';
+import { isDevModeEnabled } from '../dev-mode.js';
 import { RdfGraph } from '@dkg/graph-viz/react';
 import type { ViewConfig } from '@dkg/graph-viz';
+import { Tooltip, InfoTip } from '../components/Tooltip.js';
 
 // ── Import Memories Modal ──────────────────────────────────────────────────────
 
@@ -146,9 +147,9 @@ function ImportResultView({
             <tbody>
               {(result.quads ?? []).map((q, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '6px 10px', color: '#22d3ee', wordBreak: 'break-all' }}>{humanizeUri(q.subject)}</td>
+                  <td style={{ padding: '6px 10px', color: 'var(--cyan)', wordBreak: 'break-all' }}>{humanizeUri(q.subject)}</td>
                   <td style={{ padding: '6px 10px', color: 'var(--text-muted)', wordBreak: 'break-all' }}>{humanizeUri(q.predicate)}</td>
-                  <td style={{ padding: '6px 10px', color: q.object.startsWith('"') ? 'var(--text)' : '#4ade80', wordBreak: 'break-all' }}>{formatTripleObject(q.object)}</td>
+                  <td style={{ padding: '6px 10px', color: q.object.startsWith('"') ? 'var(--text)' : 'var(--green)', wordBreak: 'break-all' }}>{formatTripleObject(q.object)}</td>
                 </tr>
               ))}
             </tbody>
@@ -652,6 +653,17 @@ const FALLBACK_PARANETS = [
 
 // ── Recent Operations Mini Waterfall ─────────────────────────────────────────
 
+const PHASE_DESCRIPTIONS: Record<string, string> = {
+  prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
+  store: 'Inserting triples into the local triple store and data graph.',
+  chain: 'Submitting on-chain tx and waiting for confirmation.',
+  broadcast: 'Broadcasting to network peers via GossipSub.',
+  parse: 'Validating and parsing the SPARQL query syntax.',
+  execute: 'Running the SPARQL query against the local triple store.',
+  transfer: 'Fetching triple pages from the remote peer.',
+  verify: 'Verifying Merkle proofs and inserting synced triples.',
+};
+
 const PHASE_COLORS: Record<string, string> = {
   prepare: '#3b82f6', 'prepare:ensureParanet': '#60a5fa', 'prepare:partition': '#2563eb',
   'prepare:manifest': '#93c5fd', 'prepare:validate': '#1d4ed8', 'prepare:merkle': '#7dd3fc',
@@ -682,26 +694,39 @@ function DashMiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) 
           );
         })}
       </div>
-      {hover !== null && phases[hover] && (
-        <div style={{
-          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
-          marginBottom: 6, padding: '4px 8px', borderRadius: 6,
-          background: 'var(--surface)', border: '1px solid var(--border)',
-          boxShadow: '0 4px 12px rgba(0,0,0,.4)',
-          whiteSpace: 'nowrap', fontSize: 10, zIndex: 10, pointerEvents: 'none',
-        }}>
-          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? PHASE_FALLBACK_COLOR }}>
-            {phases[hover].phase}
-          </span>
-          <span style={{ color: 'var(--text-muted)', margin: '0 4px' }}>·</span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
-            {formatDuration(phases[hover].duration_ms)}
-          </span>
-          {phases[hover].status === 'error' && (
-            <span style={{ color: '#ef4444', marginLeft: 4, fontWeight: 600 }}>FAIL</span>
-          )}
-        </div>
-      )}
+      {hover !== null && phases[hover] && (() => {
+        const hoveredPhase = phases[hover].phase;
+        const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
+        const desc = PHASE_DESCRIPTIONS[topLevel];
+        return (
+          <div style={{
+            position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+            marginBottom: 6, padding: '4px 8px', borderRadius: 6,
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+            fontSize: 10, zIndex: 10, pointerEvents: 'none',
+            maxWidth: 240,
+          }}>
+            <div style={{ whiteSpace: 'nowrap' }}>
+              <span style={{ fontWeight: 700, color: PHASE_COLORS[hoveredPhase] ?? PHASE_FALLBACK_COLOR }}>
+                {hoveredPhase}
+              </span>
+              <span style={{ color: 'var(--text-muted)', margin: '0 4px' }}>·</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
+                {formatDuration(phases[hover].duration_ms)}
+              </span>
+              {phases[hover].status === 'error' && (
+                <span style={{ color: 'var(--red)', marginLeft: 4, fontWeight: 600 }}>FAIL</span>
+              )}
+            </div>
+            {desc && (
+              <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 2, whiteSpace: 'normal', lineHeight: 1.3 }}>
+                {desc}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -717,18 +742,18 @@ function OpDetailPanel({ operationId }: { operationId: string }) {
   return (
     <div style={{ padding: '10px 12px', background: 'rgba(255,255,255,.02)', borderTop: '1px solid var(--border)' }}>
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8, fontSize: 11 }}>
-        <span style={{ color: 'var(--text-muted)' }}>Status: <strong style={{ color: op.status === 'error' ? '#ef4444' : '#22c55e' }}>{op.status}</strong></span>
+        <span style={{ color: 'var(--text-muted)' }}>Status: <strong style={{ color: op.status === 'error' ? 'var(--red)' : 'var(--green-mid)' }}>{op.status}</strong></span>
         <span style={{ color: 'var(--text-muted)' }}>Duration: <strong style={{ fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(op.duration_ms)}</strong></span>
-        {op.error_message && <span style={{ color: '#ef4444', fontSize: 10 }}>{op.error_message}</span>}
+        {op.error_message && <span style={{ color: 'var(--red)', fontSize: 10 }}>{op.error_message}</span>}
       </div>
       {phases?.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: recentLogs.length ? 8 : 0 }}>
           {phases.map((p: any, i: number) => (
             <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 10 }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: p.status === 'error' ? '#ef4444' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR, flexShrink: 0 }} />
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: p.status === 'error' ? 'var(--red)' : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR, flexShrink: 0 }} />
               <span style={{ color: PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 600, minWidth: 100 }}>{p.phase}</span>
               <span className="mono" style={{ color: 'var(--text-dim)' }}>{formatDuration(p.duration_ms)}</span>
-              {p.status === 'error' && <span style={{ color: '#ef4444', fontWeight: 600 }}>FAILED</span>}
+              {p.status === 'error' && <span style={{ color: 'var(--red)', fontWeight: 600 }}>FAILED</span>}
             </div>
           ))}
         </div>
@@ -737,7 +762,7 @@ function OpDetailPanel({ operationId }: { operationId: string }) {
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
           <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 4, fontWeight: 600 }}>Recent logs</div>
           {recentLogs.map((l: any, i: number) => (
-            <div key={i} style={{ fontSize: 10, color: l.level === 'error' ? '#ef4444' : l.level === 'warn' ? '#f59e0b' : 'var(--text-muted)', lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div key={i} style={{ fontSize: 10, color: l.level === 'error' ? 'var(--red)' : l.level === 'warn' ? 'var(--amber)' : 'var(--text-muted)', lineHeight: 1.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               [{l.module}] {l.message}
             </div>
           ))}
@@ -797,7 +822,7 @@ function RecentOpsSection() {
                 </span>
                 <span style={{
                   fontSize: 10, fontWeight: 700, width: 60, flexShrink: 0,
-                  color: isError ? '#ef4444' : '#22c55e',
+                  color: isError ? 'var(--red)' : 'var(--green-mid)',
                 }}>
                   {op.operation_name}
                 </span>
@@ -805,7 +830,7 @@ function RecentOpsSection() {
                 <span className="mono" style={{ fontSize: 10, color: 'var(--text-muted)', width: 50, textAlign: 'right', flexShrink: 0 }}>
                   {formatDuration(dur)}
                 </span>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: isError ? '#ef4444' : op.status === 'in_progress' ? '#f59e0b' : '#22c55e', flexShrink: 0 }} />
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: isError ? 'var(--red)' : op.status === 'in_progress' ? 'var(--amber)' : 'var(--green-mid)', flexShrink: 0 }} />
               </div>
               {isSelected && (
                 <div style={{ border: '1px solid var(--border)', borderTop: 'none', borderRadius: '0 0 8px 8px', overflow: 'hidden', marginTop: -4 }}>
@@ -834,7 +859,7 @@ function ErrorHotspotsCard() {
 
   return (
     <div className="paranet-card" style={{ padding: 12 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red, #ef4444)', marginBottom: 6 }}>Error Hotspots (7d)</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', marginBottom: 6 }}>Error Hotspots (7d)</div>
       {hotspots.map((h: any, i: number) => (
         <div key={`${h.operation_name}-${h.phase}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', color: 'var(--text-muted)' }}>
           <span>
@@ -842,7 +867,7 @@ function ErrorHotspotsCard() {
             <span style={{ color: 'var(--text-dim)', margin: '0 4px' }}>&rsaquo;</span>
             <span style={{ color: PHASE_COLORS[h.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 500 }}>{h.phase}</span>
           </span>
-          <span style={{ color: '#ef4444', fontWeight: 700 }}>{h.error_count}</span>
+          <span style={{ color: 'var(--red)', fontWeight: 700 }}>{h.error_count}</span>
         </div>
       ))}
     </div>
@@ -862,15 +887,15 @@ function SpendingCard() {
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
         <div>
           <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalGasEth?.toFixed(6) ?? '0'}</div>
-          <div>ETH gas</div>
+          <Tooltip text="Ethereum gas fees for on-chain transactions"><div>ETH gas</div></Tooltip>
         </div>
         <div>
           <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.totalTrac?.toFixed(2) ?? '0'}</div>
-          <div>TRAC</div>
+          <Tooltip text="TRAC — the OriginTrail network token used for publishing and storing knowledge"><div>TRAC</div></Tooltip>
         </div>
         <div>
           <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{latest.publishCount ?? 0}</div>
-          <div>publishes</div>
+          <Tooltip text="Number of Knowledge Assets published on-chain"><div>publishes</div></Tooltip>
         </div>
       </div>
     </div>
@@ -887,14 +912,16 @@ export function DashboardPage() {
   const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
 
-  const PARANET_COLORS = ['var(--green)', 'var(--blue)', 'var(--amber)', 'var(--purple)', '#f472b6', '#22d3ee'];
-  const paranets = (paranetData?.paranets ?? []).map((p: any, i: number) => ({
-    id: p.id ?? `paranet-${i}`,
-    name: p.name ?? p.id ?? `Paranet ${i + 1}`,
-    assets: p.assetCount ?? p.assets ?? '—',
-    agents: p.agentCount ?? p.agents ?? '—',
-    color: PARANET_COLORS[i % PARANET_COLORS.length],
-  }));
+  const paranets = useMemo(() => {
+    const colors = ['var(--green)', 'var(--blue)', 'var(--amber)', 'var(--purple)', '#f472b6', '#22d3ee'];
+    return (paranetData?.paranets ?? []).map((p: any, i: number) => ({
+      id: p.id ?? `paranet-${i}`,
+      name: p.name ?? p.id ?? `Paranet ${i + 1}`,
+      assets: p.assetCount ?? p.assets ?? '—',
+      agents: p.agentCount ?? p.agents ?? '—',
+      color: colors[i % colors.length],
+    }));
+  }, [paranetData]);
   const displayParanets = paranets.length > 0 ? paranets : FALLBACK_PARANETS;
   const isLiveParanets = paranets.length > 0;
 
@@ -911,7 +938,7 @@ export function DashboardPage() {
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
+          <h1 className="page-title" style={{ marginBottom: 0 }}>Dashboard</h1>
           <p style={{ marginTop: 4 }}>
             {status ? `Your node is live${paranets.length ? ` and participating in ${paranets.length} paranet${paranets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
           </p>
@@ -926,19 +953,19 @@ export function DashboardPage() {
       <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
         {([
           {
-            label: 'Knowledge Collections',
+            label: <>Knowledge Collections <InfoTip text="Groups of knowledge triples stored on your node. Confirmed = finalized on-chain. Tentative = stored locally, pending blockchain finalization." /></>,
             value: confirmedKCs != null && tentativeKCs != null
               ? String(Number(confirmedKCs) + Number(tentativeKCs))
               : totalKCs != null ? Number(totalKCs).toLocaleString() : '—',
             sub: confirmedKCs != null && tentativeKCs != null
-              ? <><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs).toLocaleString()} confirmed</span>{' · '}<span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs).toLocaleString()} tentative</span></>
+              ? <><Tooltip text="Finalized on-chain with a confirmed transaction"><span style={{ color: 'var(--green)' }}>{Number(confirmedKCs).toLocaleString()} confirmed</span></Tooltip>{' · '}<Tooltip text="Stored locally, pending blockchain finalization"><span style={{ color: 'var(--amber)' }}>{Number(tentativeKCs).toLocaleString()} tentative</span></Tooltip></>
               : totalKCs != null ? 'from node metrics' : 'loading…',
             color: 'var(--green)',
           },
-          { label: 'Connected Peers', value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
-          { label: 'Agents Discovered', value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
-        ] as Array<{ label: string; value: string; sub: React.ReactNode; color: string }>).map(s => (
-          <div className="stat-card" key={s.label}>
+          { label: <>Connected Peers <InfoTip text="Other DKG nodes your node has an active network connection with" /></>, value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
+          { label: <>Agents Discovered <InfoTip text="AI agents discovered across the paranets your node participates in" /></>, value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
+        ] as Array<{ label: React.ReactNode; value: string; sub: React.ReactNode; color: string }>).map((s, i) => (
+          <div className="stat-card" key={i}>
             <div className="accent" style={{ background: `linear-gradient(90deg,${s.color}44,transparent)` }} />
             <div className="stat-label">{s.label}</div>
             <div className="stat-value mono">{s.value}</div>
@@ -948,7 +975,7 @@ export function DashboardPage() {
       </div>
 
       {/* Network viz — full width */}
-      <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: '#0a0f1a', border: '1px solid var(--border)', marginBottom: 16 }}>
+      <div style={{ position: 'relative', height: 340, borderRadius: 12, overflow: 'hidden', background: 'var(--bg)', border: '1px solid var(--border)', marginBottom: 16 }}>
         <div style={{ position: 'absolute', top: 14, left: 18, zIndex: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', boxShadow: '0 0 6px rgba(74,222,128,.53)', display: 'inline-block' }} />
           <span className="mono" style={{ fontSize: 12, fontWeight: 700 }}>{status?.networkName ?? 'DKG Network'}</span>
@@ -973,7 +1000,7 @@ export function DashboardPage() {
                 <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', marginLeft: 'auto' }} />
               </div>
               <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 10, color: 'var(--text-muted)' }}>
-                <span>{p.assets.toLocaleString()} assets</span>
+                <Tooltip text="Knowledge Assets published to this paranet"><span>{p.assets.toLocaleString()} assets</span></Tooltip>
                 <span>{p.agents} agents</span>
               </div>
             </div>
@@ -985,7 +1012,7 @@ export function DashboardPage() {
       <RecentOpsSection />
 
       {/* Health + Spending cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+      <div className="dashboard-grid-2">
         <ErrorHotspotsCard />
         <SpendingCard />
       </div>
@@ -993,9 +1020,9 @@ export function DashboardPage() {
       {/* Quick actions */}
       <div className="quick-actions" style={{ marginBottom: 16 }}>
         {[
-          { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘' },
+          { label: 'Query the Graph', desc: 'SPARQL queries', icon: '⌘', onClick: () => navigate('/explorer/sparql') },
           { label: 'Import Memories', desc: 'From Claude / ChatGPT', icon: '📥', onClick: () => setImportOpen(true) },
-          { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮' },
+          { label: 'Play OriginTrail', desc: 'Test your node', icon: '🎮', onClick: () => navigate('/apps') },
         ].map(a => (
           <button key={a.label} className="quick-action" onClick={a.onClick}>
             <span style={{ fontSize: 16 }}>{a.icon}</span>

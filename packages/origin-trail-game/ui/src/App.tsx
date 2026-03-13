@@ -92,7 +92,7 @@ function HeroBanner() {
         <h3 className="ot-hero-heading">Lead your agent swarm to Singularity Harbor</h3>
         <p className="ot-hero-desc">
           2,000 epochs across the AI Frontier. Every decision is a Knowledge Asset.
-          Every outcome is verified by the <strong style={{ color: '#4ade80' }}>Context Oracle</strong>.
+          Every outcome is verified by the <strong style={{ color: 'var(--green)' }}>Context Oracle</strong>.
         </p>
         <p className="ot-hero-tagline">Your swarm will not die of dysentery. But it might die of hallucinations.</p>
       </div>
@@ -267,7 +267,13 @@ function ContextGraphPanel({ swarm }: { swarm: any }) {
   if (triples.length === 0) {
     return (
       <div className="ot-graph-empty">
-        <span className="ot-muted">Context graph will appear once the journey begins</span>
+        <div className="ot-empty-state">
+          <div className="ot-empty-state-icon ot-empty-state-icon--sm">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="14.5" y1="9.5" x2="17.5" y2="6.5"/><line x1="9.5" y1="14.5" x2="6.5" y2="17.5"/></svg>
+          </div>
+          <div className="ot-empty-state-title">Context graph</div>
+          <div className="ot-empty-state-desc">The knowledge graph will build as your swarm makes decisions and the journey progresses.</div>
+        </div>
       </div>
     );
   }
@@ -334,7 +340,13 @@ function DecisionTrace({ swarm }: { swarm: any }) {
   if (history.length === 0) {
     return (
       <div className="ot-trace-empty">
-        <span className="ot-muted">Decision trace will appear as turns resolve…</span>
+        <div className="ot-empty-state">
+          <div className="ot-empty-state-icon ot-empty-state-icon--sm">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          </div>
+          <div className="ot-empty-state-title">No decisions yet</div>
+          <div className="ot-empty-state-desc">The decision trace will appear here as your swarm votes and turns resolve.</div>
+        </div>
       </div>
     );
   }
@@ -511,7 +523,15 @@ export function App() {
             }}>
               <strong>{w.name}</strong> — {w.players?.length ?? 0} players — {w.status}
             </div>
-          )) : <p className="ot-muted">No swarms yet</p>}
+          )) : (
+            <div className="ot-empty-state">
+              <div className="ot-empty-state-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              </div>
+              <div className="ot-empty-state-title">No swarms yet</div>
+              <div className="ot-empty-state-desc">Create a new swarm below to start your journey across the AI Frontier, or join an open one.</div>
+            </div>
+          )}
         </div>
 
         <div className="ot-section">
@@ -524,7 +544,15 @@ export function App() {
                 catch (e: any) { setError(e.message); } finally { setLoading(false); }
               }} disabled={loading || (w.players?.length ?? 0) >= w.maxPlayers}>{(w.players?.length ?? 0) >= w.maxPlayers ? 'Full' : 'Join'}</button>
             </div>
-          )) : <p className="ot-muted">No open swarms</p>}
+          )) : (
+            <div className="ot-empty-state">
+              <div className="ot-empty-state-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              </div>
+              <div className="ot-empty-state-title">No open swarms</div>
+              <div className="ot-empty-state-desc">No swarms are currently recruiting players. Launch your own swarm to get started.</div>
+            </div>
+          )}
         </div>
 
         <div className="ot-section">
@@ -761,7 +789,13 @@ function Leaderboard() {
         </div>
       ) : entries.length === 0 ? (
         <div className="ot-leaderboard-empty">
-          <p className="ot-muted">No completed expeditions yet. Be the first to reach Singularity Harbor!</p>
+          <div className="ot-empty-state" style={{ border: 'none', background: 'none', padding: '1.5rem 1rem' }}>
+            <div className="ot-empty-state-icon">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5C7 4 7 7 7 7"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5C17 4 17 7 17 7"/><path d="M4 22h16"/><path d="M10 22V8h4v14"/><path d="M8 9h8"/><path d="M8 9l-2 13"/><path d="M16 9l2 13"/></svg>
+            </div>
+            <div className="ot-empty-state-title">No completed expeditions yet</div>
+            <div className="ot-empty-state-desc">Be the first to reach Singularity Harbor! Launch a swarm below to start your journey.</div>
+          </div>
         </div>
       ) : (
         <div className="ot-leaderboard-table">

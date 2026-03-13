@@ -497,11 +497,9 @@ function chainLabel(chainId: string | null | undefined): string {
   }
 }
 
-const DEV_MODE_KEY = 'dkg-developer-mode';
-
-export function isDevModeEnabled(): boolean {
-  try { return localStorage.getItem(DEV_MODE_KEY) === '1'; } catch { return false; }
-}
+// Re-export from shared module for backward compatibility
+export { isDevModeEnabled } from '../dev-mode.js';
+import { isDevModeEnabled, setDevModeEnabled } from '../dev-mode.js';
 
 function DevModeToggle() {
   const [on, setOn] = useState(isDevModeEnabled);
@@ -509,8 +507,7 @@ function DevModeToggle() {
   const toggle = useCallback(() => {
     const next = !on;
     setOn(next);
-    try { localStorage.setItem(DEV_MODE_KEY, next ? '1' : '0'); } catch {}
-    window.dispatchEvent(new Event('devmode-change'));
+    setDevModeEnabled(next);
   }, [on]);
 
   return (
@@ -688,7 +685,7 @@ export function SettingsPage() {
   return (
     <div className="page-section">
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700 }}>Settings</h1>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Settings</h1>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Node configuration and preferences</p>
       </div>
       <GeneralSettingsTab />

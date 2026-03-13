@@ -107,7 +107,13 @@ function OverviewTab() {
       <div className="card">
         <div className="card-title">Operational Wallets</div>
         {balances.length === 0 ? (
-          <div className="empty-state">No wallets or chain not configured</div>
+          <div className="empty-state empty-state--compact">
+            <div className="empty-state-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+            </div>
+            <div className="empty-state-title">No wallets found</div>
+            <div className="empty-state-desc">Configure a blockchain connection in your node settings to see wallet balances.</div>
+          </div>
         ) : (
           <table className="data-table">
             <thead>

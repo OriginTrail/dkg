@@ -1,12 +1,17 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { DashboardPage } from './pages/Dashboard.js';
-import { ExplorerPage } from './pages/Explorer.js';
-import { AgentHubPage } from './pages/AgentHub.js';
-import { AppsPage } from './pages/Apps.js';
-import { SettingsPage, isDevModeEnabled } from './pages/Settings.js';
-import { AppHostPage, type InstalledApp } from './pages/AppHost.js';
+import { isDevModeEnabled } from './dev-mode.js';
+import type { InstalledApp } from './pages/AppHost.js';
 import { fetchNotifications, markNotificationsRead, type Notification } from './api.js';
+
+// Lazy-loaded route components — heavy pages are code-split so the initial
+// bundle only includes the shell + sidebar.  Vite will produce separate chunks.
+const DashboardPage = React.lazy(() => import('./pages/Dashboard.js').then(m => ({ default: m.DashboardPage })));
+const ExplorerPage  = React.lazy(() => import('./pages/Explorer.js').then(m => ({ default: m.ExplorerPage })));
+const AgentHubPage  = React.lazy(() => import('./pages/AgentHub.js').then(m => ({ default: m.AgentHubPage })));
+const AppsPage      = React.lazy(() => import('./pages/Apps.js').then(m => ({ default: m.AppsPage })));
+const SettingsPage  = React.lazy(() => import('./pages/Settings.js').then(m => ({ default: m.SettingsPage })));
+const AppHostPage   = React.lazy(() => import('./pages/AppHost.js').then(m => ({ default: m.AppHostPage })));
 
 const chevronIcon = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -157,6 +162,7 @@ function NotificationBell() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [open, setOpen] = useState(false);
   const bellRef = useRef<HTMLDivElement>(null);
+  const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -168,7 +174,7 @@ function NotificationBell() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 4000);
+    const t = setInterval(refresh, 20_000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -182,6 +188,10 @@ function NotificationBell() {
 
   const handleOpen = async () => {
     const next = !open;
+    if (next && bellRef.current) {
+      const rect = bellRef.current.getBoundingClientRect();
+      setDropdownPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    }
     setOpen(next);
     if (next && unreadCount > 0) {
       await markNotificationsRead();
@@ -216,10 +226,11 @@ function NotificationBell() {
         )}
       </button>
 
-      {open && (
+      {open && dropdownPos && (
         <div style={{
-          position: 'absolute', top: '100%', right: 0, width: 340,
-          background: 'var(--bg-card, var(--bg))', border: '1px solid var(--border)',
+          position: 'fixed', top: dropdownPos.top, right: dropdownPos.right,
+          width: 340,
+          background: 'var(--surface)', border: '1px solid var(--border)',
           borderRadius: 10, boxShadow: '0 8px 32px rgba(0,0,0,.4)',
           zIndex: 9999, maxHeight: 420, display: 'flex', flexDirection: 'column',
           overflow: 'hidden',
@@ -277,7 +288,7 @@ export function App() {
 
   return (
     <div className="app-layout">
-      <aside className="sidebar">
+<aside className="sidebar">
         <div className="sidebar-logo">
           <style>{`@keyframes pulse-fade{0%,100%{opacity:1}50%{opacity:.4}}`}</style>
           <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: 'var(--green)', letterSpacing: '-0.02em' }}>{liveStatus?.name ?? '…'}</div>
@@ -365,6 +376,7 @@ export function App() {
           <NotificationBell />
         </div>
         <div style={{ flex: 1, overflow: 'auto' }}>
+        <Suspense fallback={<div className="lazy-loading-fallback"><span className="lazy-spinner" />Loading…</div>}>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/explorer/*" element={<ExplorerPage />} />
@@ -379,6 +391,7 @@ export function App() {
           <Route path="/wallet" element={<Navigate to="/settings" replace />} />
           <Route path="/integrations" element={<Navigate to="/settings" replace />} />
         </Routes>
+        </Suspense>
         </div>
       </main>
     </div>

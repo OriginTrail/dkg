@@ -121,7 +121,13 @@ export function MessagesPage() {
         <div className="chat-peers">
           <div className="chat-peers-header">Agents</div>
           {agents.length === 0 ? (
-            <div className="chat-peers-empty">No agents discovered</div>
+            <div className="chat-peers-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+              <div className="empty-state-icon" style={{ width: 36, height: 36, borderRadius: 8 }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No agents discovered</div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.4 }}>Agents will appear as they join the network.</div>
+            </div>
           ) : (
             agents.map((a: Agent) => (
               <button
@@ -165,8 +171,12 @@ export function MessagesPage() {
 
               <div className="chat-messages">
                 {messages.length === 0 ? (
-                  <div className="chat-empty">
-                    No messages yet. Send one to start a conversation.
+                  <div className="chat-empty" style={{ flexDirection: 'column', gap: 10 }}>
+                    <div className="empty-state-icon">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    </div>
+                    <div className="empty-state-title">No messages yet</div>
+                    <div className="empty-state-desc">Send a message below to start a peer-to-peer conversation.</div>
                   </div>
                 ) : (
                   messages.map((msg, i) => (

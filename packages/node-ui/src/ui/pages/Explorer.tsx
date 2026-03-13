@@ -573,7 +573,11 @@ function GraphTab() {
           {loading && !triples && <div className="loading" style={{ minHeight: 400 }}>Loading graph…</div>}
           {triples && triples.length === 0 && !loading && (
             <div className="empty-state" style={{ minHeight: 400 }}>
-              {emptyReason || 'No triples match the current filters'}
+              <div className="empty-state-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="14.5" y1="9.5" x2="17.5" y2="6.5"/><line x1="9.5" y1="14.5" x2="6.5" y2="17.5"/></svg>
+              </div>
+              <div className="empty-state-title">{emptyReason ? 'No triples found' : 'No matching triples'}</div>
+              <div className="empty-state-desc">{emptyReason || 'Try adjusting the filters or selecting a different paranet.'}</div>
             </div>
           )}
           {triples && triples.length > 0 && (
@@ -1017,7 +1021,15 @@ function ResultTriples({
   loading: boolean;
   onFocusSubject: (subject: string) => void;
 }) {
-  if (!Array.isArray(result) || result.length === 0) return <div className="empty-state">Run a query to see triples</div>;
+  if (!Array.isArray(result) || result.length === 0) return (
+    <div className="empty-state empty-state--compact">
+      <div className="empty-state-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      </div>
+      <div className="empty-state-title">Run a query to see triples</div>
+      <div className="empty-state-desc">Write a SPARQL query above and execute it to explore your knowledge graph.</div>
+    </div>
+  );
   if (!triples.length) return <ResultBindingsFallback result={result} />;
   const displayRows = buildTripleRowsWithProvenance(triples, rows);
 
@@ -1075,7 +1087,15 @@ function formatBindingCell(value: unknown): string {
 
 function ResultBindingsFallback({ result }: { result: any[] }) {
   if (!Array.isArray(result) || result.length === 0) {
-    return <div className="empty-state">Run a query to inspect results</div>;
+    return (
+      <div className="empty-state empty-state--compact">
+        <div className="empty-state-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        </div>
+        <div className="empty-state-title">Run a query to inspect results</div>
+        <div className="empty-state-desc">Execute a SPARQL query to see the result bindings.</div>
+      </div>
+    );
   }
   const firstObject = result.find((row) => row && typeof row === 'object' && !Array.isArray(row));
   const columns = firstObject ? Object.keys(firstObject as Record<string, unknown>) : [];
@@ -1440,7 +1460,13 @@ function ParanetsTab() {
   return (
     <div>
       {paranets.length === 0 ? (
-        <div className="empty-state">No paranets found</div>
+        <div className="empty-state empty-state--rich">
+          <div className="empty-state-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          </div>
+          <div className="empty-state-title">No paranets found</div>
+          <div className="empty-state-desc">Subscribe to a paranet in the Integrations page, then its data will be explorable here.</div>
+        </div>
       ) : (
         <div className="paranet-list">
           {paranets.map((p: any) => (

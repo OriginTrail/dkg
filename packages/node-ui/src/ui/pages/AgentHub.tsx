@@ -555,7 +555,13 @@ function PeerChatView() {
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
           {loadingPeers && <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading peers…</div>}
           {!loadingPeers && peers.length === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers discovered yet.</div>
+            <div className="empty-state empty-state--sidebar">
+              <div className="empty-state-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              </div>
+              <div className="empty-state-title">No peers discovered</div>
+              <div className="empty-state-desc">Peers will appear here as your node discovers other agents on the network.</div>
+            </div>
           )}
           {!loadingPeers && peers.length > 0 && matchCount === 0 && (
             <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>No peers match "{peerSearch}"</div>
@@ -648,8 +654,12 @@ function PeerChatView() {
 
             <div className="chat-area" style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
               {peerMessages.length === 0 && (
-                <div style={{ textAlign: 'center', color: 'var(--text-dim)', fontSize: 12, marginTop: 40 }}>
-                  No messages yet. Say hello!
+                <div className="empty-state" style={{ marginTop: 24 }}>
+                  <div className="empty-state-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                  </div>
+                  <div className="empty-state-title">No messages yet</div>
+                  <div className="empty-state-desc">Send a message to start a peer-to-peer conversation.</div>
                 </div>
               )}
               {peerMessages.map((m, i) => (
@@ -1228,8 +1238,12 @@ function OpenClawChatView() {
               </div>
             )}
             {graphTriples && graphTriples.length === 0 && (
-              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
-                No graph data yet. Send some messages first.
+              <div className="empty-state" style={{ position: 'absolute', inset: 0 }}>
+                <div className="empty-state-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="14.5" y1="9.5" x2="17.5" y2="6.5"/><line x1="9.5" y1="14.5" x2="6.5" y2="17.5"/></svg>
+                </div>
+                <div className="empty-state-title">No graph data yet</div>
+                <div className="empty-state-desc">Send some messages first. The knowledge graph builds as you converse.</div>
               </div>
             )}
             {graphTriples && graphTriples.length > 0 && (
@@ -2390,8 +2404,12 @@ export function AgentHubPage() {
         )}
 
         {!graphLoading && graphTriples && graphTriples.length === 0 && (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-dim)', fontSize: 12 }}>
-            No triples found for this session graph yet.
+          <div className="empty-state" style={{ position: 'absolute', inset: 0 }}>
+            <div className="empty-state-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="14.5" y1="9.5" x2="17.5" y2="6.5"/><line x1="9.5" y1="14.5" x2="6.5" y2="17.5"/></svg>
+            </div>
+            <div className="empty-state-title">No triples yet</div>
+            <div className="empty-state-desc">Memory graph triples will appear here as data is stored.</div>
           </div>
         )}
 
@@ -2597,7 +2615,7 @@ export function AgentHubPage() {
                   Go to turn
                 </button>
               </div>
-              <div className="mono" style={{ fontSize: 10, color: '#22d3ee' }}>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--cyan)' }}>
                 +{selectedGraphDiff.graphDiff.addedNodeCount} nodes . +{selectedGraphDiff.graphDiff.addedEdgeCount} edges
               </div>
               {selectedGraphDiff.graphDiff.sampleNodes.length > 0 && (
@@ -2743,8 +2761,12 @@ export function AgentHubPage() {
               <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>Loading conversations…</div>
             )}
             {!sessionsLoading && sessions.length === 0 && (
-              <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '12px 6px' }}>
-                No conversations yet. Start chatting with your agent — each conversation is stored in your private knowledge graph.
+              <div className="empty-state empty-state--sidebar">
+                <div className="empty-state-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                </div>
+                <div className="empty-state-title">No conversations yet</div>
+                <div className="empty-state-desc">Start chatting with your agent. Each conversation is stored in your private knowledge graph.</div>
               </div>
             )}
             {sessions.map((s) => {
@@ -2977,8 +2999,17 @@ export function AgentHubPage() {
                           {m.persistStatus && (
                             <span
                               className="mono"
+                              title={
+                                m.persistStatus === 'enshrined' ? 'Published to the paranet and anchored on-chain' :
+                                m.persistStatus === 'stored' ? 'Saved to your local knowledge graph' :
+                                m.persistStatus === 'failed' ? 'Failed to persist this memory' :
+                                m.persistStatus === 'skipped' ? 'Memory persistence was skipped for this message' :
+                                m.persistStatus === 'in_progress' ? 'Currently being saved to the knowledge graph' :
+                                'Waiting to be persisted'
+                              }
                               style={{
                                 fontSize: 10,
+                                cursor: 'help',
                                 color:
                                   m.persistStatus === 'enshrined' ? '#22d3ee' :
                                   m.persistStatus === 'stored' ? 'var(--green)' :

@@ -79,7 +79,7 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
 
   if (!app) {
     return (
-      <div style={{ padding: 32, color: '#aaa' }}>
+      <div style={{ padding: 32, color: 'var(--text-muted)' }}>
         App <strong>{appId}</strong> is not installed.
       </div>
     );
@@ -94,7 +94,7 @@ export function AppHostPage({ apps }: { apps: InstalledApp[] }) {
       onLoad={sendToken}
       onError={handleError}
       sandbox="allow-scripts allow-forms allow-popups"
-      style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: '#111' }}
+      style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8, background: 'var(--surface)' }}
       title={app.label}
     />
   );

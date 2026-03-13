@@ -63,7 +63,32 @@ const OP_TYPE_COLORS: Record<string, string> = {
   system: '#6b7280',
 };
 
-const TOOLTIP_STYLE = { background: '#111827', border: '1px solid #1f2937', borderRadius: 6, fontSize: 12, color: '#e5e7eb' };
+const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
+  publish: 'Create a new Knowledge Asset on the DKG',
+  update: 'Update an existing Knowledge Asset',
+  query: 'Run a SPARQL query against the knowledge graph',
+  workspace: 'Manage a local workspace for staging changes',
+  enshrine: 'Anchor a Knowledge Collection on-chain to a paranet',
+  connect: 'Establish a connection with a network peer',
+  sync: 'Synchronize knowledge data with remote peers',
+  gossip: 'Propagate updates across the peer-to-peer network',
+  system: 'Internal system maintenance operation',
+};
+
+const PHASE_LEGEND_ENTRIES = [
+  { phase: 'prepare', label: 'Prepare', color: '#3b82f6' },
+  { phase: 'store', label: 'Store', color: '#8b5cf6' },
+  { phase: 'chain', label: 'Chain', color: '#f59e0b' },
+  { phase: 'broadcast', label: 'Broadcast', color: '#22c55e' },
+  { phase: 'parse', label: 'Parse', color: '#3b82f6' },
+  { phase: 'execute', label: 'Execute', color: '#8b5cf6' },
+  { phase: 'transfer', label: 'Transfer', color: '#60a5fa' },
+  { phase: 'verify', label: 'Verify', color: '#22c55e' },
+  { phase: 'decode', label: 'Decode', color: '#14b8a6' },
+  { phase: 'validate', label: 'Validate', color: '#2dd4bf' },
+];
+
+const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text)' };
 
 const TIME_PERIODS = [
   { value: '5m', label: '5 min', ms: 5 * 60_000 },
@@ -157,7 +182,7 @@ export function ObservabilitySection() {
 export function OperationsPage() {
   return (
     <div className="page-section">
-      <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Observability</h1>
+      <h1 className="page-title" style={{ marginBottom: 4 }}>Observability</h1>
       <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
       <ObservabilitySection />
     </div>
@@ -205,7 +230,13 @@ function HealthTab() {
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
-          <div className="empty-state" style={{ color: 'var(--green)' }}>No errors in this period</div>
+          <div className="empty-state empty-state--compact">
+            <div className="empty-state-icon" style={{ background: 'rgba(74,222,128,.1)', borderColor: 'rgba(74,222,128,.25)' }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <div className="empty-state-title" style={{ color: 'var(--green)' }}>No errors in this period</div>
+            <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
+          </div>
         ) : (
           <table className="data-table">
             <thead>
@@ -270,7 +301,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
             }}
           >
             <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
-            <span style={{ fontWeight: 600, fontSize: 12, color: OP_TYPE_COLORS[op.operation_name] ?? '#9ca3af' }}>{op.operation_name}</span>
+            <span style={{ fontWeight: 600, fontSize: 12, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
@@ -280,12 +311,12 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 11, color: '#ef4444' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 11, color: 'var(--red)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 6, border: '1px solid rgba(239,68,68,.15)', fontSize: 11, color: '#f87171' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 6, border: '1px solid rgba(239,68,68,.15)', fontSize: 11, color: 'var(--red)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -384,7 +415,7 @@ function StatsTab() {
 
   const legendFormatter = useCallback((value: string) => {
     const dimmed = hiddenSeries.has(value);
-    return <span style={{ color: dimmed ? '#555' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
+    return <span style={{ color: dimmed ? 'var(--text-dim)' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
   }, [hiddenSeries]);
 
   return (
@@ -421,8 +452,8 @@ function StatsTab() {
           {rates.length > 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
               {rates.map((r: any) => {
-                const color = OP_TYPE_COLORS[r.type] ?? '#9ca3af';
-                const rateColor = r.rate >= 0.9 ? '#22c55e' : r.rate >= 0.7 ? '#f59e0b' : '#ef4444';
+                const color = OP_TYPE_COLORS[r.type] ?? 'var(--text-muted)';
+                const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
                 return (
                   <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 8, padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${color}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -443,7 +474,7 @@ function StatsTab() {
                       </div>
                       <div>
                         <div style={{ color: 'var(--text-dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
-                        <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? '#ef4444' : 'var(--text-dim)' }}>{r.error}</div>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
                       </div>
                     </div>
                     <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden', marginTop: 10 }}>
@@ -523,7 +554,15 @@ function StatsTab() {
               </div>
             </div>
           ) : (
-            <div className="card" style={{ marginBottom: 14 }}><div className="empty-state">Not enough operation data for charts yet</div></div>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="empty-state empty-state--compact">
+                <div className="empty-state-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                </div>
+                <div className="empty-state-title">Not enough data for charts</div>
+                <div className="empty-state-desc">Charts will render once enough operations have been processed.</div>
+              </div>
+            </div>
           )}
         </>
       ) : (
@@ -588,7 +627,15 @@ function StatsTab() {
               </div>
             </div>
           ) : (
-            <div className="card"><div className="empty-state">Not enough hardware metrics yet — data is collected every 30 seconds</div></div>
+            <div className="card">
+              <div className="empty-state empty-state--compact">
+                <div className="empty-state-icon">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+                </div>
+                <div className="empty-state-title">Collecting hardware metrics</div>
+                <div className="empty-state-desc">Data is sampled every 30 seconds. Charts will appear shortly.</div>
+              </div>
+            </div>
           )}
         </>
       )}
@@ -627,29 +674,42 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
           );
         })}
       </div>
-      {hover !== null && phases[hover] && (
-        <div style={{
-          position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
-          marginBottom: 6, padding: '5px 10px', borderRadius: 6,
-          background: 'var(--surface)', border: '1px solid var(--border)',
-          boxShadow: '0 4px 12px rgba(0,0,0,.4)',
-          whiteSpace: 'nowrap', fontSize: 11, zIndex: 10, pointerEvents: 'none',
-        }}>
-          <span style={{ fontWeight: 700, color: PHASE_COLORS[phases[hover].phase] ?? PHASE_FALLBACK_COLOR }}>
-            {phases[hover].phase}
-          </span>
-          <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
-            {formatDuration(phases[hover].duration_ms)}
-          </span>
-          <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
-            ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
-          </span>
-          {phases[hover].status === 'error' && (
-            <span style={{ color: '#ef4444', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
-          )}
-        </div>
-      )}
+      {hover !== null && phases[hover] && (() => {
+        const hoveredPhase = phases[hover].phase;
+        const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
+        const desc = PHASE_DESCRIPTIONS[topLevel];
+        return (
+          <div style={{
+            position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
+            marginBottom: 6, padding: '5px 10px', borderRadius: 6,
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+            fontSize: 11, zIndex: 10, pointerEvents: 'none',
+            maxWidth: 260,
+          }}>
+            <div style={{ whiteSpace: 'nowrap' }}>
+              <span style={{ fontWeight: 700, color: PHASE_COLORS[hoveredPhase] ?? PHASE_FALLBACK_COLOR }}>
+                {hoveredPhase}
+              </span>
+              <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
+                {formatDuration(phases[hover].duration_ms)}
+              </span>
+              <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
+                ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
+              </span>
+              {phases[hover].status === 'error' && (
+                <span style={{ color: 'var(--red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+              )}
+            </div>
+            {desc && (
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
+                {desc}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -685,16 +745,11 @@ function OperationsTab() {
   return (
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-        <select className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)}>
+        <select className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
           <option value="">All types</option>
-          <option value="publish">publish</option>
-          <option value="update">update</option>
-          <option value="query">query</option>
-          <option value="workspace">workspace</option>
-          <option value="enshrine">enshrine</option>
-          <option value="sync">sync</option>
-          <option value="connect">connect</option>
-          <option value="system">system</option>
+          {Object.entries(OP_TYPE_DESCRIPTIONS).map(([type, desc]) => (
+            <option key={type} value={type} title={desc}>{type} — {desc}</option>
+          ))}
         </select>
         <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="">All statuses</option>
@@ -712,9 +767,35 @@ function OperationsTab() {
         <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{total} total</span>
       </div>
 
+      {/* Phase color legend */}
+      <div style={{
+        display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
+        padding: '6px 12px', borderRadius: 6,
+        background: 'rgba(255,255,255,.02)', border: '1px solid var(--border)',
+        fontSize: 10, color: 'var(--text-muted)', alignItems: 'center',
+      }}>
+        <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
+        {PHASE_LEGEND_ENTRIES.map(({ phase, label, color }) => (
+          <span
+            key={phase}
+            title={PHASE_DESCRIPTIONS[phase] ?? ''}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default' }}
+          >
+            <span style={{ width: 7, height: 7, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+            {label}
+          </span>
+        ))}
+      </div>
+
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         {operations.length === 0 ? (
-          <div className="empty-state" style={{ padding: 32 }}>No operations recorded yet</div>
+          <div className="empty-state empty-state--rich" style={{ margin: 16 }}>
+            <div className="empty-state-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div className="empty-state-title">No operations recorded</div>
+            <div className="empty-state-desc">Operations will appear here as your node processes publish, query, and other DKG requests.</div>
+          </div>
         ) : (
           <table className="data-table">
             <thead>
@@ -737,7 +818,7 @@ function OperationsTab() {
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
                   <td>{formatTime(op.started_at)}</td>
-                  <td><span className="badge" style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? '#6b7280'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? '#6b7280' }}>{op.operation_name}</span></td>
+                  <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
@@ -911,17 +992,17 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
       <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 9, color: 'var(--text-dim)' }}>
         {phases.some((p: any) => p.status === 'success') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: '#22c55e', display: 'inline-block' }} /> Success
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--green-mid)', display: 'inline-block' }} /> Success
           </span>
         )}
         {phases.some((p: any) => p.status === 'error') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: '#ef4444', display: 'inline-block' }} /> Failed
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--red)', display: 'inline-block' }} /> Failed
           </span>
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: '#f59e0b', display: 'inline-block' }} /> In Progress
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--amber)', display: 'inline-block' }} /> In Progress
           </span>
         )}
       </div>
@@ -954,15 +1035,15 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
-          <span><b style={{ color: '#9ca3af' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.paranet_id && <span><b style={{ color: '#9ca3af' }}>Paranet</b> {op.paranet_id}</span>}
-          {op.triple_count != null && <span><b style={{ color: '#9ca3af' }}>Triples</b> {op.triple_count}</span>}
-          {op.peer_id && <span><b style={{ color: '#9ca3af' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
-          {op.gas_cost_eth != null && <span><b style={{ color: '#9ca3af' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
-          {op.trac_cost != null && <span><b style={{ color: '#9ca3af' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
+          <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
+          {op.paranet_id && <span><b style={{ color: 'var(--text-muted)' }}>Paranet</b> {op.paranet_id}</span>}
+          {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
+          {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
+          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
+          {op.trac_cost != null && <span><b style={{ color: 'var(--text-muted)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
           {op.tx_hash && (
             <span>
-              <b style={{ color: '#9ca3af' }}>TX</b>{' '}
+              <b style={{ color: 'var(--text-muted)' }}>TX</b>{' '}
               {explorerUrl ? (
                 <a href={`${explorerUrl}/tx/${op.tx_hash}`} target="_blank" rel="noopener noreferrer" className="mono">{shortId(op.tx_hash)}</a>
               ) : <span className="mono">{shortId(op.tx_hash)}</span>}
@@ -970,7 +1051,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 12, color: '#ef4444' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 12, color: 'var(--red)' }}>
             {op.error_message}
           </div>
         )}
@@ -989,16 +1070,19 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
+                const topLevel = p.phase.includes(':') ? p.phase.split(':')[0] : p.phase;
+                const desc = PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? '#ef4444' : color}` }}>
-                    <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }}>{p.phase}</span>
+                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? 'var(--red)' : color}` }}>
+                    <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
-                    <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>
+                    {desc && <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
+                    <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}>
                       {p.started_at ? new Date(p.started_at).toLocaleTimeString() : ''}
                     </span>
                     {p.status === 'error' && p.details && (
-                      <span style={{ fontSize: 10, color: '#ef4444', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
+                      <span style={{ fontSize: 10, color: 'var(--red)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.details}>
                         {p.details}
                       </span>
                     )}
@@ -1006,13 +1090,6 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 );
               })}
             </div>
-            {phases.length > 0 && (
-              <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-dim)' }}>
-                {PHASE_DESCRIPTIONS[phases[0]?.phase] && (
-                  <span title="Phase description">Tip: hover phase bars for details</span>
-                )}
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -1023,7 +1100,13 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>
         {logs.length === 0 ? (
-          <div className="empty-state" style={{ padding: 24 }}>No logs for this operation</div>
+          <div className="empty-state empty-state--compact">
+            <div className="empty-state-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            </div>
+            <div className="empty-state-title">No logs available</div>
+            <div className="empty-state-desc">This operation has no log entries recorded.</div>
+          </div>
         ) : (
           <LogContainer maxHeight={350}>
             {logs.map((l: any) => (
@@ -1102,7 +1185,7 @@ function LogsTab() {
     return (
       <>
         {line.slice(0, idx)}
-        <mark style={{ background: '#f59e0b', color: '#000', borderRadius: 2, padding: '0 1px' }}>
+        <mark style={{ background: 'var(--amber)', color: 'var(--bg)', borderRadius: 2, padding: '0 1px' }}>
           {line.slice(idx, idx + debouncedSearch.length)}
         </mark>
         {line.slice(idx + debouncedSearch.length)}
@@ -1183,7 +1266,7 @@ function LogsTab() {
         }}>
           <span>
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
-            {loading ? <span style={{ marginLeft: 6, color: '#8b5cf6', fontSize: 10 }}>refreshing...</span> : ''}
+            {loading ? <span style={{ marginLeft: 6, color: 'var(--purple)', fontSize: 10 }}>refreshing...</span> : ''}
           </span>
           <span className="mono" style={{ fontSize: 10, color: 'rgba(139,92,246,.6)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
         </div>
@@ -1202,8 +1285,18 @@ function LogsTab() {
           }}
         >
           {lines.length === 0 ? (
-            <div className="empty-state" style={{ color: '#8b949e' }}>
-              {loading ? 'Loading...' : 'No log lines found'}
+            <div className="empty-state empty-state--compact">
+              {loading ? (
+                <div className="empty-state-desc">Loading...</div>
+              ) : (
+                <>
+                  <div className="empty-state-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  </div>
+                  <div className="empty-state-title">No log lines found</div>
+                  <div className="empty-state-desc">Try adjusting the search filters or check back later.</div>
+                </>
+              )}
             </div>
           ) : (
             lines.map((line, i) => (
@@ -1274,19 +1367,19 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
     const color = cls === 'error' ? LOG_COLORS.levelError : cls === 'warn' ? LOG_COLORS.levelWarn : LOG_COLORS.message;
     return (
       <div style={{ padding: '0 16px', color, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-        <span style={{ color: '#484f58', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
+        <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
         {highlight ? highlight(line) : line}
       </div>
     );
   }
 
-  const opColor = OP_TYPE_COLORS[parsed.opName] ?? '#8b949e';
+  const opColor = OP_TYPE_COLORS[parsed.opName] ?? 'var(--text-muted)';
   return (
     <div style={{ padding: '0 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-      <span style={{ color: '#484f58', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
+      <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
       <span style={{ color: LOG_COLORS.timestamp }}>{parsed.ts}</span>{' '}
       <span style={{ color: opColor, fontWeight: 600 }}>{parsed.opName}</span>{' '}
-      <span style={{ color: '#484f58' }}>{parsed.opId.slice(0, 8)}</span>{' '}
+      <span style={{ color: 'var(--text-dim)' }}>{parsed.opId.slice(0, 8)}</span>{' '}
       <span style={{ color: LOG_COLORS.module }}>[{parsed.module}]</span>{' '}
       <span style={{ color: LOG_COLORS.message }}>{highlight ? highlight(parsed.message) : parsed.message}</span>
     </div>
