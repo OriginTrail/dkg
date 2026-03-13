@@ -155,7 +155,7 @@ describe('dashboard uses runtime data', () => {
   });
 
   it('card is labeled Knowledge Collections, not Knowledge Assets', () => {
-    expect(dashboard).toContain('Knowledge Collections');
+    expect(dashboard).toMatch(/Knowledge Collections/);
     expect(dashboard).not.toMatch(/['"]Knowledge Assets['"]/);
   });
 
