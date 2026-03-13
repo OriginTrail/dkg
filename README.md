@@ -1,5 +1,5 @@
 # OriginTrail DKG v9 — Testnet Node 🦞
-<img width="1536" height="1024" alt="dkg_img" src="https://github.com/user-attachments/assets/7be9c4a1-0ade-4bad-8f16-27d457d39e19" />
+<img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v9.jpg" />
 
 [![CI](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)
@@ -9,26 +9,29 @@
 
 **Give your AI agents the ultimate memory that survives the session.**
 
+The Decentralized Knowledge Graph v9 is the shared memory layer for multi-agent AI systems. Every finding your agents produce becomes a cryptographically anchored Knowledge Asset — verifiable by anyone, queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends. 
+
 > **Disclaimer:**  
 > This project is in active development, currently in **beta** and running on the testnet. Expect rapid iteration and breaking changes. Please avoid using in production environments and note that features, APIs, and stability may change as the project evolves.
-
-The Decentralized Knowledge Graph v9 is the shared memory layer for multi-agent AI systems. Every finding your agents produce becomes a cryptographically anchored Knowledge Asset — verifiable by anyone, queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends.
-
-
 ---
 
-## What this repository is for
+## What is DKG V9
 
-Use DKG V9 when you want one or more of these:
+This is the monorepo for the **Decentralized Knowledge Graph V9 node** — the node software, CLI, dashboard UI, protocol packages, adapters, and tooling needed to run a DKG node and participate in the network.
 
-- a local or remote node that stores and serves RDF knowledge
-- a shared memory layer for AI agents
-- a publish/query protocol with cryptographic proofs
-- encrypted peer-to-peer communication between agents or apps
-- isolated domains of coordination through paranets
-- a base for agent frameworks such as OpenClaw or ElizaOS
+Any AI agent — whether built with [OpenClaw](https://github.com/OriginTrail/openclaw), [ElizaOS](https://elizaos.ai/), or any custom framework — can run a DKG node and start exchanging knowledge with other agents across the network, without any central authority, API gateway, or vendor platform in between.
 
-This repository contains the node, CLI, UI, core protocol packages, adapters, and supporting tooling.
+### Why a knowledge graph
+
+Most agent memory today is flat: conversation logs, vector embeddings, JSON blobs. A knowledge graph stores facts as structured relationships (subject → predicate → object), which means agents can reason over connections, not just retrieve similar text. When Agent A publishes "Company X acquired Company Y on March 5", any other agent can query for all acquisitions by Company X, all events on March 5, or all entities related to Company Y — without knowing what to search for in advance. The graph structure turns isolated findings into composable, queryable collective intelligence.
+
+### Why knowledge assets enable trust
+
+A **Knowledge Asset (KA)** is a unit of published knowledge: a set of RDF statements bundled with a Merkle proof and anchored to the blockchain. Once published, the content is immutable — anyone can verify that the data hasn't been tampered with by recomputing the proof against the on-chain root. This means agents don't need to trust each other; they verify. Every claim has cryptographic provenance: who published it, when, and exactly what was said.
+
+### Why context graphs enable collaboration
+
+A **Context Graph** is a bounded, topic-scoped subgraph within a paranet that requires M-of-N signatures from designated participants before it can be finalized on-chain. This enables structured multi-party collaboration: a group of research agents can co-author a shared body of findings where no single agent can unilaterally alter the record. Context graphs give agents a way to build shared context with built-in governance — useful for joint research, audits, supply chain tracking, or any workflow where multiple parties need to agree on a common set of facts.
 
 ---
 
