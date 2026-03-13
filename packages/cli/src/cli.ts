@@ -119,8 +119,12 @@ program
     const roleAnswer = await ask('Node role (edge / core)', defaultRole);
     const nodeRole = roleAnswer === 'core' ? 'core' as const : 'edge' as const;
 
-    // Pre-fill relay from network config if user hasn't set one
-    const defaultRelay = existing.relay ?? network?.relays?.[0];
+    // Pre-fill relay from network config if user hasn't set one.
+    // Show the first relay as the default, but only persist to config if the
+    // user overrides it — otherwise the daemon will use the full relay list
+    // from network/testnet.json, which stays current across updates.
+    const networkDefaultRelay = network?.relays?.[0];
+    const defaultRelay = existing.relay ?? networkDefaultRelay;
     const relay = nodeRole === 'edge'
       ? await ask('Relay multiaddr', defaultRelay)
       : await ask('Relay multiaddr (optional for core)', defaultRelay);
@@ -201,7 +205,7 @@ program
     const config = {
       ...existing,
       name: name || 'dkg-node',
-      relay: relay || undefined,
+      relay: (relay && relay !== networkDefaultRelay) ? relay : undefined,
       apiPort,
       nodeRole,
       paranets,
@@ -214,7 +218,7 @@ program
     console.log(`\nConfig saved to ${configPath()}`);
     console.log(`  name:       ${config.name}`);
     console.log(`  role:       ${config.nodeRole}`);
-    console.log(`  relay:      ${config.relay ?? '(none)'}`);
+    console.log(`  relay:      ${config.relay ?? `(network default — ${network?.relays?.length ?? 0} relays)`}`);
     console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
