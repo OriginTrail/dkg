@@ -1,8 +1,9 @@
 # DKG V9 Protocol Operations — Sequence Diagrams & Analysis
 
-> End-to-end flows for every V9 protocol operation: publish, update,
-> workspace, query, sync, gossip, and chain integration. Includes RDF
-> triples produced, on-chain vs off-chain split, and improvement notes.
+> End-to-end flows for every V9 protocol operation: publish (standard,
+> workspace + enshrine, context graph), update, query, sync, gossip,
+> and chain integration. Includes on-chain vs off-chain split and
+> improvement notes.
 
 ---
 
@@ -10,22 +11,21 @@
 
 1. [Node Boot Sequence](#1-node-boot-sequence)
 2. [Publish Operation](#2-publish-operation)
-3. [Gossip-Based Publish Propagation](#3-gossip-based-publish-propagation)
-4. [Chain Event Confirmation](#4-chain-event-confirmation)
-5. [Workspace Writes](#5-workspace-writes)
-   - 5.1 [Workspace-First Publish (Enshrine + Finalization)](#51-workspace-first-publish-enshrine--finalization)
-   - 5.2 [Detailed Workspace Insert](#52-detailed-workspace-insert)
-   - 5.3 [Detailed Paranet Enshrinement](#53-detailed-paranet-enshrinement-workspace--data-graph)
-   - 5.4 [Detailed Context Graph Enshrinement](#54-detailed-context-graph-enshrinement-workspace--context-graph)
-6. [Update Operation](#6-update-operation)
-7. [Query Operation](#7-query-operation)
-8. [Peer Sync](#8-peer-sync)
-9. [Paranet Discovery](#9-paranet-discovery)
-10. [GossipSub Topic Architecture](#10-gossipsub-topic-architecture)
-11. [Storage Model](#11-storage-model)
-12. [Merkle Tree & Proof System](#12-merkle-tree--proof-system)
-13. [On-Chain vs Off-Chain Data](#13-on-chain-vs-off-chain-data)
-14. [Protocol-Level Review & Improvements](#14-protocol-level-review--improvements)
+   - 2.1 [Standard Publish Flow](#21-standard-publish-flow)
+   - 2.2 [Workspace + Enshrine Flow (Deferred Publish)](#22-workspace--enshrine-flow-deferred-publish)
+   - 2.3 [Context Graph Publish Flow](#23-context-graph-publish-flow)
+   - 2.4 [Publish Flow Comparison](#24-publish-flow-comparison)
+   - 2.5 [Signature Types](#25-signature-types)
+3. [Chain Event Confirmation](#3-chain-event-confirmation)
+4. [Update Operation](#4-update-operation)
+5. [Query Operation](#5-query-operation)
+6. [Peer Sync](#6-peer-sync)
+7. [Paranet Discovery](#7-paranet-discovery)
+8. [GossipSub Topic Architecture](#8-gossipsub-topic-architecture)
+9. [Storage Model](#9-storage-model)
+10. [Merkle Tree & Proof System](#10-merkle-tree--proof-system)
+11. [On-Chain vs Off-Chain Data](#11-on-chain-vs-off-chain-data)
+12. [Protocol-Level Review & Improvements](#12-protocol-level-review--improvements)
 
 ---
 
@@ -90,12 +90,23 @@ sequenceDiagram
 
 ## 2. Publish Operation
 
-### 2.1 Full End-to-End Flow
+### 2.1 Standard Publish Flow
 
-The direct `publish()` call combines preparation, replication, signature
-collection, and on-chain finalization in a single operation. The key invariant
-holds: **data is replicated to core nodes and their signatures collected
-BEFORE the on-chain transaction is submitted**.
+The standard publish follows a **replicate-then-attest** protocol: data is
+staged in the workspace, broadcast to peers via GossipSub, peers push
+attestation signatures back to the publisher, and the publisher submits a
+single on-chain transaction with the collected signatures.
+
+**Key design decisions:**
+
+- **Workspace as universal staging.** Data is stored in the workspace graph
+  first. The data graph only contains chain-confirmed data.
+- **GossipSub for dissemination, direct RPC for attestation.** The gossip
+  message includes the publisher's `peerId` so that any peer in the mesh —
+  including peers multiple relay hops away — can dial back directly.
+- **Peer-push, not publisher-pull.** Peers self-select after receiving the
+  gossip and push their signatures to the publisher. This decouples quorum
+  collection from the publisher's local peer table.
 
 ```mermaid
 sequenceDiagram
@@ -103,205 +114,336 @@ sequenceDiagram
     participant Agent as DKGAgent
     participant Pub as DKGPublisher
     participant Store as TripleStore
-    participant GM as GraphManager
     participant Chain as EVM Adapter
     participant GS as GossipSub
-    participant CoreNode as Core Node (Receiver)
+    participant Peers as Receiver Nodes
 
     App->>Agent: publish(paranetId, quads, privateQuads?)
-
     Agent->>Pub: publish(options)
 
-    Note over Pub: Phase 1 — Prepare
+    rect rgb(240, 240, 255)
+        Note over Pub,Store: Phases 1–3 are LOCAL to the publishing node
 
-    Pub->>Pub: autoPartition(quads) → group by rootEntity
-    Pub->>Pub: skolemize blank nodes per rootEntity
-    Pub->>Pub: Build KAManifest [{tokenId, rootEntity, privateMerkleRoot}]
+        Note over Pub: Phase 1 — Prepare + validate
 
-    Note over Pub: Phase 2 — Validate
+        Pub->>Pub: ensureParanet(paranetId)
+        Pub->>Pub: autoPartition(quads) → group by rootEntity
+        Pub->>Pub: Build manifest + KA metadata
+        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
 
-    Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
-    Note over Pub: Rule 1: Graph URI matches paranet
-    Note over Pub: Rule 2: Subjects are rootEntities or skolemized children
-    Note over Pub: Rule 3: Each manifest entry has triples
-    Note over Pub: Rule 4: Entity exclusivity (no duplicates)
-    Note over Pub: Rule 5: No raw blank nodes
+        Note over Pub: Phase 2 — Compute Merkle roots
 
-    Note over Pub: Phase 3 — Compute Merkle Roots
+        opt privateQuads present
+            Pub->>Pub: computePrivateRoot(private quads)
+            Pub->>Pub: Add synthetic private commitment hash to leaf set
+        end
+        Pub->>Pub: Compute kcMerkleRoot (flat tree over all public triple hashes)
+        Pub->>Pub: Compute publicByteSize (canonical N-Triples encoding)
 
-    Pub->>Pub: computePublicRoot(quads) per KA
-    Pub->>Pub: computeKARoot(publicRoot, privateRoot?) per KA
-    Pub->>Pub: computeKCRoot(kaRoots[]) → kcMerkleRoot
-    Pub->>Pub: Serialize quads → NQuads, compute publicByteSize
+        Note over Pub,Store: Phase 3 — Store in workspace (local staging)
 
-    Note over Agent,CoreNode: Phase 4 — Replicate + Collect Receiver Signatures
-
-    Agent->>GS: Send SignatureRequest(merkleRoot, publicByteSize, nquads) to core nodes
-    par For each core node
-        GS->>CoreNode: SignatureRequest
-        CoreNode->>CoreNode: Validate, recompute merkle, store tentatively
-        CoreNode->>CoreNode: ECDSA sign(keccak256(merkleRoot, publicByteSize))
-        CoreNode-->>Agent: ReceiverAck(identityId, signatureR, signatureVs)
-    end
-    Agent->>Agent: Collect receiver signatures (>= minimumRequiredSignatures)
-
-    Note over Pub: Phase 5 — Store Locally
-
-    Pub->>GM: ensureParanet(paranetId)
-    Pub->>Store: insert(quads → data graph)
-    opt Private quads provided
-        Pub->>Store: insert(privateQuads → private graph)
+        Pub->>Store: insert(quads → workspace graph)
+        Pub->>Store: insert(workspace metadata → workspace_meta graph)
+        opt Private quads provided
+            Pub->>Store: storePrivateTriples(paranetId, rootEntity, privateQuads)
+        end
     end
 
-    Note over Pub: Phase 6 — On-Chain (with collected receiver signatures)
+    Note over Agent,Peers: Phase 4 — Broadcast via GossipSub (dissemination)
 
-    Pub->>Chain: publishKnowledgeAssets({merkleRoot, receiverSignatures[], tokenAmount, ...})
-    Note over Chain: Contract verifies receiver sigs, locks TRAC
-    Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
+    Pub-->>Agent: preBroadcast(preparedPublish)
+    Agent->>GS: publish(paranetPublishTopic, PublishRequest)
+    Note over GS: Message contains:<br/>nquads, paranetId, manifest, merkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize<br/>NO txHash, NO blockNumber (not yet on-chain)
+    GS-->>Peers: PublishRequest (relayed through mesh)
 
-    Note over Pub: Phase 7 — Metadata + Broadcast
+    rect rgb(232, 245, 233)
+        Note over Agent,Peers: Phase 5 — Peer-push attestation (Direct RPC)
 
-    Pub->>Pub: generateConfirmedFullMetadata(ual, manifest, chainResult)
-    Pub->>Store: insert(metadataQuads → meta graph)
+        Note over Peers: Each peer that receives the gossip (any hop distance):
+        Peers->>Peers: Validate + store in workspace graph
+        Peers->>Peers: Recompute merkleRoot from stored quads
+        Peers->>Peers: Verify merkleRoot and publicByteSize match
+        Peers->>Peers: Sign keccak256(merkleRoot, publicByteSize)
+        Peers->>Agent: Dial publisher's peerId via /dkg/attest/1.0.0
+        Note over Peers,Agent: Send: {operationId, identityId, signatureR, signatureVs}
 
-    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status: "confirmed"}
-    Agent->>GS: publish(paranetFinalizationTopic, FinalizationMessage)
-    Note over GS: Core nodes receive finalization,<br/>promote tentative → confirmed
+        Note over Agent: Publisher collects incoming attestations:
+        Agent->>Agent: Deduplicate by identityId
+        Agent->>Agent: Accumulate until quorum reached or deadline expires
+        Note over Agent: First N valid unique signatures win
+    end
+
+    rect rgb(232, 245, 233)
+        Note over Pub,Chain: Phase 6 — Submit on-chain publish
+
+        Pub->>Pub: Sign publisher commitment: keccak256(identityId, merkleRoot)
+        Pub->>Chain: publishKnowledgeAssets({kaCount, merkleRoot, publicByteSize,<br/>tokenAmount, publisherSignature, receiverSignatures[]})
+        Note over Chain: Contract verifies publisher + receiver signatures
+        Note over Chain: Contract checks minimumRequiredSignatures threshold
+        Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber, startKAId, endKAId}
+        Note over Chain: Emits: UALRangeReserved, KnowledgeBatchCreated
+    end
+
+    Note over Pub,Store: Phase 7 — Promote workspace → data graph
+
+    Pub->>Store: Copy quads: workspace graph → data graph
+    Pub->>Store: Delete quads from workspace graph
+    Pub->>Pub: generateConfirmedFullMetadata(ual, merkleRoot, txHash, batchId, ...)
+    Pub->>Store: insert(confirmed metadata → meta graph)
+    Pub->>Pub: Track ownedEntities + batch→paranet binding
+
+    Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
+
+    Pub-->>Agent: PublishResult {kcId, ual, merkleRoot, status: confirmed}
+    Agent->>GS: publish(paranetPublishTopic, confirmed PublishRequest)
+    Note over GS: Now includes: txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress<br/>Peers verify on-chain + promote workspace → data graph
+
+    Agent-->>App: PublishResult
 ```
 
-### 2.2 RDF Triples Produced
+### 2.2 Workspace + Enshrine Flow (Deferred Publish)
 
-#### Data Graph: `did:dkg:paranet:{paranetId}`
+This is the same protocol as standard publish, but split into two user-controlled
+phases: **stage now, publish later.** The workspace is used for collaborative
+drafting — data may be revised, discussed, or accumulated over hours or days
+before committing on-chain.
 
-User-supplied triples, normalized to the paranet graph:
-
-```turtle
-<https://example.org/entity/1>
-    rdf:type            schema:Article ;
-    schema:name         "Decentralized AI" ;
-    schema:dateCreated  "2026-03-08" .
-
-<https://example.org/entity/1/.well-known/genid/author-1>
-    schema:name  "Alice" .
-```
-
-Optional private content marker:
-
-```turtle
-<urn:dkg:kc>  dkg:privateContentRoot  "0x9f86d081..." .
-```
-
-#### Meta Graph: `did:dkg:paranet:{paranetId}/_meta`
-
-```turtle
-# KC (Knowledge Collection)
-<did:dkg:base:84532/0xPubAddr/42>
-    rdf:type              dkg:KnowledgeCollection ;
-    dkg:merkleRoot        "0xabc..." ;
-    dkg:kaCount           "2"^^xsd:integer ;
-    dkg:status            "confirmed" ;
-    dkg:paranet           <did:dkg:paranet:{paranetId}> ;
-    dkg:accessPolicy      "ownerOnly" ;
-    dkg:publisherPeerId   "12D3KooW..." ;
-    prov:wasAttributedTo  "12D3KooW..." ;
-    dkg:publishedAt       "2026-03-08T11:00:00Z"^^xsd:dateTime ;
-    dkg:transactionHash   "0xdef..." ;
-    dkg:blockNumber       "12345678"^^xsd:integer ;
-    dkg:blockTimestamp     "1709901234" ;
-    dkg:publisherAddress  "0x1234..." ;
-    dkg:batchId           "7"^^xsd:integer ;
-    dkg:chainId           "base:84532" .
-
-# KA (Knowledge Asset) — one per rootEntity
-<did:dkg:base:84532/0xPubAddr/42/0>
-    rdf:type                dkg:KnowledgeAsset ;
-    dkg:rootEntity          <https://example.org/entity/1> ;
-    dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "0"^^xsd:integer ;
-    dkg:publicTripleCount   "3"^^xsd:integer .
-
-<did:dkg:base:84532/0xPubAddr/42/1>
-    rdf:type                dkg:KnowledgeAsset ;
-    dkg:rootEntity          <https://example.org/entity/2> ;
-    dkg:partOf              <did:dkg:base:84532/0xPubAddr/42> ;
-    dkg:tokenId             "1"^^xsd:integer ;
-    dkg:publicTripleCount   "5"^^xsd:integer ;
-    dkg:privateTripleCount  "2"^^xsd:integer ;
-    dkg:privateMerkleRoot   "0x7c211..." .
-```
-
----
-
-## 3. Publish Propagation (Replicate-then-Finalize)
-
-In the V9 protocol, data propagation happens in two phases:
-1. **Pre-publish replication**: Publisher sends data to core nodes, collects receiver
-   signatures. This happens BEFORE the on-chain tx.
-2. **Post-publish finalization**: After the chain tx confirms, publisher broadcasts a
-   lightweight FinalizationMessage. Core nodes (who already have the data) promote
-   from tentative to confirmed.
+`publish()` is syntactic sugar for `writeToWorkspace()` + immediate
+`enshrineFromWorkspace()`. The underlying protocol is identical.
 
 ```mermaid
 sequenceDiagram
-    participant Pub as Publisher Node
-    participant GS as GossipSub / libp2p
-    participant R1 as Core Node 1
-    participant R2 as Core Node 2
-    participant Chain as Base Sepolia
+    participant App as Application
+    participant Agent as DKGAgent
+    participant Store as TripleStore
+    participant GS as GossipSub
+    participant Peers as Receiver Nodes
+    participant Chain as EVM Adapter
 
-    Note over Pub,R2: Phase 1 — Pre-publish replication + signature collection
+    Note over App,Peers: Step A — Write to workspace (can happen many times)
 
-    Pub->>GS: SignatureRequest(merkleRoot, publicByteSize, nquads)
+    App->>Agent: writeToWorkspace(paranetId, quads)
 
-    GS-->>R1: SignatureRequest
-    GS-->>R2: SignatureRequest
+    rect rgb(240, 240, 255)
+        Note over Agent,Store: LOCAL: validate + store in workspace
+        Agent->>Agent: autoPartition(quads) → group by rootEntity
+        Agent->>Agent: validatePublishRequest(quads, manifest, paranetId)
+        Agent->>Store: insert(quads → workspace graph)
+        Agent->>Store: insert(workspace metadata → workspace_meta graph)
+    end
 
-    R1->>R1: Decode, validate paranetId
-    R1->>R1: Parse nquads → recompute merkle root
-    R1->>R1: Verify recomputed root == merkleRoot
-    R1->>R1: Insert quads → data graph (tentative)
-    R1->>R1: Sign keccak256(merkleRoot, publicByteSize)
-    R1-->>Pub: ReceiverAck(identityId, signatureR, signatureVs)
+    Agent->>GS: publish(paranetWorkspaceTopic, WorkspacePublishRequest)
+    GS-->>Peers: WorkspacePublishRequest
+    Peers->>Peers: Validate + store in workspace graph
 
-    R2->>R2: Same validation + tentative storage + sign
-    R2-->>Pub: ReceiverAck(identityId, signatureR, signatureVs)
+    Note over App,Chain: Time passes — hours, days, revisions...
 
-    Pub->>Pub: Collect receiver signatures (>= minimumRequiredSignatures)
+    Note over App,Peers: Step B — Enshrine from workspace (triggers publish flow)
 
-    Note over Pub,Chain: Phase 2 — On-chain publish (carries receiver signatures)
+    App->>Agent: enshrineFromWorkspace(paranetId, selection)
 
-    Pub->>Chain: publishKnowledgeAssets({merkleRoot, receiverSignatures[], ...})
-    Note over Chain: Verify all receiver signatures<br/>Lock TRAC for storage<br/>Create KnowledgeBatch
-    Chain-->>Pub: {txHash, batchId, blockNumber}
+    rect rgb(240, 240, 255)
+        Note over Agent,Store: LOCAL: read staged data from workspace
+        Agent->>Store: CONSTRUCT quads from workspace graph (by selection)
+        Agent->>Agent: Compute merkleRoot + publicByteSize from workspace quads
+    end
 
-    Note over Pub,R2: Phase 3 — Finalization broadcast
+    Note over Agent,Peers: No pre-broadcast needed — peers already have workspace data
 
-    Pub->>GS: publish(paranetFinalizationTopic, FinalizationMessage)
-    Note over GS: FinalizationMessage contains:<br/>ual, paranetId, merkleRoot,<br/>txHash, blockNumber, batchId
+    rect rgb(232, 245, 233)
+        Note over Agent,Peers: Collect receiver attestations (same peer-push mechanism)
+        Agent->>GS: publish(paranetPublishTopic, attestation request with publisherPeerId)
+        Peers->>Peers: Verify workspace data matches merkleRoot
+        Peers->>Peers: Sign keccak256(merkleRoot, publicByteSize)
+        Peers->>Agent: Dial back via /dkg/attest/1.0.0 with signature
+        Agent->>Agent: Collect until quorum or deadline
+    end
 
-    GS-->>R1: FinalizationMessage
-    GS-->>R2: FinalizationMessage
+    rect rgb(232, 245, 233)
+        Note over Agent,Chain: Submit on-chain publish
+        Agent->>Chain: publishKnowledgeAssets({..., receiverSignatures[]})
+        Chain-->>Agent: OnChainPublishResult {txHash, batchId, ...}
+    end
 
-    R1->>R1: Verify txHash on-chain (optional, trust finalization)
-    R1->>R1: Promote tentative → confirmed
-    R1->>R1: Add chain provenance (txHash, blockNumber, etc.)
+    Note over Agent,Store: Promote workspace → data graph
+    Agent->>Store: Copy quads: workspace graph → data graph
+    Agent->>Store: Delete quads from workspace graph
+    Agent->>Store: insert(confirmed metadata → meta graph)
 
-    Note over R1: Tentative timeout (60 min) — safety net
+    Agent->>GS: Broadcast finalization with chain proof
+    Agent-->>App: PublishResult {status: confirmed}
+```
 
-    alt Not confirmed within 60 min
-        R1->>R1: Remove tentative data + metadata
+**Key differences from standard publish:**
+
+| Aspect | Standard publish | Workspace + enshrine |
+|--------|-----------------|---------------------|
+| **Data already gossip-replicated?** | No — pre-broadcast needed in Phase 4 | Yes — workspace gossip happened during writeToWorkspace |
+| **Timing** | Immediate — one API call | Deferred — two API calls, arbitrary time gap |
+| **Revisions** | Not possible — data is committed | Workspace supports upsert before enshrine |
+| **Attestation trigger** | Gossip message with publisherPeerId | Same mechanism — peers verify workspace data |
+
+### 2.3 Context Graph Publish Flow
+
+A context graph is a **curated, governance-gated subgraph** within a paranet.
+M-of-N registered participants must sign before data can be published to it.
+The publish is **atomic** — a single on-chain transaction handles both the base
+publish (receiver signatures) and the context graph registration (participant
+signatures). If either set of signatures is insufficient, nothing is published.
+
+**Key concepts:**
+
+- A context graph is **scoped to a paranet** via URI convention:
+  `did:dkg:paranet:{paranetId}/context/{contextGraphId}`
+- Participants are registered on-chain at context graph creation with an M-of-N
+  threshold. The protocol's `minimumRequiredSignatures` does NOT apply — each
+  context graph defines its own requirements.
+- Data is gossip-replicated to ALL paranet peers (for availability), but only
+  lands in the context graph URI after the atomic chain tx succeeds.
+- **Receiver signatures** (replication proof) and **participant signatures**
+  (governance consent) are collected in parallel before the chain tx.
+
+```mermaid
+sequenceDiagram
+    participant App as Application / Game Coordinator
+    participant Agent as DKGAgent (Publisher)
+    participant Store as TripleStore
+    participant GS as GossipSub
+    participant ParaPeers as Paranet Peers
+    participant CGPeers as Context Graph Participants
+    participant Chain as EVM Adapter
+
+    Note over App,Chain: Prerequisites: context graph already created on-chain<br/>with participantIdentityIds[] and requiredSignatures (M of N)
+
+    App->>Agent: publish(paranetId, quads, {contextGraphId})
+
+    rect rgb(240, 240, 255)
+        Note over Agent,Store: LOCAL: Prepare + validate + store in workspace
+        Agent->>Agent: autoPartition, validate, compute merkleRoot + publicByteSize
+        Agent->>Store: insert(quads → workspace graph)
+    end
+
+    Note over Agent,ParaPeers: Phase 4 — Broadcast via GossipSub (to all paranet peers)
+
+    Agent->>GS: publish(paranetPublishTopic, PublishRequest)
+    Note over GS: Contains: publisherPeerId, merkleRoot,<br/>contextGraphId, deadline
+    GS-->>ParaPeers: PublishRequest (relayed through mesh)
+    GS-->>CGPeers: PublishRequest (participants are also paranet peers)
+    ParaPeers->>ParaPeers: Validate + store in workspace graph
+    CGPeers->>CGPeers: Validate + store in workspace graph
+
+    rect rgb(232, 245, 233)
+        Note over Agent,ParaPeers: Phase 5a — Collect receiver attestations (from any paranet peer)
+
+        ParaPeers->>ParaPeers: Verify merkleRoot, sign keccak256(merkleRoot, publicByteSize)
+        ParaPeers->>Agent: Dial back via /dkg/attest/1.0.0
+        Agent->>Agent: Collect receiver sigs until quorum or deadline
+    end
+
+    rect rgb(255, 243, 224)
+        Note over App,CGPeers: Phase 5b — Collect participant signatures (governance)
+
+        Note over App: Application-defined coordination mechanism<br/>(e.g., game turn proposal/approval, voting protocol, manual review)
+
+        CGPeers->>CGPeers: Verify data matches proposal
+        CGPeers->>CGPeers: Sign keccak256(contextGraphId, merkleRoot)
+        CGPeers-->>App: Participant signature {identityId, r, vs}
+
+        App->>App: Collect M-of-N participant signatures
+        Note over App: If < M participants sign → publish fails entirely<br/>(no orphaned data in paranet)
+    end
+
+    rect rgb(232, 245, 233)
+        Note over Agent,Chain: Phase 6 — Atomic on-chain publish
+
+        Agent->>Chain: publishToContextGraph({<br/>  kaCount, merkleRoot, publicByteSize, tokenAmount,<br/>  publisherSignature,<br/>  receiverSignatures[],<br/>  contextGraphId, participantSignatures[]<br/>})
+        Note over Chain: Contract verifies ALL signatures atomically:<br/>• Publisher commitment<br/>• Receiver attestations (≥ minimumRequired)<br/>• Participant governance (≥ context graph M-of-N)
+        Chain-->>Agent: {txHash, batchId, blockNumber, contextGraphExpanded}
+        Note over Chain: Emits: KnowledgeBatchCreated + ContextGraphExpanded
+    end
+
+    Note over Agent,Store: Phase 7 — Promote workspace → context graph
+
+    Agent->>Store: Copy quads: workspace → context graph data URI
+    Agent->>Store: Delete quads from workspace graph
+    Agent->>Store: insert(confirmed metadata → context graph meta URI)
+    Note over Store: Data lives at did:dkg:paranet:{id}/context/{ctxId}<br/>NOT in the paranet data graph
+
+    Agent->>GS: Broadcast chain proof (for peer promotion)
+    Agent-->>App: PublishResult {status: confirmed, contextGraphId}
+```
+
+#### How participant signature collection works
+
+The protocol provides the **signing primitive** but NOT the coordination mechanism.
+How participants learn about the proposal and decide to sign is application-specific:
+
+| Application | Coordination mechanism | Timing |
+|-------------|----------------------|--------|
+| **Game (turn resolution)** | Leader broadcasts `turn:proposal` via app topic; peers respond with `turn:approve` + signature | During turn resolution, before enshrine |
+| **Manual curation** | Dashboard shows pending proposals; curators sign via UI | Asynchronous, human-in-the-loop |
+| **Automated pipeline** | Service monitors workspace writes; auto-signs if validation passes | Event-driven, immediate |
+
+The protocol only requires: M-of-N valid signatures over `keccak256(contextGraphId, merkleRoot)`,
+collected before the chain tx. How they're collected is up to the application.
+
+#### What if participant signatures are insufficient?
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant Agent as DKGAgent
+
+    App->>Agent: publish(paranetId, quads, {contextGraphId})
+    Agent->>Agent: Collect receiver sigs ✓
+    Agent->>Agent: Collect participant sigs... only 1 of 3 required
+
+    alt Strict mode (default for context graphs)
+        Agent-->>App: PublishResult {status: failed, error: "insufficient participant signatures"}
+        Note over Agent: Data stays in workspace, nothing on-chain
+        Note over Agent: No orphaned data in paranet — clean failure
+    end
+
+    alt Fallback mode (application opts in)
+        Agent->>Agent: Drop contextGraphId, publish to paranet only
+        Agent-->>App: PublishResult {status: confirmed, contextGraphError: "insufficient sigs, fell back to paranet"}
+        Note over Agent: Data in paranet data graph, NOT in context graph
     end
 ```
 
-> **Note on tentative data retention:**
-> Core nodes store data tentatively when they sign the receiver ack. If the
-> publisher fails to submit the chain tx (gas issues, crash), the tentative
-> data expires after 60 minutes. This is safe — the TRAC was never locked,
-> so no economic harm. The publisher can retry with a new signature collection.
+### 2.4 Publish Flow Comparison
+
+| | Standard publish | Workspace + enshrine | Context graph publish |
+|---|---|---|---|
+| **Target** | Paranet data graph | Paranet data graph | Context graph (within paranet) |
+| **Staging** | Workspace (automatic) | Workspace (manual write) | Workspace (automatic or manual) |
+| **Receiver sigs** | Required (peer-push) | Required (peer-push) | Required (peer-push) |
+| **Participant sigs** | Not needed | Not needed | Required (M-of-N, app-defined collection) |
+| **Chain tx** | `publishKnowledgeAssets` | `publishKnowledgeAssets` | `publishToContextGraph` (atomic) |
+| **Failure behavior** | Rollback workspace | Rollback workspace | Strict: fail entirely / Fallback: paranet-only |
+| **Data lands in** | `did:dkg:paranet:{id}` | `did:dkg:paranet:{id}` | `did:dkg:paranet:{id}/context/{ctxId}` |
+
+### 2.5 Signature Types
+
+| Signature type | Purpose | Signed over | Collected from |
+|---|---|---|---|
+| **Publisher signature** | Publisher commits to the batch | `keccak256(identityId, merkleRoot)` | Publisher's own operational key |
+| **Receiver signatures** | Peers attest data replication | `keccak256(merkleRoot, publicByteSize)` | Any paranet peer (peer-push after gossip) |
+| **Participant signatures** | Governance consent for context graph | `keccak256(contextGraphId, merkleRoot)` | Registered context graph participants only |
+
+Receiver signatures prove replication. Participant signatures prove governance consent.
+They serve different trust models, are collected through different mechanisms, and are
+verified by different on-chain logic.
 
 ---
 
-## 4. Chain Event Confirmation
+## 3. Chain Event Confirmation
+
+Receiver nodes use the ChainEventPoller as a **fallback confirmation mechanism**.
+The primary path is the post-broadcast in Phase 8 (section 2.1), where the
+publisher gossips chain proof and peers promote workspace → data graph. The
+poller catches any events missed due to gossip failures or node restarts.
 
 ```mermaid
 sequenceDiagram
@@ -311,21 +453,21 @@ sequenceDiagram
     participant Store as TripleStore
 
     loop Every 12 seconds
-        Poller->>Poller: Check: hasPendingPublishes?
-        alt Has pending publishes
+        Poller->>Poller: Check: hasUnconfirmedWorkspaceData?
+        alt Has unconfirmed workspace data
             Poller->>Chain: listenForEvents({fromBlock: lastBlock+1, types: ["KnowledgeBatchCreated"]})
 
             loop For each KnowledgeBatchCreated event
                 Chain-->>Poller: {merkleRoot, publisherAddress, startKAId, endKAId, blockNumber}
                 Poller->>PH: confirmByMerkleRoot(merkleRoot, chainData)
-                PH->>PH: Find pending publish with matching merkleRoot
+                PH->>PH: Find workspace data with matching merkleRoot
                 alt Match found
-                    PH->>Store: Delete dkg:status "tentative"
-                    PH->>Store: Insert dkg:status "confirmed"
-                    PH->>Store: Insert chain provenance triples
-                    PH-->>Poller: confirmed = true
+                    PH->>Store: Copy quads: workspace graph → data graph
+                    PH->>Store: Delete quads from workspace graph
+                    PH->>Store: Insert confirmed metadata + chain provenance
+                    PH-->>Poller: promoted = true
                 else No match
-                    PH-->>Poller: confirmed = false
+                    PH-->>Poller: promoted = false
                 end
             end
 
@@ -334,598 +476,25 @@ sequenceDiagram
     end
 ```
 
+> **Workspace data expiry:** Workspace data that is never confirmed on-chain
+> expires after a configurable timeout. This is safe — TRAC was never locked,
+> so no economic harm. The publisher can retry with a new publish cycle.
+
 ### Chain Events Emitted
 
 | Event | Source Contract | Fields | Purpose |
 |-------|---------------|--------|---------|
-| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, merkleRoot, startKAId, endKAId, txHash | Confirm published data |
+| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, merkleRoot, startKAId, endKAId, txHash | Confirm published data, trigger workspace → data graph promotion |
 | `UALRangeReserved` | KnowledgeAssetsStorage | publisher, startId, endId | UAL allocation |
 | `ParanetCreated` | ParanetV9Registry | paranetId, creator, accessPolicy | Discover new paranets |
 | `KnowledgeBatchUpdated` | KnowledgeAssetsStorage | batchId, newMerkleRoot | Confirm data updates |
+| `ContextGraphCreated` | ContextGraphStorage | contextGraphId, manager, participantIds, M | Context graph creation |
+| `ContextGraphExpanded` | ContextGraphStorage | contextGraphId, batchId | Context graph data addition |
+
 
 ---
 
-## 5. Workspace Writes
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Agent as DKGAgent
-    participant WH as WorkspaceHandler
-    participant Store as TripleStore
-    participant GS as GossipSub
-
-    App->>Agent: writeToWorkspace(paranetId, quads)
-
-    Agent->>Agent: Encode WorkspacePublishRequest
-    Agent->>Agent: Set publisherPeerId = myPeerId
-    Agent->>Agent: Auto-partition quads by rootEntity
-
-    Note over Agent: Local write
-
-    Agent->>WH: handle(encodedRequest, myPeerId)
-    WH->>WH: Validate: publisherPeerId === fromPeerId
-    WH->>WH: autoPartition(quads)
-    WH->>WH: Validate: Rules 1-5 (same as publish)
-    WH->>WH: Check workspaceOwnedEntities for upsert rights
-
-    alt Upsert — entity already exists, owned by this peer
-        WH->>Store: deleteByPattern(workspace graph, rootEntity)
-        WH->>Store: deleteBySubjectPrefix(workspace graph, rootEntity + skolemized)
-        WH->>WH: Delete prior workspace_meta ops for this root
-    end
-
-    WH->>Store: insert(quads → workspace graph)
-    WH->>Store: insert(metaQuads → workspace_meta graph)
-    WH->>WH: Update workspaceOwnedEntities map
-
-    Note over Agent: Broadcast to network
-
-    Agent->>GS: publish(paranetWorkspaceTopic, encodedRequest)
-
-    Note over GS: Other nodes receive and run same WH.handle()
-```
-
-### Workspace Meta Triples
-
-```turtle
-# Workspace meta graph: did:dkg:paranet:{paranetId}/_workspace_meta
-
-<urn:dkg:workspace:{paranetId}:{opId}>
-    rdf:type              dkg:WorkspaceOperation ;
-    prov:wasAttributedTo  "12D3KooW..." ;
-    dkg:publishedAt       "2026-03-08T11:00:00Z"^^xsd:dateTime ;
-    dkg:rootEntity        <https://example.org/entity/1> ;
-    dkg:rootEntity        <https://example.org/entity/2> .
-```
-
-> **REVIEW: Workspace access control.**
-> The current model is creator-only upsert — only the original publisher can
-> overwrite their entities. This is enforced via `workspaceOwnedEntities` (in-memory map).
-> **Problem:** On node restart, this map is empty. Any node can then claim
-> ownership of unclaimed entities. Consider persisting ownership to workspace_meta.
-
----
-
-## 5.1 Workspace-First Publish (Enshrine + Finalization)
-
-When data is already shared via workspace, `enshrineFromWorkspace()` is the preferred publish path.
-The core protocol invariant: **replication and signature collection happen BEFORE the on-chain
-transaction**. The chain tx is the finalization step — it carries receiver signatures proving that
-core nodes have already validated and stored the data.
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Agent as DKGAgent
-    participant Pub as DKGPublisher
-    participant Store as TripleStore
-    participant Chain as EVM Adapter
-    participant GS as GossipSub
-    participant CoreNode as Core Node (Receiver)
-
-    Note over App,CoreNode: Step 1 — Workspace sharing (Section 5)
-    App->>Agent: writeToWorkspace(paranetId, quads)
-    Agent->>GS: publish(paranetWorkspaceTopic, WorkspacePublishRequest)
-    GS-->>CoreNode: WorkspacePublishRequest
-    CoreNode->>Store: insert(quads → workspace graph)
-
-    Note over App,CoreNode: Step 2 — Prepare enshrinement
-    App->>Agent: enshrineFromWorkspace(paranetId, selection)
-    Agent->>Pub: enshrineFromWorkspace(paranetId, selection)
-    Pub->>Store: CONSTRUCT workspace quads for selection
-    Pub->>Pub: autoPartition, build manifest, compute kcMerkleRoot + publicByteSize
-
-    Note over App,CoreNode: Step 3 — Collect receiver signatures from core nodes
-    Agent->>CoreNode: SignatureRequest(merkleRoot, publicByteSize, nquads)
-    CoreNode->>CoreNode: Verify data, recompute merkle, store tentatively
-    CoreNode->>CoreNode: Sign keccak256(merkleRoot, publicByteSize)
-    CoreNode-->>Agent: ReceiverAck(identityId, signatureR, signatureVs)
-    Agent->>Agent: Collect until receiverSigs >= minimumRequiredSignatures
-
-    Note over App,CoreNode: Step 4 — On-chain publish (with collected signatures)
-    Pub->>Store: insert(canonical data → data graph)
-    Pub->>Chain: publishKnowledgeAssets({merkleRoot, receiverSignatures[], tokenAmount, ...})
-    Note over Chain: Contract verifies receiver sigs, locks TRAC
-    Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
-    Pub->>Store: insert(confirmed metadata → meta graph)
-    Pub-->>Agent: PublishResult {ual, merkleRoot, status: confirmed}
-
-    Note over App,CoreNode: Step 5 — Finalization broadcast
-    Agent->>Agent: Build FinalizationMessage (ual, merkleRoot, txHash, rootEntities)
-    Agent->>GS: publish(paranetFinalizationTopic, FinalizationMessage)
-    GS-->>CoreNode: FinalizationMessage
-
-    CoreNode->>CoreNode: Verify txHash / blockNumber on-chain
-    CoreNode->>Store: Copy workspace quads → data graph (promote)
-    CoreNode->>Store: Insert confirmed metadata
-    CoreNode->>Store: Clean up promoted workspace entries
-
-    opt clearWorkspaceAfter enabled
-        Pub->>Store: Remove promoted workspace entries
-    end
-```
-
-### FinalizationMessage Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `ual` | string | Published UAL |
-| `paranetId` | string | Paranet being finalized |
-| `kcMerkleRoot` | bytes | KC merkle root for integrity verification |
-| `txHash` | string | On-chain transaction hash |
-| `blockNumber` | uint64 | Block number of confirmation |
-| `batchId` | uint64 | On-chain batch ID |
-| `startKAId` / `endKAId` | uint64 | KA token ID range |
-| `publisherAddress` | string | Publisher's on-chain address |
-| `rootEntities` | repeated string | Which workspace entities were enshrined |
-| `timestampMs` | uint64 | Message timestamp |
-| `contextGraphId` | string (optional) | If enshrining to a context graph |
-
-### Semantic Roles
-
-| Concept | Purpose | Message |
-|---------|---------|---------|
-| **Workspace sharing** | Draft/shared state distribution | WorkspacePublishRequest |
-| **Signature collection** | Pre-publish replication attestation | SignatureRequest → ReceiverAck |
-| **Direct publish** | Convenience publish (replicate + sign + chain in one call) | PublishRequest + ReceiverAck |
-| **Enshrine** | Commit workspace snapshot on-chain (with collected sigs) | On-chain tx |
-| **Finalization** | Lightweight signal for peers to promote workspace → canonical | FinalizationMessage |
-
----
-
-## 5.2 Detailed Workspace Insert
-
-Full end-to-end flow for a workspace write, including validation, triple store
-operations, GossipSub broadcast, and peer-side handling.
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Agent as DKGAgent
-    participant Pub as DKGPublisher
-    participant GM as GraphManager
-    participant Store as TripleStore (Oxigraph)
-    participant GS as GossipSub Mesh
-    participant Peer as Peer DKGNode
-    participant PeerWH as Peer WorkspaceHandler
-    participant PeerStore as Peer TripleStore
-
-    App->>Agent: writeToWorkspace(paranetId, quads)
-    Agent->>Pub: writeToWorkspace(paranetId, quads, {publisherPeerId})
-
-    Note over Pub: ── Validation Phase ──
-
-    Pub->>Pub: autoPartition(quads) → Map<rootEntity, Quad[]>
-    Pub->>Pub: buildManifest → [{rootEntity, privateTripleCount}]
-    Pub->>Pub: validatePublishRequest(quads, manifest, paranetId, existingEntities)
-    Note over Pub: Rule 1: Graph URI matches paranet<br/>Rule 2: Subjects are rootEntities or skolemized children<br/>Rule 3: Each manifest entry has triples<br/>Rule 4: Entity exclusivity<br/>Rule 5: No raw blank nodes
-
-    Pub->>Pub: Check workspaceOwnedEntities for creator-only upsert rights
-
-    Note over Pub: ── Store Phase ──
-
-    Pub->>Pub: Generate workspaceOperationId (ws-{timestamp}-{random})
-    Pub->>GM: workspaceGraphUri(paranetId) → "did:dkg:paranet:{id}/_workspace"
-    Pub->>GM: workspaceMetaGraphUri(paranetId) → "did:dkg:paranet:{id}/_workspace_meta"
-
-    opt Entity already exists (upsert)
-        Pub->>Store: deleteByPattern({graph: workspace, subject: rootEntity})
-        Pub->>Store: deleteBySubjectPrefix(workspace, rootEntity + "/.well-known/genid/")
-        Pub->>Store: Delete prior workspace_meta ops for this root
-    end
-
-    Pub->>Store: INSERT quads with graph = workspace graph URI
-    Pub->>Store: INSERT workspace meta quads (operation tracking)
-    Pub->>Store: INSERT ownership quads (rootEntity → dkg:workspaceOwner → peerId)
-
-    Note over Pub: ── Gossip Encoding Phase ──
-
-    Pub->>Pub: Remap quads graph to paranet data graph (for gossip wire format)
-    Pub->>Pub: Serialize quads → NQuads text
-    Pub->>Pub: encodeWorkspacePublishRequest(protobuf)
-    Pub->>Pub: Size guard: reject if encoded message > 512 KB
-
-    Pub-->>Agent: {workspaceOperationId, message: Uint8Array}
-
-    Agent->>GS: publish("dkg/paranet/{id}/workspace", message)
-
-    Note over GS: ── Network Propagation ──
-
-    GS-->>Peer: WorkspacePublishRequest (protobuf)
-    Peer->>PeerWH: handle(data, fromPeerId)
-
-    PeerWH->>PeerWH: decodeWorkspacePublishRequest(data)
-    PeerWH->>PeerWH: Verify publisherPeerId === fromPeerId (anti-spoof)
-    PeerWH->>PeerWH: Parse NQuads → Quad[]
-    PeerWH->>PeerWH: autoPartition → validate (same rules as publisher)
-    PeerWH->>PeerWH: Check upsert rights
-
-    opt Upsert on peer
-        PeerWH->>PeerStore: deleteByPattern (old workspace data)
-        PeerWH->>PeerStore: Delete old meta for root
-    end
-
-    PeerWH->>PeerStore: INSERT quads → workspace graph
-    PeerWH->>PeerStore: INSERT meta quads → workspace_meta graph
-    PeerWH->>PeerStore: INSERT ownership quads
-```
-
-### Workspace Write Triples Produced
-
-#### Workspace Graph: `did:dkg:paranet:{id}/_workspace`
-
-```turtle
-<https://example.org/entity/1>
-    rdf:type      schema:Article ;
-    schema:name   "Decentralized AI" .
-```
-
-#### Workspace Meta Graph: `did:dkg:paranet:{id}/_workspace_meta`
-
-```turtle
-<urn:dkg:workspace:{paranetId}:{opId}>
-    rdf:type              dkg:WorkspaceOperation ;
-    prov:wasAttributedTo  "12D3KooW..." ;
-    dkg:publishedAt       "2026-03-08T11:00:00Z"^^xsd:dateTime ;
-    dkg:rootEntity        <https://example.org/entity/1> .
-
-<https://example.org/entity/1>
-    dkg:workspaceOwner    "12D3KooW..." .
-```
-
----
-
-## 5.3 Detailed Paranet Enshrinement (Workspace → Data Graph)
-
-Full end-to-end flow for `enshrineFromWorkspace()` targeting the paranet's canonical
-data graph. The key invariant: **data replication and signature collection happen
-BEFORE the on-chain transaction**. The chain tx carries receiver signatures proving
-that core nodes have already stored the data.
-
-### Design decisions
-
-- **Replicate-then-publish**: Core nodes must attest (via ECDSA signature) that they
-  hold the data before the publisher submits the on-chain tx. This ensures the TRAC
-  payment has economic meaning — it pays core nodes who are provably storing data.
-- **Receiver signatures**: Each core node signs `keccak256(merkleRoot, publicByteSize)`
-  with its operational key. The contract verifies these signatures against registered
-  node identities. The publisher collects ≥ `minimumRequiredSignatures` before proceeding.
-- **Two-phase finalization**: After the chain tx confirms, the publisher sends a
-  lightweight FinalizationMessage so peers can promote workspace → canonical. Peers
-  also independently verify via ChainEventPoller.
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Agent as DKGAgent
-    participant Pub as DKGPublisher
-    participant Store as TripleStore (Oxigraph)
-    participant Chain as EVMChainAdapter
-    participant KA as KnowledgeAssets.sol
-    participant KAS as KnowledgeAssetsStorage.sol
-    participant GS as GossipSub Mesh
-    participant CoreNode as Core Node (Receiver)
-    participant RcvHandler as Receiver PublishHandler
-    participant RcvStore as Receiver TripleStore
-    participant FH as Receiver FinalizationHandler
-    participant Poller as Receiver ChainEventPoller
-    participant L2 as Base Sepolia L2
-
-    App->>Agent: enshrineFromWorkspace(paranetId, {rootEntities: [e1, e2]})
-    Agent->>Pub: enshrineFromWorkspace(paranetId, {rootEntities}, options)
-
-    Note over Pub: ── Phase 1: Read from Workspace ──
-
-    Pub->>Store: CONSTRUCT workspace quads for rootEntities
-    Store-->>Pub: Quad[] (workspace snapshot)
-
-    Note over Pub: ── Phase 2: Prepare ──
-
-    Pub->>Pub: autoPartition → validate → compute merkle roots
-    Pub->>Pub: computePublicRoot per KA → computeKARoot → computeKCRoot
-    Pub->>Pub: Serialize quads → NQuads, compute publicByteSize
-
-    Note over Agent,RcvStore: ── Phase 3: Replicate + Collect Receiver Signatures ──
-
-    Agent->>Agent: Identify core nodes subscribed to paranet (from sharding table)
-    Agent->>GS: Send SignatureRequest(merkleRoot, publicByteSize, nquads) to core nodes
-
-    par For each core node
-        GS->>CoreNode: SignatureRequest
-        CoreNode->>RcvHandler: validate + store tentatively
-        RcvHandler->>RcvStore: store.insert(quads) — tentative
-        RcvHandler->>RcvHandler: Recompute merkle root, verify match
-        RcvHandler->>RcvHandler: ECDSA sign(keccak256(merkleRoot, publicByteSize))
-        RcvHandler-->>Agent: ReceiverAck(identityId, signatureR, signatureVs)
-    end
-
-    Agent->>Agent: Collect receiver signatures
-    Note right of Agent: Waits until receiverSigs >= minimumRequiredSignatures
-
-    Note over Pub,L2: ── Phase 4: On-Chain Publish (with collected signatures) ──
-
-    Pub->>Store: INSERT quads → paranet data graph (did:dkg:paranet:{id})
-    Pub->>Chain: publishKnowledgeAssets({kcMerkleRoot, kaCount,<br/>  publisherSignature, receiverSignatures[], epochs, tokenAmount})
-
-    Chain->>KA: publishKnowledgeAssets(...)
-    Note over KA: Verify publisher signature<br/>Verify receiver signatures (each must be<br/>a registered node operational key)<br/>Verify receiverSigs.length >= minimumRequiredSignatures<br/>Lock TRAC for storage payment
-    KA->>KAS: createKnowledgeBatch(...)
-    KAS->>L2: Emit KnowledgeBatchCreated(batchId, merkleRoot, publisher, startKAId, endKAId)
-    KA-->>Chain: txReceipt {txHash, blockNumber, batchId}
-    Chain-->>Pub: OnChainPublishResult
-
-    Pub->>Store: INSERT confirmed metadata → meta graph
-    Pub-->>Agent: PublishResult {ual, merkleRoot, status: confirmed, onChainResult}
-
-    Note over Agent,RcvStore: ── Phase 5: Finalization Broadcast ──
-
-    Agent->>Agent: Build FinalizationMessage {ual, paranetId, kcMerkleRoot,<br/>  txHash, blockNumber, batchId, startKAId, endKAId,<br/>  publisherAddress, rootEntities, timestampMs}
-    Agent->>GS: publish("dkg/paranet/{id}/finalization", FinalizationMessage)
-    GS-->>CoreNode: FinalizationMessage
-
-    Note over CoreNode: ── Peer Finalization ──
-
-    CoreNode->>FH: handleFinalizationMessage(msg)
-    FH->>FH: Dedup guard: already confirmed?
-    alt Not yet confirmed
-        FH->>RcvStore: Read workspace quads for msg.rootEntities
-        FH->>FH: Verify merkle root matches msg.kcMerkleRoot
-        FH->>RcvStore: Copy workspace quads → data graph (promote)
-        FH->>RcvStore: INSERT confirmed metadata → meta graph
-        FH->>RcvStore: DELETE promoted workspace entries
-    end
-
-    Note over CoreNode: ── Chain Event Fallback (independent) ──
-
-    loop Every 12 seconds
-        Poller->>L2: listenForEvents({fromBlock: lastBlock+1, types: [KnowledgeBatchCreated]})
-        L2-->>Poller: KnowledgeBatchCreated {merkleRoot, publisher, startKAId, endKAId}
-        alt Not yet confirmed
-            Poller->>RcvStore: Promote tentative → confirmed
-        end
-    end
-
-    opt clearWorkspaceAfter enabled
-        Pub->>Store: DELETE workspace quads for enshrined rootEntities
-        Pub->>Store: DELETE workspace_meta ops for enshrined rootEntities
-        Pub->>Store: DELETE ownership quads for enshrined rootEntities
-    end
-```
-
-### Receiver Signature Verification
-
-```
-Receiver (off-chain):
-  1. Receive quads + merkle root from publisher
-  2. Store quads tentatively
-  3. Recompute merkle root from received quads, verify match
-  4. messageHash = keccak256(abi.encodePacked(merkleRoot, publicByteSize))
-  5. ethHash = ECDSA.toEthSignedMessageHash(messageHash)
-  6. Sign ethHash with operational key → (r, vs)
-  7. Return ReceiverAck(identityId, r, vs)
-
-Contract (on-chain):
-  1. Recompute messageHash from merkleRoot + publicByteSize
-  2. For each receiver signature:
-     a. ECDSA.recover(ethHash, r, vs) → address
-     b. IdentityStorage.getIdentityId(address) → identityId
-     c. Verify identityId is registered (node has an identity)
-  3. Verify receiverSigs.length >= minimumRequiredSignatures
-  4. Create KnowledgeBatch, lock TRAC
-```
-
-### On-Chain Events Emitted
-
-| Event | Contract | Fields | Consumer |
-|-------|----------|--------|----------|
-| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, merkleRoot, startKAId, endKAId | ChainEventPoller |
-| `UALRangeReserved` | KnowledgeAssetsStorage | publisher, startId, endId | (informational) |
-
----
-
-## 5.4 Detailed Context Graph Enshrinement (Workspace → Context Graph)
-
-Full end-to-end flow for `enshrineFromWorkspace()` targeting a context graph.
-Extends paranet enshrinement with **two layers of signatures**:
-
-1. **Receiver signatures (Layer 1 — Storage)**: Core nodes sign attesting they have the
-   data. Same as paranet publish. Required for the on-chain KC creation.
-2. **Participant signatures (Layer 2 — Governance)**: Context graph participants sign
-   approving the data entering their shared context. Can be edge nodes (same identity
-   structure as core nodes, but without minimum stake — not in sharding table).
-
-### Design decisions
-
-- **Edge node identity**: Edge nodes use the same `Profile.createProfile()` as core nodes.
-  The only difference is they don't stake above `minimumStake`, so they're not in the
-  sharding table. An edge node can be promoted to core by staking later.
-- **Participant signature message**: `keccak256(contextGraphId, merkleRoot)` — uses
-  merkleRoot instead of batchId so signatures can be collected BEFORE the chain tx.
-- **Two contract functions**: `publishToContextGraph()` combines KC creation + context
-  graph linkage atomically. `addBatchToContextGraph()` is kept for linking
-  already-published KCs to a context graph.
-- **Combined atomic transaction**: `publishToContextGraph()` creates the KC and links
-  it to the context graph in a single tx. Both receiver signatures and participant
-  signatures are submitted together.
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Agent as DKGAgent
-    participant Pub as DKGPublisher
-    participant Store as TripleStore (Oxigraph)
-    participant Chain as EVMChainAdapter
-    participant KA as KnowledgeAssets.sol
-    participant KAS as KnowledgeAssetsStorage.sol
-    participant CG as ContextGraphs.sol
-    participant CGS as ContextGraphStorage.sol
-    participant IS as IdentityStorage.sol
-    participant L2 as Base Sepolia L2
-    participant GS as GossipSub Mesh
-    participant CoreNode as Core Node (Receiver)
-    participant EdgeNode as Edge Node (Participant)
-    participant FH as Peer FinalizationHandler
-    participant PeerStore as Peer TripleStore
-
-    Note over App: ── Precondition: Context Graph Creation ──
-
-    App->>Agent: createContextGraph({participantIdentityIds, requiredSignatures})
-    Agent->>Chain: createContextGraph(params)
-    Chain->>CG: createContextGraph(participantIds, M, metadataBatchId)
-    CG->>CGS: createContextGraph(msg.sender, participantIds, M, metadataBatchId)
-    CGS->>L2: Emit ContextGraphCreated(contextGraphId, manager, participantIds, M)
-    CG-->>Chain: contextGraphId
-    Chain-->>Agent: {contextGraphId}
-
-    Note over App: ── Phase 1: Workspace Replication ──
-
-    App->>Agent: writeToWorkspace(paranetId, quads)
-    Agent->>GS: publish("dkg/paranet/{id}/workspace", WorkspacePublishRequest)
-    GS-->>CoreNode: WorkspacePublishRequest (core nodes store)
-    GS-->>EdgeNode: WorkspacePublishRequest (edge participants store)
-
-    Note over App: ── Phase 2: Enshrine to Context Graph ──
-
-    App->>Agent: enshrineFromWorkspace(paranetId, {rootEntities}, {contextGraphId})
-    Agent->>Pub: enshrineFromWorkspace(paranetId, selection, {contextGraphId})
-
-    Pub->>Store: CONSTRUCT workspace quads for rootEntities
-    Store-->>Pub: Quad[] (workspace snapshot)
-    Pub->>Pub: autoPartition → validate → compute kcMerkleRoot + publicByteSize
-    Pub->>Pub: Remap graph URI to context graph target
-
-    Note over Agent,EdgeNode: ── Phase 3: Collect Both Signature Layers ──
-
-    par Collect receiver signatures (from core nodes)
-        Agent->>CoreNode: SignatureRequest(merkleRoot, publicByteSize, nquads)
-        CoreNode->>CoreNode: Verify data, recompute merkle, store tentatively
-        CoreNode->>CoreNode: Sign keccak256(merkleRoot, publicByteSize)
-        CoreNode-->>Agent: ReceiverAck(identityId, r, vs)
-    and Collect participant signatures (from context graph members)
-        Agent->>EdgeNode: ParticipantSignRequest(contextGraphId, merkleRoot)
-        EdgeNode->>EdgeNode: Verify data in workspace, approve
-        EdgeNode->>EdgeNode: Sign keccak256(contextGraphId, merkleRoot)
-        EdgeNode-->>Agent: ParticipantAck(identityId, r, vs)
-    end
-
-    Agent->>Agent: Wait until: receiverSigs >= minimumRequiredSignatures<br/>AND participantSigs >= contextGraph.requiredSignatures (M)
-
-    Note over Pub,L2: ── Phase 4: Atomic On-Chain Transaction ──
-
-    Pub->>Store: INSERT quads → context graph data
-    Pub->>Chain: publishToContextGraph({<br/>  kcMerkleRoot, kaCount, publisherSignature,<br/>  receiverSignatures[],<br/>  contextGraphId, participantSignatures[],<br/>  epochs, tokenAmount})
-
-    Chain->>KA: publishToContextGraph(...)
-    Note over KA: 1. Verify publisher + receiver signatures<br/>2. Create KC, lock TRAC<br/>3. Verify participant signatures over (ctxId, merkleRoot)<br/>4. Link batch to context graph<br/>All atomic — reverts if any step fails
-    KA->>KAS: createKnowledgeBatch(...)
-    KAS->>L2: Emit KnowledgeBatchCreated
-    KA->>CG: addBatchToContextGraph(ctxId, batchId, ...)
-    CG->>CGS: addBatchToContextGraph(ctxId, batchId)
-    CGS->>L2: Emit ContextGraphExpanded(ctxId, batchId)
-    Chain-->>Pub: OnChainPublishResult {txHash, batchId, blockNumber}
-
-    Pub->>Store: INSERT confirmed metadata → context graph meta
-    Pub-->>Agent: PublishResult {ual, merkleRoot, status: confirmed}
-
-    Note over Agent,PeerStore: ── Phase 5: Finalization Broadcast ──
-
-    Agent->>Agent: Build FinalizationMessage {ual, paranetId, ..., contextGraphId}
-    Agent->>GS: publish("dkg/paranet/{id}/finalization", FinalizationMessage)
-    GS-->>CoreNode: FinalizationMessage
-    GS-->>EdgeNode: FinalizationMessage
-
-    Note over CoreNode: ── Peer Finalization (all participants) ──
-
-    CoreNode->>FH: handleFinalizationMessage(msg)
-    FH->>FH: Detect contextGraphId, resolve target graphs
-    FH->>PeerStore: Read workspace quads, verify merkle
-    FH->>PeerStore: Copy workspace quads → context graph data (promote)
-    FH->>PeerStore: INSERT confirmed metadata → context graph meta
-    FH->>PeerStore: Clean up promoted workspace entries
-```
-
-### Two Signature Layers
-
-| Layer | Purpose | Signers | Message signed | When collected |
-|-------|---------|---------|----------------|----------------|
-| **Receiver (L1)** | Storage attestation | Core nodes (in sharding table) | `keccak256(merkleRoot, publicByteSize)` | During pre-publish replication |
-| **Participant (L2)** | Governance / access control | Context graph participants (edge or core) | `keccak256(contextGraphId, merkleRoot)` | During pre-publish approval |
-
-### Identity Model
-
-| Node type | Identity | Stake | Sharding table | Can sign as |
-|-----------|----------|-------|----------------|-------------|
-| **Core node** | Full profile (createProfile) | ≥ minimumStake | Yes | Receiver + Participant |
-| **Edge node** | Full profile (createProfile) | < minimumStake or 0 | No | Participant only |
-
-Edge → Core promotion: An edge node stakes above `minimumStake` → automatically added
-to sharding table → can now serve as receiver (core node).
-
-### Contract Functions
-
-**`publishToContextGraph()`** — Atomic combined operation:
-1. Creates KC with receiver signatures (same as `publishKnowledgeAssets`)
-2. Links KC to context graph with participant signatures
-3. Single transaction — both succeed or both revert
-
-**`addBatchToContextGraph()`** — For already-published KCs:
-1. Links an existing batch to a context graph
-2. Requires participant signatures over `(contextGraphId, merkleRoot)`
-3. Useful when data was published to the paranet first, then added to a context graph later
-
-### Context Graph On-Chain Events
-
-| Event | Contract | Fields | Consumer |
-|-------|----------|--------|----------|
-| `ContextGraphCreated` | ContextGraphStorage | contextGraphId, manager, participantIds, M | Agent (creation receipt) |
-| `ContextGraphExpanded` | ContextGraphStorage | contextGraphId, batchId | ChainEventPoller (future) |
-| `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, merkleRoot, publisher, range | ChainEventPoller |
-
-### Participant Signature Verification
-
-```
-Participant (off-chain):
-  1. Receive workspace data or verify data already in workspace
-  2. Approve the data entering the context graph
-  3. digest = keccak256(abi.encodePacked(contextGraphId, merkleRoot))
-  4. ethHash = ECDSA.toEthSignedMessageHash(digest)
-  5. Sign ethHash with operational key → (r, vs)
-  6. Return ParticipantAck(identityId, r, vs)
-
-Contract (on-chain):
-  1. Recompute digest from contextGraphId + merkleRoot
-  2. For each participant signature:
-     a. ECDSA.recover(ethHash, r, vs) → address
-     b. IdentityStorage.getIdentityId(address) → identityId
-     c. Verify identityId is a context graph participant
-  3. Verify unique valid signers >= requiredSignatures (M)
-  4. Link batch to context graph
-```
-
----
-
-## 6. Update Operation
+## 4. Update Operation
 
 ```mermaid
 sequenceDiagram
@@ -967,7 +536,7 @@ sequenceDiagram
 
 ---
 
-## 7. Query Operation
+## 5. Query Operation
 
 ```mermaid
 sequenceDiagram
@@ -1047,7 +616,7 @@ Effective policy rules:
 
 ---
 
-## 8. Peer Sync
+## 6. Peer Sync
 
 ```mermaid
 sequenceDiagram
@@ -1101,7 +670,7 @@ sequenceDiagram
 
 ---
 
-## 9. Paranet Discovery
+## 7. Paranet Discovery
 
 ```mermaid
 sequenceDiagram
@@ -1124,7 +693,7 @@ sequenceDiagram
 
 ---
 
-## 10. GossipSub Topic Architecture
+## 8. GossipSub Topic Architecture
 
 ```mermaid
 graph TB
@@ -1135,7 +704,6 @@ graph TB
     subgraph "Per-Paranet Topics"
         PUB["dkg/paranet/{id}/publish"]
         WS["dkg/paranet/{id}/workspace"]
-        FIN["dkg/paranet/{id}/finalization"]
         APP["dkg/paranet/{id}/app"]
         UPD["dkg/paranet/{id}/update"]
         SESS["dkg/paranet/{id}/sessions"]
@@ -1154,9 +722,8 @@ graph TB
 | Topic | Purpose | Message Types |
 |-------|---------|---------------|
 | `dkg/network/peers` | Peer discovery & health | Peer announce, capabilities |
-| `dkg/paranet/{id}/publish` | Published data broadcast | PublishRequest (encoded protobuf) |
-| `dkg/paranet/{id}/workspace` | Workspace writes | WorkspacePublishRequest |
-| `dkg/paranet/{id}/finalization` | Post-enshrine promotion signal | FinalizationMessage |
+| `dkg/paranet/{id}/publish` | Publish broadcast (pre- and post-chain) | PublishRequest (pre-chain: data + publisherPeerId; post-chain: + txHash, blockNumber) |
+| `dkg/paranet/{id}/workspace` | Workspace writes (deferred publish staging) | WorkspacePublishRequest |
 | `dkg/paranet/{id}/app` | Application coordination | JSON app messages (game, etc.) |
 | `dkg/paranet/{id}/update` | KA updates | UpdateRequest |
 | `dkg/paranet/{id}/sessions` | Multi-party sessions | Session proposals, coordination |
@@ -1170,7 +737,7 @@ graph TB
 
 ---
 
-## 11. Storage Model
+## 9. Storage Model
 
 ```mermaid
 graph TB
@@ -1209,7 +776,7 @@ graph TB
 
 ---
 
-## 12. Merkle Tree & Proof System
+## 10. Merkle Tree & Proof System
 
 ```mermaid
 graph TB
@@ -1278,7 +845,7 @@ Compare kcRoot === metadata.merkleRoot ✓
 
 ---
 
-## 13. On-Chain vs Off-Chain Data
+## 11. On-Chain vs Off-Chain Data
 
 ### On-Chain (Base Sepolia)
 
@@ -1357,18 +924,18 @@ graph LR
 
 ---
 
-## 14. Protocol-Level Review & Improvements
+## 12. Protocol-Level Review & Improvements
 
-### 14.1 Publish Flow
+### 12.1 Publish Flow
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
-| P1 | Tentative data dropped after 60 min if chain is slow | Medium | Make timeout configurable; add re-request via sync protocol |
+| P1 | Workspace data dropped after timeout if chain tx never confirms | Medium | Make timeout configurable; add re-request via sync protocol |
 | P2 | No publish receipt/ACK from receivers | Low | Consider adding a lightweight gossip ACK for publisher visibility |
 | P3 | Gossip publish can be replayed (no nonce/dedup) | Medium | Add `operationId` + dedup window to GossipSub handlers |
 | P4 | `broadcastPublish` has a 5s timeout; large payloads may fail | Medium | Chunk large publish payloads or use direct protocol for big KCs |
 
-### 14.2 Workspace
+### 12.2 Workspace
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
@@ -1376,7 +943,7 @@ graph LR
 | W2 | No TTL on workspace data | Medium | Add configurable TTL; old workspace ops should be prunable |
 | W3 | No workspace versioning | Low | Track version/revision per rootEntity for optimistic concurrency |
 
-### 14.3 Consensus / Game
+### 12.3 Consensus / Game
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
@@ -1388,7 +955,7 @@ graph LR
 | C6 | No game event entities in RDF | Medium | Create first-class `ot:GameEvent` entities per turn |
 | C7 | No resource deltas in RDF | Low | Add structured resource snapshots per turn |
 
-### 14.4 GossipSub
+### 12.4 GossipSub
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
@@ -1397,7 +964,7 @@ graph LR
 | G3 | No message signing/authentication on gossip level | Medium | GossipSub supports `strictNoSign: false` — enable message signing |
 | G4 | Vote heartbeat creates O(n × 6) messages per turn | Low | Acceptable for 3-8 players; not scalable beyond ~20 |
 
-### 14.5 Chain Integration
+### 12.5 Chain Integration
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
@@ -1405,14 +972,14 @@ graph LR
 | CH2 | No retry on failed chain tx (publish, mint) | Medium | Add exponential backoff retry for chain transactions |
 | CH3 | Paranet metadata reveal is a separate tx | Low | Consider batching with creation tx to save gas |
 
-### 14.6 Storage
+### 12.6 Storage
 
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
 | S1 | Oxigraph doesn't support persistent WAL by default | Low | Ensure `oxigraph-persistent` backend is used in production |
 | S2 | No compaction/garbage collection for dropped graphs | Low | Add periodic graph statistics and compaction |
 
-### 14.7 Valuable Additions for Agents
+### 12.7 Valuable Additions for Agents
 
 Beyond fixing the gaps above, these additions to the knowledge graph would
 significantly increase utility for AI agents:
