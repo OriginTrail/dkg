@@ -42,13 +42,16 @@ export default function (api) {
   if (wsConfig.channel) {
     config.channel = { ...wsConfig.channel };
   }
+  if (wsConfig.game) {
+    config.game = { ...wsConfig.game };
+  }
 
   // Pass workspace directory to the API for auto-detection
   if (workspaceDir && !api.workspaceDir) {
     api.workspaceDir = workspaceDir;
   }
 
-  log.info?.(`[dkg-entry] config — daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}`);
+  log.info?.(`[dkg-entry] config — daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}, game.enabled: ${config.game?.enabled}`);
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);

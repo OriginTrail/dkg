@@ -28,6 +28,11 @@ import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+
+/** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
+function sanitizeIdentity(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
 const moduleRequire = createRequire(import.meta.url);
 
 interface PendingRequest {
@@ -288,7 +293,7 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId).catch((err) => {
+        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
           api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
         });
         return reply;
@@ -309,7 +314,7 @@ export class DkgChannelPlugin {
         text,
         correlationId,
       });
-      this.persistTurn(text, reply.text, correlationId).catch((err) => {
+      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
         api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
       });
       return reply;
@@ -338,12 +343,19 @@ export class DkgChannelPlugin {
     // 1. Resolve agent route (agentId + sessionKey)
     let route: any;
     try {
-      route = runtime.channel.routing.resolveAgentRoute({
+      const resolved = runtime.channel.routing.resolveAgentRoute({
         cfg,
         channel: CHANNEL_NAME,
         accountId: 'default',
         peer: { kind: 'direct', id: identity || 'owner' },
       });
+      // Clone to avoid mutating the runtime's cached route object
+      route = { ...resolved };
+      // Give non-owner identities (e.g. game-autopilot) their own session
+      // so they don't pollute the user's chat context.
+      if (identity && identity !== 'owner') {
+        route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
+      }
       log.info?.(`[dkg-channel] Route resolved: agent=${route.agentId}, session=${route.sessionKey}`);
     } catch (err: any) {
       log.warn?.(`[dkg-channel] resolveAgentRoute failed: ${err.message}`);
@@ -529,10 +541,17 @@ export class DkgChannelPlugin {
     const sdk = this.loadSdk();
 
     // Resolve route + build context (same as processInbound)
-    const route = runtime.channel.routing.resolveAgentRoute({
+    const resolved = runtime.channel.routing.resolveAgentRoute({
       cfg, channel: CHANNEL_NAME, accountId: 'default',
       peer: { kind: 'direct', id: identity || 'owner' },
     });
+    // Clone to avoid mutating the runtime's cached route object
+    const route = { ...resolved };
+    // Give non-owner identities (e.g. game-autopilot) their own session
+    // so they don't pollute the user's chat context.
+    if (identity && identity !== 'owner') {
+      route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
+    }
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
@@ -627,7 +646,7 @@ export class DkgChannelPlugin {
 
       // Persist turn even if the consumer cancelled early — use accumulated text
       const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId).catch(err => {
+      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
         log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
       });
     }
@@ -767,9 +786,15 @@ export class DkgChannelPlugin {
     userMessage: string,
     assistantReply: string,
     correlationId: string,
+    identity: string,
   ): Promise<void> {
+    // Non-owner identities (e.g. game-autopilot) get their own session
+    // so they don't pollute the user's DKG UI chat history.
+    const sessionId = identity && identity !== 'owner'
+      ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
+      : `openclaw:${CHANNEL_NAME}`;
     await this.client.storeChatTurn(
-      `openclaw:${CHANNEL_NAME}`,
+      sessionId,
       userMessage,
       assistantReply,
       { turnId: correlationId },
