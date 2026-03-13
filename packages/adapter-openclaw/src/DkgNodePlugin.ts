@@ -16,6 +16,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { DkgDaemonClient } from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
+import { DkgGamePlugin } from './DkgGamePlugin.js';
 import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
 import { WriteCapture } from './write-capture.js';
 import type {
@@ -33,6 +34,7 @@ export class DkgNodePlugin {
 
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
+  private gamePlugin: DkgGamePlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private writeCapture: WriteCapture | null = null;
   /** Guard: backlog import runs at most once per plugin lifecycle. */
@@ -74,6 +76,27 @@ export class DkgNodePlugin {
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
 
+    // --- Game module ---
+    const gameConfig = this.config.game;
+    if (gameConfig?.enabled) {
+      // Wire agent consultation through the channel bridge (if available).
+      // Uses identity "game-autopilot" → separate session from user chat.
+      const consultAgent = this.channelPlugin
+        ? (prompt: string, correlationId: string) =>
+            this.channelPlugin!.processInbound(prompt, correlationId, 'game-autopilot')
+              .then(reply => reply.text)
+        : undefined;
+
+      this.gamePlugin = new DkgGamePlugin(this.client, gameConfig, consultAgent);
+      this.gamePlugin.register(api);
+      if (!consultAgent) {
+        api.logger.warn?.(
+          '[dkg] Game module enabled but channel is disabled — autopilot unavailable, manual play only',
+        );
+      }
+      api.logger.info?.('[dkg] Game module enabled — OriginTrail Game tools active');
+    }
+
     // --- Memory module ---
     const memoryConfig = this.config.memory;
     if (memoryConfig?.enabled) {
@@ -107,6 +130,7 @@ export class DkgNodePlugin {
 
   async stop(): Promise<void> {
     // Stop integration modules
+    await this.gamePlugin?.stop();
     this.writeCapture?.stop();
     await this.channelPlugin?.stop();
   }

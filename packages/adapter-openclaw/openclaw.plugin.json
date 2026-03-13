@@ -23,6 +23,15 @@
           "port": { "type": "number", "default": 9201, "description": "Standalone bridge port (when gateway route registration unavailable)" }
         },
         "description": "DKG UI channel bridge"
+      },
+      "game": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false, "description": "Enable OriginTrail Game tools (lobby, join, play, autopilot)" },
+          "pollIntervalMs": { "type": "number", "default": 2000, "description": "Autopilot poll interval in ms" },
+          "decisionTimeoutMs": { "type": "number", "default": 15000, "description": "Agent consultation timeout per turn in ms" }
+        },
+        "description": "OriginTrail Game integration"
       }
     }
   },
