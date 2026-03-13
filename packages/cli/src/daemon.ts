@@ -1090,7 +1090,7 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
-      hasOpenClawChannel: config.openclawAdapter === true,
+      hasOpenClawChannel: config.openclawAdapter === true || !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
       autoUpdate: config.autoUpdate?.enabled ?? false,
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
@@ -2019,8 +2019,13 @@ async function handleRequest(
   // POST /api/register-adapter — adapter self-registers so UI can detect it
   if (req.method === 'POST' && path === '/api/register-adapter') {
     const body = await readBody(req);
-    const { id } = JSON.parse(body);
-    if (id === 'openclaw' && !config.openclawAdapter) {
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { id } = parsed;
+    if (typeof id !== 'string' || id !== 'openclaw') {
+      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(id)}` });
+    }
+    if (!config.openclawAdapter) {
       config.openclawAdapter = true;
       await saveConfig(config);
     }
