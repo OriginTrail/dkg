@@ -97,7 +97,7 @@ export async function migrateToBlueGreen(
       stdio: 'pipe',
       timeout: INSTALL_TIMEOUT_MS,
     });
-    execSync('pnpm build', {
+    execSync('pnpm build:runtime', {
       cwd: slotA,
       encoding: 'utf-8',
       stdio: 'pipe',
@@ -125,7 +125,7 @@ export async function migrateToBlueGreen(
         stdio: 'pipe',
         timeout: INSTALL_TIMEOUT_MS,
       });
-      execSync('pnpm build', {
+      execSync('pnpm build:runtime', {
         cwd: slotB,
         encoding: 'utf-8',
         stdio: 'pipe',

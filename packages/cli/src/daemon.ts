@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { execSync, exec, execFile } from 'node:child_process';
+import { execSync, exec, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
@@ -56,6 +56,14 @@ function getNodeVersion(): string {
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
+
+function resolveDaemonEntryPoint(): string {
+  const rDir = releasesDir();
+  const currentLink = join(rDir, 'current', 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(rDir) && existsSync(currentLink)
+    ? currentLink
+    : fileURLToPath(import.meta.url);
+}
 
 type CatchupJobState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -324,6 +332,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   // Auto-update
   let updateInterval: ReturnType<typeof setInterval> | null = null;
+  let pendingForegroundRestart = false;
   if (config.autoUpdate?.enabled) {
     const au = config.autoUpdate;
     log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
@@ -331,6 +340,12 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       async () => {
         const updated = await checkForUpdate(au, log);
         if (updated) {
+          if (foreground) {
+            log('Auto-update: update activated; restarting foreground daemon in-place.');
+            pendingForegroundRestart = true;
+            await shutdown(0);
+            return;
+          }
           log('Auto-update: update activated; restarting daemon process.');
           await shutdown(DAEMON_EXIT_CODE_RESTART);
         }
@@ -746,6 +761,25 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     await removePid();
     await removeApiPort();
     log('Stopped.');
+
+    if (pendingForegroundRestart) {
+      pendingForegroundRestart = false;
+      const entryPoint = resolveDaemonEntryPoint();
+      log(`Auto-update: launching updated foreground daemon from ${entryPoint}`);
+      try {
+        spawn(
+          process.execPath,
+          [...process.execArgv, entryPoint, 'start', '--foreground'],
+          {
+            stdio: 'inherit',
+            env: process.env,
+          },
+        );
+      } catch (err: any) {
+        log(`Auto-update: failed to relaunch foreground daemon — ${err.message}`);
+        process.exit(1);
+      }
+    }
     process.exit(exitCode);
   }
 
@@ -2617,9 +2651,62 @@ async function _performUpdateInner(
     await execAsync('pnpm install --frozen-lockfile', {
       cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
     });
-    await execAsync('pnpm build', {
-      cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
-    });
+    let usedFullBuildFallback = false;
+    let hasRuntimeBuildScript = false;
+    try {
+      const rootPkgRaw = await readFile(join(targetDir, 'package.json'), 'utf-8');
+      const rootPkg = JSON.parse(rootPkgRaw) as { scripts?: Record<string, string> };
+      hasRuntimeBuildScript = typeof rootPkg.scripts?.['build:runtime'] === 'string';
+    } catch {
+      hasRuntimeBuildScript = false;
+    }
+
+    if (hasRuntimeBuildScript) {
+      await execAsync('pnpm build:runtime', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+    } else {
+      log('Auto-update: target repo has no build:runtime script; falling back to pnpm build.');
+      await execAsync('pnpm build', {
+        cwd: targetDir, encoding: 'utf-8', timeout: 180_000,
+      });
+      usedFullBuildFallback = true;
+    }
+
+    if (usedFullBuildFallback) {
+      log('Auto-update: contract build check skipped (full build fallback already executed).');
+    } else {
+      let shouldBuildContracts = false;
+      try {
+        if (/^[0-9a-f]{6,40}$/i.test(currentCommit) && /^[0-9a-f]{6,40}$/i.test(checkedOutCommit)) {
+          const { stdout } = await execFileAsync('git', ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`], {
+            cwd: targetDir,
+            encoding: 'utf-8',
+            timeout: 30_000,
+          });
+          const changedPaths = String(stdout)
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+          shouldBuildContracts = changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
+        }
+      } catch (diffErr: any) {
+        log(`Auto-update: contract-change check failed (${diffErr.message}); skipping contract build.`);
+        shouldBuildContracts = false;
+      }
+
+      if (shouldBuildContracts) {
+        log('Auto-update: contract folder changes detected; building @dkg/evm-module...');
+        await execAsync('pnpm --filter @dkg/evm-module build', {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          timeout: 300_000,
+        });
+        log('Auto-update: @dkg/evm-module build completed.');
+      } else {
+        log('Auto-update: no contract folder changes detected; skipping @dkg/evm-module build.');
+      }
+    }
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';
