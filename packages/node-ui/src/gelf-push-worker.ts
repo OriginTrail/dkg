@@ -157,7 +157,8 @@ export class LogPushWorker {
       ].filter(Boolean).join(' ');
       const sd = `[dkg@0 peer="${sdEscape(this.peerId)}" op="${sdEscape(entry.operationName)}" opid="${sdEscape(entry.operationId)}" mod="${sdEscape(entry.module)}" net="${sdEscape(this.network)}" ${extra}]`;
       const msg = entry.message.replace(/[\r\n]+/g, ' ').slice(0, 8192);
-      const line = `<${pri}>1 ${ts} ${sdEscape(this.nodeName)} dkg-v9 - - ${sd} ${msg}\n`;
+      const hostname = this.nodeName.replace(/\s+/g, '-');
+      const line = `<${pri}>1 ${ts} ${hostname} dkg-v9 - - ${sd} ${msg}\n`;
 
       try {
         this.socket.write(line);
