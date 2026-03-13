@@ -398,6 +398,53 @@ describe('OriginTrail Game API handler', () => {
     expect(swarm!.playerIndexMap.get('p3-missed-join')).toBe(2);
   });
 
+  it('onRemoteExpeditionLaunched ignores malformed partyOrder that would drop known members', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+    const { GameEngine } = await import('../src/engine/game-engine.js');
+
+    const leaderPeerId = 'leader-malformed';
+    const followerAgent = makeMockAgent('follower-malformed');
+    followerAgent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-malformed' });
+
+    const handlers = followerAgent._messageHandlers.get('dkg/paranet/test-remote-launch-malformed/app');
+    const handle = handlers![0];
+
+    // Local node knows leader + p2 from gossip before launch.
+    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+      app: 'origin-trail-game', type: 'swarm:created', swarmId: 'swarm-malformed',
+      peerId: leaderPeerId, timestamp: Date.now(), swarmName: 'Malformed PartyOrder', playerName: 'Leader', maxPlayers: 3,
+    }), leaderPeerId);
+    handle('dkg/paranet/test-remote-launch-malformed/app', encode({
+      app: 'origin-trail-game', type: 'swarm:joined', swarmId: 'swarm-malformed',
+      peerId: 'p2-known', timestamp: Date.now(), playerName: 'P2',
+    }), 'p2-known');
+    await new Promise(r => setTimeout(r, 50));
+
+    const engine = new GameEngine();
+    const gs = engine.createGame(['Leader', 'P2'], leaderPeerId);
+    const launchMsg = encode({
+      app: 'origin-trail-game', type: 'expedition:launched', swarmId: 'swarm-malformed',
+      peerId: leaderPeerId, timestamp: Date.now(),
+      gameStateJson: JSON.stringify(gs),
+      // Malformed: drops known p2-known and introduces unrelated peer id.
+      partyOrder: [leaderPeerId, 'intruder-peer'],
+    });
+
+    handle('dkg/paranet/test-remote-launch-malformed/app', launchMsg, leaderPeerId);
+    await new Promise(r => setTimeout(r, 100));
+
+    const swarm = coordinator.getSwarm('swarm-malformed');
+    expect(swarm).not.toBeNull();
+    expect(swarm!.status).toBe('traveling');
+    expect(swarm!.players.map(p => p.peerId)).toEqual([leaderPeerId, 'p2-known']);
+    expect(swarm!.players.some(p => p.peerId === 'intruder-peer')).toBe(false);
+    // Falls back to local order because partyOrder is rejected.
+    expect(swarm!.playerIndexMap.get(leaderPeerId)).toBe(0);
+    expect(swarm!.playerIndexMap.get('p2-known')).toBe(1);
+  });
+
   it('GET /players returns registered players from the graph', async () => {
     const playerAgent = makeMockAgent('player-peer');
     playerAgent.query = async () => ({

@@ -1432,15 +1432,27 @@ export class OriginTrailGameCoordinator {
     if (msg.peerId !== swarm.leaderPeerId) return;
     if (swarm.status !== 'recruiting') return;
     swarm.gameState = JSON.parse(msg.gameStateJson);
-    if (msg.partyOrder && !this.isValidPartyOrder(msg.partyOrder, swarm)) {
-      // If join gossip was delayed, allow launch payload to fill missing members.
-      this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
-    }
-    if (msg.partyOrder && this.isValidPartyOrder(msg.partyOrder, swarm)) {
-      swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
-      this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+    if (msg.partyOrder) {
+      let appliedPartyOrder = false;
+      if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
+        swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+        this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+        appliedPartyOrder = true;
+      } else if (this.canBackfillPlayersFromPartyOrder(msg.partyOrder, swarm)) {
+        // Join gossip can be delayed. Backfill only from a safe partyOrder shape
+        // so malformed payloads cannot mutate existing local membership.
+        this.backfillPlayersFromPartyOrder(swarm, msg.partyOrder, msg.timestamp);
+        if (this.isValidPartyOrder(msg.partyOrder, swarm)) {
+          swarm.playerIndexMap = new Map(msg.partyOrder.map((pid: string, i: number) => [pid, i]));
+          this.reorderPlayersToPartyOrder(swarm, msg.partyOrder);
+          appliedPartyOrder = true;
+        }
+      }
+      if (!appliedPartyOrder) {
+        this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
+        swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
+      }
     } else {
-      if (msg.partyOrder) this.log(`Invalid partyOrder for ${msg.swarmId}, falling back to local order`);
       swarm.playerIndexMap = new Map(swarm.players.map((p, i) => [p.peerId, i]));
     }
     swarm.status = 'traveling';
@@ -1463,6 +1475,20 @@ export class OriginTrailGameCoordinator {
     if (partyOrder.length !== currentPeerIds.size) return false;
     if (new Set(partyOrder).size !== partyOrder.length) return false;
     return partyOrder.every(pid => currentPeerIds.has(pid));
+  }
+
+  private canBackfillPlayersFromPartyOrder(partyOrder: string[], swarm: SwarmState): boolean {
+    if (new Set(partyOrder).size !== partyOrder.length) return false;
+    const currentPeerIds = new Set(swarm.players.map(p => p.peerId));
+    // Never allow backfill payloads that "drop" known local members.
+    for (const peerId of currentPeerIds) {
+      if (!partyOrder.includes(peerId)) return false;
+    }
+    const expectedPartySize = Array.isArray(swarm.gameState?.party) ? swarm.gameState.party.length : null;
+    // Ensure launch payload roster matches the game state's party cardinality.
+    if (expectedPartySize != null && partyOrder.length !== expectedPartySize) return false;
+    if (partyOrder.length > swarm.maxPlayers) return false;
+    return true;
   }
 
   private backfillPlayersFromPartyOrder(swarm: SwarmState, partyOrder: string[], joinedAt: number): void {
