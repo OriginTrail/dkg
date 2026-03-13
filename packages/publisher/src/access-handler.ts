@@ -4,6 +4,7 @@ import {
   decodeAccessRequest,
   encodeAccessResponse,
   ed25519Verify,
+  assertSafeIri,
 } from '@dkg/core';
 import type { TripleStore } from '@dkg/storage';
 import { GraphManager, PrivateContentStore } from '@dkg/storage';
@@ -170,14 +171,15 @@ export class AccessHandler {
   }
 
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
+    const safeUal = assertSafeIri(kaUal);
     const result = await this.store.query(
       `SELECT ?rootEntity ?paranet ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
         GRAPH ?g {
-          <${kaUal}> <${DKG_NS}rootEntity> ?rootEntity .
-          <${kaUal}> <${DKG_NS}partOf> ?kc .
+          <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
+          <${safeUal}> <${DKG_NS}partOf> ?kc .
           ?kc <${DKG_NS}paranet> ?paranet .
-          OPTIONAL { <${kaUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
-          OPTIONAL { <${kaUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
+          OPTIONAL { <${safeUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
+          OPTIONAL { <${safeUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
           OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
           OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
@@ -228,8 +230,8 @@ export class AccessHandler {
     const metaGraph = `did:dkg:paranet:${paranetId}/_meta`;
     const allowedPeerRes = await this.store.query(
       `SELECT ?allowedPeer WHERE {
-        GRAPH <${metaGraph}> {
-          <${kcUal}> <${DKG_NS}allowedPeer> ?allowedPeer .
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          <${assertSafeIri(kcUal)}> <${DKG_NS}allowedPeer> ?allowedPeer .
         }
       }`,
     );

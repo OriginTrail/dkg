@@ -1,6 +1,6 @@
 import type { TripleStore, Quad } from '@dkg/storage';
 import type { ChainAdapter } from '@dkg/chain';
-import { contextGraphDataUri } from '@dkg/core';
+import { contextGraphDataUri, assertSafeIri } from '@dkg/core';
 import { ProofIndex, type TripleProof } from './proof-index.js';
 
 export interface VerificationInfo {
@@ -225,14 +225,6 @@ function uniqueBatchIds(triples: ProvedTriple[]): string[] {
   return [...new Set(triples.map(t => t.proof.batchId))];
 }
 
-const UNSAFE_IRI_CHARS = /[<>"{}|\\^`\x00-\x20]/;
-
-function assertSafeIri(value: string): string {
-  if (UNSAFE_IRI_CHARS.test(value)) {
-    throw new Error(`Unsafe characters in IRI: ${value}`);
-  }
-  return value;
-}
 
 const SAFE_LITERAL_RE = /^"(?:[^"\\]|\\.)*"(?:@[a-zA-Z]+(?:-[a-zA-Z0-9]+)*|\^\^<[^<>"{}|\\^`\x00-\x20]+>)?$/;
 

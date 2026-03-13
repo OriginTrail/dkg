@@ -4,7 +4,7 @@ import { GraphManager } from '@dkg/storage';
 import { MockChainAdapter } from '@dkg/chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@dkg/core';
 import { generateEd25519Keypair } from '@dkg/core';
-import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot } from '../src/index.js';
+import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -665,5 +665,174 @@ describe('UpdateHandler', () => {
 
     expect(result.status).toBe('failed');
     expect(result.onChainResult).toBeUndefined();
+  });
+
+  it('publisher.update() updates the merkle root in _meta graph', async () => {
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const DKG = 'http://dkg.io/ontology/';
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [
+        q(ENTITY_A, 'http://schema.org/name', '"Original"'),
+        q(ENTITY_A, 'http://schema.org/description', '"Will be updated"'),
+      ],
+    });
+    expect(original.status).toBe('confirmed');
+    const originalRootHex = toHex(original.merkleRoot);
+
+    const oldRootResult = await store.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(oldRootResult.type).toBe('bindings');
+    if (oldRootResult.type === 'bindings') {
+      expect(oldRootResult.bindings.length).toBe(1);
+      expect(oldRootResult.bindings[0]['root']).toContain(originalRootHex);
+    }
+
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated"')],
+    });
+    expect(updateResult.status).toBe('confirmed');
+    const updatedRootHex = toHex(updateResult.merkleRoot);
+    expect(updatedRootHex).not.toBe(originalRootHex);
+
+    const newRootResult = await store.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(newRootResult.type).toBe('bindings');
+    if (newRootResult.type === 'bindings') {
+      expect(newRootResult.bindings.length).toBe(1);
+      expect(newRootResult.bindings[0]['root']).toContain(updatedRootHex);
+      expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
+    }
+  });
+
+  it('UpdateHandler.handle() updates the merkle root in _meta graph on gossip receiver', async () => {
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const DKG = 'http://dkg.io/ontology/';
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+    expect(original.status).toBe('confirmed');
+    const originalRootHex = toHex(original.merkleRoot);
+
+    const receiverStore = new OxigraphStore();
+    const allQuads = await store.query(
+      `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } }`,
+    );
+    if (allQuads.type === 'bindings') {
+      const quadsToInsert = allQuads.bindings.map((b: Record<string, string>) => ({
+        subject: b['s'], predicate: b['p'], object: b['o'], graph: b['g'],
+      }));
+      await receiverStore.insert(quadsToInsert);
+    }
+    const receiverHandler = new UpdateHandler(receiverStore, chain, new TypedEventBus());
+
+    const preResult = await receiverStore.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(preResult.type).toBe('bindings');
+    if (preResult.type === 'bindings') {
+      expect(preResult.bindings.length).toBe(1);
+      expect(preResult.bindings[0]['root']).toContain(originalRootHex);
+    }
+
+    const updateQuads = [q(ENTITY_A, 'http://schema.org/name', '"Updated via gossip"')];
+    const updateResult = await publisher.update(original.kcId, {
+      paranetId: PARANET,
+      quads: updateQuads,
+    });
+
+    const message = buildGossipMessage({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      quads: updateQuads,
+      manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: updateResult.onChainResult!.blockNumber,
+    });
+
+    await receiverHandler.handle(message, '12D3KooWPeerA');
+
+    const newRootResult = await receiverStore.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(newRootResult.type).toBe('bindings');
+    if (newRootResult.type === 'bindings') {
+      expect(newRootResult.bindings.length).toBe(1);
+      const newRootHex = toHex(computeFlatKCRoot(updateQuads, []));
+      expect(newRootResult.bindings[0]['root']).toContain(newRootHex);
+      expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
+    }
+  });
+
+  it('updateMetaMerkleRoot fails loudly for unsafe paranetId values', async () => {
+    const DKG = 'http://dkg.io/ontology/';
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"SafeData"')],
+    });
+    const originalRootHex = toHex(original.merkleRoot);
+
+    const maliciousIds = ['test> } DELETE WHERE { ?s ?p ?o', 'foo"bar', 'test<injection'];
+    const fakeRoot = new Uint8Array(32).fill(0xff);
+    const gm = new GraphManager(store);
+
+    for (const bad of maliciousIds) {
+      await expect(
+        updateMetaMerkleRoot(store, gm, bad, original.kcId, fakeRoot),
+      ).rejects.toThrow('Unsafe paranetId for SPARQL graph IRI');
+    }
+
+    const rootAfter = await store.query(
+      `SELECT ?root WHERE { GRAPH <${META_GRAPH}> { ?ual <${DKG}merkleRoot> ?root . ?ual <${DKG}batchId> "${original.kcId}"^^<http://www.w3.org/2001/XMLSchema#integer> } }`,
+    );
+    expect(rootAfter.type).toBe('bindings');
+    if (rootAfter.type === 'bindings') {
+      expect(rootAfter.bindings.length).toBe(1);
+      expect(rootAfter.bindings[0]['root']).toContain(originalRootHex);
+    }
+  });
+
+  it('resolveUalByBatchId uses bigint string representation (no Number precision loss)', async () => {
+    const META_GRAPH = `did:dkg:paranet:${PARANET}/_meta`;
+    const DKG = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+    const original = await publisher.publish({
+      paranetId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"BigIntTest"')],
+    });
+
+    const ual = await resolveUalByBatchId(store, META_GRAPH, original.kcId);
+    expect(ual).toBeDefined();
+    expect(ual).toContain('did:dkg:');
+
+    const largeBatchId = (1n << 60n) + 1337n;
+    const largeUal = 'did:dkg:mock:31337/0x1234567890abcdef1234567890abcdef12345678/large-kc';
+    await store.insert([{
+      subject: largeUal,
+      predicate: `${DKG}batchId`,
+      object: `"${largeBatchId}"^^<${XSD}integer>`,
+      graph: META_GRAPH,
+    }]);
+    const largeResolved = await resolveUalByBatchId(store, META_GRAPH, largeBatchId);
+    expect(largeResolved).toBe(largeUal);
+
+    const roundedViaNumber = BigInt(Number(largeBatchId));
+    expect(roundedViaNumber).not.toBe(largeBatchId);
+    const roundedLookup = await resolveUalByBatchId(store, META_GRAPH, roundedViaNumber);
+    expect(roundedLookup).toBeUndefined();
+
+    const noMatch = await resolveUalByBatchId(store, META_GRAPH, 999999n);
+    expect(noMatch).toBeUndefined();
   });
 });

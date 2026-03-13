@@ -157,7 +157,12 @@ function extractCountFromQueryResult(result: any): number | null {
 }
 
 function escapeSparqlString(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
 }
 
 const SAFE_IRI_RE = /^[a-zA-Z][a-zA-Z0-9+\-.]*:[^\s<>"{}|\\^`]*$/;

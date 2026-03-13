@@ -13,6 +13,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@dkg/core": "workspace:*",
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25"
   },

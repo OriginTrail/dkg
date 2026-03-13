@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.28.1",
   "scripts": {
     "build": "turbo build",
+    "build:runtime": "pnpm -r --filter @dkg/core --filter @dkg/storage --filter @dkg/query --filter @dkg/publisher --filter @dkg/chain --filter @dkg/agent --filter @dkg/graph-viz --filter @dkg/node-ui --filter @dkg/cli --filter dkg-app-origin-trail-game run build",
     "test": "turbo test",
     "test:coverage": "turbo test:coverage",
     "lint": "turbo lint",

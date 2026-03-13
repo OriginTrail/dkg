@@ -23,7 +23,9 @@
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@dkg/core": "workspace:*"
+  },
   "openclaw": {
     "extensions": ["./openclaw-entry.mjs"]
   },

@@ -72,7 +72,7 @@ export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName:
   ];
 }
 
-export function playerJoinedQuads(paranetId: string, swarmId: string, peerId: string, displayName: string): Quad[] {
+export function playerJoinedQuads(paranetId: string, swarmId: string, peerId: string, displayName: string, joinedAt: number = Date.now()): Quad[] {
   const g = workspaceGraph(paranetId);
   const membership = `${OT}swarm/${swarmId}/member/${peerId}`;
   return [
@@ -80,6 +80,7 @@ export function playerJoinedQuads(paranetId: string, swarmId: string, peerId: st
     quad(membership, otUri('agent'), playerUri(peerId), g),
     quad(membership, otUri('displayName'), literal(displayName), g),
     quad(membership, otUri('swarm'), swarmUri(swarmId), g),
+    quad(membership, otUri('joinedAt'), literal(joinedAt), g),
   ];
 }
 

@@ -516,13 +516,13 @@ export function App() {
 
         <div className="ot-section">
           <h2>Open Swarms</h2>
-          {lobby?.openSwarms?.length ? lobby.openSwarms.map((w: any) => (
+          {(lobby?.recruitingSwarms ?? lobby?.openSwarms)?.length ? (lobby?.recruitingSwarms ?? lobby?.openSwarms).map((w: any) => (
             <div key={w.id} className="ot-card">
-              <strong>{w.name}</strong> — {w.players?.length ?? 0}/{w.maxPlayers} players
+              <strong>{w.name}</strong> — {w.players?.length ?? 0}/{w.maxPlayers} players {(w.players?.length ?? 0) >= w.maxPlayers ? '(Full)' : ''}
               <button onClick={async () => {
                 try { setLoading(true); const res = await api.join(w.id, playerName); setSwarm(res); setView('swarm'); }
                 catch (e: any) { setError(e.message); } finally { setLoading(false); }
-              }} disabled={loading}>Join</button>
+              }} disabled={loading || (w.players?.length ?? 0) >= w.maxPlayers}>{(w.players?.length ?? 0) >= w.maxPlayers ? 'Full' : 'Join'}</button>
             </div>
           )) : <p className="ot-muted">No open swarms</p>}
         </div>
@@ -588,7 +588,7 @@ export function App() {
         <div className="ot-status-bar">
           <span>Status: <strong>{swarm.status}</strong></span>
           <span>Turn: <strong>{swarm.currentTurn}</strong></span>
-          <span>Players: <strong>{swarm.playerCount}</strong></span>
+          <span>Players: <strong>{swarm.playerCount}/{swarm.maxPlayers}</strong></span>
           <span>Game Master: <strong style={{ color: 'var(--green)' }}>{swarm.leaderName ?? '—'}</strong></span>
           <span>Signatures: <strong>{swarm.signatureThreshold}</strong></span>
         </div>
@@ -601,7 +601,11 @@ export function App() {
 
         {swarm.status === 'recruiting' && (
           <div className="ot-card">
-            <h3>Waiting for players ({swarm.playerCount}/{swarm.minPlayers} minimum)</h3>
+            <h3>Waiting for players ({swarm.playerCount}/{swarm.maxPlayers} joined)</h3>
+            <p className="ot-muted">
+              Swarm capacity is set to {swarm.maxPlayers} players.
+              Minimum to start is {swarm.minPlayers}.
+            </p>
             <ul>{swarm.players.map((p: any) => <li key={p.id}>{p.name} {p.isLeader && <span className="ot-gm-badge">GM</span>}</li>)}</ul>
             {swarm.leaderId === nodeInfo?.peerId && swarm.playerCount >= swarm.minPlayers && (
               <button onClick={async () => {
@@ -794,21 +798,54 @@ function Leaderboard() {
 
 function CreateSwarmForm({ playerName, onCreated, onError }: { playerName: string; onCreated: (w: any) => void; onError: (e: string) => void }) {
   const [name, setName] = useState('');
-  const [maxPlayers, setMaxPlayers] = useState(1);
+  const [maxPlayers, setMaxPlayers] = useState(3);
   const [loading, setLoading] = useState(false);
+
+  const setClampedMaxPlayers = (value: number) => {
+    setMaxPlayers(Math.max(1, Math.min(8, value)));
+  };
 
   return (
     <div className="ot-card">
       <input value={name} onChange={e => setName(e.target.value)} placeholder="Swarm name..." />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '0.75rem' }}>
         <label style={{ margin: 0, whiteSpace: 'nowrap' }}>Max players:</label>
-        <select
-          value={maxPlayers}
-          onChange={e => setMaxPlayers(Number(e.target.value))}
-          style={{ padding: '0.4rem', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', fontSize: '0.9rem' }}
+        <button
+          type="button"
+          className="ot-secondary"
+          onClick={() => setClampedMaxPlayers(maxPlayers - 1)}
+          disabled={loading || maxPlayers <= 1}
+          aria-label="Decrease max players"
+          style={{ minWidth: 36, padding: '0.4rem 0.6rem' }}
         >
-          {[1, 2, 3, 4, 5, 6, 7, 8].map(n => <option key={n} value={n}>{n}</option>)}
-        </select>
+          -
+        </button>
+        <div
+          aria-live="polite"
+          style={{
+            minWidth: 56,
+            textAlign: 'center',
+            padding: '0.4rem 0.6rem',
+            background: 'var(--bg)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            color: 'var(--text)',
+            fontSize: '0.95rem',
+            fontWeight: 700,
+          }}
+        >
+          {maxPlayers}
+        </div>
+        <button
+          type="button"
+          className="ot-secondary"
+          onClick={() => setClampedMaxPlayers(maxPlayers + 1)}
+          disabled={loading || maxPlayers >= 8}
+          aria-label="Increase max players"
+          style={{ minWidth: 36, padding: '0.4rem 0.6rem' }}
+        >
+          +
+        </button>
       </div>
       <button disabled={!name.trim() || loading} onClick={async () => {
         try { setLoading(true); onCreated(await api.create(playerName, name, maxPlayers)); }

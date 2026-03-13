@@ -1,6 +1,7 @@
 import {
   decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
+  isSafeIri,
   type OperationContext,
 } from '@dkg/core';
 import { GraphManager, type TripleStore, type Quad } from '@dkg/storage';
@@ -393,10 +394,6 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
 
-function isSafeIri(value: string): boolean {
-  if (!value) return false;
-  return /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`]*$/.test(value);
-}
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);

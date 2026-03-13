@@ -1,5 +1,5 @@
 import type { QueryEngine, QueryResult } from '@dkg/query';
-import { DKG_ONTOLOGY } from '@dkg/core';
+import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri } from '@dkg/core';
 import { AGENT_REGISTRY_PARANET } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
@@ -47,7 +47,7 @@ export class DiscoveryClient {
   async findAgents(options: { framework?: string; limit?: number } = {}): Promise<DiscoveredAgent[]> {
     let filter = '';
     if (options.framework) {
-      filter += `\n      ?agent <${SKILL}framework> "${options.framework}" .`;
+      filter += `\n      ?agent <${SKILL}framework> "${escapeSparqlLiteral(options.framework)}" .`;
     }
 
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
@@ -81,8 +81,9 @@ export class DiscoveryClient {
 
     let skillMatch = `?offering <${SKILL}skill> ?skillType .`;
     if (options.skillType) {
-      skillMatch = `?offering <${SKILL}skill> <${SKILL}${options.skillType}> .
-        BIND(<${SKILL}${options.skillType}> AS ?skillType)`;
+      const skillUri = assertSafeIri(`${SKILL}${options.skillType}`);
+      skillMatch = `?offering <${SKILL}skill> <${skillUri}> .
+        BIND(<${skillUri}> AS ?skillType)`;
     }
 
     if (options.maxPrice !== undefined) {
@@ -92,7 +93,7 @@ export class DiscoveryClient {
       filters.push(`FILTER(xsd:float(?successRate) >= ${options.minSuccessRate})`);
     }
     if (options.framework) {
-      filters.push(`?agent <${SKILL}framework> "${options.framework}" .`);
+      filters.push(`?agent <${SKILL}framework> "${escapeSparqlLiteral(options.framework)}" .`);
     }
 
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
@@ -131,7 +132,7 @@ export class DiscoveryClient {
       SELECT ?agent ?name ?framework ?nodeRole ?relayAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
-               <${DKG}peerId> "${peerId}" .
+               <${DKG}peerId> "${escapeSparqlLiteral(peerId)}" .
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
         OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
