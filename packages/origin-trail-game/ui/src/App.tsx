@@ -477,16 +477,14 @@ export function App() {
     }).catch(() => {});
   }, []);
 
-  const swarmRef = useRef(swarm);
-  swarmRef.current = swarm;
-  const viewRef = useRef(view);
-  viewRef.current = view;
+  const autoNavigatedRef = useRef(false);
 
   const refreshLobby = useCallback(async () => {
     try {
       const data = await api.lobby();
       setLobby(data);
-      if (data.mySwarms?.length === 1 && !swarmRef.current && viewRef.current === 'lobby') {
+      if (data.mySwarms?.length === 1 && !autoNavigatedRef.current) {
+        autoNavigatedRef.current = true;
         try {
           const fresh = await api.swarm(data.mySwarms[0].id);
           setSwarm(fresh);

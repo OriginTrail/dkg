@@ -10,14 +10,17 @@ async function waitForToken(timeoutMs = 3000): Promise<string | undefined> {
   if (token) return token;
   if (window.parent === window) return undefined;
   return new Promise(resolve => {
-    const timer = setTimeout(() => resolve(undefined), timeoutMs);
     const check = setInterval(() => {
       if ((window as any).__DKG_TOKEN__) {
-        clearTimeout(timer);
         clearInterval(check);
+        clearTimeout(timer);
         resolve((window as any).__DKG_TOKEN__);
       }
     }, 100);
+    const timer = setTimeout(() => {
+      clearInterval(check);
+      resolve(undefined);
+    }, timeoutMs);
   });
 }
 
