@@ -52,8 +52,13 @@ export function monotonicTransition(
 
 /**
  * Convenience wrapper: writes quads with a CAS condition on a version counter.
- * Reads the current stateVersion, increments it, and writes the new value
- * alongside the provided quads.
+ * Uses the caller-provided `currentVersion` as the expected value, increments
+ * it, and writes the new value alongside the provided quads.
+ *
+ * The caller is responsible for supplying the correct current version — this
+ * helper does NOT read it from the store. The CAS condition ensures the write
+ * fails with `StaleWriteError` if another write has changed the version since
+ * the caller last observed it.
  *
  * @param agent         The DKG agent instance
  * @param paranetId     Target paranet

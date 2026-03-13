@@ -299,7 +299,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    const lockKeys = options.conditions.map(c => `${c.subject}\0${c.predicate}`);
+    const lockKeys = options.conditions.map(c => `${paranetId}\0${c.subject}\0${c.predicate}`);
     const uniqueKeys = [...new Set(lockKeys)];
 
     const predecessor = Promise.all(uniqueKeys.map(k => this.casLocks.get(k) ?? Promise.resolve()));
