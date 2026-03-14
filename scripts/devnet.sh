@@ -472,7 +472,8 @@ start_node() {
       echo "/ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}" > "$DEVNET_DIR/node1/multiaddr"
       log "Relay multiaddr saved: /ip4/127.0.0.1/tcp/${libp2p_port}/p2p/${peer_id}"
     else
-      log "ERROR: Could not extract relay multiaddr for node 1 — other nodes will not connect locally"
+      log "ERROR: Could not extract relay multiaddr for node 1 — aborting devnet start"
+      return 1
     fi
   fi
 }

@@ -104,7 +104,7 @@ describe('requestFaucetFunding', () => {
     const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const headers = call[1].headers;
     const key = headers['Idempotency-Key'];
-    expect(key).toMatch(/^init-mon-n_ud-_l_ve-\d+$/);
+    expect(key).toMatch(/^init-mon-n_ud-_l_ve-0xAAA$/);
     expect(key).toMatch(/^[\x20-\x7E]+$/);
   });
 });

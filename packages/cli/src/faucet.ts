@@ -18,7 +18,7 @@ export async function requestFaucetFunding(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Idempotency-Key': `init-${safeNodeName}-${Date.now()}`,
+      'Idempotency-Key': `init-${safeNodeName}-${fundable.sort().join(',')}`,
     },
     body: JSON.stringify({ mode, wallets: fundable, callerId: `dkg-node:${nodeName}` }),
     signal: AbortSignal.timeout(30_000),
