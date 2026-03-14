@@ -2255,7 +2255,7 @@ export class OriginTrailGameCoordinator {
                  <${rdf.OT}finishedAt> ?finishedAt .
           BIND(?maxScore AS ?score)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score)`,
+        } ORDER BY DESC(?score) LIMIT 500`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
@@ -2317,10 +2317,6 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
       timestamp: Date.now(),
     };
-    this.chatMessages.push(chatMsg);
-    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
-      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
-    }
 
     const gossipMsg: proto.ChatMsg = {
       app: proto.APP_ID,
@@ -2333,6 +2329,11 @@ export class OriginTrailGameCoordinator {
       message: trimmedMsg,
     };
     await this.broadcast(gossipMsg);
+
+    this.chatMessages.push(chatMsg);
+    if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
+      this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);
+    }
     return chatMsg;
   }
 

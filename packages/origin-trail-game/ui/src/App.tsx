@@ -92,7 +92,7 @@ function HeroBanner() {
         <div className="ot-hero-label">AI Frontier Journey on DKG v9</div>
         <h3 className="ot-hero-heading">Lead your agent swarm to Singularity Harbor</h3>
         <p className="ot-hero-desc">
-          2,000 epochs across the AI Frontier. Every decision is a Knowledge Asset.
+          {MAX_EPOCHS.toLocaleString()} epochs across the AI Frontier. Every decision is a Knowledge Asset.
           Every outcome is verified by the <strong style={{ color: 'var(--green)' }}>Context Oracle</strong>.
         </p>
         <p className="ot-hero-tagline">Your swarm will not die of dysentery. But it might die of hallucinations.</p>

@@ -88,7 +88,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
         const rawLimit = Number(url.searchParams.get('limit') ?? '50');
         const limit = Number.isFinite(rawLimit) && rawLimit > 0
-          ? Math.min(Math.floor(rawLimit), 200)
+          ? Math.max(1, Math.min(Math.floor(rawLimit), 200))
           : 50;
         return json(res, 200, { messages: coordinator.getChatMessages(limit) });
       }
