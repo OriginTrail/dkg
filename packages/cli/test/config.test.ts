@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import {
   loadNetworkConfig,
   removePid,
@@ -8,6 +11,8 @@ import {
   readPid,
   readApiPort,
   ensureDkgDir,
+  isDkgMonorepo,
+  dkgDir,
 } from '../src/config.js';
 
 describe('removePid / removeApiPort (catch path)', () => {
@@ -37,11 +42,7 @@ describe('removePid / removeApiPort (catch path)', () => {
 describe('loadNetworkConfig', () => {
   it('loads network/testnet.json with shape expected by join flow when run from repo', async () => {
     const config = await loadNetworkConfig();
-    // When run from monorepo (turbo test), CLI is built and dist/config.js resolves repo root
-    if (!config) {
-      // Not in repo or testnet.json missing — skip shape assertions
-      return;
-    }
+    if (!config) return;
     expect(config.networkName).toBeDefined();
     expect(Array.isArray(config.relays)).toBe(true);
     expect(config.relays.length).toBeGreaterThan(0);
@@ -53,5 +54,45 @@ describe('loadNetworkConfig', () => {
       expect(config.chain.hubAddress).toBeDefined();
       expect(config.chain.chainId).toBeDefined();
     }
+  });
+
+  it('includes faucet config when present in testnet.json', async () => {
+    const config = await loadNetworkConfig();
+    if (!config) return;
+    if (config.faucet) {
+      expect(config.faucet.url).toMatch(/^https?:\/\//);
+      expect(config.faucet.mode).toBeDefined();
+      expect(typeof config.faucet.mode).toBe('string');
+    }
+  });
+});
+
+describe('isDkgMonorepo', () => {
+  it('returns true when running from the dkg-v9 monorepo', () => {
+    expect(isDkgMonorepo()).toBe(true);
+  });
+});
+
+describe('dkgDir', () => {
+  const origHome = process.env.DKG_HOME;
+
+  afterEach(() => {
+    if (origHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = origHome;
+  });
+
+  it('returns ~/.dkg-dev when in monorepo without existing ~/.dkg/config.json, else ~/.dkg', () => {
+    delete process.env.DKG_HOME;
+    const hasExistingConfig = existsSync(join(homedir(), '.dkg', 'config.json'));
+    if (hasExistingConfig) {
+      expect(dkgDir()).toMatch(/\.dkg$/);
+    } else {
+      expect(dkgDir()).toMatch(/\.dkg-dev$/);
+    }
+  });
+
+  it('respects DKG_HOME override', () => {
+    process.env.DKG_HOME = '/tmp/custom-dkg';
+    expect(dkgDir()).toBe('/tmp/custom-dkg');
   });
 });

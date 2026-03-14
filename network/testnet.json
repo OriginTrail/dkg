@@ -21,5 +21,9 @@
     "rpcUrl": "https://sepolia.base.org",
     "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
     "chainId": "base:84532"
+  },
+  "faucet": {
+    "url": "https://euphoria.origin-trail.network/faucet/fund",
+    "mode": "v9_base_sepolia"
   }
 }
