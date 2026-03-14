@@ -44,6 +44,7 @@ export {
 export {
   type WorkspacePublishRequestMsg,
   type WorkspaceManifestEntryMsg,
+  type WorkspaceCASConditionMsg,
   encodeWorkspacePublishRequest,
   decodeWorkspacePublishRequest,
 } from './workspace.js';

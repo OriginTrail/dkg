@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   assertSafeIri,
+  assertSafeRdfTerm,
   isSafeIri,
   sparqlIri,
   escapeSparqlLiteral,
@@ -185,6 +186,45 @@ describe('sparqlInt', () => {
   it('enforces max bound', () => {
     expect(() => sparqlInt(1001, { max: 1000 })).toThrow('above maximum');
     expect(sparqlInt(1000, { max: 1000 })).toBe('1000');
+  });
+});
+
+describe('assertSafeRdfTerm — BCP47 language tags', () => {
+  it('accepts simple language tags', () => {
+    expect(() => assertSafeRdfTerm('"hello"@en')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"bonjour"@fr')).not.toThrow();
+  });
+
+  it('accepts language tags with region subtags', () => {
+    expect(() => assertSafeRdfTerm('"colour"@en-GB')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"farbe"@de-CH')).not.toThrow();
+  });
+
+  it('accepts language tags with numeric subtags (BCP47)', () => {
+    expect(() => assertSafeRdfTerm('"name"@de-CH-1996')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"text"@sl-rozaj-1994')).not.toThrow();
+    expect(() => assertSafeRdfTerm('"foo"@zh-Hant-TW')).not.toThrow();
+  });
+
+  it('rejects language tags starting with digits', () => {
+    expect(() => assertSafeRdfTerm('"x"@123')).toThrow();
+  });
+
+  it('rejects language tags with empty subtags', () => {
+    expect(() => assertSafeRdfTerm('"x"@en-')).toThrow();
+    expect(() => assertSafeRdfTerm('"x"@en--GB')).toThrow();
+  });
+
+  it('accepts typed literals with datatype IRI', () => {
+    expect(() => assertSafeRdfTerm('"42"^^<http://www.w3.org/2001/XMLSchema#integer>')).not.toThrow();
+  });
+
+  it('accepts IRI terms', () => {
+    expect(() => assertSafeRdfTerm('<http://example.org/resource>')).not.toThrow();
+  });
+
+  it('rejects injection through language tag', () => {
+    expect(() => assertSafeRdfTerm('"x"@en> } DROP ALL #')).toThrow();
   });
 });
 

@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -79,14 +79,6 @@ export interface WriteConditionalToWorkspaceOptions extends WriteToWorkspaceOpti
   conditions: CASCondition[];
 }
 
-const SAFE_RDF_LITERAL = /^"(?:[^"\\]|\\.)*"(?:@[A-Za-z-]+|\^\^<[^>]+>)?$/;
-const SAFE_RDF_IRI = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
-
-function assertSafeRdfTerm(value: string): void {
-  if (SAFE_RDF_LITERAL.test(value)) return;
-  if (SAFE_RDF_IRI.test(value)) return;
-  throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
-}
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
@@ -174,7 +166,7 @@ export class DKGPublisher implements Publisher {
   private async _writeToWorkspaceImpl(
     paranetId: string,
     quads: Quad[],
-    options: WriteToWorkspaceOptions,
+    options: WriteToWorkspaceOptions & { conditions?: CASCondition[] },
   ): Promise<WriteToWorkspaceResult> {
     const ctx = options.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
@@ -237,6 +229,13 @@ export class DKGPublisher implements Publisher {
       )
       .join('\n');
 
+    const casConditions = options.conditions?.map(c => ({
+      subject: c.subject,
+      predicate: c.predicate,
+      expectedValue: c.expectedValue ?? '',
+      expectAbsent: c.expectedValue === null,
+    }));
+
     const message = encodeWorkspacePublishRequest({
       paranetId,
       nquads: new TextEncoder().encode(nquadsStr),
@@ -249,6 +248,7 @@ export class DKGPublisher implements Publisher {
       workspaceOperationId,
       timestampMs: Date.now(),
       operationId: ctx.operationId,
+      casConditions,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -370,7 +370,10 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
-    return this._writeToWorkspaceImpl(paranetId, quads, options);
+    return this._writeToWorkspaceImpl(paranetId, quads, {
+      ...options,
+      conditions: options.conditions,
+    });
   }
 
   /**

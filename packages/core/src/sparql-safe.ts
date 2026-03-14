@@ -78,6 +78,31 @@ export function sparqlString(value: string): string {
  * Handles `bigint` natively via `.toString()` to avoid precision loss
  * for values beyond `Number.MAX_SAFE_INTEGER`.
  */
+// SPARQL STRING_LITERAL2: forbid raw CR/LF, only allow valid SPARQL escapes
+// BCP47 lang tags: primary subtag alpha-only, subsequent subtags alphanumeric (e.g. de-CH-1996)
+const SAFE_IRI_CHARS = '[^<>"{}|\\\\^`\\x00-\\x20>]';
+const SAFE_RDF_LITERAL = new RegExp(
+  `^"(?:[^"\\\\\\r\\n]|\\\\[tbnrf"'\\\\]|\\\\u[0-9a-fA-F]{4}|\\\\U[0-9a-fA-F]{8})*"` +
+  `(?:@[A-Za-z]+(?:-[A-Za-z0-9]+)*|\\^\\^<${SAFE_IRI_CHARS}+>)?$`,
+);
+const SAFE_RDF_IRI_TERM = /^<[^<>"{}|\\^`\x00-\x20]+>$/;
+
+/**
+ * Validates a complete SPARQL RDF term — either a quoted literal
+ * (with optional language tag or datatype) or an IRI in angle brackets.
+ * Throws on anything that could break SPARQL syntax.
+ *
+ *     assertSafeRdfTerm('"hello"')           // ok
+ *     assertSafeRdfTerm('"42"^^<xsd:int>')   // ok
+ *     assertSafeRdfTerm('<http://ex.org/>')   // ok
+ *     assertSafeRdfTerm('" } DROP ALL #')     // throws
+ */
+export function assertSafeRdfTerm(value: string): void {
+  if (SAFE_RDF_LITERAL.test(value)) return;
+  if (SAFE_RDF_IRI_TERM.test(value)) return;
+  throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
+}
+
 export function sparqlInt(
   value: number | bigint,
   opts?: { min?: number; max?: number },

@@ -210,9 +210,9 @@ describe('Phase-sequence contracts', () => {
     expect(phases).toEqual([
       'decode:start',
       'decode:end',
+      'store:start',
       'validate:start',
       'validate:end',
-      'store:start',
       'store:end',
     ]);
   });

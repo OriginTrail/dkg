@@ -24,4 +24,5 @@ export {
   escapeSparqlLiteral,
   sparqlString,
   sparqlInt,
+  assertSafeRdfTerm,
 } from './sparql-safe.js';

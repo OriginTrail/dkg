@@ -3,7 +3,8 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm } from '@origintrail-official/dkg-core';
+import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
 import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -60,6 +61,58 @@ export class WorkspaceHandler {
   }
 
   /**
+   * Enforce CAS conditions carried in a gossip message.
+   * Must be called inside a write lock so no concurrent mutation can
+   * interleave between the check and the subsequent write.
+   * Returns false if any condition fails (write should be skipped).
+   */
+  private async enforceCASConditions(
+    conditions: WorkspaceCASConditionMsg[],
+    workspaceGraph: string,
+    ctx: import('@origintrail-official/dkg-core').OperationContext,
+  ): Promise<boolean> {
+    for (const cond of conditions) {
+      try {
+        assertSafeIri(cond.subject);
+        assertSafeIri(cond.predicate);
+        if (!cond.expectAbsent) {
+          if (!cond.expectedValue) {
+            this.log.warn(ctx, `CAS rejected: empty expectedValue for non-absent condition`);
+            return false;
+          }
+          assertSafeRdfTerm(cond.expectedValue);
+        }
+      } catch {
+        this.log.warn(ctx, `CAS rejected: invalid IRI/term in condition — possible injection attempt`);
+        return false;
+      }
+
+      try {
+        if (cond.expectAbsent) {
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
+          const result = await this.store.query(ask);
+          if (result.type !== 'boolean' || result.value) {
+            this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected absent`);
+            return false;
+          }
+        } else {
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+          const result = await this.store.query(ask);
+          if (result.type !== 'boolean' || !result.value) {
+            this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected ${cond.expectedValue}`);
+            return false;
+          }
+        }
+      } catch (err) {
+        this.log.warn(ctx, `CAS rejected: query failed — ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    }
+    this.log.info(ctx, `Remote CAS conditions passed (${conditions.length})`);
+    return true;
+  }
+
+  /**
    * Handler for GossipSub workspace topic: (data, fromPeerId) => void.
    * Validates, stores to workspace + workspace_meta, updates workspaceOwnedEntities.
    */
@@ -71,7 +124,7 @@ export class WorkspaceHandler {
       if (request.operationId) {
         ctx = createOperationContext('workspace', request.operationId);
       }
-      const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs } = request;
+      const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs, casConditions } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 
       if (publisherPeerId !== fromPeerId) {
@@ -92,40 +145,49 @@ export class WorkspaceHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
-      const existing = new Set<string>([...wsOwned.keys()]);
-
-      // Creator-only upsert: allow overwriting entities this writer created
-      const upsertable = new Set<string>();
-      for (const [entity, creator] of wsOwned) {
-        if (creator === publisherPeerId) {
-          upsertable.add(entity);
-        }
-      }
-
-      onPhase?.('validate', 'start');
-      const validation = validatePublishRequest(
-        quads, manifestForValidation, paranetId, existing,
-        { allowUpsert: true, upsertableEntities: upsertable },
-      );
-      if (!validation.valid) {
-        this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
-        return;
-      }
-
-      onPhase?.('validate', 'end');
-
       const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
       const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
 
-      const subjects = [...new Set(quads.map(q => q.subject))];
+      const condSubjects = (casConditions ?? []).map(c => c.subject);
+      const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
       const lockKeys = subjects.map(s => `${paranetId}\0${s}`);
 
       onPhase?.('store', 'start');
-      await this.withWriteLocks(lockKeys, async () => {
-        // Delete-then-insert for upserted entities.
-        // Delete exact root + skolemized children only to avoid prefix collisions.
-        // Also remove prior workspace_meta ops referencing these roots to prevent stale cleanup.
+      const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
+        const wsOwned = this.workspaceOwnedEntities.get(paranetId) ?? new Map<string, string>();
+        const existing = new Set<string>([...wsOwned.keys()]);
+
+        const upsertable = new Set<string>();
+        for (const [entity, creator] of wsOwned) {
+          if (creator === publisherPeerId) {
+            upsertable.add(entity);
+          }
+        }
+
+        onPhase?.('validate', 'start');
+        const validation = validatePublishRequest(
+          quads, manifestForValidation, paranetId, existing,
+          { allowUpsert: true, upsertableEntities: upsertable },
+        );
+        if (!validation.valid) {
+          this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
+          return false;
+        }
+        onPhase?.('validate', 'end');
+
+        if (casConditions && casConditions.length > 0) {
+          const passed = await this.enforceCASConditions(casConditions, workspaceGraph, ctx);
+          if (!passed) {
+            // Intentional: we reject writes whose CAS pre-conditions don't hold
+            // locally. This can cause temporary divergence if gossip delivers
+            // writes out-of-order, but the originator's workspace-sync protocol
+            // replays missed writes on reconnect, converging replicas eventually.
+            // Accepting stale-CAS writes would silently corrupt local state.
+            this.log.info(ctx, `Skipping workspace write ${workspaceOperationId} — remote CAS conditions not met`);
+            return false;
+          }
+        }
+
         for (const m of manifestForValidation) {
           if (wsOwned.has(m.rootEntity)) {
             await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
@@ -186,9 +248,14 @@ export class WorkspaceHandler {
             liveOwned.set(entry.rootEntity, entry.creatorPeerId);
           }
         }
+
+        return true;
       });
+
       onPhase?.('store', 'end');
-      this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
+      if (applied) {
+        this.log.info(ctx, `Stored workspace write ${workspaceOperationId} (${quads.length} quads)`);
+      }
     } catch (err) {
       this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);
     }
