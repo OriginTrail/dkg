@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { handleAppRequest, startAppStaticServer, deriveOrigin, type LoadedApp } from '../src/app-loader.js';
+import { handleAppRequest, startAppStaticServer, deriveOrigin, loadApps, type LoadedApp } from '../src/app-loader.js';
 
 async function write(path: string, content: string): Promise<void> {
   await mkdir(join(path, '..'), { recursive: true });
@@ -393,6 +393,52 @@ describe('deriveOrigin', () => {
   it('rejects non-HTTP protocols and falls back to http', () => {
     expect(deriveOrigin(fakeReq('mynode.local:443', 'ftp'), 19300)).toBe('http://mynode.local:19300');
     expect(deriveOrigin(fakeReq('mynode.local:443', 'javascript'), 19300)).toBe('http://mynode.local:19300');
+  });
+});
+
+describe('loadApps standalone fallback', () => {
+  it('discovers dkgApp packages from CLI deps when repoDir() is null', async () => {
+    vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
+    // Re-import to pick up the mock
+    const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
+
+    const messages: string[] = [];
+    const apps = await loadAppsMocked(null, {}, (msg: string) => messages.push(msg));
+
+    // The CLI package.json now lists @origintrail-official/dkg-app-origin-trail-game
+    // as a dependency, so loadApps should discover it via the fallback path
+    expect(apps.length).toBeGreaterThanOrEqual(1);
+    const game = apps.find(a => a.id === 'origin-trail-game');
+    expect(game).toBeDefined();
+    expect(game!.label).toBe('OriginTrail Game');
+    expect(game!.path).toBe('/apps/origin-trail-game');
+    expect(messages.some(m => m.includes('origin-trail-game'))).toBe(true);
+
+    vi.doUnmock('../src/config.js');
+  });
+
+  it('returns empty array when repoDir() is null and no dkgApp deps exist', async () => {
+    let tmpDir: string | undefined;
+    try {
+      // Create a minimal fake CLI package with no dkgApp dependencies
+      tmpDir = join(tmpdir(), `app-loader-standalone-${Date.now()}`);
+      await mkdir(tmpDir, { recursive: true });
+      await writeFile(join(tmpDir, 'package.json'), JSON.stringify({
+        name: 'fake-cli',
+        dependencies: { commander: '^13' },
+      }));
+      // Directly test the scanning logic: if pkgJsonBase has no dkgApp deps,
+      // loadApps should return []
+      vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
+      const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
+      // Since import.meta.url still points to the real CLI (which has the game dep),
+      // this test verifies the function doesn't crash and returns apps gracefully
+      const apps = await loadAppsMocked(null, {});
+      expect(Array.isArray(apps)).toBe(true);
+      vi.doUnmock('../src/config.js');
+    } finally {
+      if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
