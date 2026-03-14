@@ -215,7 +215,16 @@ sequenceDiagram
 
 **Recommendation:** Start with `vectra` (zero native dependencies, works everywhere), migrate to `hnswlib-node` for production performance.
 
-**Storage:** Persist the index to `~/.dkg/embeddings/` alongside the triple store. One index file per paranet.
+**Storage:** Persist indices to `~/.dkg/embeddings/` alongside the triple store. Use **separate indices per visibility scope** to prevent data leaks:
+
+```
+~/.dkg/embeddings/
+  <paranetId>/
+    enshrined.vectra    — confirmed on-chain KCs (public)
+    workspace.vectra    — draft workspace writes (private, node-local)
+```
+
+Search queries over enshrined data never touch the workspace index, and vice versa. The `includeWorkspace` flag on search requests controls whether workspace results are merged. This isolation ensures draft/workspace vectors cannot leak into general search results even if a filter path is missed.
 
 ### 1.3 Search API
 
@@ -452,7 +461,7 @@ The LLM can now choose between `dkg_query` (precise SPARQL) and `dkg_search` (na
   description: 'Search the DKG using natural language. Finds relevant knowledge assets by meaning, not exact text match.',
   parameters: {
     query: { type: 'string' },
-    paranets: { type: 'string', description: 'Comma-separated paranet IDs' },
+    paranetId: { type: 'string', description: 'Paranet ID to search within (single target)' },
     limit: { type: 'number' }
   }
 }
@@ -473,7 +482,7 @@ Returns agents whose profile embeddings (skills, publications, paranet membershi
 
 ## Implementation Details
 
-### New package: `@dkg/search`
+### New package: `@origintrail-official/dkg-search`
 
 ```text
 packages/search/
