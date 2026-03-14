@@ -524,13 +524,13 @@ describe('@unit RandomSampling', () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(isValid).to.be.equal(true, 'Period should be valid');
 
-      // Mine blocks up to the last block of the current period
+      // Read duration and block number in one go, then compute how many
+      // blocks to mine. Each contract call can advance the block by 1,
+      // so read current block last and subtract 1 for safety margin.
+      const duration = Number(await RandomSampling.getActiveProofingPeriodDurationInBlocks());
       const currentBlock = await hre.ethers.provider.getBlockNumber();
-      const blocksToMine =
-        Number(activeProofPeriodStartBlock) +
-        Number(await RandomSampling.getActiveProofingPeriodDurationInBlocks()) -
-        currentBlock -
-        1;
+      const periodEnd = Number(activeProofPeriodStartBlock) + duration;
+      const blocksToMine = Math.max(0, periodEnd - currentBlock - 2);
       await mineBlocks(blocksToMine);
 
       let statusAfterUpdate = await RandomSampling.getActiveProofPeriodStatus();
