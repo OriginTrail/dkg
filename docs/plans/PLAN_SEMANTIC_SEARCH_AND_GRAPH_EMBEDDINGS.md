@@ -194,9 +194,10 @@ sequenceDiagram
     Embedder->>Embedder: filter to embeddable fields (see allowlist below)
     Embedder->>Embedder: concat subject label + allowed literal values
     Embedder->>Embedder: sentence-transformers encode → 384-dim vector
-    Embedder->>VecIndex: upsert(entityUri, vector, metadata)
+    Embedder->>VecIndex: upsert(ual:entityUri, vector, metadata)
     
-    Note over VecIndex: metadata = {paranetId, publisherPeerId, timestamp, ual}
+    Note over VecIndex: key = ual + ":" + entityUri (composite, preserves provenance)
+    Note over VecIndex: metadata = {paranetId, publisherPeerId, timestamp, ual, entityUri}
 ```
 
 **When to embed:**
@@ -324,8 +325,8 @@ sequenceDiagram
     participant VecIndex as Vector Index
 
     Note over Scheduler: Triggered on schedule or threshold
-    Scheduler->>Store: SPARQL: all triples in paranet
-    Store-->>Scheduler: triples (h, r, t)
+    Scheduler->>Store: SPARQL: structural triples (IRI→IRI edges only)
+    Store-->>Scheduler: triples (h, r, t) — literal objects excluded
     
     Scheduler->>PyKEEN: train TransE(triples, dim=128, epochs=100)
     Note over PyKEEN: Learns entity + relation embeddings
@@ -342,16 +343,26 @@ sequenceDiagram
 
 ### 2.2 PyKEEN integration
 
-PyKEEN runs as a Python subprocess or sidecar. The node exports triples as TSV, invokes PyKEEN, and imports the resulting embeddings.
+PyKEEN runs as a Python subprocess or sidecar. The node exports structural triples (IRI subjects and objects only — literal-object triples are excluded) as TSV, invokes PyKEEN, and imports the resulting embeddings.
 
 ```bash
-# Export triples from store
+# Export structural triples from store (excludes literal objects)
 dkg embeddings export --paranet testing --output /tmp/triples.tsv
 
-# Train (PyKEEN CLI)
-pykeen train --model TransE --dataset /tmp/triples.tsv \
-  --embedding-dim 128 --num-epochs 100 \
-  --output /tmp/embeddings/
+# Train using PyKEEN Python API (the pykeen CLI `--dataset` flag expects
+# named datasets, not raw files — use the pipeline config for local triples):
+python3 -c "
+from pykeen.triples import TriplesFactory
+from pykeen.pipeline import pipeline
+tf = TriplesFactory.from_path('/tmp/triples.tsv')
+result = pipeline(
+    training=tf,
+    model='TransE',
+    model_kwargs=dict(embedding_dim=128),
+    training_kwargs=dict(num_epochs=100),
+)
+result.save_to_directory('/tmp/embeddings/')
+"
 
 # Import embeddings back
 dkg embeddings import --paranet testing --input /tmp/embeddings/
