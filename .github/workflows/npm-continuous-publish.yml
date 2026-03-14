@@ -1,6 +1,6 @@
 # Automatically publish all public packages to NPM on every push to main.
-# Uses a dev pre-release suffix (e.g. 9.0.0-beta.4-dev.1710412800)
-# so NPM-installed nodes auto-update without manual releases.
+# Uses a dev pre-release suffix (e.g. 9.0.0-beta.5-dev.1710412800)
+# and publishes as `latest` so all NPM-installed nodes auto-update.
 #
 # To disable: remove the NPM_TOKEN secret from the repo settings.
 # After that, only manual `npm publish` will push new versions.
@@ -77,6 +77,6 @@ jobs:
 
       - name: Publish all public packages
         if: env.HAS_NPM_TOKEN == 'true'
-        run: pnpm -r publish --no-git-checks --tag dev
+        run: pnpm -r publish --no-git-checks --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
