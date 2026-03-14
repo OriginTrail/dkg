@@ -63,7 +63,31 @@ git tag -s v9.0.0-beta.2 -m "DKG v9.0.0 beta 2"
 git push origin v9.0.0-beta.2
 ```
 
-## 5) Node update policy
+## 5) Publishing to npm
+
+After pushing a tag, the GitHub Actions release workflow builds, tests, and creates a
+GitHub Release automatically. npm publishing is done manually to keep full control.
+
+From a clean `main` checkout at the tagged commit:
+
+```bash
+git checkout v9.0.0-beta.3
+pnpm install --frozen-lockfile
+pnpm build
+pnpm -r publish --no-git-checks --tag latest
+```
+
+npm will prompt for your OTP code. All publishable packages in the monorepo are
+published in one command. Private packages (`@origintrail-official/dkg-evm-module`,
+`@origintrail-official/dkg-network-sim`) are skipped automatically.
+
+Verify after publishing:
+
+```bash
+npm view @origintrail-official/dkg version
+```
+
+## 6) Node update policy
 
 - Stable cohort:
   - follow stable tags/branch
@@ -89,7 +113,7 @@ Tag verification:
 dkg update 9.0.0-beta.2 --allow-prerelease --no-verify-tag
 ```
 
-## 6) Post-update verification
+## 7) Post-update verification
 
 After each update:
 
@@ -101,7 +125,7 @@ cat "$DKG_HOME/.current-version"
 test ! -f "$DKG_HOME/.update-pending.json" && echo "pending state cleared"
 ```
 
-## 7) Rollback
+## 8) Rollback
 
 If issues are detected:
 
@@ -117,7 +141,7 @@ Then start node again:
 dkg start
 ```
 
-## 8) Promotion policy
+## 9) Promotion policy
 
 Recommended progression:
 

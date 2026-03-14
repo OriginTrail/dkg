@@ -1,5 +1,5 @@
-# Create a GitHub Release and publish to npm when a version tag is pushed.
-# Supports stable (v9.0.0) and pre-release (v9.0.0-beta.2) tags.
+# Create a GitHub Release when a version tag (v*.*.*) is pushed.
+# npm publishing is done manually — see RELEASE_PROCESS.md.
 
 name: Release
 
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    name: Build, test, release, and publish
+    name: Build, test, and create release
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -53,7 +53,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -76,11 +75,6 @@ jobs:
             echo "" >> release_notes.md
             echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/v$V/CHANGELOG.md) for details." >> release_notes.md
           fi
-
-      - name: Publish to npm
-        run: pnpm -r publish --no-git-checks --tag latest
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
