@@ -376,10 +376,12 @@ program
       const newPid = await readPid();
       if (newPid && isProcessRunning(newPid)) {
         const config = await loadConfig();
-        const port = await readApiPort().catch(() => 9200);
+        const rawPort = await readApiPort().catch(() => null);
+        const port = Number.isFinite(rawPort) ? rawPort : (config.apiPort ?? 9200);
+        const host = config.apiHost && config.apiHost !== '0.0.0.0' ? config.apiHost : '127.0.0.1';
         console.log(STARTUP_BANNER);
         console.log(`  Node:       ${config.name} (PID ${newPid})`);
-        console.log(`  Node UI:    \x1b[4m\x1b[36mhttp://127.0.0.1:${port}/ui\x1b[0m`);
+        console.log(`  Node UI:    \x1b[4m\x1b[36mhttp://${host}:${port}/ui\x1b[0m`);
         console.log(`  GitHub:     \x1b[4m\x1b[36mhttps://github.com/OriginTrail/dkg-v9\x1b[0m`);
         console.log(`  Discord:    \x1b[4m\x1b[36mhttps://discord.com/invite/xCaY7hvNwD\x1b[0m`);
         console.log(`  Logs:       ${logPath()}`);
