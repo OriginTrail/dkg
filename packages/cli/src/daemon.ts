@@ -135,8 +135,17 @@ export async function runDaemon(foreground: boolean): Promise<void> {
 
   // Write PID early so the CLI detects the process is alive while
   // initialization (sync, on-chain identity, profile publish) proceeds.
+  // Wrapped in try/finally so the PID file is cleaned up if boot fails.
   await writePid(process.pid);
+  try {
+    await runDaemonInner(foreground, config, startedAt);
+  } catch (err) {
+    await removePid().catch(() => {});
+    throw err;
+  }
+}
 
+async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<typeof loadConfig>>, startedAt: number): Promise<void> {
   const logFile = logPath();
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
@@ -164,7 +173,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       return;
     }
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
-    process.exit(1);
+    removePid().catch(() => {}).finally(() => process.exit(1));
   });
 
   process.on('unhandledRejection', (reason) => {
