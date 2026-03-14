@@ -1,6 +1,6 @@
 {
   "name": "dkg-v9",
-  "version": "9.0.0-beta.2",
+  "version": "9.0.0-beta.4",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "scripts": {

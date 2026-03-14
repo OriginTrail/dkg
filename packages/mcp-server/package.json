@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-mcp-server",
-  "version": "9.0.0-beta.2",
+  "version": "9.0.0-beta.4",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

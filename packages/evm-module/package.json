@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-evm-module",
-  "version": "9.0.0-beta.2",
+  "version": "9.0.0-beta.4",
   "description": "DKG V9 smart contracts (forked from V8 dkg-evm-module)",
   "license": "Apache-2.0",
   "private": true,
