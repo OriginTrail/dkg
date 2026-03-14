@@ -2210,7 +2210,7 @@ export class OriginTrailGameCoordinator {
       const bestByPlayer = new Map<string, typeof entries[number]>();
       for (const entry of entries) {
         const existing = bestByPlayer.get(entry.player);
-        if (!existing || entry.finishedAt > existing.finishedAt) {
+        if (!existing || entry.score > existing.score || (entry.score === existing.score && entry.finishedAt > existing.finishedAt)) {
           bestByPlayer.set(entry.player, entry);
         }
       }
@@ -2291,7 +2291,7 @@ export class OriginTrailGameCoordinator {
       peerId: msg.peerId,
       displayName,
       message,
-      timestamp: msg.timestamp,
+      timestamp: Number.isFinite(msg.timestamp) ? msg.timestamp : Date.now(),
     });
     if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {
       this.chatMessages = this.chatMessages.slice(-OriginTrailGameCoordinator.MAX_CHAT_MESSAGES);

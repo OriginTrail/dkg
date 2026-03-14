@@ -119,7 +119,9 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
       if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
 
-      const body = JSON.parse(await readBody(req));
+      const raw = JSON.parse(await readBody(req));
+      if (!raw || typeof raw !== 'object') return json(res, 400, { error: 'Invalid request body' });
+      const body = raw;
 
       if (subpath === '/chat') {
         const { message, displayName } = body;

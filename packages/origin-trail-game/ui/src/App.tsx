@@ -899,11 +899,16 @@ function LobbyChat({ playerName }: { playerName: string }) {
     try {
       await api.sendChat(text, playerName);
       setInput('');
-      const data = await api.chat(50);
-      setMessages(data?.messages ?? []);
     } catch (e: any) {
       setSendError(e?.message ?? 'Failed to send message');
-    } finally { setSending(false); }
+      setSending(false);
+      return;
+    }
+    try {
+      const data = await api.chat(50);
+      setMessages(data?.messages ?? []);
+    } catch { /* refresh failed, message was still sent */ }
+    setSending(false);
   };
 
   return (
