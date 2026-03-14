@@ -2555,7 +2555,13 @@ async function resolveLatestNpmVersion(
     if (!tags) return null;
 
     const latest = tags.latest ?? null;
-    if (!allowPrerelease || !latest) return latest;
+    if (!allowPrerelease) {
+      // Reject pre-release versions (those containing '-') when prereleases disabled.
+      if (latest && !latest.includes('-')) return latest;
+      log('Auto-update (npm): latest dist-tag is a pre-release and allowPrerelease=false, skipping');
+      return null;
+    }
+    if (!latest) return latest;
 
     const candidates = [latest, tags.beta, tags.next].filter(Boolean) as string[];
     candidates.sort((a, b) => compareSemver(b, a));
@@ -2636,7 +2642,12 @@ async function _performNpmUpdateInner(
   log(`Auto-update (npm): installing ${CLI_NPM_PACKAGE}@${targetVersion} into slot ${target}...`);
 
   try {
+    // Clean the target slot to prevent stale artifacts (e.g. old git builds)
+    // from being mistaken for a valid entry point after install.
+    const { rm } = await import('node:fs/promises');
+    await rm(targetDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
     await mkdir(targetDir, { recursive: true });
+
     const slotPkg = {
       name: 'dkg-release-slot',
       private: true,
@@ -2657,8 +2668,8 @@ async function _performNpmUpdateInner(
     return 'failed';
   }
 
-  const entry = slotEntryPoint(targetDir);
-  if (!entry) {
+  const npmEntry = join(targetDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
+  if (!existsSync(npmEntry)) {
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return 'failed';
   }

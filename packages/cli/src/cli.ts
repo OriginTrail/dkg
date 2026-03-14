@@ -1311,21 +1311,20 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
-async function stopDaemonIfRunning(): Promise<void> {
+/** Returns true if daemon was stopped (or not running). False if it couldn't be stopped. */
+async function stopDaemonIfRunning(): Promise<boolean> {
   const pid = await readPid();
-  if (pid && isProcessRunning(pid)) {
-    console.log('Stopping daemon...');
-    try { process.kill(pid, 'SIGTERM'); } catch (err: any) {
-      if (err?.code !== 'ESRCH') throw err;
-    }
-    for (let i = 0; i < 20; i++) {
-      await sleep(500);
-      if (!isProcessRunning(pid)) break;
-    }
-    if (isProcessRunning(pid)) {
-      console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
-    }
+  if (!pid || !isProcessRunning(pid)) return true;
+  console.log('Stopping daemon...');
+  try { process.kill(pid, 'SIGTERM'); } catch (err: any) {
+    if (err?.code !== 'ESRCH') throw err;
   }
+  for (let i = 0; i < 20; i++) {
+    await sleep(500);
+    if (!isProcessRunning(pid)) return true;
+  }
+  console.error('Daemon is still running after SIGTERM. Stop it manually before restarting.');
+  return false;
 }
 
 // ─── dkg update ──────────────────────────────────────────────────────
@@ -1384,7 +1383,11 @@ program
       console.log(`Updating to ${version} via NPM...`);
       const updateStatus = await performNpmUpdate(version!, logFn);
       if (updateStatus === 'updated') {
-        await stopDaemonIfRunning();
+        const stopped = await stopDaemonIfRunning();
+        if (!stopped) {
+          console.error('Update applied but old daemon is still running. Stop it manually and run "dkg start".');
+          process.exit(1);
+        }
         console.log('Update applied. Run "dkg start" to start with the new version.');
       } else {
         console.error('Update failed. Check logs and retry.');

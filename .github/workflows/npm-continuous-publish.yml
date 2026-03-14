@@ -50,11 +50,9 @@ jobs:
       - name: Compute dev version suffix
         id: version
         run: |
-          # Use epoch seconds for a monotonically increasing dev suffix.
           EPOCH=$(date +%s)
           SHORT_SHA=$(git rev-parse --short=7 HEAD)
-          echo "SUFFIX=dev.${EPOCH}" >> $GITHUB_OUTPUT
-          echo "SHORT_SHA=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "SUFFIX=dev.${EPOCH}.${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Bump all public packages to dev pre-release
         run: |
@@ -68,7 +66,6 @@ jobs:
               if (!fs.existsSync(pkgPath)) continue;
               const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
               if (pkg.private) continue;
-              // Append dev suffix: 9.0.0-beta.4 → 9.0.0-beta.4-dev.1710412800
               const base = pkg.version.replace(/-dev\\..*$/, '');
               pkg.version = base + '-' + '${SUFFIX}';
               fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
@@ -77,6 +74,7 @@ jobs:
           "
 
       - name: Publish all public packages
+        if: ${{ secrets.NPM_TOKEN != '' }}
         run: pnpm -r publish --no-git-checks --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
