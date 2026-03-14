@@ -1611,16 +1611,25 @@ export class OriginTrailGameCoordinator {
     }
 
     if (swarm.pendingProposal?.hash === msg.proposalHash) {
-      let mySig = swarm.pendingProposal.participantSignatures.get(this.myPeerId);
-      if (!mySig && swarm.contextGraphId != null && swarm.pendingProposal.merkleRoot && this.agent.identityId > 0n) {
+      const pp = swarm.pendingProposal;
+      if (
+        msg.winningAction !== pp.winningAction ||
+        msg.resolution !== pp.resolution ||
+        (msg.merkleRoot ?? null) !== (pp.merkleRoot ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot)) : null)
+      ) {
+        this.log(`Duplicate proposal hash but mismatched fields for ${msg.swarmId} turn ${msg.turn} — rejecting`);
+        return;
+      }
+      let mySig = pp.participantSignatures.get(this.myPeerId);
+      if (!mySig && swarm.contextGraphId != null && pp.merkleRoot && this.agent.identityId > 0n) {
         try {
-          const merkleRootBytes = typeof swarm.pendingProposal.merkleRoot === 'string'
-            ? ethers.getBytes(swarm.pendingProposal.merkleRoot)
-            : swarm.pendingProposal.merkleRoot;
+          const merkleRootBytes = typeof pp.merkleRoot === 'string'
+            ? ethers.getBytes(pp.merkleRoot)
+            : pp.merkleRoot!;
           const sig = await this.agent.signContextGraphDigest(
             BigInt(swarm.contextGraphId), merkleRootBytes,
           );
-          swarm.pendingProposal.participantSignatures.set(this.myPeerId, sig);
+          pp.participantSignatures.set(this.myPeerId, sig);
           mySig = sig;
         } catch { /* signing retry failed, send approval without signature */ }
       }
