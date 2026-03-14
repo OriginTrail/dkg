@@ -397,47 +397,51 @@ describe('deriveOrigin', () => {
 });
 
 describe('loadApps standalone fallback', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('discovers dkgApp packages from CLI deps when repoDir() is null', async () => {
+    vi.resetModules();
     vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
-    // Re-import to pick up the mock
     const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
 
     const messages: string[] = [];
     const apps = await loadAppsMocked(null, {}, (msg: string) => messages.push(msg));
 
-    // The CLI package.json now lists @origintrail-official/dkg-app-origin-trail-game
-    // as a dependency, so loadApps should discover it via the fallback path
     expect(apps.length).toBeGreaterThanOrEqual(1);
     const game = apps.find(a => a.id === 'origin-trail-game');
     expect(game).toBeDefined();
     expect(game!.label).toBe('OriginTrail Game');
     expect(game!.path).toBe('/apps/origin-trail-game');
     expect(messages.some(m => m.includes('origin-trail-game'))).toBe(true);
-
-    vi.doUnmock('../src/config.js');
   });
 
   it('returns empty array when repoDir() is null and no dkgApp deps exist', async () => {
-    let tmpDir: string | undefined;
+    const fakeCliDir = join(tmpdir(), `app-loader-standalone-${Date.now()}`);
+    const fakeDistDir = join(fakeCliDir, 'dist');
     try {
-      // Create a minimal fake CLI package with no dkgApp dependencies
-      tmpDir = join(tmpdir(), `app-loader-standalone-${Date.now()}`);
-      await mkdir(tmpDir, { recursive: true });
-      await writeFile(join(tmpDir, 'package.json'), JSON.stringify({
+      await mkdir(fakeDistDir, { recursive: true });
+      await writeFile(join(fakeCliDir, 'package.json'), JSON.stringify({
         name: 'fake-cli',
         dependencies: { commander: '^13' },
       }));
-      // Directly test the scanning logic: if pkgJsonBase has no dkgApp deps,
-      // loadApps should return []
+
+      vi.resetModules();
       vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
+      // Override fileURLToPath so loadApps resolves cliDir to our fake dir
+      const realFileURLToPath = (await import('node:url')).fileURLToPath;
+      const realPathToFileURL = (await import('node:url')).pathToFileURL;
+      vi.doMock('node:url', () => ({
+        fileURLToPath: () => join(fakeDistDir, 'app-loader.js'),
+        pathToFileURL: realPathToFileURL,
+      }));
       const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
-      // Since import.meta.url still points to the real CLI (which has the game dep),
-      // this test verifies the function doesn't crash and returns apps gracefully
+
       const apps = await loadAppsMocked(null, {});
-      expect(Array.isArray(apps)).toBe(true);
-      vi.doUnmock('../src/config.js');
+      expect(apps).toEqual([]);
     } finally {
-      if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
+      await rm(fakeCliDir, { recursive: true, force: true });
     }
   });
 });
