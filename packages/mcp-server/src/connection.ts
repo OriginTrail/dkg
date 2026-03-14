@@ -1,5 +1,4 @@
 import {
-  dkgHomeDir,
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,

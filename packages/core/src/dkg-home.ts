@@ -15,11 +15,11 @@ export function dkgHomeDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
 }
 
-/** Read the daemon PID from $DKG_HOME/daemon.pid. */
+/** Read the daemon PID from $DKG_HOME/daemon.pid. Returns null if missing or invalid. */
 export async function readDaemonPid(dkgHome?: string): Promise<number | null> {
   try {
     const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'daemon.pid'), 'utf-8');
-    return parseInt(raw.trim(), 10);
+    return parseStrictInt(raw.trim());
   } catch {
     return null;
   }
@@ -35,16 +35,16 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Read the API port from $DKG_API_PORT env or $DKG_HOME/api.port file. */
+/** Read the API port from $DKG_API_PORT env or $DKG_HOME/api.port file. Returns null if missing or invalid. */
 export async function readDkgApiPort(dkgHome?: string): Promise<number | null> {
   const envPort = process.env.DKG_API_PORT
-    ? parseInt(process.env.DKG_API_PORT, 10)
+    ? parsePort(process.env.DKG_API_PORT)
     : null;
   if (envPort) return envPort;
 
   try {
     const raw = await readFile(join(dkgHome ?? dkgHomeDir(), 'api.port'), 'utf-8');
-    return parseInt(raw.trim(), 10);
+    return parsePort(raw.trim());
   } catch {
     return null;
   }
@@ -65,6 +65,19 @@ export function loadAuthTokenSync(dkgHome?: string): string | undefined {
     }
   } catch { /* unreadable */ }
   return undefined;
+}
+
+/** Parse a string as a strict integer, returning null for NaN or non-integer values. */
+function parseStrictInt(value: string): number | null {
+  const n = Number(value);
+  return Number.isInteger(n) ? n : null;
+}
+
+/** Parse a string as a valid port number (1–65535), returning null for invalid values. */
+function parsePort(value: string): number | null {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return null;
+  return n;
 }
 
 /** Async variant of loadAuthTokenSync. */
