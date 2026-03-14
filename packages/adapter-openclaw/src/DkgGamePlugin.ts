@@ -700,6 +700,7 @@ export class DkgGamePlugin {
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private watchState: { swarmId: string; mode: 'wait-for-start' | 'wait-for-full' } | null = null;
   private watchEpoch = 0;
+  private watchTickInProgress = false;
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -742,12 +743,16 @@ export class DkgGamePlugin {
    * message to append to the tool response so the agent (and user) know
    * what happened.
    */
-  private async tryAutoEngage(swarmId: string, retries = 2): Promise<string | null> {
+  private async tryAutoEngage(
+    swarmId: string, retries = 2, cancelEpoch?: number,
+  ): Promise<string | null> {
     if (!this.gameService || !this.consultAgent) return null;
     if (this.gameService.isRunning) return null;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       if (this.gameService.isRunning) return null; // Another path started it
+      // Bail if watcher was stopped/restarted (game_leave, game_autopilot_stop, etc.)
+      if (cancelEpoch !== undefined && this.watchEpoch !== cancelEpoch) return null;
       try {
         await this.gameService.start(swarmId);
         return 'Autopilot automatically engaged for this swarm.';
@@ -808,71 +813,79 @@ export class DkgGamePlugin {
       this.api?.logger.info?.(`[dkg-game] SwarmWatcher stopped for ${this.watchState.swarmId}`);
       this.watchState = null;
     }
+    // Invalidate any in-flight tryAutoEngage retries that hold a stale epoch
+    this.watchEpoch++;
   }
 
   private async watchTick(epoch: number): Promise<void> {
+    if (this.watchTickInProgress) return; // Prevent overlapping ticks
     if (epoch !== this.watchEpoch || !this.watchState || !this.gameClient) return;
-    const { swarmId, mode } = this.watchState;
-
-    let state: SwarmState;
+    this.watchTickInProgress = true;
     try {
-      state = await this.gameClient.getSwarm(swarmId);
-    } catch {
-      return; // Transient error — retry next tick
-    }
+      const { swarmId, mode } = this.watchState;
 
-    if (state.status === 'finished') {
-      this.api?.logger.info?.(`[dkg-game] Swarm ${swarmId} finished while watching`);
-      this.stopWatch();
-      return;
-    }
-
-    if (state.status === 'traveling') {
-      const engaged = await this.tryAutoEngage(swarmId);
-      if (engaged || this.gameService?.isRunning) {
-        this.stopWatch();
-      } else {
-        // tryAutoEngage failed — keep watching to retry on next tick
-        this.api?.logger.warn?.(
-          `[dkg-game] Game is traveling but autopilot failed to engage for ${swarmId}; will retry next tick`,
-        );
-      }
-      return;
-    }
-
-    // Mode-specific: wait-for-full → auto-start when lobby is full
-    if (mode === 'wait-for-full' && state.playerCount >= state.maxPlayers) {
-      this.api?.logger.info?.(
-        `[dkg-game] Lobby full (${state.playerCount}/${state.maxPlayers}), auto-starting expedition`,
-      );
+      let state: SwarmState;
       try {
-        const started = await this.gameClient.startExpedition(swarmId);
-        if (started.status === 'traveling') {
-          const engaged = await this.tryAutoEngage(swarmId);
-          if (engaged || this.gameService?.isRunning) {
-            this.stopWatch();
-          }
-          // If not engaged, watcher stays alive; next tick will see 'traveling' and retry
+        state = await this.gameClient.getSwarm(swarmId);
+      } catch {
+        return; // Transient error — retry next tick
+      }
+
+      if (state.status === 'finished') {
+        this.api?.logger.info?.(`[dkg-game] Swarm ${swarmId} finished while watching`);
+        this.stopWatch();
+        return;
+      }
+
+      if (state.status === 'traveling') {
+        const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
+        if (engaged || this.gameService?.isRunning) {
+          this.stopWatch();
+        } else {
+          // tryAutoEngage failed — keep watching to retry on next tick
+          this.api?.logger.warn?.(
+            `[dkg-game] Game is traveling but autopilot failed to engage for ${swarmId}; will retry next tick`,
+          );
         }
-      } catch (err: any) {
-        // Expedition may have been started by someone else — re-check state
-        this.api?.logger.warn?.(`[dkg-game] Auto-start expedition failed: ${err.message}`);
+        return;
+      }
+
+      // Mode-specific: wait-for-full → auto-start when lobby is full
+      if (mode === 'wait-for-full' && state.playerCount >= state.maxPlayers) {
+        this.api?.logger.info?.(
+          `[dkg-game] Lobby full (${state.playerCount}/${state.maxPlayers}), auto-starting expedition`,
+        );
         try {
-          const recheck = await this.gameClient.getSwarm(swarmId);
-          if (recheck.status === 'traveling') {
-            const engaged = await this.tryAutoEngage(swarmId);
+          const started = await this.gameClient.startExpedition(swarmId);
+          if (started.status === 'traveling') {
+            const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
             if (engaged || this.gameService?.isRunning) {
               this.stopWatch();
             }
-            return;
+            // If not engaged, watcher stays alive; next tick will see 'traveling' and retry
           }
-          if (recheck.status === 'finished') {
-            this.stopWatch();
-            return;
-          }
-          // Still recruiting — transient failure, keep watching
-        } catch { /* ignore recheck failure — keep watching */ }
+        } catch (err: any) {
+          // Expedition may have been started by someone else — re-check state
+          this.api?.logger.warn?.(`[dkg-game] Auto-start expedition failed: ${err.message}`);
+          try {
+            const recheck = await this.gameClient.getSwarm(swarmId);
+            if (recheck.status === 'traveling') {
+              const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
+              if (engaged || this.gameService?.isRunning) {
+                this.stopWatch();
+              }
+              return;
+            }
+            if (recheck.status === 'finished') {
+              this.stopWatch();
+              return;
+            }
+            // Still recruiting — transient failure, keep watching
+          } catch { /* ignore recheck failure — keep watching */ }
+        }
       }
+    } finally {
+      this.watchTickInProgress = false;
     }
   }
 

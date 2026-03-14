@@ -1335,6 +1335,119 @@ describe('watchTick watcher retention', () => {
 });
 
 // ---------------------------------------------------------------------------
+// tryAutoEngage cancellation & tick overlap
+// ---------------------------------------------------------------------------
+
+describe('tryAutoEngage cancellation', () => {
+  const recruitingSwarm = {
+    id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+    leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+    voteStatus: null, lastTurn: null,
+  };
+
+  const travelingSwarm = {
+    ...recruitingSwarm, status: 'traveling', currentTurn: 1,
+    gameState: { sessionId: 's', player: 'p', epochs: 1, trainingTokens: 500, apiCredits: 5,
+      computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+      party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+      status: 'active', moveCount: 1 },
+  };
+
+  it('tryAutoEngage bails when watcher is stopped during retry', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Capture epoch, then stop watcher (simulating game_leave)
+      const epoch = (plugin as any).watchEpoch;
+      (plugin as any).stopWatch();
+
+      // tryAutoEngage with the stale epoch should bail immediately
+      const result = await (plugin as any).tryAutoEngage('sw-1', 2, epoch);
+      expect(result).toBeNull();
+      expect(plugin.getService().isRunning).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('overlapping watchTick calls are prevented', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Mock getSwarm to return traveling — tryAutoEngage will be spied to block
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/swarm/')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+
+      // Block tryAutoEngage so the first tick stays "in progress"
+      let resolveEngage!: () => void;
+      const engagePromise = new Promise<void>(r => { resolveEngage = r; });
+      vi.spyOn(plugin as any, 'tryAutoEngage').mockImplementation(async () => {
+        await engagePromise;
+        return null;
+      });
+
+      const epoch = (plugin as any).watchEpoch;
+
+      // Fire first tick (will block on tryAutoEngage)
+      const tick1 = (plugin as any).watchTick(epoch);
+
+      // Fire second tick while first is still running — should be skipped
+      const tick2Promise = (plugin as any).watchTick(epoch);
+
+      // Unblock and wait
+      resolveEngage();
+      await tick1;
+      await tick2Promise;
+
+      // tryAutoEngage should have been called exactly once (second tick was skipped)
+      expect((plugin as any).tryAutoEngage).toHaveBeenCalledTimes(1);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tool description assertions
 // ---------------------------------------------------------------------------
 
