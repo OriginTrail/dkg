@@ -825,10 +825,13 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     clearInterval(chainScanTimer);
     clearInterval(pingTimer);
     await Promise.allSettled(installedApps.map(async (app) => {
+      if (!app.destroy) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const timeout = new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), 5_000));
-        await Promise.race([app.destroy?.(), timeout]);
+        const timeout = new Promise<void>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 5_000); });
+        await Promise.race([app.destroy(), timeout]);
       } catch (err: any) { log(`App ${app.id} destroy error: ${err.message}`); }
+      finally { if (timer) clearTimeout(timer); }
     }));
     metricsCollector.stop();
     server.close();
