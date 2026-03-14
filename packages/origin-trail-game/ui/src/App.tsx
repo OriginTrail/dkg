@@ -921,8 +921,8 @@ function LobbyChat({ playerName }: { playerName: string }) {
       <div className="ot-lobby-chat-messages" ref={scrollRef}>
         {messages.length === 0 ? (
           <span className="ot-muted" style={{ alignSelf: 'center', marginTop: 'auto', marginBottom: 'auto' }}>No messages yet</span>
-        ) : messages.map((m: any, i: number) => (
-          <div key={i} className="ot-chat-msg">
+        ) : messages.map((m: any) => (
+          <div key={m.id ?? m.timestamp} className="ot-chat-msg">
             <span className="ot-chat-msg-name">{m.displayName}</span>
             {m.message}
             <span className="ot-chat-msg-time">{m.timestamp ? new Date(m.timestamp).toLocaleTimeString() : ''}</span>

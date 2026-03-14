@@ -1845,7 +1845,7 @@ export class OriginTrailGameCoordinator {
         }
         mySwarms.push(swarm);
       } else if (swarm.status === 'recruiting') {
-        if (now - swarm.createdAt > STALE_SWARM_TTL_MS) continue;
+        if (swarm.createdAt > 0 && now - swarm.createdAt > STALE_SWARM_TTL_MS) continue;
         if (swarm.players.length < swarm.maxPlayers) {
           openSwarms.push(swarm);
         }
@@ -2196,7 +2196,7 @@ export class OriginTrailGameCoordinator {
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
-      return bindings.map((b: any) => ({
+      const entries = bindings.map((b: any) => ({
         player: stripQuotes(String(b.player ?? '')),
         displayName: stripQuotes(String(b.displayName ?? '')),
         score: Number(stripQuotes(String(b.score ?? '0'))),
@@ -2207,6 +2207,14 @@ export class OriginTrailGameCoordinator {
         swarmId: stripQuotes(String(b.swarmId ?? '')),
         finishedAt: Number(stripQuotes(String(b.finishedAt ?? '0'))),
       }));
+      const bestByPlayer = new Map<string, typeof entries[number]>();
+      for (const entry of entries) {
+        const existing = bestByPlayer.get(entry.player);
+        if (!existing || entry.finishedAt > existing.finishedAt) {
+          bestByPlayer.set(entry.player, entry);
+        }
+      }
+      return [...bestByPlayer.values()];
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];
