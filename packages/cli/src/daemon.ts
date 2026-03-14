@@ -133,6 +133,10 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   const config = await loadConfig();
   const startedAt = Date.now();
 
+  // Write PID early so the CLI detects the process is alive while
+  // initialization (sync, on-chain identity, profile publish) proceeds.
+  await writePid(process.pid);
+
   const logFile = logPath();
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
@@ -788,7 +792,6 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   const boundPort = (server.address() as any).port as number;
   apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
-  await writePid(process.pid);
 
   log(`API listening on http://${apiHost}:${boundPort}`);
   log(`Node UI: http://${apiHost}:${boundPort}/ui`);
