@@ -1366,6 +1366,9 @@ program
       }
 
       let version = versionOrRef ?? null;
+      if (version) {
+        version = version.replace(/^refs\/tags\/v?/, '').replace(/^v/, '');
+      }
       if (!version) {
         console.log('Checking NPM registry for updates...');
         const check = await checkForNpmVersionUpdate(logFn, allowPre);

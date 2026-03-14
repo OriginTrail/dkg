@@ -1164,7 +1164,7 @@ async function handleRequest(
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
       hasOpenClawChannel: config.openclawAdapter === true || !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
-      autoUpdate: config.autoUpdate?.enabled ?? false,
+      autoUpdate: isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false),
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
       latestVersion: lastUpdateCheck.latestVersion || null,
@@ -1196,7 +1196,7 @@ async function handleRequest(
       peers: uniquePeers.size,
       paranets: config.paranets?.length ?? 0,
       telemetry: config.telemetry?.enabled ?? false,
-      autoUpdate: config.autoUpdate?.enabled ?? false,
+      autoUpdate: isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false),
       auth: config.auth?.enabled !== false,
     });
   }
@@ -2581,8 +2581,9 @@ function compareSemver(a: string, b: string): number {
   for (let i = 0; i < 3; i++) {
     if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
   }
-  const preA = a.includes('-') ? a.split('-').slice(1).join('-') : '';
-  const preB = b.includes('-') ? b.split('-').slice(1).join('-') : '';
+  const stripBuild = (s: string) => s.replace(/\+.*$/, '');
+  const preA = a.includes('-') ? stripBuild(a.split('-').slice(1).join('-')) : '';
+  const preB = b.includes('-') ? stripBuild(b.split('-').slice(1).join('-')) : '';
   if (!preA && preB) return 1;
   if (preA && !preB) return -1;
   return preA.localeCompare(preB, undefined, { numeric: true });
