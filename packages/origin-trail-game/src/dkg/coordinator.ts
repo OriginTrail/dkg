@@ -1611,7 +1611,19 @@ export class OriginTrailGameCoordinator {
     }
 
     if (swarm.pendingProposal?.hash === msg.proposalHash) {
-      const mySig = swarm.pendingProposal.participantSignatures.get(this.myPeerId);
+      let mySig = swarm.pendingProposal.participantSignatures.get(this.myPeerId);
+      if (!mySig && swarm.contextGraphId != null && swarm.pendingProposal.merkleRoot && this.agent.identityId > 0n) {
+        try {
+          const merkleRootBytes = typeof swarm.pendingProposal.merkleRoot === 'string'
+            ? ethers.getBytes(swarm.pendingProposal.merkleRoot)
+            : swarm.pendingProposal.merkleRoot;
+          const sig = await this.agent.signContextGraphDigest(
+            BigInt(swarm.contextGraphId), merkleRootBytes,
+          );
+          swarm.pendingProposal.participantSignatures.set(this.myPeerId, sig);
+          mySig = sig;
+        } catch { /* signing retry failed, send approval without signature */ }
+      }
       await this.broadcast({
         app: proto.APP_ID,
         type: 'turn:approve',
@@ -2099,7 +2111,7 @@ export class OriginTrailGameCoordinator {
           this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
         }
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        if (timer) clearTimeout(timer);
       }
     }
   }

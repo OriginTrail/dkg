@@ -178,10 +178,16 @@ done
 echo ""
 echo "Phase 5: Concurrent voting — 3 nodes vote simultaneously"
 
-api "$NODE1" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null &
-api "$NODE2" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"forage\"}" > /dev/null &
-api "$NODE3" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null &
-wait || true
+api "$NODE1" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null & PID1=$!
+api "$NODE2" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"forage\"}" > /dev/null & PID2=$!
+api "$NODE3" POST "$APP/vote" -d "{\"swarmId\":\"$SWARM_ID\",\"voteAction\":\"march\"}" > /dev/null & PID3=$!
+VOTE_FAILS=0
+for pid in $PID1 $PID2 $PID3; do
+  if ! wait "$pid"; then VOTE_FAILS=$((VOTE_FAILS+1)); fi
+done
+if [[ "$VOTE_FAILS" -gt 0 ]]; then
+  echo "  ⚠ $VOTE_FAILS vote request(s) failed (may recover via force-resolve)"
+fi
 
 sleep 10
 
