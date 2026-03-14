@@ -826,8 +826,12 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
         res.end(JSON.stringify({ error: 'Forbidden' }));
         return true;
       }
-    } catch {
-      // realpath fails if file doesn't exist — handled below by SPA fallback
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
     }
   }
 
@@ -865,7 +869,14 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
         'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
       });
       const stream = createReadStream(filePath);
-      stream.on('error', () => { if (!res.writableEnded) res.end(); });
+      stream.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Stream read error' }));
+        } else {
+          res.destroy(err);
+        }
+      });
       stream.pipe(res);
     }
   } catch {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,36 +45,39 @@ function createMockRes(): {
   let resolveFinished: () => void;
   const finished = new Promise<void>((r) => { resolveFinished = r; });
 
-  const listeners = new Map<string, Function[]>();
+  const writable = new Writable({
+    write(chunk, _enc, cb) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      cb();
+    },
+    final(cb) {
+      state.body = Buffer.concat(chunks).toString('utf8');
+      resolveFinished();
+      cb();
+    },
+  });
 
-  const res: any = {
-    writableEnded: false,
-    destroyed: false,
-    on(ev: string, fn: Function) { listeners.set(ev, [...(listeners.get(ev) ?? []), fn]); return res; },
-    once(ev: string, fn: Function) { return res.on(ev, fn); },
-    removeListener() { return res; },
-    emit(ev: string, ...args: any[]) { for (const fn of listeners.get(ev) ?? []) fn(...args); },
+  const res = Object.assign(writable, {
+    headersSent: false,
+    statusCode: 200,
     writeHead(code: number, headers?: Record<string, string>) {
       state.statusCode = code;
       state.headers = headers ?? {};
+      (res as any).headersSent = true;
       return res;
-    },
-    write(chunk: Buffer | string) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
-      return true;
     },
     end(chunk?: Buffer | string) {
       if (chunk !== undefined) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
       }
       state.body = Buffer.concat(chunks).toString('utf8');
-      res.writableEnded = true;
+      writable.destroy();
       resolveFinished();
       return res;
     },
-  };
+  });
 
-  return { res: res as ServerResponse, state, finished };
+  return { res: res as unknown as ServerResponse, state, finished };
 }
 
 function parseJsonBody(body: string): any {
