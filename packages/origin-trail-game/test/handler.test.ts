@@ -3356,9 +3356,11 @@ describe('getLobby stale finished swarms', () => {
     const staleSwarm = await coordinator.createSwarm('Alice', 'StaleSwarm', 3);
 
     freshSwarm.status = 'finished';
+    freshSwarm.finishedAt = Date.now() - 30 * 60 * 1000;
     freshSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 30 * 60 * 1000 }];
 
     staleSwarm.status = 'finished';
+    staleSwarm.finishedAt = Date.now() - 2 * 60 * 60 * 1000;
     staleSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 2 * 60 * 60 * 1000 }];
 
     const lobby = coordinator.getLobby();
