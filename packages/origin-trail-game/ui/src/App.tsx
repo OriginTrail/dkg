@@ -158,7 +158,7 @@ function buildContextTriples(swarm: any): Triple[] {
     triples.push({ subject: swarmUri, predicate: `${OT}hasMember`, object: agentUri });
     triples.push({ subject: agentUri, predicate: RDF_TYPE, object: m.alive ? `${OT}Agent` : `${OT}DeadAgent` });
     triples.push({ subject: agentUri, predicate: SCHEMA_NAME, object: lit(m.name) });
-    triples.push({ subject: agentUri, predicate: `${OT}health`, object: lit(`${m.health} HP`) });
+    triples.push({ subject: agentUri, predicate: `${OT}health`, object: lit(`${m.health} Health Points`) });
   }
 
   // Current resources
@@ -734,7 +734,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
         <div><label>Tokens <Tooltip text="Training tokens fuel every action your swarm takes. Advancing costs 5 per alive member, upgrading costs 3 per member. If tokens hit zero, all members take 20 damage — which can be fatal. Buy more at DKG Hubs or gamble on Upgrade Skills for a random gain." /></label><span>{state.trainingTokens}</span></div>
         <div><label>API Credits <Tooltip text="Spent 1 per 'Upgrade Skills' action, which gambles for a random training token payout (0–99). Each credit is worth 10 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.apiCredits}</span></div>
         <div><label>GPUs <Tooltip text="You need at least 1 GPU to advance. Can be lost when failing a bottleneck challenge. Each GPU is worth 50 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.computeUnits}</span></div>
-        <div><label>TRAC <Tooltip text="OriginTrail tokens — the universal currency. Spent on 'Sync Memory' (5 TRAC, heals party +10 HP each), paying tolls at bottlenecks, and buying resources at DKG Hubs. Each TRAC counts toward your final score." /></label><span>{state.trac}</span></div>
+        <div><label>TRAC <Tooltip text="OriginTrail tokens — the universal currency. Spent on 'Sync Memory' (5 TRAC, heals party +10 Health Points each), paying tolls at bottlenecks, and buying resources at DKG Hubs. Each TRAC counts toward your final score." /></label><span>{state.trac}</span></div>
         <div><label>Date <Tooltip text="Time advances with each action (1–2 days). If you pass November (month 11) without reaching AGI, the expedition fails. Winning before October gives a score bonus." /></label><span>Epoch {state.epochs}</span></div>
       </div>
       <div className="ot-trail-bar">
@@ -746,7 +746,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
           <div key={m.id} className={`ot-member ${!m.alive ? 'ot-dead' : m.health < 40 ? 'ot-sick' : ''}`}>
             {m.name}
             {leaderName && m.name === leaderName && <span className="ot-gm-badge">GM</span>}
-            {' — '}{m.alive ? `${m.health} HP` : 'Deceased'}
+            {' — '}{m.alive ? `${m.health} Health Points` : 'Deceased'}
           </div>
         ))}
       </div>

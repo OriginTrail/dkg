@@ -91,7 +91,7 @@ describe('buildGameTriples produces valid triple structure', () => {
         const memberNode = `agent:${m.name}`;
         triples.push({ subject: swarmNode, predicate: 'game:hasMember', object: memberNode });
         triples.push({ subject: memberNode, predicate: 'rdf:type', object: m.alive ? 'game:Agent' : 'game:DeadAgent' });
-        triples.push({ subject: memberNode, predicate: 'game:health', object: `"${m.health} HP"` });
+        triples.push({ subject: memberNode, predicate: 'game:health', object: `"${m.health} Health Points"` });
       }
     }
 
