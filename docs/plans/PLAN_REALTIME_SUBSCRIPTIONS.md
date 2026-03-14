@@ -316,18 +316,23 @@ useEffect(() => {
     const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
     const { ticket } = await api.getSseTicket();
     if (cancelled) return;
-    let url = `${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`;
-    if (lastSeq) url += `&since=${lastSeq}`;
-    es = new EventSource(url);
+    const params = new URLSearchParams({
+      types: 'game:swarm_created,game:turn_resolved,game:player_joined',
+      paranets: 'origin-trail-game',
+      ticket,
+    });
+    if (lastSeq) params.set('since', lastSeq);
+    es = new EventSource(`${nodeUrl}/api/events?${params}`);
 
     function onEvent(e: MessageEvent) {
       if (e.lastEventId) lastSeq = e.lastEventId;
       const data = JSON.parse(e.data);
-      if (data.type === 'game:turn_resolved' && data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-      if (data.type === 'game:swarm_created') refreshLobby();
-      if (data.type === 'game:player_joined' && data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+      if (data.data?.swarmId === swarm?.id && swarm) refreshSwarm(swarm.id);
+      else if (data.type === 'game:swarm_created') refreshLobby();
     }
-    es.onmessage = onEvent;
+    es.addEventListener('game:turn_resolved', onEvent);
+    es.addEventListener('game:swarm_created', onEvent);
+    es.addEventListener('game:player_joined', onEvent);
 
     // Reconnect with a fresh ticket on connection loss.
     // Disable native EventSource reconnect since the ticket is single-use.
@@ -342,11 +347,13 @@ useEffect(() => {
 }, [swarm?.id]);
 ```
 
-> **Note on deduplication:** The server assigns monotonic sequence IDs
-> (`id:` field in SSE). On reconnect, the subscribe-then-replay strategy
-> (§2.4) uses the last-seen sequence to avoid overlap. If any duplicate
-> does slip through (e.g., during failover), clients should track the
-> last processed `id` and skip events with `id <= lastSeen`.
+> **Note on deduplication:** `EventSource` does **not** deduplicate
+> events natively — it only tracks `lastEventId` for reconnect resume.
+> Clients **must** implement explicit dedup: track the last processed
+> sequence ID and skip events where `id <= lastSeen`. The server
+> guarantees monotonic sequence IDs and non-overlapping replay
+> (subscribe-then-replay, §2.4), but edge cases during failover may
+> still produce duplicates that clients must handle.
 
 **Benefits:**
 - Instant turn resolution (0ms vs 3-4s poll)
