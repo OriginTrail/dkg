@@ -157,6 +157,25 @@ describe('DashboardDB — notifications', () => {
     expect(notifications.every(n => n.ts > 1500)).toBe(true);
   });
 
+  it('stores and retrieves peer field for clickable notification routing', () => {
+    const peerId = '12D3KooWExamplePeerId123';
+    db.insertNotification(makeNotification({
+      type: 'chat_message',
+      title: 'New message',
+      peer: peerId,
+    }));
+    const { notifications } = db.getNotifications();
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].peer).toBe(peerId);
+    expect(notifications[0].type).toBe('chat_message');
+  });
+
+  it('returns null peer for notifications without peer field', () => {
+    db.insertNotification(makeNotification({ type: 'kc_published' }));
+    const { notifications } = db.getNotifications();
+    expect(notifications[0].peer).toBeNull();
+  });
+
   it('pruning removes old notifications', () => {
     const db2 = new DashboardDB({ dataDir: dir, retentionDays: 0 });
 

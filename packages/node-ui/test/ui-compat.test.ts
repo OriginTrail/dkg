@@ -456,6 +456,74 @@ describe('x-forwarded-proto allowlist', () => {
   });
 });
 
+describe('clickable notifications', () => {
+  const app = readFile('App.tsx');
+  const agentHub = readFile('pages/AgentHub.tsx');
+
+  it('NotificationBell uses useNavigate for navigation', () => {
+    const bellSection = app.slice(
+      app.indexOf('function NotificationBell'),
+      app.indexOf('export function App'),
+    );
+    expect(bellSection).toContain('useNavigate()');
+  });
+
+  it('notification items with peer field navigate to /agent?tab=peers&peer=', () => {
+    expect(app).toContain("navigate(`/agent?tab=peers&peer=");
+    expect(app).toContain('encodeURIComponent(n.peer');
+  });
+
+  it('notification items without peer are not clickable', () => {
+    expect(app).toContain("const clickable = !!n.peer");
+    expect(app).toContain("cursor: clickable ? 'pointer' : 'default'");
+  });
+
+  it('clickable notification shows "Open chat" hint', () => {
+    expect(app).toContain('Open chat');
+    expect(app).toContain('clickable &&');
+  });
+
+  it('notification dropdown closes on click-through', () => {
+    const navSection = app.slice(
+      app.indexOf("navigate(`/agent?tab=peers") - 200,
+      app.indexOf("navigate(`/agent?tab=peers") + 100,
+    );
+    expect(navSection).toContain('setOpen(false)');
+  });
+
+  it('notification items have data-peer attribute for testability', () => {
+    expect(app).toContain('data-peer={n.peer');
+  });
+
+  it('AgentHub reads tab and peer from URL search params', () => {
+    expect(agentHub).toContain('useSearchParams');
+    expect(agentHub).toMatch(/searchParams\.get\(['"]tab['"]\)/);
+    expect(agentHub).toMatch(/searchParams\.get\(['"]peer['"]\)/);
+  });
+
+  it('AgentHub sets initial mode to peers when tab=peers in URL', () => {
+    expect(agentHub).toMatch(/urlTab === ['"]peers['"].*['"]peers['"].*['"]agent['"]/);
+  });
+
+  it('AgentHub clears URL params after reading them', () => {
+    expect(agentHub).toContain('setSearchParams({}, { replace: true })');
+  });
+
+  it('PeerChatView accepts initialPeerId prop', () => {
+    expect(agentHub).toMatch(/function PeerChatView\(\s*\{\s*initialPeerId\s*\}/);
+    expect(agentHub).toContain('initialPeerId?: string');
+  });
+
+  it('PeerChatView auto-selects initial peer from prop', () => {
+    expect(agentHub).toContain('initialPeerApplied');
+    expect(agentHub).toContain('peers.find(p => p.peerId === initialPeerId)');
+  });
+
+  it('AgentHub passes urlPeer to PeerChatView', () => {
+    expect(agentHub).toMatch(/PeerChatView\s+initialPeerId=\{urlPeer/);
+  });
+});
+
 describe('Agent Hub merged with messages and private memories', () => {
   const app = readFile('App.tsx');
   const agentHub = readFile('pages/AgentHub.tsx');

@@ -163,6 +163,7 @@ function NotificationBell() {
   const [open, setOpen] = useState(false);
   const bellRef = useRef<HTMLDivElement>(null);
   const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
+  const navigate = useNavigate();
 
   const refresh = useCallback(async () => {
     try {
@@ -246,31 +247,48 @@ function NotificationBell() {
               <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-dim)', fontSize: 13 }}>
                 No notifications yet
               </div>
-            ) : notifications.slice(0, 50).map(n => (
-              <div key={n.id} style={{
-                padding: '10px 16px', borderBottom: '1px solid var(--border)',
-                display: 'flex', gap: 10, alignItems: 'flex-start',
-                background: n.read ? 'transparent' : 'rgba(74,222,128,.06)',
-              }}>
-                <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>
-                  {NOTIF_ICONS[n.type] ?? '\u{1F514}'}
-                </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text)', marginBottom: 2 }}>
-                    {n.title}
-                  </div>
-                  <div style={{
-                    fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
-                    {n.message}
-                  </div>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>
-                    {formatTimeAgo(n.ts)}
+            ) : notifications.slice(0, 50).map(n => {
+              const clickable = !!n.peer;
+              return (
+                <div
+                  key={n.id}
+                  role={clickable ? 'link' : undefined}
+                  data-peer={n.peer ?? undefined}
+                  onClick={clickable ? () => {
+                    setOpen(false);
+                    navigate(`/agent?tab=peers&peer=${encodeURIComponent(n.peer!)}`);
+                  } : undefined}
+                  style={{
+                    padding: '10px 16px', borderBottom: '1px solid var(--border)',
+                    display: 'flex', gap: 10, alignItems: 'flex-start',
+                    background: n.read ? 'transparent' : 'rgba(74,222,128,.06)',
+                    cursor: clickable ? 'pointer' : 'default',
+                    transition: 'background .1s ease',
+                  }}
+                  onMouseEnter={clickable ? (e) => { e.currentTarget.style.background = 'rgba(74,222,128,.12)'; } : undefined}
+                  onMouseLeave={clickable ? (e) => { e.currentTarget.style.background = n.read ? 'transparent' : 'rgba(74,222,128,.06)'; } : undefined}
+                >
+                  <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>
+                    {NOTIF_ICONS[n.type] ?? '\u{1F514}'}
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text)', marginBottom: 2 }}>
+                      {n.title}
+                    </div>
+                    <div style={{
+                      fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.4,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {n.message}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3 }}>
+                      {formatTimeAgo(n.ts)}
+                      {clickable && <span style={{ marginLeft: 6, color: 'var(--green)', fontWeight: 500 }}>Open chat &rarr;</span>}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
