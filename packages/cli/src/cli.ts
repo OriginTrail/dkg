@@ -1346,7 +1346,7 @@ program
       checkIntervalMinutes: 30,
     };
     const standalone = isStandaloneInstall();
-    const allowPre = opts.allowPrerelease ?? au.allowPrerelease ?? true;
+    const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 
     if (standalone) {
       const logFn = (msg: string) => console.log(msg);
@@ -1508,8 +1508,10 @@ program
         stdio: 'pipe',
       }).trim();
       await writeFile(commitFile, commit);
-    } catch {
-      // NPM slots have no .git — commit metadata stays unchanged.
+    } catch (err: any) {
+      if (existsSync(join(targetDir, '.git'))) {
+        console.warn(`Warning: failed to read rollback commit: ${err?.message ?? String(err)}`);
+      }
     }
     try {
       // Try git layout first, then NPM layout for version metadata.

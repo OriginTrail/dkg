@@ -2615,7 +2615,7 @@ export async function checkForNpmVersionUpdate(
   }
 
   const latest = await resolveLatestNpmVersion(log, allowPrerelease);
-  if (!latest) return { status: 'error' };
+  if (latest === null) return { status: 'up-to-date' };
 
   if (latest === currentVersion) return { status: 'up-to-date' };
   if (compareSemver(latest, currentVersion) <= 0) return { status: 'up-to-date' };
