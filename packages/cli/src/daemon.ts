@@ -2636,6 +2636,20 @@ async function _performNpmUpdateInner(
   const rDir = releasesDir();
   await mkdir(rDir, { recursive: true });
 
+  const versionFile = join(dkgDir(), '.current-version');
+  const pending = await readPendingUpdateState();
+  if (pending) {
+    const active = await activeSlot();
+    if (active === pending.target) {
+      if (pending.version) await writeFile(versionFile, pending.version);
+      await clearPendingUpdateState();
+      log(`Auto-update (npm): recovered pending update state for slot ${pending.target} (v${pending.version}).`);
+      return 'updated';
+    }
+    await clearPendingUpdateState();
+    log('Auto-update (npm): cleared stale pending update state.');
+  }
+
   const active = await activeSlot();
   const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
   const targetDir = join(rDir, target);
@@ -2686,7 +2700,6 @@ async function _performNpmUpdateInner(
     log(`Auto-update (npm): could not read installed package version, using spec "${targetVersion}"`);
   }
 
-  const versionFile = join(dkgDir(), '.current-version');
   await writePendingUpdateState({
     target: target as 'a' | 'b',
     commit: '',

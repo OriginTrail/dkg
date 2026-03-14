@@ -7,7 +7,7 @@ import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -1501,17 +1501,19 @@ program
     await swapSlot(target);
     const commitFile = join(dkgDir(), '.current-commit');
     const versionFile = join(dkgDir(), '.current-version');
-    try {
-      const commit = execSync('git rev-parse HEAD', {
-        cwd: targetDir,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-      }).trim();
-      await writeFile(commitFile, commit);
-    } catch (err: any) {
-      if (existsSync(join(targetDir, '.git'))) {
+    if (existsSync(join(targetDir, '.git'))) {
+      try {
+        const commit = execSync('git rev-parse HEAD', {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          stdio: 'pipe',
+        }).trim();
+        await writeFile(commitFile, commit);
+      } catch (err: any) {
         console.warn(`Warning: failed to read rollback commit: ${err?.message ?? String(err)}`);
       }
+    } else {
+      try { await unlink(commitFile); } catch { /* already absent */ }
     }
     try {
       // Try git layout first, then NPM layout for version metadata.
