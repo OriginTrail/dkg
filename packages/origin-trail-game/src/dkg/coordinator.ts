@@ -1576,6 +1576,9 @@ export class OriginTrailGameCoordinator {
       this.log(`Rejected vote from dead peer ${msg.peerId.slice(0, 8)} on ${msg.swarmId}`);
       return;
     }
+    const existing = swarm.votes.find(v => v.peerId === msg.peerId && v.turn === msg.turn);
+    if (existing && existing.action === msg.action) return;
+
     swarm.votes = swarm.votes.filter(v => v.peerId !== msg.peerId);
     swarm.votes.push({
       peerId: msg.peerId,
@@ -2119,6 +2122,7 @@ export class OriginTrailGameCoordinator {
   ]);
 
   private static readonly REDUNDANT_DELAYS_MS = [2_000, 6_000];
+  private pendingBroadcastTimers = new Set<ReturnType<typeof setTimeout>>();
 
   private async broadcast(msg: proto.OTMessage): Promise<void> {
     const data = proto.encode(msg);
@@ -2128,7 +2132,12 @@ export class OriginTrailGameCoordinator {
 
     if (isCritical) {
       for (const delay of OriginTrailGameCoordinator.REDUNDANT_DELAYS_MS) {
-        setTimeout(() => this.tryPublish(data, msg.type), delay);
+        const timer = setTimeout(() => {
+          this.pendingBroadcastTimers.delete(timer);
+          this.tryPublish(data, msg.type);
+        }, delay);
+        timer.unref?.();
+        this.pendingBroadcastTimers.add(timer);
       }
     }
   }
@@ -2381,6 +2390,8 @@ export class OriginTrailGameCoordinator {
   }
 
   destroy(): void {
+    for (const timer of this.pendingBroadcastTimers) clearTimeout(timer);
+    this.pendingBroadcastTimers.clear();
     if (this.graphSyncInitialTimer) {
       clearTimeout(this.graphSyncInitialTimer);
       this.graphSyncInitialTimer = null;
