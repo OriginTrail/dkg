@@ -1036,3 +1036,468 @@ describe('game tool error handling', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// game_start lobby guard
+// ---------------------------------------------------------------------------
+
+describe('game_start lobby guard', () => {
+  const recruitingSwarm = {
+    id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+    leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+    voteStatus: null, lastTurn: null,
+  };
+
+  const travelingSwarm = {
+    ...recruitingSwarm, status: 'traveling', currentTurn: 1,
+    gameState: { sessionId: 's', player: 'p', epochs: 1, trainingTokens: 500, apiCredits: 5,
+      computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+      party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+      status: 'active', moveCount: 1 },
+  };
+
+  it('warns when lobby not full', async () => {
+    const originalFetch = globalThis.fetch;
+    let startCalled = false;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/start')) {
+        startCalled = true;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const api = mockApi();
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      plugin.register(api);
+
+      const startTool = api.tools.find(t => t.name === 'game_start')!;
+      const result = await startTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.started).toBe(false);
+      expect(parsed.blocked).toBe('lobby_not_full');
+      expect(parsed.warning).toContain('1/3');
+      expect(parsed.playerCount).toBe(1);
+      expect(parsed.maxPlayers).toBe(3);
+      expect(startCalled).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('force=true bypasses lobby guard', async () => {
+    const originalFetch = globalThis.fetch;
+    let startCalled = false;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/start')) {
+        startCalled = true;
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/swarm/')) {
+        // Return recruiting with unfilled lobby — without force, the guard would block
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      const startTool = api.tools.find(t => t.name === 'game_start')!;
+      const result = await startTool.execute('test', { swarm_id: 'sw-1', force: true });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.warning).toBeUndefined();
+      expect(parsed.status).toBe('traveling');
+      expect(startCalled).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not kill watcher on API failure', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/join')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+      }
+      if (urlStr.includes('/swarm/')) {
+        // Pre-check returns full lobby so guard lets it through
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...recruitingSwarm, playerCount: 3 }) });
+      }
+      if (urlStr.includes('/start')) {
+        // API fails (e.g., not the leader)
+        return Promise.resolve({ ok: false, status: 403, text: () => Promise.resolve('Only the leader can start') });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // game_start fails — watcher should survive
+      // No force: pre-check sees full lobby (3/3), lets it through, /start returns 403
+      const startTool = api.tools.find(t => t.name === 'game_start')!;
+      const result = await startTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain('403');
+
+      // Watcher survived the failed start
+      expect(plugin.getWatchState().active).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stops watcher only on successful start', async () => {
+    const originalFetch = globalThis.fetch;
+    // Phase 1: join returns recruiting (starts watcher)
+    // Phase 2: game_start — /swarm/ returns full lobby, /start succeeds, /swarm/ returns traveling for gameService
+    let phase = 1;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (phase === 1) {
+        if (urlStr.includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }
+      // Phase 2: game_start flow
+      if (urlStr.includes('/start')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000, pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join (phase 1: recruiting)
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Switch to phase 2: game_start flow (traveling state for gameService)
+      phase = 2;
+
+      // game_start succeeds — watcher should be stopped, autopilot engaged
+      const startTool = api.tools.find(t => t.name === 'game_start')!;
+      await startTool.execute('test', { swarm_id: 'sw-1', force: true });
+      expect(plugin.getWatchState().active).toBe(false);
+      expect(plugin.getService().isRunning).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// watchTick watcher retention on failed engage
+// ---------------------------------------------------------------------------
+
+describe('watchTick watcher retention', () => {
+  const recruitingSwarm = {
+    id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+    leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+    voteStatus: null, lastTurn: null,
+  };
+
+  const travelingSwarm = {
+    ...recruitingSwarm, status: 'traveling', currentTurn: 1,
+    gameState: { sessionId: 's', player: 'p', epochs: 1, trainingTokens: 500, apiCredits: 5,
+      computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+      party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+      status: 'active', moveCount: 1 },
+  };
+
+  it('keeps watcher alive when tryAutoEngage fails', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join (recruiting at join time)
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Switch to traveling — watchTick enters the 'traveling' branch
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/swarm/')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+
+      // Spy on tryAutoEngage to simulate failure (returns null) — avoids retry delays
+      vi.spyOn(plugin as any, 'tryAutoEngage').mockResolvedValue(null);
+
+      await (plugin as any).watchTick((plugin as any).watchEpoch);
+
+      // Watcher stays alive: tryAutoEngage failed and isRunning is false
+      expect(plugin.getWatchState().active).toBe(true);
+      expect(plugin.getService().isRunning).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stops watcher after successful auto-engage', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000, pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Join with recruiting swarm
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Now switch to traveling — watchTick should auto-engage and stop watcher
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        const urlStr = String(url);
+        if (urlStr.includes('/swarm/')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+        }
+        if (urlStr.includes('/locations')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+
+      await (plugin as any).watchTick((plugin as any).watchEpoch);
+
+      // Autopilot engaged, watcher stopped
+      expect(plugin.getService().isRunning).toBe(true);
+      expect(plugin.getWatchState().active).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tryAutoEngage cancellation & tick overlap
+// ---------------------------------------------------------------------------
+
+describe('tryAutoEngage cancellation', () => {
+  const recruitingSwarm = {
+    id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+    leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+    voteStatus: null, lastTurn: null,
+  };
+
+  const travelingSwarm = {
+    ...recruitingSwarm, status: 'traveling', currentTurn: 1,
+    gameState: { sessionId: 's', player: 'p', epochs: 1, trainingTokens: 500, apiCredits: 5,
+      computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+      party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+      status: 'active', moveCount: 1 },
+  };
+
+  it('tryAutoEngage bails when watcher is stopped during retry', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher via join
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Capture epoch, then stop watcher (simulating game_leave)
+      const epoch = (plugin as any).watchEpoch;
+      (plugin as any).stopWatch();
+
+      // tryAutoEngage with the stale epoch should bail immediately
+      const result = await (plugin as any).tryAutoEngage('sw-1', 2, epoch);
+      expect(result).toBeNull();
+      expect(plugin.getService().isRunning).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('overlapping watchTick calls are prevented', async () => {
+    const originalFetch = globalThis.fetch;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start watcher
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/join')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Mock getSwarm to return traveling — tryAutoEngage will be spied to block
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes('/swarm/')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+        }
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+      }) as any;
+
+      // Block tryAutoEngage so the first tick stays "in progress"
+      let resolveEngage!: () => void;
+      const engagePromise = new Promise<void>(r => { resolveEngage = r; });
+      vi.spyOn(plugin as any, 'tryAutoEngage').mockImplementation(async () => {
+        await engagePromise;
+        return null;
+      });
+
+      const epoch = (plugin as any).watchEpoch;
+
+      // Fire first tick (will block on tryAutoEngage)
+      const tick1 = (plugin as any).watchTick(epoch);
+
+      // Fire second tick while first is still running — should be skipped
+      const tick2Promise = (plugin as any).watchTick(epoch);
+
+      // Unblock and wait
+      resolveEngage();
+      await tick1;
+      await tick2Promise;
+
+      // tryAutoEngage should have been called exactly once (second tick was skipped)
+      expect((plugin as any).tryAutoEngage).toHaveBeenCalledTimes(1);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool description assertions
+// ---------------------------------------------------------------------------
+
+describe('tool description guards', () => {
+  it('game_start description discourages manual use', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const startTool = api.tools.find(t => t.name === 'game_start')!;
+    expect(startTool.description).toContain('Usually NOT needed');
+    expect(startTool.description).toContain('watcher');
+  });
+
+  it('game_autopilot_start does not suggest calling game_start', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const autopilotTool = api.tools.find(t => t.name === 'game_autopilot_start')!;
+    expect(autopilotTool.description).not.toContain('call game_start first');
+    expect(autopilotTool.description).toContain('auto-engages automatically');
+  });
+
+  it('game_create warns against manual start', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const createTool = api.tools.find(t => t.name === 'game_create')!;
+    expect(createTool.description).toContain('Do NOT call game_start');
+  });
+
+  it('game_join warns against calling game_start', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const joinTool = api.tools.find(t => t.name === 'game_join')!;
+    expect(joinTool.description).toContain('Do NOT call game_start');
+  });
+
+  it('game_start has force parameter', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const startTool = api.tools.find(t => t.name === 'game_start')!;
+    expect(startTool.parameters.properties.force).toBeDefined();
+    expect(startTool.parameters.properties.force.type).toBe('boolean');
+  });
+});

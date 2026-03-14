@@ -700,6 +700,7 @@ export class DkgGamePlugin {
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private watchState: { swarmId: string; mode: 'wait-for-start' | 'wait-for-full' } | null = null;
   private watchEpoch = 0;
+  private watchTickInProgressEpoch: number | null = null;
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -742,16 +743,29 @@ export class DkgGamePlugin {
    * message to append to the tool response so the agent (and user) know
    * what happened.
    */
-  private async tryAutoEngage(swarmId: string): Promise<string | null> {
+  private async tryAutoEngage(
+    swarmId: string, retries = 2, cancelEpoch?: number,
+  ): Promise<string | null> {
     if (!this.gameService || !this.consultAgent) return null;
     if (this.gameService.isRunning) return null;
-    try {
-      await this.gameService.start(swarmId);
-      return 'Autopilot automatically engaged for this swarm.';
-    } catch (err: any) {
-      this.api?.logger.warn?.(`[dkg-game] Auto-engage autopilot failed: ${err.message}`);
-      return null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (this.gameService.isRunning) return null; // Another path started it
+      // Bail if watcher was stopped/restarted (game_leave, game_autopilot_stop, etc.)
+      if (cancelEpoch !== undefined && this.watchEpoch !== cancelEpoch) return null;
+      try {
+        await this.gameService.start(swarmId);
+        return 'Autopilot automatically engaged for this swarm.';
+      } catch (err: any) {
+        this.api?.logger.warn?.(
+          `[dkg-game] Auto-engage attempt ${attempt + 1}/${retries + 1} failed: ${err.message}`,
+        );
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
     }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -799,58 +813,80 @@ export class DkgGamePlugin {
       this.api?.logger.info?.(`[dkg-game] SwarmWatcher stopped for ${this.watchState.swarmId}`);
       this.watchState = null;
     }
+    // Invalidate any in-flight tryAutoEngage retries that hold a stale epoch
+    this.watchEpoch++;
   }
 
   private async watchTick(epoch: number): Promise<void> {
+    if (this.watchTickInProgressEpoch === epoch) return; // Prevent same-epoch overlap
     if (epoch !== this.watchEpoch || !this.watchState || !this.gameClient) return;
-    const { swarmId, mode } = this.watchState;
-
-    let state: SwarmState;
+    this.watchTickInProgressEpoch = epoch;
     try {
-      state = await this.gameClient.getSwarm(swarmId);
-    } catch {
-      return; // Transient error — retry next tick
-    }
+      const { swarmId, mode } = this.watchState;
 
-    if (state.status === 'finished') {
-      this.api?.logger.info?.(`[dkg-game] Swarm ${swarmId} finished while watching`);
-      this.stopWatch();
-      return;
-    }
-
-    if (state.status === 'traveling') {
-      this.stopWatch();
-      await this.tryAutoEngage(swarmId);
-      return;
-    }
-
-    // Mode-specific: wait-for-full → auto-start when lobby is full
-    if (mode === 'wait-for-full' && state.playerCount >= state.maxPlayers) {
-      this.api?.logger.info?.(
-        `[dkg-game] Lobby full (${state.playerCount}/${state.maxPlayers}), auto-starting expedition`,
-      );
+      let state: SwarmState;
       try {
-        const started = await this.gameClient.startExpedition(swarmId);
-        if (started.status === 'traveling') {
+        state = await this.gameClient.getSwarm(swarmId);
+      } catch {
+        return; // Transient error — retry next tick
+      }
+
+      if (state.status === 'finished') {
+        this.api?.logger.info?.(`[dkg-game] Swarm ${swarmId} finished while watching`);
+        this.stopWatch();
+        return;
+      }
+
+      if (state.status === 'traveling') {
+        const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
+        if (engaged || this.gameService?.isRunning) {
           this.stopWatch();
-          await this.tryAutoEngage(swarmId);
+        } else {
+          // tryAutoEngage failed — keep watching to retry on next tick
+          this.api?.logger.warn?.(
+            `[dkg-game] Game is traveling but autopilot failed to engage for ${swarmId}; will retry next tick`,
+          );
         }
-      } catch (err: any) {
-        // Expedition may have been started by someone else — re-check state
-        this.api?.logger.warn?.(`[dkg-game] Auto-start expedition failed: ${err.message}`);
+        return;
+      }
+
+      // Mode-specific: wait-for-full → auto-start when lobby is full
+      if (mode === 'wait-for-full' && state.playerCount >= state.maxPlayers) {
+        this.api?.logger.info?.(
+          `[dkg-game] Lobby full (${state.playerCount}/${state.maxPlayers}), auto-starting expedition`,
+        );
         try {
-          const recheck = await this.gameClient.getSwarm(swarmId);
-          if (recheck.status === 'traveling') {
-            this.stopWatch();
-            await this.tryAutoEngage(swarmId);
-            return;
+          const started = await this.gameClient.startExpedition(swarmId);
+          if (started.status === 'traveling') {
+            const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
+            if (engaged || this.gameService?.isRunning) {
+              this.stopWatch();
+            }
+            // If not engaged, watcher stays alive; next tick will see 'traveling' and retry
           }
-          if (recheck.status === 'finished') {
-            this.stopWatch();
-            return;
-          }
-          // Still recruiting — transient failure, keep watching
-        } catch { /* ignore recheck failure — keep watching */ }
+        } catch (err: any) {
+          // Expedition may have been started by someone else — re-check state
+          this.api?.logger.warn?.(`[dkg-game] Auto-start expedition failed: ${err.message}`);
+          try {
+            const recheck = await this.gameClient.getSwarm(swarmId);
+            if (recheck.status === 'traveling') {
+              const engaged = await this.tryAutoEngage(swarmId, 2, epoch);
+              if (engaged || this.gameService?.isRunning) {
+                this.stopWatch();
+              }
+              return;
+            }
+            if (recheck.status === 'finished') {
+              this.stopWatch();
+              return;
+            }
+            // Still recruiting — transient failure, keep watching
+          } catch { /* ignore recheck failure — keep watching */ }
+        }
+      }
+    } finally {
+      if (this.watchTickInProgressEpoch === epoch) {
+        this.watchTickInProgressEpoch = null;
       }
     }
   }
@@ -888,7 +924,8 @@ export class DkgGamePlugin {
         description:
           'Join an existing OriginTrail Game swarm. Use game_lobby first to find a swarm ID. ' +
           'If the swarm is already traveling, autopilot auto-engages. ' +
-          'If still recruiting, a background watcher will auto-engage when the game starts.',
+          'If still recruiting, a background watcher will auto-engage when the game starts. ' +
+          'Do NOT call game_start — the watcher or the leader will handle it.',
         parameters: {
           type: 'object',
           properties: {
@@ -905,7 +942,7 @@ export class DkgGamePlugin {
             );
             const summary: Record<string, unknown> = formatSwarmSummary(result);
             if (result.status === 'traveling') {
-              const msg = await this.tryAutoEngage(result.id);
+              const msg = await this.tryAutoEngage(result.id, 0);
               if (msg) summary.autopilot = msg;
             } else if (result.status === 'recruiting') {
               this.startWatch(result.id, 'wait-for-start');
@@ -971,7 +1008,8 @@ export class DkgGamePlugin {
         name: 'game_create',
         description:
           'Create a new OriginTrail Game swarm. You become the leader. ' +
-          'A background watcher will auto-start the expedition when the lobby is full and engage autopilot.',
+          'A background watcher auto-starts the expedition when the lobby is full and engages autopilot. ' +
+          'Do NOT call game_start manually — the watcher handles it.',
         parameters: {
           type: 'object',
           properties: {
@@ -1005,21 +1043,50 @@ export class DkgGamePlugin {
       {
         name: 'game_start',
         description:
-          'Launch the expedition for a swarm (leader only). The game begins and the first turn starts.',
+          'Launch the expedition for a swarm (leader only). ' +
+          'Usually NOT needed — the background watcher auto-starts when the lobby is full. ' +
+          'If the lobby has fewer players than maxPlayers, this will warn you unless force=true. ' +
+          'Autopilot auto-engages after a successful start.',
         parameters: {
           type: 'object',
           properties: {
             swarm_id: { type: 'string', description: 'Swarm ID to start' },
+            force: { type: 'boolean', description: 'Set true to start even if the lobby is not full. Default: false.' },
           },
           required: ['swarm_id'],
         },
         execute: async (_id, params) => {
           try {
-            this.stopWatch(); // Manual start supersedes watcher
-            const result = await this.gameClient!.startExpedition(String(params.swarm_id));
+            const swarmId = String(params.swarm_id);
+            const force = params.force === true || params.force === 'true';
+
+            // Pre-check: warn/block if lobby is not full (unless force=true)
+            if (!force) {
+              try {
+                const state = await this.gameClient!.getSwarm(swarmId);
+                if (state.status === 'recruiting' && state.playerCount < state.maxPlayers) {
+                  return this.json({
+                    started: false,
+                    blocked: 'lobby_not_full',
+                    warning: `Lobby has ${state.playerCount}/${state.maxPlayers} players. ` +
+                      'The background watcher will auto-start when full. ' +
+                      'If you really want to start now, call game_start with force: true.',
+                    status: state.status,
+                    playerCount: state.playerCount,
+                    maxPlayers: state.maxPlayers,
+                  });
+                }
+              } catch {
+                // Can't check — proceed with start attempt
+              }
+            }
+
+            const result = await this.gameClient!.startExpedition(swarmId);
+            // Only stop watcher AFTER successful start
+            this.stopWatch();
             const summary: Record<string, unknown> = formatSwarmSummary(result);
             if (result.status === 'traveling') {
-              const msg = await this.tryAutoEngage(result.id);
+              const msg = await this.tryAutoEngage(result.id, 0);
               if (msg) summary.autopilot = msg;
             }
             return this.json(summary);
@@ -1120,7 +1187,9 @@ export class DkgGamePlugin {
           'Start autonomous game play. The agent will poll the game state every 2 seconds, ' +
           'consult the AI strategist for each turn decision using the full DKG context graph, ' +
           'and submit votes automatically until the game ends. ' +
-          'Requires the swarm to be in traveling state (call game_start first if you are the leader). ' +
+          'Requires the swarm to be in traveling state. ' +
+          'NOTE: After game_join or game_create, autopilot auto-engages automatically — ' +
+          'you do NOT need to call this manually unless auto-engage was disabled or you stopped autopilot. ' +
           'Optional strategy_hint lets you guide the AI strategy (e.g., "play aggressively" or "conserve resources").',
         parameters: {
           type: 'object',
