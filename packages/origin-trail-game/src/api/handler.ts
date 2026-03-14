@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { OriginTrailGameCoordinator } from '../dkg/coordinator.js';
 import { MIN_PLAYERS, signatureThreshold } from '../engine/wagon-train.js';
+import { MAX_EPOCHS } from '../engine/game-engine.js';
 import { LOCATIONS } from '../world/world-data.js';
 
 const PREFIX = '/api/apps/origin-trail-game';
@@ -98,6 +99,7 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
           id: 'origin-trail-game',
           label: 'OriginTrail Game',
           minPlayers: MIN_PLAYERS,
+          maxEpochs: MAX_EPOCHS,
           version: '0.2.0',
           dkgEnabled: !!coordinator,
           peerId: coordinator?.myPeerId ?? null,

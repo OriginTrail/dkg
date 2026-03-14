@@ -121,6 +121,7 @@ export interface SwarmState {
   pendingProposal: TurnProposal | null;
   turnHistory: ResolvedTurn[];
   createdAt: number;
+  finishedAt?: number;
   playerIndexMap: Map<string, number>;
   contextGraphId?: string;
   requiredSignatures?: number;
@@ -690,6 +691,7 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.status === 'traveling') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
       if (swarm.gameState) swarm.gameState.status = 'lost';
       this.workspaceOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
@@ -1046,6 +1048,7 @@ export class OriginTrailGameCoordinator {
 
     if (newState.status !== 'active') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
     } else {
       swarm.currentTurn++;
       swarm.votes = [];
@@ -1186,6 +1189,7 @@ export class OriginTrailGameCoordinator {
 
     if (result.newState.status !== 'active') {
       swarm.status = 'finished';
+      swarm.finishedAt = Date.now();
     } else {
       swarm.currentTurn++;
       swarm.votes = [];
@@ -1689,6 +1693,7 @@ export class OriginTrailGameCoordinator {
 
       if (newState.status !== 'active') {
         swarm.status = 'finished';
+        swarm.finishedAt = Date.now();
       } else {
         swarm.currentTurn++;
         swarm.votes = [];
@@ -1858,6 +1863,7 @@ export class OriginTrailGameCoordinator {
 
       if (newState.status !== 'active') {
         swarm.status = 'finished';
+        swarm.finishedAt = Date.now();
       } else {
         swarm.currentTurn++;
         swarm.votes = [];
@@ -1885,8 +1891,9 @@ export class OriginTrailGameCoordinator {
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         if (swarm.status === 'finished') {
-          const lastTurn = swarm.turnHistory[swarm.turnHistory.length - 1];
-          const relevantTs = lastTurn?.timestamp ?? now;
+          const relevantTs = swarm.finishedAt
+            ?? swarm.turnHistory[swarm.turnHistory.length - 1]?.timestamp
+            ?? now;
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
@@ -2245,17 +2252,16 @@ export class OriginTrailGameCoordinator {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
           {
-            SELECT ?player (MAX(?s) AS ?maxScore) (MAX(?ft) AS ?latestFinished) WHERE {
+            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
               ?e a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
-                 <${rdf.OT}score> ?s ;
-                 <${rdf.OT}finishedAt> ?ft .
-            } GROUP BY ?player
+                 <${rdf.OT}score> ?s .
+            } GROUP BY ?player ORDER BY DESC(?maxScore) LIMIT 100
           }
           ?entry a <${rdf.OT}LeaderboardEntry> ;
                  <${rdf.OT}player> ?player ;
                  <${rdf.OT}score> ?maxScore ;
-                 <${rdf.OT}finishedAt> ?latestFinished ;
+                 <${rdf.OT}finishedAt> ?ft ;
                  <${rdf.OT}displayName> ?displayName ;
                  <${rdf.OT}outcome> ?outcome ;
                  <${rdf.OT}epochs> ?epochs ;
@@ -2263,9 +2269,9 @@ export class OriginTrailGameCoordinator {
                  <${rdf.OT}partySize> ?partySize ;
                  <${rdf.OT}swarm> ?swarm .
           BIND(?maxScore AS ?score)
-          BIND(?latestFinished AS ?finishedAt)
+          BIND(?ft AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 50`,
+        } ORDER BY DESC(?score) DESC(?finishedAt)`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];

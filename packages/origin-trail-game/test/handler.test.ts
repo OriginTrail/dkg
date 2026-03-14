@@ -3356,15 +3356,31 @@ describe('getLobby stale finished swarms', () => {
     const staleSwarm = await coordinator.createSwarm('Alice', 'StaleSwarm', 3);
 
     freshSwarm.status = 'finished';
+    freshSwarm.finishedAt = Date.now() - 30 * 60 * 1000;
     freshSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 30 * 60 * 1000 }];
 
     staleSwarm.status = 'finished';
+    staleSwarm.finishedAt = Date.now() - 2 * 60 * 60 * 1000;
     staleSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 2 * 60 * 60 * 1000 }];
 
     const lobby = coordinator.getLobby();
     const mySwarmIds = lobby.mySwarms.map(s => s.id);
     expect(mySwarmIds).toContain(freshSwarm.id);
     expect(mySwarmIds).not.toContain(staleSwarm.id);
+  });
+
+  it('falls back to turnHistory timestamp when finishedAt is missing', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('lobby-fallback');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'fallback-test' });
+
+    const recentSwarm = await coordinator.createSwarm('Alice', 'RecentSwarm', 3);
+    recentSwarm.status = 'finished';
+    recentSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 10 * 60 * 1000 }];
+
+    const lobby = coordinator.getLobby();
+    expect(lobby.mySwarms.map(s => s.id)).toContain(recentSwarm.id);
   });
 });
 

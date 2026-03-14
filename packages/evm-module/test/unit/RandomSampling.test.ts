@@ -540,8 +540,10 @@ describe('@unit RandomSampling', () => {
         'Period should still be valid',
       );
 
-      // Mine one more block to reach the end of the period
-      await mineBlocks(1);
+      // Mine enough blocks to definitely pass the end of the period
+      const currentBlock2 = await hre.ethers.provider.getBlockNumber();
+      const blocksToEnd = Math.max(1, periodEnd - currentBlock2 + 1);
+      await mineBlocks(blocksToEnd);
       statusAfterUpdate = await RandomSampling.getActiveProofPeriodStatus();
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(statusAfterUpdate.isValid).to.be.equal(

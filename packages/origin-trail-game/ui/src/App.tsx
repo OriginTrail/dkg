@@ -9,7 +9,7 @@ const OT = 'https://origintrail-game.dkg.io/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'https://schema.org/name';
 const RDFS_LABEL = 'http://www.w3.org/2000/01/rdf-schema#label';
-const MAX_EPOCHS = 1000;
+const DEFAULT_MAX_EPOCHS = 1000;
 
 function HeroBanner() {
   return (
@@ -92,7 +92,7 @@ function HeroBanner() {
         <div className="ot-hero-label">AI Frontier Journey on DKG v9</div>
         <h3 className="ot-hero-heading">Lead your agent swarm to Singularity Harbor</h3>
         <p className="ot-hero-desc">
-          {MAX_EPOCHS.toLocaleString()} epochs across the AI Frontier. Every decision is a Knowledge Asset.
+          {DEFAULT_MAX_EPOCHS.toLocaleString()} epochs across the AI Frontier. Every decision is a Knowledge Asset.
           Every outcome is verified by the <strong style={{ color: 'var(--green)' }}>Context Oracle</strong>.
         </p>
         <p className="ot-hero-tagline">Your swarm will not die of dysentery. But it might die of hallucinations.</p>
@@ -150,7 +150,7 @@ function buildContextTriples(swarm: any): Triple[] {
   triples.push({ subject: swarmUri, predicate: RDF_TYPE, object: `${OT}AgentSwarm` });
   triples.push({ subject: swarmUri, predicate: SCHEMA_NAME, object: lit(swarm.name) });
   triples.push({ subject: swarmUri, predicate: `${OT}status`, object: lit(gs.status) });
-  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: lit(`${gs.epochs}/${MAX_EPOCHS}`) });
+  triples.push({ subject: swarmUri, predicate: `${OT}epochs`, object: lit(`${gs.epochs}/${DEFAULT_MAX_EPOCHS}`) });
 
   // Party members
   for (const m of gs.party ?? []) {
@@ -730,7 +730,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
   return (
     <div className="ot-game-state">
       <div className="ot-stats">
-        <div><label>Epochs <Tooltip text={`Your progress toward AGI. Reach ${MAX_EPOCHS} to win. Each 'Advance' gains epochs based on intensity. Arriving at landmarks along the route grants bonuses.`} /></label><span>{state.epochs} / {MAX_EPOCHS}</span></div>
+        <div><label>Epochs <Tooltip text={`Your progress toward AGI. Reach ${DEFAULT_MAX_EPOCHS} to win. Each 'Advance' gains epochs based on intensity. Arriving at landmarks along the route grants bonuses.`} /></label><span>{state.epochs} / {DEFAULT_MAX_EPOCHS}</span></div>
         <div><label>Tokens <Tooltip text="Training tokens fuel every action your swarm takes. Advancing costs 5 per alive member, upgrading costs 3 per member. If tokens hit zero, all members take 20 damage — which can be fatal. Buy more at DKG Hubs or gamble on Upgrade Skills for a random gain." /></label><span>{state.trainingTokens}</span></div>
         <div><label>API Credits <Tooltip text="Spent 1 per 'Upgrade Skills' action, which gambles for a random training token payout (0–99). Each credit is worth 10 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.apiCredits}</span></div>
         <div><label>GPUs <Tooltip text="You need at least 1 GPU to advance. Can be lost when failing a bottleneck challenge. Each GPU is worth 50 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.computeUnits}</span></div>
@@ -738,7 +738,7 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
         <div><label>Date <Tooltip text="Time advances with each action (1–2 days). If you pass November (month 11) without reaching AGI, the expedition fails. Winning before October gives a score bonus." /></label><span>Epoch {state.epochs}</span></div>
       </div>
       <div className="ot-trail-bar">
-        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / MAX_EPOCHS) * 100)}%` }} />
+        <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / DEFAULT_MAX_EPOCHS) * 100)}%` }} />
       </div>
       <div className="ot-party">
         <h4>Swarm Members</h4>
@@ -859,7 +859,7 @@ function Leaderboard() {
               <span className={`ot-lb-outcome ${entry.outcome === 'won' ? 'ot-lb-won' : 'ot-lb-lost'}`}>
                 {entry.outcome === 'won' ? 'AGI ✓' : 'Failed'}
               </span>
-              <span className="ot-lb-epochs">{entry.epochs}/{MAX_EPOCHS}</span>
+              <span className="ot-lb-epochs">{entry.epochs}/{DEFAULT_MAX_EPOCHS}</span>
               <span className="ot-lb-survivors">{entry.survivors}/{entry.partySize}</span>
             </div>
           ))}
