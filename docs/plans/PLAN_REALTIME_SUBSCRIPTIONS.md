@@ -161,12 +161,12 @@ Example payloads:
 |-----------|------|---------|-------------|
 | `types` | comma-separated | all | Event types to subscribe to (e.g. `kc:confirmed,workspace:write`) |
 | `paranets` | comma-separated | all | Filter by paranet ID |
-| `since` | epoch ms | now | Replay events after this timestamp (bounded to last 5 min) |
+| `since` | integer (seq ID) | latest | Replay events after this sequence ID (bounded to last 1000 events / 5 min) |
 
 **Example:**
 
 ```
-GET /api/events?types=workspace:write,kc:confirmed&paranets=origin-trail-game&token=<jwt>
+GET /api/events?types=workspace:write,kc:confirmed&paranets=origin-trail-game&ticket=<opaque_ticket>
 Accept: text/event-stream
 ```
 
@@ -261,11 +261,13 @@ class SubscriptionManager {
   removeSubscription(res: ServerResponse): void { ... }
 
   private broadcast(eventType: string, data: unknown): void {
-    const payload = data as DKGEventPayload;
+    const raw = data as Record<string, unknown>;
+    const type = (raw.type as string) ?? eventType;
+    const paranetId = raw.paranetId as string | undefined;
     for (const sub of this.subscriptions) {
-      if (sub.filter.types && !sub.filter.types.has(payload.type)) continue;
-      if (sub.filter.paranets && (!payload.paranetId || !sub.filter.paranets.has(payload.paranetId))) continue;
-      sendSse(sub.res, payload);
+      if (sub.filter.types && !sub.filter.types.has(type)) continue;
+      if (sub.filter.paranets && (!paranetId || !sub.filter.paranets.has(paranetId))) continue;
+      sendSse(sub.res, { ...raw, type }, this.nextSeq++);
     }
   }
 }
@@ -286,7 +288,7 @@ Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `Subscriptio
 2. Replay matching events from the ring buffer where `seq > since`.
 3. Deduplicate on the client using the `id` field in SSE (`EventSource` handles this natively via `lastEventId`).
 
-This ensures zero event loss on reconnection. The `since` parameter accepts either an epoch-ms timestamp or a sequence ID; the server resolves whichever is provided to the nearest ring-buffer offset.
+This ensures zero event loss on reconnection. The `since` parameter accepts a **sequence ID** (monotonic integer assigned by the server). Clients should persist `lastEventId` from SSE and pass it on reconnect. The server resolves the sequence to the ring-buffer offset. Epoch-ms timestamps are not supported for `since` to avoid ambiguity.
 
 ---
 
@@ -302,25 +304,44 @@ Replace the `setInterval(refreshLobby, 4000)` and `setInterval(refreshSwarm, 300
 
 ```typescript
 useEffect(() => {
-  const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
-  // Obtain a short-lived, opaque SSE ticket (see auth note in §2.1)
-  const { ticket } = await api.getSseTicket();
-  const es = new EventSource(`${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`);
+  let es: EventSource | null = null;
+  let cancelled = false;
 
-  es.addEventListener('game:turn_resolved', (e) => {
-    const data = JSON.parse(e.data);
-    if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-  });
+  async function connect() {
+    const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
+    const { ticket } = await api.getSseTicket();
+    if (cancelled) return;
+    const url = `${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game&ticket=${ticket}`;
+    es = new EventSource(url);
 
-  es.addEventListener('game:swarm_created', () => refreshLobby());
-  es.addEventListener('game:player_joined', (e) => {
-    const data = JSON.parse(e.data);
-    if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-  });
+    es.addEventListener('game:turn_resolved', (e) => {
+      const data = JSON.parse(e.data);
+      if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+    });
+    es.addEventListener('game:swarm_created', () => refreshLobby());
+    es.addEventListener('game:player_joined', (e) => {
+      const data = JSON.parse(e.data);
+      if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+    });
 
-  return () => es.close();
+    // Reconnect with a fresh ticket on connection loss.
+    // Disable native EventSource reconnect since the ticket is single-use.
+    es.onerror = () => {
+      es?.close();
+      if (!cancelled) setTimeout(connect, 2000);
+    };
+  }
+
+  connect();
+  return () => { cancelled = true; es?.close(); };
 }, [swarm?.id]);
 ```
+
+> **Note on deduplication:** The server assigns monotonic sequence IDs
+> (`id:` field in SSE). On reconnect, the subscribe-then-replay strategy
+> (§2.4) uses the last-seen sequence to avoid overlap. If any duplicate
+> does slip through (e.g., during failover), clients should track the
+> last processed `id` and skip events with `id <= lastSeen`.
 
 **Benefits:**
 - Instant turn resolution (0ms vs 3-4s poll)
