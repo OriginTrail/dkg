@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import { requestFaucetFunding } from './faucet.js';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
@@ -223,9 +224,15 @@ program
     await saveConfig(config);
 
     // Generate wallets eagerly so they're available for faucet funding
-    const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-    const opWallets = await loadOpWallets(dkgDir());
-    const walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
+    let walletAddresses: string[] = [];
+    try {
+      const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
+      const opWallets = await loadOpWallets(dkgDir());
+      walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
+    } catch (err: any) {
+      console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
+      console.warn('Wallets will be auto-generated on first "dkg start".');
+    }
 
     console.log(`\nConfig saved to ${configPath()}`);
     console.log(`  name:       ${config.name}`);
@@ -249,46 +256,26 @@ program
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
-    console.log(`  wallets:    ${walletAddresses.length ? walletAddresses.join(', ') : '(none)'}`);
+    if (walletAddresses.length) {
+      console.log(`  wallets:    ${walletAddresses.join(', ')}`);
+    }
 
     // Auto-fund from testnet faucet if available
     if (network?.faucet?.url && walletAddresses.length > 0) {
+      if (walletAddresses.length > 3) {
+        console.log(`\nNote: faucet supports up to 3 wallets; funding the first 3.`);
+      }
       console.log(`\nRequesting testnet tokens from faucet...`);
       try {
-        const res = await fetch(network.faucet.url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Idempotency-Key': `init-${config.name}-${Date.now()}`,
-          },
-          body: JSON.stringify({
-            mode: network.faucet.mode,
-            wallets: walletAddresses.slice(0, 3),
-            callerId: `dkg-node:${config.name}`,
-          }),
-          signal: AbortSignal.timeout(30_000),
-        });
-        if (res.ok) {
-          const data = await res.json() as {
-            summary?: { success?: number; failed?: number };
-            results?: { chainId: string; amount: string; status: string }[];
-          };
-          const success = data.summary?.success ?? 0;
-          if (success > 0) {
-            const amounts = (data.results ?? [])
-              .filter(r => r.status === 'success')
-              .map(r => {
-                const label = r.chainId.includes('eth') ? 'ETH' : 'TRAC';
-                return `${r.amount} ${label}`;
-              });
-            console.log(`  Funded: ${amounts.join(', ')}`);
-          } else {
-            console.log('  Faucet returned no successful transactions (you may already have tokens or hit a cooldown).');
-          }
+        const result = await requestFaucetFunding(
+          network.faucet.url, network.faucet.mode, walletAddresses, config.name,
+        );
+        if (result.success) {
+          console.log(`  Funded: ${result.funded.join(', ')}`);
+        } else if (result.error) {
+          console.log(`  Faucet request failed (${result.error}). Fund manually or retry later.`);
         } else {
-          const text = await res.text().catch(() => '');
-          console.log(`  Faucet request failed (HTTP ${res.status}). Fund manually or retry later.`);
-          if (text) console.log(`  ${text.slice(0, 200)}`);
+          console.log('  Faucet returned no successful transactions (you may already have tokens or hit a cooldown).');
         }
       } catch (err: any) {
         console.log(`  Faucet unavailable: ${err?.message ?? String(err)}. Fund your wallet manually.`);

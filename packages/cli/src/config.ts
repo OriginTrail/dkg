@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { join, dirname, resolve, basename } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export interface AutoUpdateConfig {
@@ -168,8 +168,22 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 
 export function dkgDir(): string {
   if (process.env.DKG_HOME) return process.env.DKG_HOME;
-  if (repoDir()) return join(homedir(), '.dkg-dev');
+  if (isDkgMonorepo()) return join(homedir(), '.dkg-dev');
   return join(homedir(), '.dkg');
+}
+
+let _isDkgMonorepo: boolean | null = null;
+export function isDkgMonorepo(): boolean {
+  if (_isDkgMonorepo !== null) return _isDkgMonorepo;
+  const root = repoDir();
+  if (!root) { _isDkgMonorepo = false; return false; }
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+    _isDkgMonorepo = pkg.name === 'dkg-v9';
+  } catch {
+    _isDkgMonorepo = false;
+  }
+  return _isDkgMonorepo;
 }
 
 /**
