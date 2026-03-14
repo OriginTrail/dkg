@@ -29,7 +29,7 @@ export interface LoadedApp {
   path: string;
   staticDir: string;
   handler: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean>;
-  destroy?: () => void;
+  destroy?: () => void | Promise<void>;
 }
 
 const MIME: Record<string, string> = {
