@@ -370,27 +370,37 @@ program
     );
     child.unref();
 
-    // Wait for daemon to write its PID file
+    // Wait for daemon to write its PID file and API port
+    let startedPid: number | null = null;
     for (let i = 0; i < 30; i++) {
       await sleep(500);
       const newPid = await readPid();
       if (newPid && isProcessRunning(newPid)) {
-        const config = await loadConfig();
+        startedPid = newPid;
         const rawPort = await readApiPort().catch(() => null);
-        const port = Number.isFinite(rawPort) ? rawPort : (config.apiPort ?? 9200);
-        const host = config.apiHost && config.apiHost !== '0.0.0.0' ? config.apiHost : '127.0.0.1';
-        console.log(STARTUP_BANNER);
-        console.log(`  Node:       ${config.name} (PID ${newPid})`);
-        console.log(`  Node UI:    \x1b[4m\x1b[36mhttp://${host}:${port}/ui\x1b[0m`);
-        console.log(`  GitHub:     \x1b[4m\x1b[36mhttps://github.com/OriginTrail/dkg-v9\x1b[0m`);
-        console.log(`  Discord:    \x1b[4m\x1b[36mhttps://discord.com/invite/xCaY7hvNwD\x1b[0m`);
-        console.log(`  Logs:       ${logPath()}`);
-        console.log('');
-        console.log('  \x1b[33mThis is an experimental testnet node. Things will break.');
-        console.log('  Not intended for production use.\x1b[0m');
-        console.log('');
-        return;
+        if (Number.isFinite(rawPort) && rawPort! > 0) break;
       }
+    }
+    if (startedPid) {
+      const config = await loadConfig();
+      const rawPort = await readApiPort().catch(() => null);
+      const port = (Number.isFinite(rawPort) && rawPort! > 0) ? rawPort : (config.apiPort ?? 9200);
+      const host = config.apiHost && config.apiHost !== '0.0.0.0' ? config.apiHost : '127.0.0.1';
+      const hostDisplay = host.includes(':') ? `[${host}]` : host;
+      const isTTY = process.stdout.isTTY;
+      const cyan = (s: string) => isTTY ? `\x1b[4m\x1b[36m${s}\x1b[0m` : s;
+      const yellow = (s: string) => isTTY ? `\x1b[33m${s}\x1b[0m` : s;
+      console.log(isTTY ? STARTUP_BANNER : '');
+      console.log(`  Node:       ${config.name} (PID ${startedPid})`);
+      console.log(`  Node UI:    ${cyan(`http://${hostDisplay}:${port}/ui`)}`);
+      console.log(`  GitHub:     ${cyan('https://github.com/OriginTrail/dkg-v9')}`);
+      console.log(`  Discord:    ${cyan('https://discord.com/invite/xCaY7hvNwD')}`);
+      console.log(`  Logs:       ${logPath()}`);
+      console.log('');
+      console.log(`  ${yellow('This is an experimental testnet node. Things will break.')}`);
+      console.log(`  ${yellow('Not intended for production use.')}`);
+      console.log('');
+      return;
     }
     console.error('Daemon did not start within 15s. Check logs:', logPath());
     process.exit(1);
