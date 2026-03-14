@@ -34,7 +34,7 @@ function httpGet(server: Server, path: string, headers?: Record<string, string>)
 }
 
 function fakeReqRes(host?: string): { req: IncomingMessage; res: ServerResponse & { _status: number; _body: string; _headers: Record<string, unknown> } } {
-  const req = { method: 'GET', headers: { host: host || '127.0.0.1:19200' } } as unknown as IncomingMessage;
+  const req = { method: 'GET', headers: { host: host || '127.0.0.1:19200' }, socket: { localPort: 19200 } } as unknown as IncomingMessage;
   const collected = { _status: 0, _body: '', _headers: {} as Record<string, unknown> };
   const res = {
     ...collected,
@@ -388,6 +388,11 @@ describe('deriveOrigin', () => {
 
   it('handles Host header without port', () => {
     expect(deriveOrigin(fakeReq('mynode.local'), 19300)).toBe('http://mynode.local:19300');
+  });
+
+  it('rejects non-HTTP protocols and falls back to http', () => {
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'ftp'), 19300)).toBe('http://mynode.local:19300');
+    expect(deriveOrigin(fakeReq('mynode.local:443', 'javascript'), 19300)).toBe('http://mynode.local:19300');
   });
 });
 
