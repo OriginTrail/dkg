@@ -528,8 +528,10 @@ describe('clickable notifications', () => {
     expect(agentHub).toContain('initialPeerApplied.current === initialPeerId');
   });
 
-  it('AgentHub passes urlPeer to PeerChatView', () => {
-    expect(agentHub).toMatch(/PeerChatView\s+initialPeerId=\{urlPeer/);
+  it('AgentHub captures deep-link peer in stable state before clearing URL', () => {
+    expect(agentHub).toContain('deepLinkPeer');
+    expect(agentHub).toMatch(/useState.*urlPeer/);
+    expect(agentHub).toMatch(/PeerChatView\s+initialPeerId=\{deepLinkPeer/);
   });
 });
 

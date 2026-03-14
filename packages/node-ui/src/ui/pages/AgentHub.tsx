@@ -1312,6 +1312,8 @@ export function AgentHubPage() {
   const urlTab = searchParams.get('tab');
   const urlPeer = searchParams.get('peer');
 
+  const [deepLinkPeer, setDeepLinkPeer] = useState<string | null>(urlPeer);
+
   const [mode, setMode] = useState<'agent' | 'peers' | 'openclaw'>(
     urlTab === 'peers' ? 'peers' : 'agent',
   );
@@ -1329,7 +1331,8 @@ export function AgentHubPage() {
 
   useEffect(() => {
     if (urlTab === 'peers') setMode('peers');
-  }, [urlTab]);
+    if (urlPeer) setDeepLinkPeer(urlPeer);
+  }, [urlTab, urlPeer]);
 
   useEffect(() => {
     if (urlTab || urlPeer) {
@@ -2723,7 +2726,7 @@ export function AgentHubPage() {
 
       {mode === 'peers' ? (
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          <PeerChatView initialPeerId={urlPeer ?? undefined} />
+          <PeerChatView initialPeerId={deepLinkPeer ?? undefined} />
         </div>
       ) : mode === 'openclaw' ? (
         <div style={{ flex: 1, overflow: 'hidden' }}>
