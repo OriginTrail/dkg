@@ -102,7 +102,7 @@ export interface TurnProposal {
   event?: { type: string; description: string };
   actionSuccess?: boolean;
   turnQuads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-  merkleRoot?: Uint8Array;
+  merkleRoot?: Uint8Array | string;
   proposalTimestamp: number;
   participantSignatures: Map<string, ParticipantSignature>;
 }
@@ -1613,10 +1613,13 @@ export class OriginTrailGameCoordinator {
 
     if (swarm.pendingProposal?.hash === msg.proposalHash) {
       const pp = swarm.pendingProposal;
+      const ppRootHex = pp.merkleRoot
+        ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot))
+        : null;
       if (
         msg.winningAction !== pp.winningAction ||
         msg.resolution !== pp.resolution ||
-        (msg.merkleRoot ?? null) !== (pp.merkleRoot ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot)) : null)
+        (ppRootHex != null && msg.merkleRoot != null && msg.merkleRoot !== ppRootHex)
       ) {
         this.log(`Duplicate proposal hash but mismatched fields for ${msg.swarmId} turn ${msg.turn} — rejecting`);
         return;
@@ -1762,6 +1765,7 @@ export class OriginTrailGameCoordinator {
       deaths,
       event: msg.event,
       turnQuads: localTurnQuads.length > 0 ? localTurnQuads : undefined,
+      merkleRoot: localMerkleRootHex,
       proposalTimestamp: msg.timestamp,
       participantSignatures: peerSigs,
     };
