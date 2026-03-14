@@ -7,10 +7,10 @@
     "dkg": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('network',{recursive:true});fs.copyFileSync('../../network/testnet.json','network/testnet.json')\"",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
     "@origintrail-official/dkg-agent": "workspace:*",
@@ -30,6 +30,7 @@
   },
   "files": [
     "dist",
+    "network",
     "README.md",
     "LICENSE"
   ],

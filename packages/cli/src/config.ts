@@ -129,17 +129,25 @@ const DEFAULT_CONFIG: DkgConfig = {
 let _networkConfig: NetworkConfig | null = null;
 
 /**
- * Load the network config from network/testnet.json in the repo root.
- * Walks up from this file's location to find it.
+ * Load the network config from network/testnet.json.
+ *
+ * Candidate paths (tried in order):
+ *  1. Monorepo root when running from packages/cli/dist/
+ *  2. Monorepo root when running from packages/cli/src/ during dev
+ *  3. Bundled alongside dist/ in the published NPM package (dist/../network/)
+ *
+ * Monorepo paths are checked first so that edits to the repo-root
+ * network/testnet.json are picked up immediately during development
+ * without requiring a rebuild of the CLI package.
  */
 export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
   if (_networkConfig) return _networkConfig;
   try {
     const thisDir = dirname(fileURLToPath(import.meta.url));
-    // Walk up from packages/cli/dist (or src) to repo root
     const candidates = [
-      join(thisDir, '..', '..', '..', 'network', 'testnet.json'),   // from dist/
-      join(thisDir, '..', '..', '..', '..', 'network', 'testnet.json'), // from src/ during dev
+      join(thisDir, '..', '..', '..', 'network', 'testnet.json'),       // monorepo from dist/
+      join(thisDir, '..', '..', '..', '..', 'network', 'testnet.json'), // monorepo from src/ during dev
+      join(thisDir, '..', 'network', 'testnet.json'),                   // NPM package (network/ at package root)
     ];
     for (const path of candidates) {
       try {

@@ -85,7 +85,7 @@ export async function migrateToBlueGreen(
     })).trim();
 
   if (!slotReady(slotA)) {
-    await rm(slotA, { recursive: true, force: true });
+    await rm(slotA, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
     if (hasLocalRepo) {
       git(['clone', '--local', localRepo!, slotA], undefined, localRepo!);
     } else {
@@ -108,7 +108,7 @@ export async function migrateToBlueGreen(
 
   if (!slotReady(slotB)) {
     try {
-      await rm(slotB, { recursive: true, force: true });
+      await rm(slotB, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
       if (hasLocalRepo) {
         // Keep slot B source aligned with slot A/local repo state.
         git(['clone', '--reference', slotA, '--dissociate', localRepo!, slotB], undefined, localRepo!);
@@ -134,7 +134,7 @@ export async function migrateToBlueGreen(
       log(`  Slot b: cloned and built`);
     } catch (err: any) {
       log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
-      await rm(slotB, { recursive: true, force: true });
+      await rm(slotB, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
       try {
         const repoUrl = hasLocalRepo ? localRepo! : sourceRepo;
         git(['clone', repoUrl, slotB], undefined, repoUrl);
@@ -143,7 +143,7 @@ export async function migrateToBlueGreen(
         }
       } catch {
         // Keep slot B absent if bootstrap fails; avoid leaving a broken empty directory.
-        await rm(slotB, { recursive: true, force: true }).catch(() => undefined);
+        await rm(slotB, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(() => undefined);
         log('  Slot b: fallback clone failed; slot left uninitialized for later self-heal.');
       }
     }
