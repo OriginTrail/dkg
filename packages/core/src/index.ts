@@ -26,3 +26,11 @@ export {
   sparqlInt,
   assertSafeRdfTerm,
 } from './sparql-safe.js';
+export {
+  DKGError,
+  DKGUserError,
+  DKGInternalError,
+  PayloadTooLargeError,
+  toErrorMessage,
+  hasErrorCode,
+} from './errors.js';

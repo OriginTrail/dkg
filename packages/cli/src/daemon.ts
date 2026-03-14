@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -2316,12 +2316,6 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
 const SMALL_BODY_BYTES = 256 * 1024; // 256 KB — for settings, connect, chat, and other small payloads
 
-class PayloadTooLargeError extends Error {
-  constructor(maxBytes: number) {
-    super(`Request body too large (>${maxBytes} bytes)`);
-    this.name = 'PayloadTooLargeError';
-  }
-}
 
 function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
   return new Promise((resolve, reject) => {
