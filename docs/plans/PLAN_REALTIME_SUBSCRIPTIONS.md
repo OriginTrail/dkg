@@ -166,10 +166,16 @@ Example payloads:
 **Example:**
 
 ```
-GET /api/events?types=workspace:write,kc:confirmed&paranets=origin-trail-game
-Authorization: Bearer <token>
+GET /api/events?types=workspace:write,kc:confirmed&paranets=origin-trail-game&token=<jwt>
 Accept: text/event-stream
 ```
+
+> **Auth note:** Browser `EventSource` cannot set custom headers, so SSE
+> endpoints must accept auth via a `token` query parameter (signed JWT or
+> short-lived HMAC token) in addition to the `Authorization` header. The
+> query-param token should be single-use or time-bounded (≤5 min) to
+> limit replay risk. Cookie-based auth is also acceptable when the client
+> and API share the same origin.
 
 **Response:**
 
@@ -247,7 +253,7 @@ class SubscriptionManager {
     const payload = data as DKGEventPayload;
     for (const sub of this.subscriptions) {
       if (sub.filter.types && !sub.filter.types.has(payload.type)) continue;
-      if (sub.filter.paranets && payload.paranetId && !sub.filter.paranets.has(payload.paranetId)) continue;
+      if (sub.filter.paranets && (!payload.paranetId || !sub.filter.paranets.has(payload.paranetId))) continue;
       sendSse(sub.res, payload);
     }
   }
@@ -262,7 +268,14 @@ class SubscriptionManager {
 
 ### 2.4 Event replay
 
-Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `SubscriptionManager`. When a client connects with `since=<timestamp>`, replay matching events before switching to live streaming. This handles reconnection without missing events.
+Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `SubscriptionManager`. Each event is assigned an incrementing sequence ID.
+
+**Subscribe-then-replay** to avoid losing events between replay and live attach:
+1. Register the subscription first (live events start buffering to the client's queue).
+2. Replay matching events from the ring buffer where `seq > since`.
+3. Deduplicate on the client using the `id` field in SSE (`EventSource` handles this natively via `lastEventId`).
+
+This ensures zero event loss on reconnection. The `since` parameter accepts either an epoch-ms timestamp or a sequence ID; the server resolves whichever is provided to the nearest ring-buffer offset.
 
 ---
 
@@ -278,7 +291,8 @@ Replace the `setInterval(refreshLobby, 4000)` and `setInterval(refreshSwarm, 300
 
 ```typescript
 useEffect(() => {
-  const es = new EventSource(`${getBaseUrl()}/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game`);
+  const nodeUrl = getBaseUrl().replace(/\/api\/apps\/.*$/, '');
+  const es = new EventSource(`${nodeUrl}/api/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game`);
 
   es.addEventListener('game:turn_resolved', (e) => {
     const data = JSON.parse(e.data);
