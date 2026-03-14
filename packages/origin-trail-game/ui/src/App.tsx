@@ -903,7 +903,7 @@ function LobbyChat({ playerName }: { playerName: string }) {
     if (!text) return;
     setSending(true);
     try {
-      await api.sendChat(text);
+      await api.sendChat(text, playerName);
       setInput('');
       const data = await api.chat(50);
       setMessages(data?.messages ?? []);

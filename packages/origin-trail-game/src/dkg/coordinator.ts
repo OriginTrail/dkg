@@ -1844,10 +1844,11 @@ export class OriginTrailGameCoordinator {
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
-      } else if (swarm.status === 'recruiting' && swarm.players.length < swarm.maxPlayers) {
-        openSwarms.push(swarm);
-        recruitingSwarms.push(swarm);
       } else if (swarm.status === 'recruiting') {
+        if (now - swarm.createdAt > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
+        if (swarm.players.length < swarm.maxPlayers) {
+          openSwarms.push(swarm);
+        }
         recruitingSwarms.push(swarm);
       }
     }
