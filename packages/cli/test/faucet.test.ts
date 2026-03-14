@@ -95,4 +95,16 @@ describe('requestFaucetFunding', () => {
     const headers = call[1].headers;
     expect(headers['Idempotency-Key']).toMatch(/^init-my-special-node-/);
   });
+
+  it('sanitizes non-ASCII node names in Idempotency-Key header', async () => {
+    const fetch = mockFetch(200, { summary: { success: 0 }, results: [] });
+    await requestFaucetFunding(
+      'https://faucet.example.com/fund', 'test', ['0xAAA'], 'mon-n\u0153ud-\u00e9l\u00e8ve', fetch,
+    );
+    const call = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const headers = call[1].headers;
+    const key = headers['Idempotency-Key'];
+    expect(key).toMatch(/^init-mon-n_ud-_l_ve-\d+$/);
+    expect(key).toMatch(/^[\x20-\x7E]+$/);
+  });
 });

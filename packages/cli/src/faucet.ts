@@ -13,11 +13,12 @@ export async function requestFaucetFunding(
 ): Promise<FaucetResult> {
   const fundable = wallets.slice(0, 3);
   if (fundable.length === 0) return { success: false, funded: [], error: 'no wallets' };
+  const safeNodeName = nodeName.replace(/[^\x20-\x7E]/g, '_');
   const res = await _fetch(faucetUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Idempotency-Key': `init-${nodeName}-${Date.now()}`,
+      'Idempotency-Key': `init-${safeNodeName}-${Date.now()}`,
     },
     body: JSON.stringify({ mode, wallets: fundable, callerId: `dkg-node:${nodeName}` }),
     signal: AbortSignal.timeout(30_000),

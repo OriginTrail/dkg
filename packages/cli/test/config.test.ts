@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import {
   loadNetworkConfig,
   removePid,
@@ -78,9 +81,14 @@ describe('dkgDir', () => {
     else process.env.DKG_HOME = origHome;
   });
 
-  it('returns ~/.dkg-dev when running from monorepo (no DKG_HOME)', () => {
+  it('returns ~/.dkg-dev when in monorepo without existing ~/.dkg/config.json, else ~/.dkg', () => {
     delete process.env.DKG_HOME;
-    expect(dkgDir()).toMatch(/\.dkg-dev$/);
+    const hasExistingConfig = existsSync(join(homedir(), '.dkg', 'config.json'));
+    if (hasExistingConfig) {
+      expect(dkgDir()).toMatch(/\.dkg$/);
+    } else {
+      expect(dkgDir()).toMatch(/\.dkg-dev$/);
+    }
   });
 
   it('respects DKG_HOME override', () => {

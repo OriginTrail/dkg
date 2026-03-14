@@ -168,8 +168,11 @@ export async function loadNetworkConfig(): Promise<NetworkConfig | null> {
 
 export function dkgDir(): string {
   if (process.env.DKG_HOME) return process.env.DKG_HOME;
-  if (isDkgMonorepo()) return join(homedir(), '.dkg-dev');
-  return join(homedir(), '.dkg');
+  const defaultDir = join(homedir(), '.dkg');
+  if (isDkgMonorepo() && !existsSync(join(defaultDir, 'config.json'))) {
+    return join(homedir(), '.dkg-dev');
+  }
+  return defaultDir;
 }
 
 let _isDkgMonorepo: boolean | null = null;
