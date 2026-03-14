@@ -2115,38 +2115,40 @@ export class OriginTrailGameCoordinator {
 
   private static readonly CRITICAL_MSG_TYPES = new Set([
     'swarm:created', 'swarm:joined', 'expedition:launched',
-    'turn:proposal', 'turn:approve', 'turn:resolved',
+    'vote:cast', 'turn:proposal', 'turn:approve', 'turn:resolved',
   ]);
+
+  private static readonly REDUNDANT_DELAYS_MS = [2_000, 6_000];
 
   private async broadcast(msg: proto.OTMessage): Promise<void> {
     const data = proto.encode(msg);
     const isCritical = OriginTrailGameCoordinator.CRITICAL_MSG_TYPES.has(msg.type);
-    const maxAttempts = isCritical ? 3 : 1;
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let settled = false;
-      try {
-        const publishPromise = this.agent.gossip.publish(this.topic, data)
-          .then(() => { settled = true; });
-        const timeout = new Promise<void>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('publish timeout')), 5_000);
-        });
-        await Promise.race([publishPromise, timeout]);
-        return;
-      } catch (err: any) {
-        if (settled) return;
-        if (attempt < maxAttempts) {
-          const delay = 500 * Math.pow(2, attempt - 1);
-          this.log(`Broadcast ${msg.type} attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`);
-          await new Promise(r => setTimeout(r, delay));
-          if (settled) return;
-        } else {
-          this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
+    await this.tryPublish(data, msg.type);
+
+    if (isCritical) {
+      for (const delay of OriginTrailGameCoordinator.REDUNDANT_DELAYS_MS) {
+        setTimeout(() => this.tryPublish(data, msg.type), delay);
       }
+    }
+  }
+
+  private async tryPublish(data: Uint8Array, msgType: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    try {
+      const publishPromise = this.agent.gossip.publish(this.topic, data)
+        .then(() => { settled = true; });
+      const timeout = new Promise<void>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('publish timeout')), 5_000);
+      });
+      await Promise.race([publishPromise, timeout]);
+    } catch (err: any) {
+      if (!settled) {
+        this.log(`Broadcast ${msgType} failed: ${err.message ?? 'no peers'}`);
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
