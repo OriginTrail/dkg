@@ -7,6 +7,7 @@ import {
   MerkleTree,
   hashTriple,
   canonicalize,
+  hexToBytes,
 } from '../src/index.js';
 
 describe('Ed25519', () => {
@@ -144,5 +145,25 @@ describe('canonicalize', () => {
     ].join('\n');
     const result = await canonicalize(input);
     expect(result).toContain('<http://example.org/s>');
+  });
+});
+
+describe('hexToBytes', () => {
+  it('converts valid hex to bytes', () => {
+    expect(Array.from(hexToBytes('0xdeadbeef'))).toEqual([0xde, 0xad, 0xbe, 0xef]);
+    expect(Array.from(hexToBytes('abcd'))).toEqual([0xab, 0xcd]);
+  });
+
+  it('rejects odd-length hex strings', () => {
+    expect(() => hexToBytes('0xabc')).toThrow('Invalid hex string');
+  });
+
+  it('rejects non-hex characters', () => {
+    expect(() => hexToBytes('0xgggg')).toThrow('Invalid hex string');
+    expect(() => hexToBytes('xyz!')).toThrow('Invalid hex string');
+  });
+
+  it('handles empty string with 0x prefix', () => {
+    expect(Array.from(hexToBytes('0x'))).toEqual([]);
   });
 });

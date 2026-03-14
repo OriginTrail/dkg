@@ -650,6 +650,7 @@ function splitNQuadLine(line: string): string[] {
             j += 2;
             if (line[j] === '<') {
               const end = line.indexOf('>', j);
+              if (end === -1) break;
               j = end + 1;
             }
           }

@@ -47,6 +47,24 @@ describe('TypedEventBus', () => {
     expect(h2).toHaveBeenCalled();
   });
 
+  it('logs errors from handlers without crashing other handlers', () => {
+    const bus = new TypedEventBus();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const goodHandler = vi.fn();
+    const badHandler = () => { throw new Error('handler broke'); };
+
+    bus.on('test', badHandler);
+    bus.on('test', goodHandler);
+    bus.emit('test', 'data');
+
+    expect(goodHandler).toHaveBeenCalledWith('data');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[EventBus] Handler error'),
+      'handler broke',
+    );
+    errorSpy.mockRestore();
+  });
+
   it('DKGEvent includes connection observability constants', () => {
     expect(DKGEvent.CONNECTION_OPEN).toBe('connection:open');
     expect(DKGEvent.CONNECTION_CLOSE).toBe('connection:close');

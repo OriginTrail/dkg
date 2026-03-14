@@ -39,8 +39,8 @@ export class TypedEventBus implements EventBus {
     for (const handler of handlers) {
       try {
         handler(data);
-      } catch {
-        // don't let one handler crash the bus
+      } catch (err) {
+        console.error(`[EventBus] Handler error on "${event}":`, err instanceof Error ? err.message : err);
       }
     }
   }

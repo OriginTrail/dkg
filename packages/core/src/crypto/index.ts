@@ -11,3 +11,5 @@ export { sha256 } from './hashing.js';
 export { MerkleTree } from './merkle.js';
 
 export { canonicalize, hashTriple } from './canonicalize.js';
+
+export { hexToBytes } from './oracle-verify.js';

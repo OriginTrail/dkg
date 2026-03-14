@@ -36,8 +36,11 @@ export interface VerifyResult {
   unverifiedBatches: string[];
 }
 
-function hexToBytes(hex: string): Uint8Array {
+export function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) {
+    throw new Error(`Invalid hex string: "${hex.slice(0, 20)}${hex.length > 20 ? '...' : ''}"`);
+  }
   const bytes = new Uint8Array(clean.length / 2);
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);

@@ -2281,7 +2281,7 @@ function splitNQuadLine(line: string): string[] {
           if (line[j] === '@') { while (j < line.length && line[j] !== ' ') j++; }
           else if (line[j] === '^' && line[j + 1] === '^') {
             j += 2;
-            if (line[j] === '<') { const end = line.indexOf('>', j); j = end + 1; }
+            if (line[j] === '<') { const end = line.indexOf('>', j); if (end === -1) break; j = end + 1; }
           }
           break;
         }

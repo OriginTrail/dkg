@@ -272,18 +272,21 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     log(`Network config: ${network.networkName} (genesis v${network.genesisVersion})`);
   }
 
+  let chatDb: typeof import('./daemon.js') extends any ? any : never = null;
   agent.onChat((text, senderPeerId, _convId) => {
-    try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'in', peer: senderPeerId, text }); } catch { /* never crash */ }
-    try {
-      dashDb.insertNotification({
-        ts: Date.now(),
-        type: 'chat_message',
-        title: 'New message',
-        message: `Message from ${shortId(senderPeerId)}: ${text.slice(0, 120)}`,
-        source: 'peer-chat',
-        peer: senderPeerId,
-      });
-    } catch { /* never crash */ }
+    if (chatDb) {
+      try { chatDb.insertChatMessage({ ts: Date.now(), direction: 'in', peer: senderPeerId, text }); } catch { /* never crash */ }
+      try {
+        chatDb.insertNotification({
+          ts: Date.now(),
+          type: 'chat_message',
+          title: 'New message',
+          message: `Message from ${shortId(senderPeerId)}: ${text.slice(0, 120)}`,
+          source: 'peer-chat',
+          peer: senderPeerId,
+        });
+      } catch { /* never crash */ }
+    }
     log(`CHAT IN  [${shortId(senderPeerId)}]: ${text}`);
   });
 
@@ -394,6 +397,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   // --- Dashboard DB + Metrics ---
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  chatDb = dashDb;
   log('Dashboard DB initialized at ' + join(dkgDir(), 'node-ui.db'));
 
   Logger.setSink((entry) => {
@@ -2243,10 +2247,21 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
   res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+
+function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c) => chunks.push(c));
+    let total = 0;
+    req.on('data', (c: Buffer) => {
+      total += c.length;
+      if (total > maxBytes) {
+        req.destroy();
+        reject(new Error(`Request body too large (>${maxBytes} bytes)`));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString()));
     req.on('error', reject);
   });

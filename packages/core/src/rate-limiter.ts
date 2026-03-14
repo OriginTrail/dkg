@@ -24,6 +24,7 @@ export class RateLimiter {
   constructor(config: RateLimitConfig) {
     this.config = config;
     this.cleanupTimer = setInterval(() => this.cleanup(), Math.max(config.windowMs * 2, 60_000));
+    this.cleanupTimer.unref();
   }
 
   /**
