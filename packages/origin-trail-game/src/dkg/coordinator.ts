@@ -11,7 +11,7 @@
  * paranet — including relays — relays game coordination messages.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { gameEngine, GameEngine } from '../engine/game-engine.js';
@@ -2173,22 +2173,30 @@ export class OriginTrailGameCoordinator {
     try {
       const result = await this.agent.query(
         `SELECT ?player ?displayName ?score ?outcome ?epochs ?survivors ?partySize ?swarmId ?finishedAt WHERE {
-          ?entry a <${rdf.OT}LeaderboardEntry> .
-          ?entry <${rdf.OT}player> ?player .
-          ?entry <${rdf.OT}displayName> ?displayName .
-          ?entry <${rdf.OT}score> ?score .
-          ?entry <${rdf.OT}outcome> ?outcome .
-          ?entry <${rdf.OT}epochs> ?epochs .
-          ?entry <${rdf.OT}survivors> ?survivors .
-          ?entry <${rdf.OT}partySize> ?partySize .
-          ?entry <${rdf.OT}swarm> ?swarm .
-          ?entry <${rdf.OT}finishedAt> ?finishedAt .
+          {
+            SELECT ?player (MAX(?s) AS ?maxScore) WHERE {
+              ?e a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?s .
+            } GROUP BY ?player
+          }
+          ?entry a <${rdf.OT}LeaderboardEntry> ;
+                 <${rdf.OT}player> ?player ;
+                 <${rdf.OT}score> ?maxScore ;
+                 <${rdf.OT}displayName> ?displayName ;
+                 <${rdf.OT}outcome> ?outcome ;
+                 <${rdf.OT}epochs> ?epochs ;
+                 <${rdf.OT}survivors> ?survivors ;
+                 <${rdf.OT}partySize> ?partySize ;
+                 <${rdf.OT}swarm> ?swarm ;
+                 <${rdf.OT}finishedAt> ?finishedAt .
+          BIND(?maxScore AS ?score)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
-        } ORDER BY DESC(?score) LIMIT 500`,
+        } ORDER BY DESC(?score) LIMIT 50`,
         { paranetId: this.paranetId, includeWorkspace: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
-      const entries = bindings.map((b: any) => ({
+      return bindings.map((b: any) => ({
         player: stripQuotes(String(b.player ?? '')),
         displayName: stripQuotes(String(b.displayName ?? '')),
         score: Number(stripQuotes(String(b.score ?? '0'))),
@@ -2199,15 +2207,6 @@ export class OriginTrailGameCoordinator {
         swarmId: stripQuotes(String(b.swarmId ?? '')),
         finishedAt: Number(stripQuotes(String(b.finishedAt ?? '0'))),
       }));
-
-      const bestByPlayer = new Map<string, typeof entries[number]>();
-      for (const entry of entries) {
-        const existing = bestByPlayer.get(entry.player);
-        if (!existing || entry.score > existing.score) {
-          bestByPlayer.set(entry.player, entry);
-        }
-      }
-      return [...bestByPlayer.values()].sort((a, b) => b.score - a.score).slice(0, 50);
     } catch (err: any) {
       this.log(`Leaderboard query failed: ${err.message}`);
       return [];
@@ -2234,7 +2233,7 @@ export class OriginTrailGameCoordinator {
 
   async sendChatMessage(displayName: string, message: string): Promise<{ id: string; peerId: string; displayName: string; message: string; timestamp: number }> {
     const chatMsg = {
-      id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: randomUUID(),
       peerId: this.myPeerId,
       displayName,
       message,

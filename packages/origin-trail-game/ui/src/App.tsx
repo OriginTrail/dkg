@@ -882,6 +882,7 @@ function LobbyChat({ playerName }: { playerName: string }) {
   const [messages, setMessages] = useState<any[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -903,13 +904,15 @@ function LobbyChat({ playerName }: { playerName: string }) {
     const text = input.trim();
     if (!text) return;
     setSending(true);
+    setSendError('');
     try {
       await api.sendChat(text, playerName);
       setInput('');
       const data = await api.chat(50);
       setMessages(data?.messages ?? []);
-    } catch { /* ignore */ }
-    finally { setSending(false); }
+    } catch (e: any) {
+      setSendError(e?.message ?? 'Failed to send message');
+    } finally { setSending(false); }
   };
 
   return (
@@ -936,6 +939,7 @@ function LobbyChat({ playerName }: { playerName: string }) {
         />
         <button onClick={send} disabled={sending || !input.trim()}>Send</button>
       </div>
+      {sendError && <div className="ot-error" style={{ fontSize: '0.85em', marginTop: 4 }}>{sendError}</div>}
     </div>
   );
 }
