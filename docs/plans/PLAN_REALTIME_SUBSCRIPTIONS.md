@@ -180,6 +180,14 @@ Accept: text/event-stream
 > if unused. Server-side logs must redact the `ticket` query parameter.
 > Cookie-based auth is also acceptable when the client and API share
 > the same origin.
+>
+> **Ticket binding:** Each issued ticket must be bound to the authenticated
+> subject (user/node identity) and the requested scope (event types,
+> paranet filter). The server stores `{ subject, scope, expiresAt,
+> consumed: false }` per ticket. On first `/api/events` use the server
+> atomically marks the ticket as consumed — subsequent uses are rejected.
+> This prevents a leaked-but-unused ticket from being replayed by another
+> client during its TTL.
 
 **Response:**
 
@@ -288,11 +296,22 @@ class SubscriptionManager {
 Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `SubscriptionManager`. Each event is assigned an incrementing sequence ID.
 
 **Subscribe-then-replay** to avoid losing events between replay and live attach:
-1. Register the subscription first (live events start buffering to the client's queue).
-2. Replay matching events from the ring buffer where `seq > since`.
-3. Deduplicate on the client using the `id` field in SSE (`EventSource` handles this natively via `lastEventId`).
+1. Register the subscription first. Live events start accumulating in a **per-connection queue** (not sent immediately).
+2. Replay matching events from the ring buffer where `seq > since`, writing them to the client.
+3. Flush the per-connection queue. Any live events that arrived during step 2 are sent in order.
+4. Switch to direct delivery — new events are written to the client immediately.
 
-This ensures zero event loss on reconnection. The `since` parameter accepts a **sequence ID** (monotonic integer assigned by the server). Clients should persist `lastEventId` from SSE and pass it on reconnect. The server resolves the sequence to the ring-buffer offset. Epoch-ms timestamps are not supported for `since` to avoid ambiguity.
+This gating step prevents interleaving newer live events before older replayed ones. The client must still perform explicit dedup (track last processed `seq`, skip events where `id <= lastSeen`), since `EventSource` does **not** deduplicate natively — it only tracks `lastEventId` for reconnect resume.
+
+The `since` parameter accepts a **sequence ID** (monotonic integer assigned by the server). Clients should persist `lastEventId` from SSE and pass it on reconnect. The server resolves the sequence to the ring-buffer offset. Epoch-ms timestamps are not supported for `since` to avoid ambiguity.
+
+> **Durability caveat:** The ring buffer and sequence IDs are in-memory
+> and process-local. A node restart or failover resets replay state, so
+> clients may miss events despite sending `since`. Semantics are
+> **best-effort**; after a reconnect that returns no replay data (or a
+> `system:missed_events` signal), clients should re-sync full state from
+> the REST API. Durable replay (WAL-backed buffer or persistent sequence)
+> may be added in a future phase.
 
 ---
 
@@ -325,6 +344,8 @@ useEffect(() => {
     es = new EventSource(`${nodeUrl}/api/events?${params}`);
 
     function onEvent(e: MessageEvent) {
+      // Explicit dedup: skip replayed/duplicate events
+      if (e.lastEventId && lastSeq && Number(e.lastEventId) <= Number(lastSeq)) return;
       if (e.lastEventId) lastSeq = e.lastEventId;
       const data = JSON.parse(e.data);
       if (data.data?.swarmId === swarm?.id && swarm) refreshSwarm(swarm.id);
