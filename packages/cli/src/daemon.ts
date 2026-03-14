@@ -375,16 +375,18 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   let pendingForegroundRestart = false;
   const au = config.autoUpdate;
-  if (au?.repo && au?.branch) {
-    const checkIntervalMs = (au.checkIntervalMinutes || 30) * 60_000;
-    if (au.enabled) {
-      log(`Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`);
-    } else {
-      log(`Auto-update disabled — version check only: ${au.repo}@${au.branch}`);
-    }
+  const standalone = isStandaloneInstall();
+  const hasGitConfig = !!(au?.repo && au?.branch);
 
-    const standalone = isStandaloneInstall();
-    const allowPre = au.allowPrerelease ?? true;
+  if (standalone || hasGitConfig) {
+    const checkIntervalMs = (au?.checkIntervalMinutes || 30) * 60_000;
+    const allowPre = au?.allowPrerelease ?? true;
+
+    if (standalone) {
+      log(`Auto-update (npm): ${au?.enabled !== false ? 'enabled' : 'disabled — version check only'} (every ${au?.checkIntervalMinutes ?? 30}min)`);
+    } else if (hasGitConfig) {
+      log(`Auto-update ${au!.enabled ? 'enabled' : 'disabled — version check only'}: ${au!.repo}@${au!.branch} (every ${au!.checkIntervalMinutes}min)`);
+    }
 
     const runCheck = async () => {
       let updateAvailable = false;
@@ -401,8 +403,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
           updateAvailable = true;
           targetNpmVersion = npmStatus.version;
         }
-      } else {
-        const commitStatus = await checkForNewCommitWithStatus(au, log);
+      } else if (hasGitConfig) {
+        const commitStatus = await checkForNewCommitWithStatus(au!, log);
         if (commitStatus.status !== 'error') {
           lastUpdateCheck.upToDate = commitStatus.status === 'up-to-date';
           lastUpdateCheck.checkedAt = Date.now();
@@ -411,14 +413,14 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         updateAvailable = commitStatus.status === 'available';
       }
 
-      if (au.enabled && updateAvailable) {
+      if ((au?.enabled !== false) && updateAvailable) {
         isUpdating = true;
         let updated = false;
         if (standalone && targetNpmVersion) {
           const status = await performNpmUpdate(targetNpmVersion, log);
           updated = status === 'updated';
-        } else {
-          updated = await checkForUpdate(au, log);
+        } else if (hasGitConfig) {
+          updated = await checkForUpdate(au!, log);
         }
         isUpdating = false;
         if (updated) {
@@ -2640,14 +2642,18 @@ async function _performNpmUpdateInner(
   const pending = await readPendingUpdateState();
   if (pending) {
     const active = await activeSlot();
-    if (active === pending.target) {
-      if (pending.version) await writeFile(versionFile, pending.version);
+    if (active === pending.target && pending.version === targetVersion) {
+      await writeFile(versionFile, pending.version);
       await clearPendingUpdateState();
       log(`Auto-update (npm): recovered pending update state for slot ${pending.target} (v${pending.version}).`);
       return 'updated';
     }
     await clearPendingUpdateState();
-    log('Auto-update (npm): cleared stale pending update state.');
+    if (active === pending.target && pending.version !== targetVersion) {
+      log(`Auto-update (npm): pending version ${pending.version} differs from target ${targetVersion}, proceeding with fresh install.`);
+    } else {
+      log('Auto-update (npm): cleared stale pending update state.');
+    }
   }
 
   const active = await activeSlot();

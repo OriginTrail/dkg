@@ -24,7 +24,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, existsSync: vi.fn(() => true) };
+  return {
+    ...actual,
+    existsSync: vi.fn(() => true),
+    openSync: vi.fn(() => 99),
+    closeSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn(() => `${process.pid}:${Date.now()}:testtoken`),
+    unlinkSync: vi.fn(),
+  };
 });
 
 const fetchMock = vi.fn();
@@ -44,7 +52,7 @@ vi.mock('../src/config.js', async (importOriginal) => {
 });
 
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
@@ -54,6 +62,11 @@ const mockedWriteFile = vi.mocked(writeFile);
 const mockedMkdir = vi.mocked(mkdir);
 const mockedRm = vi.mocked(rm);
 const mockedExistsSync = vi.mocked(existsSync);
+const mockedOpenSync = vi.mocked(openSync);
+const mockedCloseSync = vi.mocked(closeSync);
+const mockedFsWriteFileSync = vi.mocked(fsWriteFileSync);
+const mockedReadFileSync = vi.mocked(readFileSync);
+const mockedUnlinkSync = vi.mocked(unlinkSync);
 const mockedSwapSlot = vi.mocked(swapSlot);
 const mockedExec = vi.mocked(exec);
 const mockedExecFile = vi.mocked(execFile);
@@ -93,6 +106,13 @@ describe('blue-green checkForUpdate', () => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    mockedMkdir.mockResolvedValue(undefined as any);
+    mockedRm.mockResolvedValue(undefined as any);
+    mockedOpenSync.mockReturnValue(99 as any);
+    mockedCloseSync.mockReturnValue(undefined as any);
+    mockedFsWriteFileSync.mockReturnValue(undefined as any);
+    mockedReadFileSync.mockReturnValue(`${process.pid}:${Date.now()}:testtoken` as any);
+    mockedUnlinkSync.mockReturnValue(undefined as any);
     (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
     (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));
   });
