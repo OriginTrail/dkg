@@ -29,7 +29,7 @@ function mockClient(): DkgDaemonClient {
 // ---------------------------------------------------------------------------
 
 describe('DkgGamePlugin', () => {
-  it('registers all 10 game tools', () => {
+  it('registers all 11 game tools', () => {
     const api = mockApi();
     const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
     plugin.register(api);
@@ -37,6 +37,7 @@ describe('DkgGamePlugin', () => {
     const toolNames = api.tools.map(t => t.name);
     expect(toolNames).toContain('game_lobby');
     expect(toolNames).toContain('game_join');
+    expect(toolNames).toContain('game_leave');
     expect(toolNames).toContain('game_create');
     expect(toolNames).toContain('game_start');
     expect(toolNames).toContain('game_status');
@@ -45,7 +46,7 @@ describe('DkgGamePlugin', () => {
     expect(toolNames).toContain('game_leaderboard');
     expect(toolNames).toContain('game_autopilot_start');
     expect(toolNames).toContain('game_autopilot_stop');
-    expect(api.tools.length).toBe(10);
+    expect(api.tools.length).toBe(11);
   });
 
   it('all tools have name, description, parameters, and execute', () => {
@@ -95,6 +96,16 @@ describe('DkgGamePlugin', () => {
     expect(actionProp.enum).toContain('trade');
   });
 
+  it('game_leave has optional swarm_id (no required params)', () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+    expect(leaveTool.parameters.required).toEqual([]);
+    expect(leaveTool.parameters.properties.swarm_id).toBeDefined();
+  });
+
   it('game_autopilot_start requires swarm_id', () => {
     const api = mockApi();
     const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
@@ -142,11 +153,12 @@ describe('DkgNodePlugin with game module', () => {
     plugin.register(api);
 
     const toolNames = tools.map(t => t.name);
-    // 8 core DKG tools + 10 game tools = 18
+    // 8 core DKG tools + 11 game tools = 19
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('game_lobby');
+    expect(toolNames).toContain('game_leave');
     expect(toolNames).toContain('game_autopilot_start');
-    expect(tools.length).toBe(18);
+    expect(tools.length).toBe(19);
   });
 
   it('does not register game tools when game.enabled is false/missing', () => {
@@ -663,6 +675,314 @@ describe('SwarmWatcher', () => {
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.watcher.active).toBe(true);
       expect(parsed.watcher.mode).toBe('wait-for-start');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// game_leave tool
+// ---------------------------------------------------------------------------
+
+describe('game_leave tool', () => {
+  it('returns disbanded message when leader leaves recruiting swarm', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ disbanded: true }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const api = mockApi();
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      plugin.register(api);
+
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.status).toBe('disbanded');
+      expect(parsed.message).toContain('disbanded');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('returns swarm summary with left flag when non-leader leaves', async () => {
+    const originalFetch = globalThis.fetch;
+    const remainingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+      voteStatus: null, lastTurn: null,
+    };
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(remainingSwarm) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const api = mockApi();
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      plugin.register(api);
+
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.id).toBe('sw-1');
+      expect(parsed.left).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('includes message when leaving a traveling swarm (finished)', async () => {
+    const originalFetch = globalThis.fetch;
+    const finishedSwarm = {
+      id: 'sw-1', name: 'Test', status: 'finished', playerCount: 1, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 5,
+      gameState: { status: 'lost', epochs: 200 },
+      voteStatus: null, lastTurn: null,
+    };
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(finishedSwarm) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const api = mockApi();
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      plugin.register(api);
+
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', { swarm_id: 'sw-1' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.left).toBe(true);
+      expect(parsed.message).toContain('ended the expedition');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stops autopilot when leaving the autopilot swarm', async () => {
+    const originalFetch = globalThis.fetch;
+    const travelingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'traveling', playerCount: 2, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 1,
+      gameState: { sessionId: 's', player: 'p', epochs: 10, trainingTokens: 500,
+        apiCredits: 5, computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+        party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+        status: 'active', moveCount: 1 },
+      voteStatus: null, lastTurn: null,
+    };
+    const finishedSwarm = { ...travelingSwarm, status: 'finished' };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      if (urlStr.includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(finishedSwarm) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start autopilot
+      await plugin.getService().start('sw-1');
+      expect(plugin.getService().isRunning).toBe(true);
+
+      // Leave should stop autopilot
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      await leaveTool.execute('test', { swarm_id: 'sw-1' });
+      expect(plugin.getService().isRunning).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('stops watcher when leaving the watched swarm', async () => {
+    const originalFetch = globalThis.fetch;
+    const recruitingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'recruiting', playerCount: 1, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 0, gameState: null,
+      voteStatus: null, lastTurn: null,
+    };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/join')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(recruitingSwarm) });
+      }
+      if (urlStr.includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ disbanded: true }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { watchIntervalMs: 60_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Join to start watcher
+      const joinTool = api.tools.find(t => t.name === 'game_join')!;
+      await joinTool.execute('test', { swarm_id: 'sw-1', player_name: 'Bot' });
+      expect(plugin.getWatchState().active).toBe(true);
+
+      // Leave should stop watcher
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      await leaveTool.execute('test', { swarm_id: 'sw-1' });
+      expect(plugin.getWatchState().active).toBe(false);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('works without swarm_id (auto-resolve)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ disbanded: true }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const api = mockApi();
+      const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+      plugin.register(api);
+
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', {});
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.status).toBe('disbanded');
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not stop autopilot when leaving a different swarm', async () => {
+    const originalFetch = globalThis.fetch;
+    const travelingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'traveling', playerCount: 2, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 1,
+      gameState: { sessionId: 's', player: 'p', epochs: 10, trainingTokens: 500,
+        apiCredits: 5, computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+        party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+        status: 'active', moveCount: 1 },
+      voteStatus: null, lastTurn: null,
+    };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      if (urlStr.includes('/leave')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ disbanded: true }) });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start autopilot for sw-1
+      await plugin.getService().start('sw-1');
+      expect(plugin.getService().isRunning).toBe(true);
+
+      // Leave sw-2 — autopilot for sw-1 should NOT stop
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      await leaveTool.execute('test', { swarm_id: 'sw-2' });
+      expect(plugin.getService().isRunning).toBe(true);
+
+      await plugin.stop();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not stop autopilot when leave API fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const travelingSwarm = {
+      id: 'sw-1', name: 'Test', status: 'traveling', playerCount: 2, maxPlayers: 3,
+      leaderId: 'p1', leaderName: 'Player1', players: [], currentTurn: 1,
+      gameState: { sessionId: 's', player: 'p', epochs: 10, trainingTokens: 500,
+        apiCredits: 5, computeUnits: 10, modelWeights: 3, trac: 100, month: 1, day: 1,
+        party: [{ id: 'a1', name: 'Agent', health: 100, alive: true }],
+        status: 'active', moveCount: 1 },
+      voteStatus: null, lastTurn: null,
+    };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/swarm/')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(travelingSwarm) });
+      }
+      if (urlStr.includes('/locations')) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ locations: [] }) });
+      }
+      if (urlStr.includes('/leave')) {
+        // Simulate API 400 error (e.g., multiple active swarms)
+        return Promise.resolve({ ok: false, status: 400, text: () => Promise.resolve('Multiple active swarms found') });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }) as any;
+
+    try {
+      const consultAgent = vi.fn().mockResolvedValue('ACTION: advance');
+      const plugin = new DkgGamePlugin(mockClient(), { pollIntervalMs: 100_000 }, consultAgent);
+      const api = mockApi();
+      plugin.register(api);
+
+      // Start autopilot for sw-1
+      await plugin.getService().start('sw-1');
+      expect(plugin.getService().isRunning).toBe(true);
+
+      // Leave with no swarm_id — API fails with 400
+      const leaveTool = api.tools.find(t => t.name === 'game_leave')!;
+      const result = await leaveTool.execute('test', {});
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.error).toContain('400');
+
+      // Autopilot should still be running since leave failed
+      expect(plugin.getService().isRunning).toBe(true);
 
       await plugin.stop();
     } finally {

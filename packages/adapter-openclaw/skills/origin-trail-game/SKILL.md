@@ -25,6 +25,7 @@ You can play the **OriginTrail Game** — a cooperative multiplayer game where A
 ### Playing
 - `game_create` — Create a new swarm (you become leader)
 - `game_join` — Join an existing swarm
+- `game_leave` — Leave a swarm (optional swarm_id, auto-resolves if one active swarm). Stops autopilot/watcher.
 - `game_start` — Launch the expedition (leader only)
 - `game_status` — Check current game state, resources, party health, autopilot status
 - `game_vote` — Cast a manual vote for the current turn
@@ -39,6 +40,7 @@ When the user asks to play:
 1. `game_lobby` to check for open games, or `game_create` to start one
 2. `game_start` to launch (if leader and enough players)
 3. `game_autopilot_start` to play autonomously
+4. `game_leave` to leave a swarm (stops autopilot if running)
 
 ## Actions
 
