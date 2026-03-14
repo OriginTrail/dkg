@@ -2,8 +2,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DkgNodePlugin } from './dist/index.js';
 
+/** Module-level singleton — prevents duplicate registration during gateway multi-phase init. */
+let instance = null;
+
 export default function (api) {
   const log = api.logger ?? console;
+
+  if (instance) {
+    log.info?.('[dkg-entry] Skipping duplicate plugin load (gateway multi-phase init)');
+    return;
+  }
 
   // Read DKG config from workspace config.json (not openclaw.json)
   let workspaceDir = api.config?.agents?.defaults?.workspace;
@@ -55,5 +63,16 @@ export default function (api) {
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
+  instance = dkg;
+
+  // Reset singleton on gateway teardown so in-process restart re-registers fresh.
+  // Listen on multiple lifecycle events — whichever the gateway version supports.
+  if (typeof api.on === 'function') {
+    const reset = () => { instance = null; };
+    for (const event of ['shutdown', 'close', 'restart', 'reload']) {
+      api.on(event, reset);
+    }
+  }
+
   log.info?.('[dkg-entry] DkgNodePlugin registered');
 }
