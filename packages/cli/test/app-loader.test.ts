@@ -399,45 +399,67 @@ describe('deriveOrigin', () => {
 describe('loadApps standalone fallback', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock('../src/config.js');
+    vi.doUnmock('node:url');
   });
 
-  it('discovers dkgApp packages from CLI deps when repoDir() is null', async () => {
+  async function createFakeCliDir(deps: Record<string, string>, nodeModules?: Record<string, { pkgJson: object; handlerCode?: string }>) {
+    const fakeCliDir = join(tmpdir(), `app-loader-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+    const fakeDistDir = join(fakeCliDir, 'dist');
+    await mkdir(fakeDistDir, { recursive: true });
+    await writeFile(join(fakeCliDir, 'package.json'), JSON.stringify({ name: 'fake-cli', dependencies: deps }));
+    if (nodeModules) {
+      for (const [name, { pkgJson, handlerCode }] of Object.entries(nodeModules)) {
+        const modDir = join(fakeCliDir, 'node_modules', ...name.split('/'));
+        await mkdir(modDir, { recursive: true });
+        await writeFile(join(modDir, 'package.json'), JSON.stringify(pkgJson));
+        if (handlerCode) await writeFile(join(modDir, 'handler.js'), handlerCode);
+      }
+    }
+    return { fakeCliDir, fakeDistDir };
+  }
+
+  async function loadAppsWithFakeDir(fakeDistDir: string) {
+    const { pathToFileURL } = await import('node:url');
     vi.resetModules();
     vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
+    vi.doMock('node:url', () => ({
+      fileURLToPath: () => join(fakeDistDir, 'app-loader.js'),
+      pathToFileURL,
+    }));
     const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
+    return loadAppsMocked;
+  }
 
-    const messages: string[] = [];
-    const apps = await loadAppsMocked(null, {}, (msg: string) => messages.push(msg));
+  it('discovers dkgApp packages from CLI deps when repoDir() is null', async () => {
+    const handlerCode = 'export default function createHandler() { return async () => false; }';
+    const { fakeCliDir, fakeDistDir } = await createFakeCliDir(
+      { 'fake-game': '*' },
+      { 'fake-game': {
+        pkgJson: { name: 'fake-game', dkgApp: { id: 'test-game', label: 'Test Game', apiHandler: './handler.js', staticDir: '.' } },
+        handlerCode,
+      }},
+    );
+    try {
+      const loadAppsMocked = await loadAppsWithFakeDir(fakeDistDir);
+      const messages: string[] = [];
+      const apps = await loadAppsMocked(null, {}, (msg: string) => messages.push(msg));
 
-    expect(apps.length).toBeGreaterThanOrEqual(1);
-    const game = apps.find(a => a.id === 'origin-trail-game');
-    expect(game).toBeDefined();
-    expect(game!.label).toBe('OriginTrail Game');
-    expect(game!.path).toBe('/apps/origin-trail-game');
-    expect(messages.some(m => m.includes('origin-trail-game'))).toBe(true);
+      expect(apps).toHaveLength(1);
+      expect(apps[0].id).toBe('test-game');
+      expect(apps[0].label).toBe('Test Game');
+      expect(apps[0].path).toBe('/apps/test-game');
+      expect(messages.some(m => m.includes('test-game'))).toBe(true);
+    } finally {
+      await rm(fakeCliDir, { recursive: true, force: true });
+    }
   });
 
   it('returns empty array when repoDir() is null and no dkgApp deps exist', async () => {
-    const fakeCliDir = join(tmpdir(), `app-loader-standalone-${Date.now()}`);
-    const fakeDistDir = join(fakeCliDir, 'dist');
+    const { fakeCliDir, fakeDistDir } = await createFakeCliDir({ commander: '^13' });
     try {
-      await mkdir(fakeDistDir, { recursive: true });
-      await writeFile(join(fakeCliDir, 'package.json'), JSON.stringify({
-        name: 'fake-cli',
-        dependencies: { commander: '^13' },
-      }));
-
-      vi.resetModules();
-      vi.doMock('../src/config.js', () => ({ repoDir: () => null }));
-      // Override fileURLToPath so loadApps resolves cliDir to our fake dir
-      const realFileURLToPath = (await import('node:url')).fileURLToPath;
-      const realPathToFileURL = (await import('node:url')).pathToFileURL;
-      vi.doMock('node:url', () => ({
-        fileURLToPath: () => join(fakeDistDir, 'app-loader.js'),
-        pathToFileURL: realPathToFileURL,
-      }));
-      const { loadApps: loadAppsMocked } = await import('../src/app-loader.js');
-
+      const loadAppsMocked = await loadAppsWithFakeDir(fakeDistDir);
       const apps = await loadAppsMocked(null, {});
       expect(apps).toEqual([]);
     } finally {
