@@ -722,7 +722,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
       }
       if (req.method === 'PUT' && reqUrl.pathname === '/api/settings/workspace-ttl') {
         try {
-          const bodyStr = await readBody(req);
+          const bodyStr = await readBody(req, SMALL_BODY_BYTES);
           const { ttlDays } = JSON.parse(bodyStr ?? '{}') as { ttlDays?: number };
           if (typeof ttlDays !== 'number' || !Number.isFinite(ttlDays) || ttlDays < 0) {
             return jsonResponse(res, 400, { error: 'ttlDays must be a finite non-negative number' });
@@ -733,6 +733,7 @@ export async function runDaemon(foreground: boolean): Promise<void> {
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
+          if (err instanceof PayloadTooLargeError) throw err;
           return jsonResponse(res, 500, { error: err.message ?? 'Failed to update workspace TTL' });
         }
       }
@@ -1226,7 +1227,7 @@ async function handleRequest(
 
   // POST /api/invoke-skill  { peerId: "...", skillUri: "...", input: "..." }
   if (req.method === 'POST' && path === '/api/invoke-skill') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(body);
@@ -1259,7 +1260,7 @@ async function handleRequest(
   // POST /api/chat  { to: "name-or-peerId", text: "..." }
   if (req.method === 'POST' && path === '/api/chat') {
     const serverT0 = Date.now();
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { to, text } = JSON.parse(body);
     if (!to || !text) return jsonResponse(res, 400, { error: 'Missing "to" or "text"' });
 
@@ -1327,7 +1328,7 @@ async function handleRequest(
   // POST /api/chat-openclaw  { peerId: "...", text: "..." }
   // Sends a message to an OpenClaw agent via P2P and waits for a response.
   if (req.method === 'POST' && path === '/api/chat-openclaw') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { peerId: rawPeerId, text } = JSON.parse(body);
     if (!rawPeerId || !text) return jsonResponse(res, 400, { error: 'Missing "peerId" or "text"' });
 
@@ -1383,7 +1384,7 @@ async function handleRequest(
   // agent.  The daemon forwards to the adapter's channel bridge server and
   // returns the agent's reply.
   if (req.method === 'POST' && path === '/api/openclaw-channel/send') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: { text?: string; correlationId?: string; identity?: string };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
@@ -1454,7 +1455,7 @@ async function handleRequest(
   // POST /api/openclaw-channel/stream  { text, correlationId, identity? }
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === 'POST' && path === '/api/openclaw-channel/stream') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: { text?: string; correlationId?: string; identity?: string };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
@@ -1560,7 +1561,7 @@ async function handleRequest(
   // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
   // using the same ChatMemoryManager pathway as built-in Agent Hub chat.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
@@ -1663,7 +1664,7 @@ async function handleRequest(
 
   // POST /api/connect  { multiaddr: "..." }
   if (req.method === 'POST' && path === '/api/connect') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { multiaddr: addr } = JSON.parse(body);
     if (!addr) return jsonResponse(res, 400, { error: 'Missing "multiaddr"' });
     await agent.connectTo(addr);
@@ -1794,7 +1795,7 @@ async function handleRequest(
 
   // POST /api/workspace/enshrine  { paranetId, selection?, clearAfter?, contextGraphId? }
   if (req.method === 'POST' && path === '/api/workspace/enshrine') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { paranetId, selection, clearAfter, contextGraphId } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
     const ctx = createOperationContext('enshrine');
@@ -1831,7 +1832,7 @@ async function handleRequest(
 
   // POST /api/context-graph/create  { participantIdentityIds: number[], requiredSignatures: number }
   if (req.method === 'POST' && path === '/api/context-graph/create') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { participantIdentityIds, requiredSignatures } = JSON.parse(body);
     if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
       return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
@@ -1903,7 +1904,7 @@ async function handleRequest(
 
   // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }
   if (req.method === 'POST' && path === '/api/query-remote') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { peerId: rawPeerId, lookupType, paranetId, ual, entityUri, rdfType, sparql, limit, timeout } = JSON.parse(body);
     if (!rawPeerId) return jsonResponse(res, 400, { error: 'Missing "peerId"' });
     if (!lookupType) return jsonResponse(res, 400, { error: 'Missing "lookupType"' });
@@ -1928,7 +1929,7 @@ async function handleRequest(
 
   // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
   if (req.method === 'POST' && path === '/api/subscribe') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { paranetId, includeWorkspace } = JSON.parse(body);
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
     const shouldSyncWorkspace = includeWorkspace !== false;
@@ -2011,7 +2012,7 @@ async function handleRequest(
 
   // POST /api/paranet/create  { id, name, description? }
   if (req.method === 'POST' && path === '/api/paranet/create') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     await agent.createParanet({ id, name, description });
@@ -2036,7 +2037,7 @@ async function handleRequest(
 
   // POST /api/register-adapter — adapter self-registers so UI can detect it
   if (req.method === 'POST' && path === '/api/register-adapter') {
-    const body = await readBody(req);
+    const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     const { id } = parsed;
@@ -2251,7 +2252,8 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
   res.end(JSON.stringify(data));
 }
 
-const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
+const SMALL_BODY_BYTES = 256 * 1024; // 256 KB — for settings, connect, chat, and other small payloads
 
 class PayloadTooLargeError extends Error {
   constructor(maxBytes: number) {
@@ -2265,18 +2267,22 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
     const chunks: Buffer[] = [];
     let total = 0;
     let rejected = false;
-    req.on('data', (c: Buffer) => {
+    const onData = (c: Buffer) => {
       if (rejected) return;
       total += c.length;
       if (total > maxBytes) {
         rejected = true;
+        req.removeListener('data', onData);
+        req.resume();
+        req.destroy();
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
       chunks.push(c);
-    });
+    };
+    req.on('data', onData);
     req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
-    req.on('error', reject);
+    req.on('error', (err) => { if (!rejected) reject(err); });
   });
 }
 
