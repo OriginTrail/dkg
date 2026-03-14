@@ -241,15 +241,17 @@ export class DkgChannelPlugin {
       for (let i = 0; i < 20; i++) {
         const candidate = join(dir, 'node_modules', 'openclaw', 'package.json');
         if (existsSync(candidate)) {
-          this.sdk = createRequire(candidate)('openclaw/plugin-sdk');
-          log?.info?.('[dkg-channel] Loaded plugin-sdk via node_modules walk');
-          return this.sdk;
+          try {
+            this.sdk = createRequire(candidate)('openclaw/plugin-sdk');
+            log?.info?.('[dkg-channel] Loaded plugin-sdk via node_modules walk');
+            return this.sdk;
+          } catch { /* broken install — keep walking */ }
         }
         const parent = dirname(dir);
         if (parent === dir) break; // reached filesystem root
         dir = parent;
       }
-    } catch { /* walk failed */ }
+    } catch { /* walk setup failed (e.g. fileURLToPath) */ }
 
     log?.warn?.('[dkg-channel] Could not load openclaw/plugin-sdk — using direct runtime dispatch');
     return this.sdk;
