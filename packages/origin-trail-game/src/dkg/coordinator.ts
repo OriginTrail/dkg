@@ -1610,7 +1610,18 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
-    if (swarm.pendingProposal?.hash === msg.proposalHash) return;
+    if (swarm.pendingProposal?.hash === msg.proposalHash) {
+      await this.broadcast({
+        app: proto.APP_ID,
+        type: 'turn:approve',
+        swarmId: swarm.id,
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        turn: msg.turn,
+        proposalHash: msg.proposalHash,
+      } as proto.TurnApproveMsg);
+      return;
+    }
 
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
