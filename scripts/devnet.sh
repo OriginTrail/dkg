@@ -76,9 +76,10 @@ start_hardhat() {
 
   cd "$REPO_ROOT/packages/evm-module"
 
-  # Remove stale deployment artifacts so the fresh chain starts clean
+  # Remove stale deployment artifacts + marker so the fresh chain starts clean
   rm -f "$REPO_ROOT/packages/evm-module/deployments/hardhat_contracts.json"
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
+  rm -f "$DEVNET_DIR/hardhat/deployed"
 
   npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
