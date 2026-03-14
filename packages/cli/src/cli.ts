@@ -207,9 +207,6 @@ program
       existingAuthEnabled ? 'y' : 'n',
     )).toLowerCase() === 'y';
 
-    console.log('\nOperational wallets are stored in ~/.dkg/wallets.json');
-    console.log('They are auto-generated on first start. You can edit the file to add your own keys.');
-
     rl.close();
 
     const config = {
@@ -224,6 +221,11 @@ program
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
     };
     await saveConfig(config);
+
+    // Generate wallets eagerly so they're available for faucet funding
+    const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
+    const opWallets = await loadOpWallets(dkgDir());
+    const walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
 
     console.log(`\nConfig saved to ${configPath()}`);
     console.log(`  name:       ${config.name}`);
@@ -247,6 +249,52 @@ program
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
+    console.log(`  wallets:    ${walletAddresses.length ? walletAddresses.join(', ') : '(none)'}`);
+
+    // Auto-fund from testnet faucet if available
+    if (network?.faucet?.url && walletAddresses.length > 0) {
+      console.log(`\nRequesting testnet tokens from faucet...`);
+      try {
+        const res = await fetch(network.faucet.url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `init-${config.name}-${Date.now()}`,
+          },
+          body: JSON.stringify({
+            mode: network.faucet.mode,
+            wallets: walletAddresses.slice(0, 3),
+            callerId: `dkg-node:${config.name}`,
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (res.ok) {
+          const data = await res.json() as {
+            summary?: { success?: number; failed?: number };
+            results?: { chainId: string; amount: string; status: string }[];
+          };
+          const success = data.summary?.success ?? 0;
+          if (success > 0) {
+            const amounts = (data.results ?? [])
+              .filter(r => r.status === 'success')
+              .map(r => {
+                const label = r.chainId.includes('eth') ? 'ETH' : 'TRAC';
+                return `${r.amount} ${label}`;
+              });
+            console.log(`  Funded: ${amounts.join(', ')}`);
+          } else {
+            console.log('  Faucet returned no successful transactions (you may already have tokens or hit a cooldown).');
+          }
+        } else {
+          const text = await res.text().catch(() => '');
+          console.log(`  Faucet request failed (HTTP ${res.status}). Fund manually or retry later.`);
+          if (text) console.log(`  ${text.slice(0, 200)}`);
+        }
+      } catch (err: any) {
+        console.log(`  Faucet unavailable: ${err?.message ?? String(err)}. Fund your wallet manually.`);
+      }
+    }
+
     console.log(`\nRun "dkg start" to start the node.`);
   });
 
