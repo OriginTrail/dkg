@@ -1116,8 +1116,10 @@ export function isValidOpenClawPersistTurnPayload(payload: {
     && typeof payload.assistantReply === 'string';
 }
 
+let _standaloneCache: boolean | null = null;
 function resolveAutoUpdateEnabled(config: DkgConfig): boolean {
-  return isStandaloneInstall() ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false);
+  if (_standaloneCache === null) _standaloneCache = isStandaloneInstall();
+  return _standaloneCache ? (config.autoUpdate?.enabled !== false) : (config.autoUpdate?.enabled ?? false);
 }
 
 async function handleRequest(
