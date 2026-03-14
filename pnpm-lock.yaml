@@ -94,12 +94,6 @@ importers:
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
-      '@origintrail-official/dkg-core':
-        specifier: workspace:*
-        version: link:../core
-      '@origintrail-official/dkg-storage':
-        specifier: workspace:*
-        version: link:../storage
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -135,9 +129,6 @@ importers:
       '@noble/curves':
         specifier: ^2
         version: 2.0.1
-      '@noble/ed25519':
-        specifier: ^3
-        version: 3.0.0
       '@noble/hashes':
         specifier: ^2
         version: 2.0.1
@@ -172,9 +163,6 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@origintrail-official/dkg-storage':
-        specifier: workspace:*
-        version: link:../storage
       protobufjs:
         specifier: ^8.0.0
         version: 8.0.0
@@ -188,9 +176,6 @@ importers:
 
   packages/chain:
     dependencies:
-      '@origintrail-official/dkg-core':
-        specifier: workspace:*
-        version: link:../core
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -289,12 +274,6 @@ importers:
       '@noble/hashes':
         specifier: ^2
         version: 2.0.1
-      it-length-prefixed:
-        specifier: ^10.0.1
-        version: 10.0.1
-      it-pipe:
-        specifier: ^3.0.1
-        version: 3.0.1
       libp2p:
         specifier: ^3
         version: 3.1.3
@@ -304,9 +283,6 @@ importers:
       rdf-canonize:
         specifier: ^5.0.0
         version: 5.0.0
-      uint8arrays:
-        specifier: ^5
-        version: 5.1.0
     devDependencies:
       vitest:
         specifier: ^3.2.4
@@ -640,12 +616,6 @@ importers:
       ethers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
-      n3:
-        specifier: ^2
-        version: 2.0.1
-      rdf-canonize:
-        specifier: ^5
-        version: 5.0.0
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -675,9 +645,6 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      n3:
-        specifier: ^2
-        version: 2.0.1
       oxigraph:
         specifier: ^0.5
         version: 0.5.5

@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { computePrivateRoot } from './merkle.js';
+import { parseSimpleNQuads } from './publish-handler.js';
 
 export interface AccessResult {
   granted: boolean;
@@ -90,27 +91,6 @@ export class AccessClient {
       verified,
     };
   }
-}
-
-function parseSimpleNQuads(text: string): Quad[] {
-  const quads: Quad[] = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-
-    const match = trimmed.match(
-      /^<([^>]+)>\s+<([^>]+)>\s+(".*?"(?:@\S+|\^\^<[^>]+>)?|<[^>]+>|_:\S+)\s+(?:<([^>]+)>\s+)?\.$/,
-    );
-    if (match) {
-      quads.push({
-        subject: match[1],
-        predicate: match[2],
-        object: match[3].startsWith('<') ? match[3].slice(1, -1) : match[3],
-        graph: match[4] ?? '',
-      });
-    }
-  }
-  return quads;
 }
 
 function toHex(bytes: Uint8Array): string {

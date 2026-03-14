@@ -16,9 +16,7 @@
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@multiformats/multiaddr": "^13.0.1",
-    "ethers": "^6.16.0",
-    "n3": "^2",
-    "rdf-canonize": "^5"
+    "ethers": "^6.16.0"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
