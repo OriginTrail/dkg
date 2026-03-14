@@ -25,7 +25,7 @@ fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo "  ✗ $1"; }
 api() {
   local node="$1" method="$2" path="$3"
   shift 3
-  curl -sf -X "$method" \
+  curl -sf --connect-timeout 5 --max-time 30 -X "$method" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     "$node$path" "$@" 2>/dev/null
@@ -62,8 +62,10 @@ fi
 echo ""
 echo "Phase 2: Create swarm and fill roster"
 
-SWARM_JSON=$(api "$NODE1" POST "$APP/create" \
-  -d '{"playerName":"Alice","swarmName":"CAS-Test-Swarm","maxPlayers":3}')
+if ! SWARM_JSON=$(api "$NODE1" POST "$APP/create" \
+  -d '{"playerName":"Alice","swarmName":"CAS-Test-Swarm","maxPlayers":3}'); then
+  fail "Create swarm request failed"; echo ""; echo "Results: $PASS passed, $FAIL failed, $TOTAL total"; exit 1
+fi
 SWARM_ID=$(swarm_field id "$SWARM_JSON")
 
 if [[ -z "$SWARM_ID" ]]; then
@@ -98,7 +100,7 @@ wait "$J1" || true
 wait "$J2" || true
 sleep 3
 
-SWARM_STATE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID")
+SWARM_STATE=$(api "$NODE1" GET "$APP/swarm/$SWARM_ID" || echo '{}')
 PLAYER_COUNT=$(swarm_field playerCount "$SWARM_STATE")
 STATUS=$(swarm_field status "$SWARM_STATE")
 

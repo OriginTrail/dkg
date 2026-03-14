@@ -2062,18 +2062,22 @@ export class OriginTrailGameCoordinator {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
       try {
-        const publishPromise = this.agent.gossip.publish(this.topic, data);
+        const publishPromise = this.agent.gossip.publish(this.topic, data)
+          .then(() => { settled = true; });
         const timeout = new Promise<void>((_, reject) => {
           timer = setTimeout(() => reject(new Error('publish timeout')), 5_000);
         });
         await Promise.race([publishPromise, timeout]);
         return;
       } catch (err: any) {
+        if (settled) return;
         if (attempt < maxAttempts) {
           const delay = 500 * Math.pow(2, attempt - 1);
           this.log(`Broadcast ${msg.type} attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`);
           await new Promise(r => setTimeout(r, delay));
+          if (settled) return;
         } else {
           this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
         }
