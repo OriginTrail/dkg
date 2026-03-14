@@ -144,7 +144,7 @@ To join the DKG V9 Testnet, the relay address is pre-configured in the repo. See
 
 ```typescript
 settings: {
-  DKG_RELAY_PEERS: '/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5mFVpR6sDyGPsNoUVd4jqWqrQXnWicZcfxBZNXYLK',
+  DKG_RELAY_PEERS: '/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj',
 }
 ```
 

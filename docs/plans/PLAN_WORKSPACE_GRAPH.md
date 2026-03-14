@@ -1,8 +1,10 @@
 # Plan: Workspace Graph (No-Finality Build Area)
 
-**Status**: Draft  
+**Status**: Implemented  
 **Date**: 2026-02  
 **Goal**: Let agents build knowledge graphs collaboratively **without** blockchain cost or finality complexity, then **enshrine** (publish with finality) when ready. Reduces friction for pipelines (e.g. Guardian ETL) that need to query intermediate graphs while building.
+
+> **Implementation note (2026-03):** All core workspace features are implemented: `writeToWorkspace`, `writeConditionalToWorkspace` (CAS), `enshrineFromWorkspace`, workspace graph/metadata graphs, GossipSub replication on the workspace topic, workspace sync on peer connect, query options (`graphSuffix: '_workspace'`, `includeWorkspace: true`), entity exclusivity (Rule 4) in workspace, and workspace TTL/eviction. The OriginTrail game and other components actively use workspace writes. See `packages/publisher/src/dkg-publisher.ts`, `packages/publisher/src/workspace-handler.ts`, and `packages/agent/src/dkg-agent.ts`.
 
 ---
 
@@ -251,16 +253,16 @@ Workspace replication is **the same model** as for the data graph: GossipSub, al
 
 ---
 
-## 12. Implementation Order (Suggested)
+## 12. Implementation Checklist
 
-1. **Constants + GraphManager**: Add workspace and workspace_meta graph URIs and workspace topic; create both graphs in `ensureParanet`.
-2. **Proto**: Define workspace publish message and encoder/decoder.
-3. **Publisher.writeToWorkspace**: Validate, insert into workspace + workspace_meta, broadcast on workspace topic.
-4. **Workspace handler**: Subscribe to workspace topic; on message, validate and store to workspace + workspace_meta (same as receiver side of “publish”).
-5. **Agent / node**: On paranet subscribe, subscribe to both publish and workspace topics; register workspace handler.
-6. **Query**: Add `graphSuffix` / `includeWorkspace` and wire to workspace graph URI.
-7. **Publisher.enshrineFromWorkspace**: Read from workspace graph, call existing publish (data graph + chain + publish topic).
-8. **Sync (optional v1)**: Extend paranet sync to include workspace (and workspace_meta) so new nodes get workspace state.
-9. **Docs + tests**: Update specs and add tests for write → replicate → query → enshrine.
+1. ✅ **Constants + GraphManager**: `paranetWorkspaceGraphUri`, `paranetWorkspaceMetaGraphUri`, `paranetWorkspaceTopic` in `packages/core/src/constants.ts`. `ensureParanet` creates workspace and workspace_meta graphs.
+2. ✅ **Proto**: `WorkspacePublishRequest` message in `packages/core/src/proto/workspace.ts`.
+3. ✅ **Publisher.writeToWorkspace**: Validate, insert into workspace + workspace_meta, broadcast on workspace topic. See `packages/publisher/src/dkg-publisher.ts`.
+4. ✅ **Workspace handler**: `WorkspaceHandler` in `packages/publisher/src/workspace-handler.ts`. Includes CAS condition enforcement and per-entity write locks.
+5. ✅ **Agent / node**: `DKGAgent` subscribes to both publish and workspace topics; exposes `writeToWorkspace`, `writeConditionalToWorkspace`, `enshrineFromWorkspace`.
+6. ✅ **Query**: `graphSuffix: '_workspace'` and `includeWorkspace: true` options in `DKGQueryEngine`.
+7. ✅ **Publisher.enshrineFromWorkspace**: Read from workspace graph, call existing publish flow.
+8. ✅ **Sync**: Workspace and workspace_meta included in paranet sync on peer connect.
+9. ✅ **Tests**: Coverage in `packages/publisher/test/workspace.test.ts`, `packages/agent/test/e2e-workspace.test.ts`, `packages/agent/test/e2e-workspace-sync.test.ts`, and `packages/agent/test/workspace-consistency.test.ts`.
 
 No change to existing publish flow or to chain adapter.

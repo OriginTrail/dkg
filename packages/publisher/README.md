@@ -21,16 +21,29 @@ Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowle
 ```typescript
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 
-const publisher = new DKGPublisher(agent);
+const publisher = new DKGPublisher(config);
 
+// Publish a Knowledge Collection
 const result = await publisher.publish({
   paranetId: 'urn:paranet:example',
-  nquads: myTriples,
-  private: ['urn:entity:secret'],
-  epochs: 2,
+  quads: myTriples,
+  privateQuads: sensitiveTriples,
+  accessPolicy: 'ownerOnly',
+});
+console.log('Published KC:', result.ual);
+
+// Write to workspace (feeless staging)
+await publisher.writeToWorkspace('urn:paranet:example', quads, {
+  publisherPeerId: agent.peerId,
 });
 
-console.log('Published KC:', result.ual);
+// Conditional write with Compare-and-Swap
+await publisher.writeConditionalToWorkspace('urn:paranet:example', quads, {
+  publisherPeerId: agent.peerId,
+  conditions: [
+    { subject: 'urn:entity:1', predicate: 'urn:status', expectedValue: '"pending"' },
+  ],
+});
 ```
 
 ## Internal Dependencies

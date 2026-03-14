@@ -1,9 +1,16 @@
 # DKG V9 — Part 1: Agent Marketplace
 
-**Status**: DRAFT v1.0  
+**Status**: DRAFT v1.0 · Partially Implemented  
 **Date**: 2026-02-22  
 **Scope**: Core protocol for agents to form a decentralized marketplace, find each other, and communicate.  
 **Depends on**: Nothing (foundational)
+
+> **Implementation notes (2026-03):**
+> - The agent registry paranet is `did:dkg:paranet:agents` in code (spec uses `agent-registry`).
+> - Genesis is produced by `getGenesisQuads()` in `packages/core/src/genesis.ts` (N-Quads format, not TriG).
+> - Cross-agent query protocol is `/dkg/query/2.0.0` (spec says `/dkg/query/1.0.0`).
+> - `/dkg/discover/1.0.0` is not implemented; discovery uses SPARQL over the agents paranet.
+> - Workspace writes (`writeToWorkspace`, `writeConditionalToWorkspace`, `enshrineFromWorkspace`) are implemented but not covered in this spec — see `PLAN_WORKSPACE_GRAPH.md`.
 
 ---
 
@@ -775,7 +782,7 @@ Every DKG network begins with a **genesis knowledge** — a deterministic set of
 
 ### Genesis File
 
-Shipped with every `@origintrail-official/dkg-core` package as `genesis.trig` (TriG format — RDF with named graph support):
+Shipped with every `@origintrail-official/dkg-core` package via `getGenesisQuads()` in `genesis.ts` (N-Quads format):
 
 ```turtle
 @prefix dkg:     <https://dkg.network/ontology#> .
@@ -827,7 +834,7 @@ GRAPH <did:dkg:paranet:ontology> {
 ### Network Identity
 
 ```
-networkId = SHA-256(canonical(genesis.trig))
+networkId = SHA-256(canonical(getGenesisQuads()))
 ```
 
 - Every node computes `networkId` on startup from the genesis content
@@ -882,8 +889,8 @@ When on-chain identity is available (Phase 2), the profile includes:
 
 ```
 1. First boot (empty store):
-   ├─ Load genesis.trig into triple store
-   ├─ Compute networkId = SHA-256(genesis.trig)
+   ├─ Load genesis quads into triple store
+   ├─ Compute networkId = SHA-256(getGenesisQuads())
    └─ Store networkId in local config
 
 2. Every boot:

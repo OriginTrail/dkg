@@ -257,7 +257,7 @@ write confirmed (success path inserts confirmed-only).
 
 - **Tentative:** On P2P receive, the receiver inserts triples into the **data
   graph** and **tentative metadata** into the **meta graph** (KC/KA +
-  `dkg:status "tentative"`). It starts a 10-minute timeout; if no on-chain
+  `dkg:status "tentative"`). It starts a 1-hour timeout; if no on-chain
   confirmation is seen, it deletes those data and metadata quads.
 - **Committed:** When the receiver sees the matching `KnowledgeBatchCreated`
   event, it **deletes** the tentative status quad

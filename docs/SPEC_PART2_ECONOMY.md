@@ -1,9 +1,15 @@
 # DKG V9 — Part 2: Agent Economy & Self-Sustaining Network
 
-**Status**: DRAFT v1.0  
+**Status**: DRAFT v1.0 · Partially Implemented  
 **Date**: 2026-02-22  
 **Scope**: Payments, delegation, rewards, marketplace pricing, multi-chain, self-governance.  
 **Depends on**: Part 1 (Agent Marketplace)
+
+> **Implementation notes (2026-03):**
+> - Trust-layer contracts (FairSwapJudge, PublishingConvictionAccount, Staking) are implemented in `packages/evm-module/`.
+> - `EVMChainAdapter` supports `batchMintKnowledgeAssets`, `initiatePurchase`, and conviction methods.
+> - Economy features (Macaroons, x402 payment channels, relay rewards) are deferred.
+> - The `@origintrail-official/dkg-access` package referenced here does not exist; access control is in `packages/publisher/`.
 
 ---
 

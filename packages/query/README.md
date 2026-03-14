@@ -17,9 +17,15 @@ import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 
 const engine = new DKGQueryEngine(store);
 
-const results = await engine.query({
-  sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
+const results = await engine.query(
+  'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
+  { paranetId: 'urn:paranet:example' },
+);
+
+// Query workspace data
+const wsResults = await engine.query(sparql, {
   paranetId: 'urn:paranet:example',
+  includeWorkspace: true,
 });
 ```
 
