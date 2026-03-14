@@ -2264,12 +2264,18 @@ export class OriginTrailGameCoordinator {
   }
 
   private onRemoteChatMessage(msg: proto.ChatMsg): void {
+    if (typeof msg.id !== 'string' || !msg.id) return;
+    if (typeof msg.message !== 'string' || msg.message.trim().length === 0) return;
     if (this.chatMessages.some(m => m.id === msg.id)) return;
+    const message = msg.message.trim().slice(0, 200);
+    const displayName = (typeof msg.displayName === 'string' && msg.displayName.trim())
+      ? msg.displayName.trim().slice(0, 50)
+      : msg.peerId?.slice(0, 8) ?? 'unknown';
     this.chatMessages.push({
       id: msg.id,
       peerId: msg.peerId,
-      displayName: msg.displayName,
-      message: msg.message,
+      displayName,
+      message,
       timestamp: msg.timestamp,
     });
     if (this.chatMessages.length > OriginTrailGameCoordinator.MAX_CHAT_MESSAGES) {

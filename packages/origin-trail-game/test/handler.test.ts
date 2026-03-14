@@ -3392,6 +3392,54 @@ describe('Leaderboard deduplication', () => {
   });
 });
 
+describe('/chat API handler validation', () => {
+  it('POST /chat rejects empty message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: '   ', displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(400);
+    expect(JSON.parse(mock.body).error).toContain('empty');
+  });
+
+  it('POST /chat rejects oversized message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const longMessage = 'x'.repeat(201);
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: longMessage, displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(400);
+    expect(JSON.parse(mock.body).error).toContain('200');
+  });
+
+  it('POST /chat accepts valid 200-char message', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+    const message = 'a'.repeat(200);
+    const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message, displayName: 'Alice' });
+    const mock = createMockRes();
+    await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+    expect(mock.status).toBe(200);
+    const body = JSON.parse(mock.body);
+    expect(body.message).toBe(message);
+    expect(body.displayName).toBe('Alice');
+  });
+
+  it('GET /chat clamps invalid limit', async () => {
+    const agent = makeMockAgent('chat-api-peer');
+    const handler = createHandler(agent, { paranets: ['test'] });
+
+    for (const invalidLimit of ['-5', '0', 'NaN', '999']) {
+      const req = createMockReq('GET', `/api/apps/origin-trail-game/chat?limit=${invalidLimit}`);
+      const mock = createMockRes();
+      await handler(req, mock.res, new URL(req.url, 'http://localhost'));
+      expect(mock.status).toBe(200);
+    }
+  });
+});
+
 describe('Lobby chat', () => {
   it('chat message round-trip via coordinator', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
@@ -3430,5 +3478,53 @@ describe('Lobby chat', () => {
     const limited = coordinator.getChatMessages(1);
     expect(limited.length).toBe(1);
     expect(limited[0].displayName).toBe('Bob');
+  });
+
+  it('drops remote chat messages with invalid or empty fields', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-val-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-val-test' });
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-val-test/app')![0];
+
+    handle('dkg/paranet/chat-val-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'bad-peer', timestamp: Date.now(),
+      id: '', displayName: 'X', message: 'no id',
+    } as any), 'bad-peer');
+
+    handle('dkg/paranet/chat-val-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'bad-peer', timestamp: Date.now(),
+      id: 'msg-2', displayName: 'X', message: '   ',
+    } as any), 'bad-peer');
+
+    await new Promise(r => setTimeout(r, 50));
+    expect(coordinator.getChatMessages().length).toBe(0);
+  });
+
+  it('truncates oversized remote chat messages', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const { encode } = await import('../src/dkg/protocol.js');
+
+    const agent = makeMockAgent('chat-trunc-peer');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-trunc-test' });
+
+    const handle = agent._messageHandlers.get('dkg/paranet/chat-trunc-test/app')![0];
+    const longMsg = 'a'.repeat(500);
+    const longName = 'b'.repeat(100);
+    handle('dkg/paranet/chat-trunc-test/app', encode({
+      app: 'origin-trail-game', type: 'chat:message', swarmId: 'lobby',
+      peerId: 'trunc-peer', timestamp: Date.now(),
+      id: 'trunc-1', displayName: longName, message: longMsg,
+    } as any), 'trunc-peer');
+
+    await new Promise(r => setTimeout(r, 50));
+    const msgs = coordinator.getChatMessages();
+    expect(msgs.length).toBe(1);
+    expect(msgs[0].message.length).toBe(200);
+    expect(msgs[0].displayName.length).toBe(50);
   });
 });

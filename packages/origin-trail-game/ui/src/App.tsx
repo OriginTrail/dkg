@@ -542,7 +542,8 @@ export function App() {
           {(() => {
             const activeSwarms = (lobby?.mySwarms ?? []).filter((w: any) => {
               if (w.status !== 'finished') return true;
-              const lastActivity = w.lastTurn?.timestamp ?? w.createdAt ?? 0;
+              const lastActivity = w.lastTurn?.timestamp ?? w.createdAt;
+              if (!lastActivity) return true;
               return Date.now() - lastActivity < 3600000;
             });
             return activeSwarms.length ? activeSwarms.map((w: any) => (
