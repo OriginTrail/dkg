@@ -3368,6 +3368,20 @@ describe('getLobby stale finished swarms', () => {
     expect(mySwarmIds).toContain(freshSwarm.id);
     expect(mySwarmIds).not.toContain(staleSwarm.id);
   });
+
+  it('falls back to turnHistory timestamp when finishedAt is missing', async () => {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+
+    const agent = makeMockAgent('lobby-fallback');
+    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'fallback-test' });
+
+    const recentSwarm = await coordinator.createSwarm('Alice', 'RecentSwarm', 3);
+    recentSwarm.status = 'finished';
+    recentSwarm.turnHistory = [{ turn: 1, winningAction: 'advance', resultMessage: '', approvers: [], votes: [], resolution: 'consensus', deaths: [], timestamp: Date.now() - 10 * 60 * 1000 }];
+
+    const lobby = coordinator.getLobby();
+    expect(lobby.mySwarms.map(s => s.id)).toContain(recentSwarm.id);
+  });
 });
 
 describe('Leaderboard deduplication', () => {

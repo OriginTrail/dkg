@@ -1891,7 +1891,9 @@ export class OriginTrailGameCoordinator {
     for (const swarm of this.swarms.values()) {
       if (swarm.players.some(p => p.peerId === this.myPeerId)) {
         if (swarm.status === 'finished') {
-          const relevantTs = swarm.finishedAt ?? swarm.createdAt;
+          const relevantTs = swarm.finishedAt
+            ?? swarm.turnHistory[swarm.turnHistory.length - 1]?.timestamp
+            ?? now;
           if (now - relevantTs > OriginTrailGameCoordinator.FINISHED_SWARM_DISPLAY_TTL_MS) continue;
         }
         mySwarms.push(swarm);
