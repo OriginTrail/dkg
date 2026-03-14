@@ -100,6 +100,10 @@ export class DKGNode {
       pubsub: gossipsub({
         emitSelf: false,
         allowPublishToZeroTopicPeers: true,
+        floodPublish: true,
+        D: 4,
+        Dlo: 2,
+        Dhi: 8,
       }),
       dcutr: dcutr(),
     };

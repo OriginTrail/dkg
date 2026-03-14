@@ -216,8 +216,8 @@ export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
   readonly paranetId: string;
   private readonly topic: string;
-  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 5_000;
-  private static readonly GRAPH_SYNC_INTERVAL_MS = 20_000;
+  private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 2_000;
+  private static readonly GRAPH_SYNC_INTERVAL_MS = 10_000;
   private static readonly GRAPH_SYNC_ERROR_LOG_INTERVAL_MS = 120_000;
   private swarms = new Map<string, SwarmState>();
   private subscribed = false;
@@ -1611,6 +1611,44 @@ export class OriginTrailGameCoordinator {
       return;
     }
 
+    if (swarm.pendingProposal?.hash === msg.proposalHash) {
+      const pp = swarm.pendingProposal;
+      if (
+        msg.winningAction !== pp.winningAction ||
+        msg.resolution !== pp.resolution ||
+        (msg.merkleRoot ?? null) !== (pp.merkleRoot ? (typeof pp.merkleRoot === 'string' ? pp.merkleRoot : ethers.hexlify(pp.merkleRoot)) : null)
+      ) {
+        this.log(`Duplicate proposal hash but mismatched fields for ${msg.swarmId} turn ${msg.turn} — rejecting`);
+        return;
+      }
+      let mySig = pp.participantSignatures.get(this.myPeerId);
+      if (!mySig && swarm.contextGraphId != null && pp.merkleRoot && this.agent.identityId > 0n) {
+        try {
+          const merkleRootBytes = typeof pp.merkleRoot === 'string'
+            ? ethers.getBytes(pp.merkleRoot)
+            : pp.merkleRoot!;
+          const sig = await this.agent.signContextGraphDigest(
+            BigInt(swarm.contextGraphId), merkleRootBytes,
+          );
+          pp.participantSignatures.set(this.myPeerId, sig);
+          mySig = sig;
+        } catch { /* signing retry failed, send approval without signature */ }
+      }
+      await this.broadcast({
+        app: proto.APP_ID,
+        type: 'turn:approve',
+        swarmId: swarm.id,
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        turn: msg.turn,
+        proposalHash: msg.proposalHash,
+        identityId: mySig ? String(mySig.identityId) : undefined,
+        signatureR: mySig ? ethers.hexlify(mySig.r) : undefined,
+        signatureVS: mySig ? ethers.hexlify(mySig.vs) : undefined,
+      } as proto.TurnApproveMsg);
+      return;
+    }
+
     const resolution = msg.resolution ?? 'consensus';
     const votes = msg.votes ?? swarm.votes.map(v => ({ peerId: v.peerId, action: v.action }));
     const deaths = msg.deaths ?? [];
@@ -2060,15 +2098,40 @@ export class OriginTrailGameCoordinator {
 
   // ── Utilities ─────────────────────────────────────────────────────
 
+  private static readonly CRITICAL_MSG_TYPES = new Set([
+    'swarm:created', 'swarm:joined', 'expedition:launched',
+    'turn:proposal', 'turn:approve', 'turn:resolved',
+  ]);
+
   private async broadcast(msg: proto.OTMessage): Promise<void> {
-    try {
-      const publishPromise = this.agent.gossip.publish(this.topic, proto.encode(msg));
-      const timeout = new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('publish timeout')), 5_000),
-      );
-      await Promise.race([publishPromise, timeout]);
-    } catch (err: any) {
-      this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+    const data = proto.encode(msg);
+    const isCritical = OriginTrailGameCoordinator.CRITICAL_MSG_TYPES.has(msg.type);
+    const maxAttempts = isCritical ? 3 : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      try {
+        const publishPromise = this.agent.gossip.publish(this.topic, data)
+          .then(() => { settled = true; });
+        const timeout = new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('publish timeout')), 5_000);
+        });
+        await Promise.race([publishPromise, timeout]);
+        return;
+      } catch (err: any) {
+        if (settled) return;
+        if (attempt < maxAttempts) {
+          const delay = 500 * Math.pow(2, attempt - 1);
+          this.log(`Broadcast ${msg.type} attempt ${attempt}/${maxAttempts} failed, retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          if (settled) return;
+        } else {
+          this.log(`Broadcast failed: ${err.message ?? 'no peers'}`);
+        }
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
   }
 
