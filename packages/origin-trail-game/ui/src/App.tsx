@@ -730,12 +730,12 @@ function GameStateDisplay({ state, leaderName }: { state: any; leaderName?: stri
   return (
     <div className="ot-game-state">
       <div className="ot-stats">
-        <div><label>Epochs <Tooltip text={`Training epochs completed. Reach ${MAX_EPOCHS} to achieve AGI.`} /></label><span>{state.epochs} / {MAX_EPOCHS}</span></div>
-        <div><label>Tokens <Tooltip text="Training tokens fuel your AI models. Running out damages your party." /></label><span>{state.trainingTokens}</span></div>
-        <div><label>API Credits <Tooltip text="Used for advanced operations and skill upgrades." /></label><span>{state.apiCredits}</span></div>
-        <div><label>GPUs <Tooltip text="Compute units power your training runs. More GPUs = faster progress." /></label><span>{state.computeUnits}</span></div>
-        <div><label>TRAC <Tooltip text="OriginTrail tokens used for publishing knowledge to the DKG." /></label><span>{state.trac}</span></div>
-        <div><label>Date <Tooltip text="Current position on the AI Frontier timeline." /></label><span>Epoch {state.epochs}</span></div>
+        <div><label>Epochs <Tooltip text={`Your progress toward AGI. Reach ${MAX_EPOCHS} to win. Each 'Advance' gains epochs based on intensity. Arriving at landmarks along the route grants bonuses.`} /></label><span>{state.epochs} / {MAX_EPOCHS}</span></div>
+        <div><label>Tokens <Tooltip text="Training tokens fuel every action your swarm takes. Advancing costs 5 per alive member, upgrading costs 3 per member. If tokens hit zero, all members take 20 damage — which can be fatal. Buy more at DKG Hubs or gamble on Upgrade Skills for a random gain." /></label><span>{state.trainingTokens}</span></div>
+        <div><label>API Credits <Tooltip text="Spent 1 per 'Upgrade Skills' action, which gambles for a random training token payout (0–99). Each credit is worth 10 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.apiCredits}</span></div>
+        <div><label>GPUs <Tooltip text="You need at least 1 GPU to advance. Can be lost when failing a bottleneck challenge. Each GPU is worth 50 points in your final score. Buy more at DKG Hubs with TRAC." /></label><span>{state.computeUnits}</span></div>
+        <div><label>TRAC <Tooltip text="OriginTrail tokens — the universal currency. Spent on 'Sync Memory' (5 TRAC, heals party +10 HP each), paying tolls at bottlenecks, and buying resources at DKG Hubs. Each TRAC counts toward your final score." /></label><span>{state.trac}</span></div>
+        <div><label>Date <Tooltip text="Time advances with each action (1–2 days). If you pass November (month 11) without reaching AGI, the expedition fails. Winning before October gives a score bonus." /></label><span>Epoch {state.epochs}</span></div>
       </div>
       <div className="ot-trail-bar">
         <div className="ot-trail-fill" style={{ width: `${Math.min(100, (state.epochs / MAX_EPOCHS) * 100)}%` }} />
