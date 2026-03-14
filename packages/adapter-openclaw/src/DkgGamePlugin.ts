@@ -700,7 +700,7 @@ export class DkgGamePlugin {
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private watchState: { swarmId: string; mode: 'wait-for-start' | 'wait-for-full' } | null = null;
   private watchEpoch = 0;
-  private watchTickInProgress = false;
+  private watchTickInProgressEpoch: number | null = null;
 
   constructor(
     private readonly client: DkgDaemonClient,
@@ -818,9 +818,9 @@ export class DkgGamePlugin {
   }
 
   private async watchTick(epoch: number): Promise<void> {
-    if (this.watchTickInProgress) return; // Prevent overlapping ticks
+    if (this.watchTickInProgressEpoch === epoch) return; // Prevent same-epoch overlap
     if (epoch !== this.watchEpoch || !this.watchState || !this.gameClient) return;
-    this.watchTickInProgress = true;
+    this.watchTickInProgressEpoch = epoch;
     try {
       const { swarmId, mode } = this.watchState;
 
@@ -885,7 +885,9 @@ export class DkgGamePlugin {
         }
       }
     } finally {
-      this.watchTickInProgress = false;
+      if (this.watchTickInProgressEpoch === epoch) {
+        this.watchTickInProgressEpoch = null;
+      }
     }
   }
 
@@ -1064,6 +1066,8 @@ export class DkgGamePlugin {
                 const state = await this.gameClient!.getSwarm(swarmId);
                 if (state.status === 'recruiting' && state.playerCount < state.maxPlayers) {
                   return this.json({
+                    started: false,
+                    blocked: 'lobby_not_full',
                     warning: `Lobby has ${state.playerCount}/${state.maxPlayers} players. ` +
                       'The background watcher will auto-start when full. ' +
                       'If you really want to start now, call game_start with force: true.',

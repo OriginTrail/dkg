@@ -1079,7 +1079,8 @@ describe('game_start lobby guard', () => {
       const startTool = api.tools.find(t => t.name === 'game_start')!;
       const result = await startTool.execute('test', { swarm_id: 'sw-1' });
       const parsed = JSON.parse(result.content[0].text);
-      expect(parsed.warning).toBeDefined();
+      expect(parsed.started).toBe(false);
+      expect(parsed.blocked).toBe('lobby_not_full');
       expect(parsed.warning).toContain('1/3');
       expect(parsed.playerCount).toBe(1);
       expect(parsed.maxPlayers).toBe(3);
