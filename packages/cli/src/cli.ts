@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, isProcessRunning, dkgDir, logPath, ensureDkgDir,
@@ -26,8 +27,7 @@ import {
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
 
-/** Options object passed to commander action callbacks (parsed .option() values) */
-type ActionOpts = Record<string, any>;
+type ActionOpts = Record<string, unknown>;
 
 function normalizeVersionTagRef(input: string): string {
   const cleaned = input.trim();
@@ -192,7 +192,7 @@ program
     const hubAddress = await ask('Hub contract address', defaultHubAddress);
     const chainIdStr = await ask('Chain ID', defaultChainId);
 
-    const chainSection: any = rpcUrl && hubAddress ? {
+    const chainSection = rpcUrl && hubAddress ? {
       type: 'evm' as const,
       rpcUrl,
       hubAddress,
@@ -396,8 +396,8 @@ program
         }
       }
       console.log('Daemon still running after 10s — you may need to kill it manually.');
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -419,8 +419,8 @@ program
       console.log(`  Uptime:    ${uptime}`);
       console.log(`  Peers:     ${s.connectedPeers}`);
       console.log(`  Relay:     ${s.relayConnected ? 'connected' : 'not connected'}`);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -456,8 +456,8 @@ program
         console.log(`  ${a.name.padEnd(nameW)}   ${short.padEnd(16)}   ${role.padEnd(5)}   ${a.framework ?? '—'}${self}`);
       }
       console.log(`\n  ${agents.length} agent(s) total`);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -477,8 +477,8 @@ program
         console.error(`Failed: ${result.error}`);
         process.exit(1);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -543,8 +543,8 @@ program
         console.log('\nChat ended.');
         process.exit(0);
       });
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -579,7 +579,7 @@ program
         console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
       } else if (opts.triples) {
         const parsed = JSON.parse(opts.triples);
-        quads = parsed.map((q: any) => ({ ...q, graph: q.graph || defaultGraph }));
+        quads = parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph }));
       } else if (opts.subject && opts.predicate && opts.object) {
         quads = [{
           subject: opts.subject,
@@ -634,8 +634,8 @@ program
       for (const ka of result.kas) {
         console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -669,23 +669,24 @@ program
           return;
         }
         const keys = Object.keys(result.bindings[0]);
-        const widths = keys.map(k => Math.max(k.length, ...result.bindings.map(
-          (row: any) => stripQuotes(String(row[k] ?? '')).length,
+        const bindings = result.bindings as Array<Record<string, string>>;
+        const widths = keys.map(k => Math.max(k.length, ...bindings.map(
+          (row) => stripQuotes(String(row[k] ?? '')).length,
         )));
 
         const header = keys.map((k, i) => k.padEnd(widths[i])).join('  ');
         console.log(header);
         console.log(widths.map((w: number) => '─'.repeat(w)).join('  '));
-        for (const row of result.bindings) {
+        for (const row of bindings) {
           const line = keys.map((k, i) => stripQuotes(String(row[k] ?? '')).padEnd(widths[i])).join('  ');
           console.log(line);
         }
-        console.log(`\n${result.bindings.length} row(s)`);
+        console.log(`\n${bindings.length} row(s)`);
       } else {
         console.log(JSON.stringify(result, null, 2));
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -707,10 +708,10 @@ program
       const client = await ApiClient.connect();
 
       let lookupType: string;
-      const request: Record<string, any> = {
+      const request: Record<string, unknown> = {
         paranetId: opts.paranet,
-        limit: parseInt(opts.limit, 10),
-        timeout: parseInt(opts.timeout, 10),
+        limit: parseInt(opts.limit as string, 10),
+        timeout: parseInt(opts.timeout as string, 10),
       };
 
       if (opts.ual) {
@@ -768,13 +769,14 @@ program
             console.log('No results.');
           } else {
             const keys = Object.keys(bindings[0]);
-            const widths = keys.map(k => Math.max(k.length, ...bindings.map(
-              (row: any) => stripQuotes(String(row[k] ?? '')).length,
+            const rows = bindings as Array<Record<string, string>>;
+            const widths = keys.map(k => Math.max(k.length, ...rows.map(
+              (row) => stripQuotes(String(row[k] ?? '')).length,
             )));
             const header = keys.map((k, i) => k.padEnd(widths[i])).join('  ');
             console.log(header);
             console.log(widths.map((w: number) => '─'.repeat(w)).join('  '));
-            for (const row of bindings) {
+            for (const row of rows) {
               const line = keys.map((k, i) => stripQuotes(String(row[k] ?? '')).padEnd(widths[i])).join('  ');
               console.log(line);
             }
@@ -790,8 +792,8 @@ program
       if (response.truncated) {
         console.log(`\n(results truncated — ${response.resultCount} total)`);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -828,8 +830,8 @@ program
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -863,8 +865,8 @@ syncCmd
       if (status.error) {
         console.log(`Error:     ${status.error}`);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -899,8 +901,8 @@ paranetCmd
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -933,8 +935,8 @@ paranetCmd
         console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
       }
       console.log(`\n  ${paranets.length} paranet(s)`);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -958,8 +960,8 @@ paranetCmd
       console.log(`  Type:        ${p.isSystem ? 'system' : 'user'}`);
       console.log(`  Creator:     ${p.creator ?? '—'}`);
       console.log(`  Created:     ${p.createdAt ?? '—'}`);
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -1020,8 +1022,8 @@ program
       } else {
         console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -1052,8 +1054,8 @@ workspaceCmd
       if (result.txHash) {
         console.log(`  TX:     ${result.txHash}`);
       }
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -1140,8 +1142,8 @@ program
       console.log(`  File:  ~/.dkg/wallets.json`);
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
       console.log('The primary wallet is used for identity registration. All wallets are used for publishing.\n');
-    } catch (err: any) {
-      console.error(err.message);
+    } catch (err) {
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -1229,14 +1231,14 @@ program
       const receipt = await tx.wait();
       console.log(`  Confirmed in block ${receipt!.blockNumber}`);
       console.log(`  New ask: ${amount} TRAC`);
-    } catch (err: any) {
-      if (err.code === 'CALL_EXCEPTION') {
+    } catch (err) {
+      if (hasErrorCode(err, 'CALL_EXCEPTION')) {
         console.error(
           `Transaction reverted. The primary wallet may not be the admin/operational key for this identity.\n` +
           `Use --identity <id> if auto-detection picked the wrong identity.`,
         );
       }
-      console.error(err.message ?? err);
+      console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
@@ -1322,8 +1324,8 @@ async function stopDaemonIfRunning(): Promise<boolean> {
   const pid = await readPid();
   if (!pid || !isProcessRunning(pid)) return true;
   console.log('Stopping daemon...');
-  try { process.kill(pid, 'SIGTERM'); } catch (err: any) {
-    if (err?.code !== 'ESRCH') throw err;
+  try { process.kill(pid, 'SIGTERM'); } catch (err) {
+    if (!hasErrorCode(err, 'ESRCH')) throw err;
   }
   for (let i = 0; i < 20; i++) {
     await sleep(500);
@@ -1438,8 +1440,8 @@ program
           console.log('Stopping daemon...');
           try {
             process.kill(pid, 'SIGTERM');
-          } catch (err: any) {
-            if (err?.code !== 'ESRCH') throw err;
+          } catch (err) {
+            if (!hasErrorCode(err, 'ESRCH')) throw err;
           }
           for (let i = 0; i < 20; i++) {
             await sleep(500);
@@ -1459,8 +1461,8 @@ program
         console.error('Update failed before activation. Check logs and retry.');
         process.exit(1);
       }
-    } catch (err: any) {
-      console.error(`Update failed: ${err?.message ?? String(err)}`);
+    } catch (err) {
+      console.error(`Update failed: ${toErrorMessage(err)}`);
       process.exit(1);
     }
   });
@@ -1494,8 +1496,8 @@ program
       console.log('Stopping daemon...');
       try {
         process.kill(pid, 'SIGTERM');
-      } catch (err: any) {
-        if (err?.code !== 'ESRCH') throw err;
+      } catch (err) {
+        if (!hasErrorCode(err, 'ESRCH')) throw err;
       }
       for (let i = 0; i < 20; i++) {
         await sleep(500);
@@ -1518,8 +1520,8 @@ program
           stdio: 'pipe',
         }).trim();
         await writeFile(commitFile, commit);
-      } catch (err: any) {
-        console.warn(`Warning: failed to read rollback commit: ${err?.message ?? String(err)}`);
+      } catch (err) {
+        console.warn(`Warning: failed to read rollback commit: ${toErrorMessage(err)}`);
       }
     } else {
       try { await unlink(commitFile); } catch { /* already absent */ }
@@ -1537,8 +1539,8 @@ program
           if (version) { await writeFile(versionFile, version); break; }
         } catch { /* try next */ }
       }
-    } catch (err: any) {
-      console.warn(`Warning: failed to update rollback version metadata: ${err?.message ?? String(err)}`);
+    } catch (err) {
+      console.warn(`Warning: failed to update rollback version metadata: ${toErrorMessage(err)}`);
     }
     console.log(`Rolled back: current → slot ${target}`);
     console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');

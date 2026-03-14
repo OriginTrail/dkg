@@ -26,3 +26,4 @@ export {
   sparqlInt,
   assertSafeRdfTerm,
 } from './sparql-safe.js';
+export { toErrorMessage, hasErrorCode } from './errors.js';

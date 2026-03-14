@@ -61,8 +61,8 @@ export class DkgDaemonClient {
     try {
       const data = await this.get<Record<string, unknown>>('/api/status');
       return { ok: true, peerId: data.peerId as string | undefined };
-    } catch (err: any) {
-      return { ok: false, error: err.message };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
