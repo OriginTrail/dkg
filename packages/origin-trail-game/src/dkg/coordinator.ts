@@ -856,6 +856,10 @@ export class OriginTrailGameCoordinator {
     const turn = this.swarms.get(swarmId)?.currentTurn;
 
     const timer = setInterval(async () => {
+      try {
+        if (!this.agent.peerId) return;
+      } catch { return; }
+
       const swarm = this.swarms.get(swarmId);
       if (!swarm || swarm.currentTurn !== turn || this.allAliveVoted(swarm)) {
         this.stopVoteHeartbeat(swarmId);
