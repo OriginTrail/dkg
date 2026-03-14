@@ -1611,6 +1611,7 @@ export class OriginTrailGameCoordinator {
     }
 
     if (swarm.pendingProposal?.hash === msg.proposalHash) {
+      const mySig = swarm.pendingProposal.participantSignatures.get(this.myPeerId);
       await this.broadcast({
         app: proto.APP_ID,
         type: 'turn:approve',
@@ -1619,6 +1620,9 @@ export class OriginTrailGameCoordinator {
         timestamp: Date.now(),
         turn: msg.turn,
         proposalHash: msg.proposalHash,
+        identityId: mySig ? String(mySig.identityId) : undefined,
+        signatureR: mySig ? ethers.hexlify(mySig.r) : undefined,
+        signatureVS: mySig ? ethers.hexlify(mySig.vs) : undefined,
       } as proto.TurnApproveMsg);
       return;
     }
