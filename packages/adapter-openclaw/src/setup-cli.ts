@@ -9,11 +9,21 @@
  */
 
 import { Command } from 'commander';
+import { readFileSync } from 'node:fs';
 import { runSetup } from './setup.js';
+
+function getVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
 
 const program = new Command('dkg-openclaw')
   .description('DKG OpenClaw adapter management')
-  .version('0.0.1');
+  .version(getVersion());
 
 program
   .command('setup')

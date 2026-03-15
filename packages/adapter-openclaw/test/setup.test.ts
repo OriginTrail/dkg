@@ -253,8 +253,10 @@ describe('writeWorkspaceConfig', () => {
     const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
     // daemonUrl is always set from the provided port (so --port takes effect)
     expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
-    // But sub-config keys like watchDebounceMs are preserved
+    // Sub-config keys like watchDebounceMs are preserved
     expect(config['dkg-node'].memory.watchDebounceMs).toBe(3000);
+    // User-configured enabled: false is respected on re-runs (idempotent)
+    expect(config['dkg-node'].memory.enabled).toBe(false);
   });
 });
 

@@ -441,7 +441,9 @@ export async function fundWallets(addresses: string[]): Promise<void> {
 
   log('Funding wallets via testnet faucet...');
   try {
-    const idempotencyKey = `dkg-openclaw-setup-${Date.now()}`;
+    // Use a stable idempotency key based on wallet addresses so re-runs
+    // don't create duplicate faucet requests and hit rate limits.
+    const idempotencyKey = `dkg-openclaw-setup-${addresses.sort().join('-')}`;
     const res = await fetch('https://euphoria.origin-trail.network/faucet/fund', {
       method: 'POST',
       headers: {
@@ -559,14 +561,16 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): voi
   }
 
   // Deep-merge: preserve existing dkg-node sub-config, but always set daemonUrl
-  // from the current port (so --port takes effect on re-runs)
+  // from the current port (so --port takes effect on re-runs).
+  // Feature flags default to true on first run but are not overridden on re-runs
+  // so that user-configured `false` values are respected.
   const dkgNode = existing['dkg-node'] ?? {};
   existing['dkg-node'] = {
     ...dkgNode,
     daemonUrl: `http://127.0.0.1:${apiPort}`,
-    memory: { ...dkgNode.memory, enabled: true },
-    channel: { ...dkgNode.channel, enabled: true },
-    game: { ...dkgNode.game, enabled: true },
+    memory: { enabled: true, ...dkgNode.memory },
+    channel: { enabled: true, ...dkgNode.channel },
+    game: { enabled: true, ...dkgNode.game },
   };
 
   mkdirSync(workspaceDir, { recursive: true });
