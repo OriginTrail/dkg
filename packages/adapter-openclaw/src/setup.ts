@@ -73,87 +73,23 @@ function warn(msg: string): void {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Root of the adapter package.
- *
- * Tries multiple locations in order:
- *  1. Global npm install (stable, survives cache cleanup)
- *  2. Monorepo checkout (development)
- *  3. Current location (fallback — may be npx cache)
- *
- * When running via `npx`, the adapter lives in a temporary cache that gets
- * cleaned up. To produce a stable `plugins.load.paths` entry, this function
- * prefers the global install path. If the adapter isn't installed globally
- * yet, `ensureGlobalAdapter()` installs it before we resolve.
+ * Root of the adapter package, derived from the script's own location.
+ * This is always correct for the currently running code — no global install
+ * resolution, no version comparison, no npm prefix lookups.
  */
 function adapterRoot(): string {
-  // 1. Try global npm install
-  try {
-    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(join(candidate, 'package.json'))) return candidate;
-    }
-  } catch { /* fall through */ }
-
-  // 2. Monorepo checkout (from dist/ or src/ → package root)
   const root = resolve(__dirname, '..');
-  if (existsSync(join(root, 'package.json')) && existsSync(join(root, 'openclaw-entry.mjs'))) {
-    return root;
-  }
-
-  // 3. Fallback — current location (may be npx cache)
   if (existsSync(join(root, 'package.json'))) return root;
   return __dirname;
 }
 
 /**
- * Ensure the adapter is installed globally so that `adapterRoot()` returns
- * a stable path. Called before writing `openclaw.json`.
+ * Check whether an adapter path looks ephemeral (npx cache).
+ * Npx cache paths typically contain `_npx` or a temp directory marker.
  */
-function ensureGlobalAdapter(): void {
-  // Read the current (running) adapter version
-  let currentVersion = '';
-  try {
-    const pkgPath = resolve(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-    currentVersion = pkg.version ?? '';
-  } catch { /* unknown */ }
-
-  // Check if a global install exists and whether its version matches
-  try {
-    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        const installed = JSON.parse(readFileSync(candidate, 'utf-8'));
-        if (installed.version === currentVersion || !currentVersion) {
-          return; // version matches (or we can't determine current version)
-        }
-        log(`Global adapter ${installed.version} differs from current ${currentVersion} — upgrading`);
-        break;
-      }
-    }
-  } catch { /* fall through to install */ }
-
-  const versionSuffix = currentVersion ? `@${currentVersion}` : '';
-  log('Installing adapter globally for stable plugin path...');
-  try {
-    execSync(`npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`, { stdio: 'inherit' });
-  } catch {
-    // Don't silently continue with an ephemeral npx cache path —
-    // that would break after cache cleanup.
-    throw new Error(
-      'Could not install the adapter globally. A global install is required ' +
-      'so that the plugin path in openclaw.json remains stable. Run:\n' +
-      `  npm install -g @origintrail-official/dkg-adapter-openclaw${versionSuffix}`,
-    );
-  }
+function isEphemeralPath(p: string): boolean {
+  const normalized = p.replace(/\\/g, '/');
+  return normalized.includes('/_npx/') || normalized.includes('\\_npx\\');
 }
 
 function dkgDir(): string {
@@ -784,24 +720,15 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 7: Merge adapter into openclaw.json
-  // Resolve a stable adapter path for openclaw.json. In a monorepo checkout,
-  // the path is already stable. For npx runs, we ensure a global install
-  // exists so the path survives cache cleanup.
-  //
-  // Detect monorepo from the script's own location (__dirname), not from
-  // adapterRoot() which may resolve to a global install path.
-  const scriptPkgRoot = resolve(__dirname, '..');
-  const isMonorepo = existsSync(join(scriptPkgRoot, 'openclaw-entry.mjs'))
-    && existsSync(join(scriptPkgRoot, '..', '..', 'packages'));
-  let resolvedAdapterPath: string;
-  if (isMonorepo) {
-    // In monorepo, always use the local checkout — not a stale global install
-    resolvedAdapterPath = scriptPkgRoot;
-  } else {
-    if (!dryRun) {
-      ensureGlobalAdapter();
-    }
-    resolvedAdapterPath = adapterRoot();
+  // Use the script's own location as the adapter path — always correct for
+  // the currently running code. Warn if the path looks ephemeral (npx cache).
+  const resolvedAdapterPath = adapterRoot();
+  if (isEphemeralPath(resolvedAdapterPath)) {
+    warn(
+      'Adapter is running from an npx cache path which may not persist.\n' +
+      '         Install the adapter globally for a stable plugin path:\n' +
+      '         npm install -g @origintrail-official/dkg-adapter-openclaw',
+    );
   }
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
