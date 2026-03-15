@@ -771,11 +771,15 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 7: Merge adapter into openclaw.json
   // Resolve a stable adapter path for openclaw.json. In a monorepo checkout,
-  // adapterRoot() returns the monorepo path directly. For npx runs, we ensure
-  // a global install exists so the path survives cache cleanup.
+  // the path is already stable. For npx runs, we ensure a global install
+  // exists so the path survives cache cleanup.
+  //
+  // Detect monorepo from the script's own location (__dirname), not from
+  // adapterRoot() which may resolve to a global install path.
+  const scriptPkgRoot = resolve(__dirname, '..');
+  const isMonorepo = existsSync(join(scriptPkgRoot, 'openclaw-entry.mjs'))
+    && existsSync(join(scriptPkgRoot, '..', '..', 'packages'));
   let resolvedAdapterPath = adapterRoot();
-  const isMonorepo = existsSync(join(resolvedAdapterPath, 'openclaw-entry.mjs'))
-    && existsSync(join(resolvedAdapterPath, '..', '..', 'package.json'));
   if (!dryRun && !isMonorepo) {
     ensureGlobalAdapter();
     resolvedAdapterPath = adapterRoot(); // re-resolve to pick up stable global path
