@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
@@ -986,9 +986,11 @@ openclawCmd
       // Falls back to npx only for first-time setup when adapter isn't installed.
       let adapterCli: string | null = null;
       try {
+        // Resolve from the main entrypoint (respects package.json "exports").
+        // The main entrypoint is dist/index.js; setup-cli.js is a sibling.
         const require = createRequire(import.meta.url);
-        const adapterPkg = require.resolve('@origintrail-official/dkg-adapter-openclaw/package.json');
-        adapterCli = join(adapterPkg, '..', 'dist', 'setup-cli.js');
+        const adapterMain = require.resolve('@origintrail-official/dkg-adapter-openclaw');
+        adapterCli = join(dirname(adapterMain), 'setup-cli.js');
         if (!existsSync(adapterCli)) adapterCli = null;
       } catch { /* not installed locally */ }
 

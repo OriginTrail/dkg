@@ -793,10 +793,15 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const scriptPkgRoot = resolve(__dirname, '..');
   const isMonorepo = existsSync(join(scriptPkgRoot, 'openclaw-entry.mjs'))
     && existsSync(join(scriptPkgRoot, '..', '..', 'packages'));
-  let resolvedAdapterPath = adapterRoot();
-  if (!dryRun && !isMonorepo) {
-    ensureGlobalAdapter();
-    resolvedAdapterPath = adapterRoot(); // re-resolve to pick up stable global path
+  let resolvedAdapterPath: string;
+  if (isMonorepo) {
+    // In monorepo, always use the local checkout — not a stale global install
+    resolvedAdapterPath = scriptPkgRoot;
+  } else {
+    if (!dryRun) {
+      ensureGlobalAdapter();
+    }
+    resolvedAdapterPath = adapterRoot();
   }
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
@@ -813,7 +818,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 9: Copy skill files
   if (!dryRun) {
-    copySkills(workspaceDir);
+    copySkills(workspaceDir, resolvedAdapterPath);
   } else {
     log('[dry-run] Would copy skill files to workspace');
   }
