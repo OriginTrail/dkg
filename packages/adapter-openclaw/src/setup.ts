@@ -502,10 +502,13 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     log('Adapter path already in plugins.load.paths');
   }
 
-  // Add to entries (idempotent)
+  // Add to entries or ensure enabled (preserves other plugin-specific fields)
   if (!config.plugins.entries[pluginId]) {
     config.plugins.entries[pluginId] = { enabled: true };
     log(`Added ${pluginId} to plugins.entries`);
+  } else if (!config.plugins.entries[pluginId].enabled) {
+    config.plugins.entries[pluginId].enabled = true;
+    log(`Re-enabled ${pluginId} in plugins.entries`);
   } else {
     log(`${pluginId} already in plugins.entries`);
   }
@@ -659,18 +662,28 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 4: Write DKG config
   const network = loadNetworkConfig();
+  let effectivePort = apiPort;
   if (!dryRun) {
     writeDkgConfig(agentName, network, apiPort, {
       nameExplicit: options.name != null,
       portExplicit: options.port != null,
     });
+    // Read back the effective port from the merged config so downstream steps
+    // (daemon start, workspace config, verify) use the correct port even when
+    // an existing config had a different apiPort that was preserved.
+    try {
+      const merged = JSON.parse(readFileSync(join(dkgDir(), 'config.json'), 'utf-8'));
+      if (merged.apiPort && Number.isInteger(merged.apiPort)) {
+        effectivePort = merged.apiPort;
+      }
+    } catch { /* use apiPort */ }
   } else {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
 
   // Step 5: Start daemon
   if (shouldStart && !dryRun) {
-    await startDaemon(apiPort);
+    await startDaemon(effectivePort);
   } else if (shouldStart) {
     log('[dry-run] Would start DKG daemon');
   } else {
@@ -705,7 +718,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 8: Write workspace config
   if (!dryRun) {
-    writeWorkspaceConfig(workspaceDir, apiPort);
+    writeWorkspaceConfig(workspaceDir, effectivePort);
   } else {
     log('[dry-run] Would write workspace config.json');
   }
@@ -722,7 +735,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 10: Verify
   if (shouldVerify && !dryRun) {
-    await verifySetup(apiPort);
+    await verifySetup(effectivePort);
   } else if (shouldVerify) {
     log('[dry-run] Would verify setup');
   }

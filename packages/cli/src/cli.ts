@@ -978,7 +978,7 @@ openclawCmd
     const { execFileSync } = await import('node:child_process');
     const extraArgs = process.argv.slice(process.argv.indexOf('setup') + 1);
     try {
-      execFileSync('npx', ['@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
+      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
         stdio: 'inherit',
         shell: false,
       });
