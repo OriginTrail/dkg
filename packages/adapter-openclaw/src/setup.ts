@@ -72,13 +72,63 @@ function warn(msg: string): void {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/** Root of the adapter package (works from both dist/ and src/). */
+/**
+ * Root of the adapter package.
+ *
+ * Tries multiple locations in order:
+ *  1. Global npm install (stable, survives cache cleanup)
+ *  2. Monorepo checkout (development)
+ *  3. Current location (fallback — may be npx cache)
+ *
+ * When running via `npx`, the adapter lives in a temporary cache that gets
+ * cleaned up. To produce a stable `plugins.load.paths` entry, this function
+ * prefers the global install path. If the adapter isn't installed globally
+ * yet, `ensureGlobalAdapter()` installs it before we resolve.
+ */
 function adapterRoot(): string {
-  // From dist/ → go up one level; from src/ → also one level up
+  // 1. Try global npm install
+  try {
+    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const candidates = [
+      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw'),
+      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw'),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(join(candidate, 'package.json'))) return candidate;
+    }
+  } catch { /* fall through */ }
+
+  // 2. Monorepo checkout (from dist/ or src/ → package root)
   const root = resolve(__dirname, '..');
+  if (existsSync(join(root, 'package.json')) && existsSync(join(root, 'openclaw-entry.mjs'))) {
+    return root;
+  }
+
+  // 3. Fallback — current location (may be npx cache)
   if (existsSync(join(root, 'package.json'))) return root;
-  // Fallback: we ARE in the root already
   return __dirname;
+}
+
+/**
+ * Ensure the adapter is installed globally so that `adapterRoot()` returns
+ * a stable path. Called before writing `openclaw.json`.
+ */
+function ensureGlobalAdapter(): void {
+  try {
+    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const candidates = [
+      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
+      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg-adapter-openclaw', 'package.json'),
+    ];
+    if (candidates.some(c => existsSync(c))) return; // already installed
+  } catch { /* fall through */ }
+
+  log('Installing adapter globally for stable plugin path...');
+  try {
+    execSync('npm install -g @origintrail-official/dkg-adapter-openclaw', { stdio: 'inherit' });
+  } catch {
+    warn('Could not install adapter globally — using current path (may be ephemeral npx cache)');
+  }
 }
 
 function dkgDir(): string {
@@ -218,7 +268,19 @@ export function loadNetworkConfig(): NetworkConfig {
   );
 }
 
-export function writeDkgConfig(agentName: string, network: NetworkConfig, apiPort: number): void {
+export interface DkgConfigOverrides {
+  /** True when the user explicitly passed --name. */
+  nameExplicit?: boolean;
+  /** True when the user explicitly passed --port. */
+  portExplicit?: boolean;
+}
+
+export function writeDkgConfig(
+  agentName: string,
+  network: NetworkConfig,
+  apiPort: number,
+  overrides?: DkgConfigOverrides,
+): void {
   const dir = dkgDir();
   const configPath = join(dir, 'config.json');
 
@@ -235,10 +297,12 @@ export function writeDkgConfig(agentName: string, network: NetworkConfig, apiPor
     }
   }
 
+  // Explicit CLI overrides (--name, --port) take precedence over existing config.
+  // Auto-detected values only fill in when no existing value is present.
   const config: Record<string, any> = {
     ...existing,
-    name: existing.name ?? agentName,
-    apiPort: existing.apiPort ?? apiPort,
+    name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
+    apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
     paranets: existing.paranets ?? network.defaultParanets,
     chain: existing.chain ?? network.chain,
@@ -596,7 +660,10 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // Step 4: Write DKG config
   const network = loadNetworkConfig();
   if (!dryRun) {
-    writeDkgConfig(agentName, network, apiPort);
+    writeDkgConfig(agentName, network, apiPort, {
+      nameExplicit: options.name != null,
+      portExplicit: options.port != null,
+    });
   } else {
     log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
   }
@@ -624,6 +691,11 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 7: Merge adapter into openclaw.json
+  // Ensure adapter is globally installed so we get a stable path
+  // (npx cache paths are ephemeral and break after cleanup)
+  if (!dryRun) {
+    ensureGlobalAdapter();
+  }
   const resolvedAdapterPath = adapterRoot();
   if (!dryRun) {
     mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
