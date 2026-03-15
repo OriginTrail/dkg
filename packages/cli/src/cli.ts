@@ -975,15 +975,20 @@ openclawCmd
   .description('Set up the DKG OpenClaw adapter (runs npx setup script)')
   .allowUnknownOption(true)
   .action(async () => {
-    const { execSync } = await import('node:child_process');
-    const args = process.argv.slice(process.argv.indexOf('setup') + 1).join(' ');
+    const { execFileSync } = await import('node:child_process');
+    const extraArgs = process.argv.slice(process.argv.indexOf('setup') + 1);
     try {
-      execSync(`npx @origintrail-official/dkg-adapter-openclaw setup ${args}`, {
+      execFileSync('npx', ['@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
         stdio: 'inherit',
+        shell: false,
       });
-    } catch {
-      console.log('\nIf the adapter is not installed, run:');
-      console.log('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+    } catch (err: any) {
+      if (err.status) {
+        process.exit(err.status);
+      }
+      console.error('\nIf the adapter is not installed, run:');
+      console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+      process.exit(1);
     }
   });
 

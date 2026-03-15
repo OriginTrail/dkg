@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -190,8 +190,7 @@ describe('mergeOpenClawConfig', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter');
 
-    // Check backup exists
-    const files = require('node:fs').readdirSync(testDir);
+    const files = readdirSync(testDir);
     const backups = files.filter((f: string) => f.startsWith('openclaw.json.bak.'));
     expect(backups.length).toBeGreaterThanOrEqual(1);
   });
@@ -239,7 +238,7 @@ describe('writeWorkspaceConfig', () => {
     expect(config['dkg-node']).toBeDefined();
   });
 
-  it('preserves existing dkg-node overrides', () => {
+  it('overrides daemonUrl with new port on re-run', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, 'config.json'), JSON.stringify({
@@ -252,8 +251,9 @@ describe('writeWorkspaceConfig', () => {
     writeWorkspaceConfig(ws, 9200);
 
     const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    // Existing daemonUrl should be overwritten by the merge (spread order)
-    // but memory.watchDebounceMs should be preserved
+    // daemonUrl is always set from the provided port (so --port takes effect)
+    expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
+    // But sub-config keys like watchDebounceMs are preserved
     expect(config['dkg-node'].memory.watchDebounceMs).toBe(3000);
   });
 });
@@ -263,43 +263,51 @@ describe('writeWorkspaceConfig', () => {
 // ---------------------------------------------------------------------------
 
 describe('copySkills', () => {
-  it('copies skill files to workspace', () => {
-    // Create fake adapter skills
-    const adapterRoot = join(testDir, 'adapter');
-    mkdirSync(join(adapterRoot, 'skills', 'dkg-node'), { recursive: true });
-    mkdirSync(join(adapterRoot, 'skills', 'origin-trail-game'), { recursive: true });
-    writeFileSync(join(adapterRoot, 'skills', 'dkg-node', 'SKILL.md'), '# DKG Node Skills');
-    writeFileSync(join(adapterRoot, 'skills', 'origin-trail-game', 'SKILL.md'), '# Game Skills');
-    writeFileSync(join(adapterRoot, 'package.json'), '{}');
+  it('copies skill files from adapter root to workspace', () => {
+    // Create fake adapter root with skills
+    const fakeRoot = join(testDir, 'adapter');
+    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
+    mkdirSync(join(fakeRoot, 'skills', 'origin-trail-game'), { recursive: true });
+    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# DKG Node Skills');
+    writeFileSync(join(fakeRoot, 'skills', 'origin-trail-game', 'SKILL.md'), '# Game Skills');
 
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
 
-    // We can't easily test copySkills directly since it uses adapterRoot()
-    // which is based on import.meta.url. Instead, test the file operations.
-    const destDkg = join(ws, 'skills', 'dkg-node', 'SKILL.md');
-    const destGame = join(ws, 'skills', 'origin-trail-game', 'SKILL.md');
+    // Use rootOverride to inject the fake adapter root
+    copySkills(ws, fakeRoot);
 
-    // Manually simulate what copySkills does
-    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    mkdirSync(join(ws, 'skills', 'origin-trail-game'), { recursive: true });
-
-    const { copyFileSync: cfs } = require('node:fs');
-    cfs(join(adapterRoot, 'skills', 'dkg-node', 'SKILL.md'), destDkg);
-    cfs(join(adapterRoot, 'skills', 'origin-trail-game', 'SKILL.md'), destGame);
-
-    expect(readFileSync(destDkg, 'utf-8')).toBe('# DKG Node Skills');
-    expect(readFileSync(destGame, 'utf-8')).toBe('# Game Skills');
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# DKG Node Skills');
+    expect(readFileSync(join(ws, 'skills', 'origin-trail-game', 'SKILL.md'), 'utf-8')).toBe('# Game Skills');
   });
 
-  it('skips copy when files are identical', () => {
+  it('skips copy when files are already identical', () => {
+    const fakeRoot = join(testDir, 'adapter');
+    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
+    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
+
     const ws = join(testDir, 'workspace');
     mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
     writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
 
-    // File already exists with same content — a real copySkills would skip
-    const content = readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8');
-    expect(content).toBe('# Same Content');
+    // Should not throw; just skip
+    copySkills(ws, fakeRoot);
+
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Same Content');
+  });
+
+  it('updates skill files when content differs', () => {
+    const fakeRoot = join(testDir, 'adapter');
+    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
+    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Updated Content');
+
+    const ws = join(testDir, 'workspace');
+    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Old Content');
+
+    copySkills(ws, fakeRoot);
+
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Updated Content');
   });
 });
 

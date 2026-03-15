@@ -466,11 +466,12 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): voi
     }
   }
 
-  // Deep-merge: preserve existing dkg-node settings, fill in defaults
+  // Deep-merge: preserve existing dkg-node sub-config, but always set daemonUrl
+  // from the current port (so --port takes effect on re-runs)
   const dkgNode = existing['dkg-node'] ?? {};
   existing['dkg-node'] = {
-    daemonUrl: `http://127.0.0.1:${apiPort}`,
     ...dkgNode,
+    daemonUrl: `http://127.0.0.1:${apiPort}`,
     memory: { enabled: true, ...dkgNode.memory },
     channel: { enabled: true, ...dkgNode.channel },
     game: { enabled: true, ...dkgNode.game },
@@ -485,8 +486,8 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): voi
 // Step 9: Copy skill files
 // ---------------------------------------------------------------------------
 
-export function copySkills(workspaceDir: string): void {
-  const root = adapterRoot();
+export function copySkills(workspaceDir: string, rootOverride?: string): void {
+  const root = rootOverride ?? adapterRoot();
   const skillsSource = join(root, 'skills');
   if (!existsSync(skillsSource)) {
     warn(`Skills directory not found at ${skillsSource}`);
@@ -566,6 +567,9 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const shouldVerify = options.verify !== false;
   const shouldStart = options.start !== false;
   const apiPort = parseInt(options.port ?? '9200', 10);
+  if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535) {
+    throw new Error(`Invalid port "${options.port}" — must be an integer between 1 and 65535`);
+  }
 
   console.log('\nDKG OpenClaw Adapter Setup');
   console.log('='.repeat(40) + '\n');
