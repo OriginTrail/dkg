@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import {
@@ -976,42 +976,24 @@ openclawCmd
   .allowUnknownOption(true)
   .action(async () => {
     const { execFileSync } = await import('node:child_process');
-    const { createRequire } = await import('node:module');
     // Forward args after "openclaw setup" to the adapter setup script.
     const oclawIdx = process.argv.indexOf('openclaw');
     const setupIdx = oclawIdx >= 0 ? process.argv.indexOf('setup', oclawIdx + 1) : -1;
     const extraArgs = setupIdx >= 0 ? process.argv.slice(setupIdx + 1) : [];
     try {
-      // Prefer locally installed adapter (deterministic, no version drift).
-      // Falls back to npx only for first-time setup when adapter isn't installed.
-      let adapterCli: string | null = null;
-      try {
-        // Resolve from the main entrypoint (respects package.json "exports").
-        // The main entrypoint is dist/index.js; setup-cli.js is a sibling.
-        const require = createRequire(import.meta.url);
-        const adapterMain = require.resolve('@origintrail-official/dkg-adapter-openclaw');
-        adapterCli = join(dirname(adapterMain), 'setup-cli.js');
-        if (!existsSync(adapterCli)) adapterCli = null;
-      } catch { /* not installed locally */ }
-
-      if (adapterCli) {
-        execFileSync(process.execPath, [adapterCli, 'setup', ...extraArgs], {
-          stdio: 'inherit',
-        });
-      } else {
-        // First-time: use npx to download and run the adapter setup.
-        // The setup script's ensureGlobalAdapter() will install it globally
-        // so subsequent runs use the local path above.
-        execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
-          stdio: 'inherit',
-          shell: process.platform === 'win32',
-        });
-      }
+      // This is a thin convenience wrapper — the primary entry point is:
+      //   npx @origintrail-official/dkg-adapter-openclaw setup
+      // The adapter's own setup script warns if running from an ephemeral
+      // npx cache and advises users to install globally.
+      execFileSync('npx', ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', ...extraArgs], {
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      });
     } catch (err: any) {
       if (err.status) {
         process.exit(err.status);
       }
-      console.error('\nIf the adapter is not installed, run:');
+      console.error('\nTo set up the OpenClaw adapter, run:');
       console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
       process.exit(1);
     }
