@@ -531,7 +531,7 @@ describe('clickable notifications', () => {
 
   it('AgentHub captures deep-link peer in stable state before clearing URL', () => {
     expect(agentHub).toContain('deepLinkPeer');
-    expect(agentHub).toMatch(/useState.*urlPeer/);
+    expect(agentHub).toMatch(/useState[\s\S]*urlPeer/);
     expect(agentHub).toMatch(/PeerChatView\s+initialPeerId=\{deepLinkPeer/);
   });
 });
