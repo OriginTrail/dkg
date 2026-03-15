@@ -1,4 +1,4 @@
-# @dkg/sdk
+# @origintrail-official/dkg-sdk
 
 Resource-first TypeScript SDK for DKG daemon APIs.
 
@@ -12,7 +12,7 @@ Resource-first TypeScript SDK for DKG daemon APIs.
 ## Quick Start
 
 ```ts
-import { createDKG } from '@dkg/sdk';
+import { createDKG } from '@origintrail-official/dkg-sdk';
 
 const dkg = createDKG({
   baseUrl: 'http://127.0.0.1:9200',
@@ -118,11 +118,11 @@ This is the initial SDK foundation; next step is expanding each resource with ad
 
 ## Testing
 
-- Unit tests: `pnpm --filter @dkg/sdk test`
+- Unit tests: `pnpm --filter @origintrail-official/dkg-sdk test`
 - Integration tests (against a running local daemon):
 
 ```bash
 DKG_SDK_INTEGRATION_BASE_URL=http://127.0.0.1:9200 \
 DKG_SDK_INTEGRATION_TOKEN=<optional-token> \
-pnpm --filter @dkg/sdk test:integration
+pnpm --filter @origintrail-official/dkg-sdk test:integration
 ```

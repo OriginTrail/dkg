@@ -1,6 +1,6 @@
 # Publish/Query Flow
 
-This flow shows the typical write/read cycle using `@dkg/sdk`.
+This flow shows the typical write/read cycle using `@origintrail-official/dkg-sdk`.
 
 ## Publish
 

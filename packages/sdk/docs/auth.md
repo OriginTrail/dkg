@@ -1,11 +1,11 @@
 # SDK Auth
 
-`@dkg/sdk` uses bearer auth when a token is provided.
+`@origintrail-official/dkg-sdk` uses bearer auth when a token is provided.
 
 ## With token
 
 ```ts
-import { createDKG } from '@dkg/sdk';
+import { createDKG } from '@origintrail-official/dkg-sdk';
 
 const dkg = createDKG({
   baseUrl: 'http://127.0.0.1:9200',

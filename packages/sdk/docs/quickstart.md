@@ -11,7 +11,7 @@ By default, daemon API is on `http://127.0.0.1:9200`.
 ## 2) Install and create client
 
 ```ts
-import { createDKG } from '@dkg/sdk';
+import { createDKG } from '@origintrail-official/dkg-sdk';
 
 const dkg = createDKG({
   baseUrl: 'http://127.0.0.1:9200',
