@@ -416,7 +416,7 @@ program
         if (Number.isFinite(rawPort) && rawPort! > 0) break;
       }
     }
-    if (startedPid) {
+    if (startedPid && isProcessRunning(startedPid)) {
       const config = await loadConfig();
       const rawPort = await readApiPort().catch(() => null);
       const port = (Number.isFinite(rawPort) && rawPort! > 0) ? rawPort : (config.apiPort ?? 9200);
