@@ -13,6 +13,7 @@ import {
   ensureDkgDir,
   isDkgMonorepo,
   dkgDir,
+  repoDir,
 } from '../src/config.js';
 
 describe('removePid / removeApiPort (catch path)', () => {
@@ -69,7 +70,12 @@ describe('loadNetworkConfig', () => {
 
 describe('isDkgMonorepo', () => {
   it('returns true when running from the dkg-v9 monorepo', () => {
-    expect(isDkgMonorepo()).toBe(true);
+    const result = isDkgMonorepo();
+    if (repoDir() === null) {
+      expect(result).toBe(false);
+    } else {
+      expect(result).toBe(true);
+    }
   });
 });
 

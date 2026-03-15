@@ -27,16 +27,15 @@ export async function requestFaucetFunding(
     const text = await res.text().catch(() => '');
     return { success: false, funded: [], error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
   }
-  const data = await res.json() as {
-    summary?: { success?: number; failed?: number };
-    results?: { chainId: string; amount: string; status: string }[];
-  };
-  const amounts = (data.results ?? [])
-    .filter(r => r.status === 'success')
-    .map(r => {
-      const label = r.chainId.includes('eth') ? 'ETH' : 'TRAC';
-      return `${r.amount} ${label}`;
+  const data = await res.json() as Record<string, unknown>;
+  const results = Array.isArray(data.results) ? data.results : [];
+  const amounts = results
+    .filter((r: any) => r && typeof r.status === 'string' && r.status === 'success' && typeof r.chainId === 'string')
+    .map((r: any) => {
+      const label = String(r.chainId).includes('eth') ? 'ETH' : 'TRAC';
+      return `${r.amount ?? '?'} ${label}`;
     });
-  const success = (data.summary?.success ?? 0) > 0 || amounts.length > 0;
+  const summary = data.summary && typeof data.summary === 'object' ? data.summary as Record<string, unknown> : null;
+  const success = (typeof summary?.success === 'number' && summary.success > 0) || amounts.length > 0;
   return { success, funded: amounts };
 }

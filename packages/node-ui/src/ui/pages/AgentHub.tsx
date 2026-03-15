@@ -1326,7 +1326,7 @@ export function AgentHubPage() {
     if (nodeStatus?.hasOpenClawChannel && mode === 'agent' && urlTab !== 'peers') {
       setMode('openclaw');
     }
-  }, [nodeStatus, urlTab]);
+  }, [nodeStatus, urlTab, mode]);
 
   useEffect(() => {
     if (urlTab === 'peers') setMode('peers');
