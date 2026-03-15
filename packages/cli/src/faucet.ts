@@ -18,7 +18,7 @@ export async function requestFaucetFunding(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Idempotency-Key': `init-${safeNodeName}-${fundable.sort().join(',')}`,
+      'Idempotency-Key': `init-${safeNodeName}-${[...fundable].sort().join(',')}`,
     },
     body: JSON.stringify({ mode, wallets: fundable, callerId: `dkg-node:${nodeName}` }),
     signal: AbortSignal.timeout(30_000),
@@ -37,5 +37,6 @@ export async function requestFaucetFunding(
       const label = r.chainId.includes('eth') ? 'ETH' : 'TRAC';
       return `${r.amount} ${label}`;
     });
-  return { success: (data.summary?.success ?? 0) > 0, funded: amounts };
+  const success = (data.summary?.success ?? 0) > 0 || amounts.length > 0;
+  return { success, funded: amounts };
 }
