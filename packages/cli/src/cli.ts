@@ -106,6 +106,55 @@ async function runDaemonSupervisor(): Promise<void> {
   }
 }
 
+async function runForegroundSupervisor(): Promise<void> {
+  const maxCrashRestarts = 5;
+  let crashRestartCount = 0;
+  let currentChild: ReturnType<typeof spawn> | null = null;
+
+  let signalled = false;
+  const onSignal = (sig: NodeJS.Signals) => {
+    signalled = true;
+    if (currentChild) currentChild.kill(sig);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
+  while (true) {
+    if (signalled) process.exit(0);
+
+    currentChild = spawn(
+      process.execPath,
+      [...process.execArgv, resolveDaemonEntryPoint(), 'daemon-foreground-worker'],
+      {
+        stdio: 'inherit',
+        env: process.env,
+      },
+    );
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      currentChild!.once('exit', (code) => resolve(code));
+      currentChild!.once('error', () => resolve(1));
+    });
+    currentChild = null;
+
+    if (signalled) process.exit(exitCode ?? 0);
+
+    if (exitCode === DAEMON_EXIT_CODE_RESTART) {
+      crashRestartCount = 0;
+      await sleep(250);
+      if (signalled) process.exit(0);
+      continue;
+    }
+
+    if (exitCode === 0) process.exit(0);
+
+    crashRestartCount += 1;
+    if (crashRestartCount >= maxCrashRestarts) process.exit(exitCode ?? 1);
+    await sleep(1000);
+    if (signalled) process.exit(0);
+  }
+}
+
 const program = new Command();
 program
   .name('dkg')
@@ -388,7 +437,7 @@ program
     await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
 
     if (opts.foreground) {
-      await runDaemon(true);
+      await runForegroundSupervisor();
       return;
     }
 
