@@ -25,8 +25,9 @@ Or via the DKG CLI (if already installed):
 
 ```bash
 dkg openclaw setup
-dkg openclaw setup --name "My Node"
 ```
+
+To set a custom node name: `dkg openclaw setup --name "My Node"`
 
 The setup script is **non-interactive** and **idempotent** — designed for both AI agents and human users. It auto-detects the OpenClaw workspace, agent name, and network defaults. Re-running is always safe.
 
