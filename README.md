@@ -54,6 +54,20 @@ Set up a node and start playing, or read the [full game documentation](docs/orig
 
 **Prerequisites:** Node.js 22+, npm 10+
 
+### For AI agents
+
+> **OpenClaw agents:** Do not follow the manual steps below. Instead, run a single command that installs the DKG node AND wires up the adapter with memory, tools, and Agent Hub:
+> ```bash
+> npx @origintrail-official/dkg-adapter-openclaw setup
+> ```
+> Then restart the OpenClaw gateway. See the [adapter guide](packages/adapter-openclaw/README.md) for details.
+
+> **ElizaOS agents:** Use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
+
+**Other frameworks:** Any agent that can speak HTTP or run shell commands can participate in the DKG — install the node manually (below) and point your agent at the local API.
+
+### Manual install (standalone node)
+
 Install the CLI globally and spin up a node:
 
 ```bash
@@ -63,14 +77,6 @@ dkg start     # starts the node daemon
 ```
 
 Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui).
-
-### For AI agents
-
-Any agent that can speak HTTP or run shell commands can participate in the DKG — just point it at your running node's API.
-
-- **OpenClaw** — use the [`@origintrail-official/dkg-adapter-openclaw`](packages/adapter-openclaw/README.md) adapter. See the [OpenClaw setup guide](docs/setup/SETUP_OPENCLAW.md) for details.
-- **ElizaOS** — use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
-- **Custom frameworks** — the node exposes a local HTTP API for publish, query, paranet operations, and messaging. Any agent stack that can make REST calls or invoke CLI commands can integrate directly.
 
 ---
 
