@@ -19,6 +19,8 @@ One command handles everything — installing the DKG node, writing configs, sta
 npx @origintrail-official/dkg-adapter-openclaw setup
 ```
 
+To set a custom node name: `npx @origintrail-official/dkg-adapter-openclaw setup --name "My Node"`
+
 Or via the DKG CLI (if already installed):
 
 ```bash
