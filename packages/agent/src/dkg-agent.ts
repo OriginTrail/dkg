@@ -516,13 +516,17 @@ export class DKGAgent {
     // agents that published their profiles before we came online.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
+    const handleSyncError = (remotePeer: string, err: unknown): void => {
+      const shortPeer = remotePeer.slice(-8);
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
+    };
+
     this.node.libp2p.addEventListener('peer:connect', (evt) => {
       const remotePeer = evt.detail.toString();
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
-          const shortPeer = remotePeer.slice(-8);
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
+          handleSyncError(remotePeer, err);
         });
       }, 3000);
     });
@@ -533,9 +537,7 @@ export class DKGAgent {
       const remotePeer = pid.toString();
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
-          const shortPeer = remotePeer.slice(-8);
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
+          handleSyncError(remotePeer, err);
         });
       }, 3000);
     }
