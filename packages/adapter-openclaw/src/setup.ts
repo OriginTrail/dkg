@@ -190,7 +190,7 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
   }
 
   // Fallback: generate a unique name
-  const id = Math.random().toString(36).slice(2, 8);
+  const id = Math.random().toString(36).slice(2, 7);
   const name = `openclaw-agent-${id}`;
   warn(`Could not determine agent name from IDENTITY.md — using "${name}"`);
   return name;
