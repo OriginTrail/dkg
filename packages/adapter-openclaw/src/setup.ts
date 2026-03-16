@@ -501,7 +501,11 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
 
   // Ensure plugin-registered tools are visible to the agent
   if (!config.tools) config.tools = {};
-  if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
+  if (!Array.isArray(config.tools.alsoAllow)) {
+    // Preserve existing string value if present
+    const existing = config.tools.alsoAllow;
+    config.tools.alsoAllow = existing ? [existing] : [];
+  }
   if (!config.tools.alsoAllow.includes('group:plugins')) {
     config.tools.alsoAllow.push('group:plugins');
     log('Added "group:plugins" to tools.alsoAllow');
