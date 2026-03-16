@@ -499,6 +499,14 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     log(`${pluginId} already in plugins.entries`);
   }
 
+  // Ensure plugin-registered tools are visible to the agent
+  if (!config.tools) config.tools = {};
+  if (!Array.isArray(config.tools.alsoAllow)) config.tools.alsoAllow = [];
+  if (!config.tools.alsoAllow.includes('group:plugins')) {
+    config.tools.alsoAllow.push('group:plugins');
+    log('Added "group:plugins" to tools.alsoAllow');
+  }
+
   const updated = JSON.stringify(config, null, 2) + '\n';
   if (updated === raw) {
     log('openclaw.json already up to date — no changes needed');
