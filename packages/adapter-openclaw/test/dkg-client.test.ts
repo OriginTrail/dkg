@@ -123,6 +123,24 @@ describe('DkgDaemonClient', () => {
     expect(body.paranetId).toBe('agent-memory');
   });
 
+  it('semanticSearch should POST to /api/semantic-search', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ results: [{ subject: 'urn:s', score: 0.9 }] }), { status: 200 }),
+    );
+
+    const results = await client.semanticSearch('washing machine', { paranetId: 'agent-memory', topK: 5 });
+
+    expect(results).toHaveLength(1);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:9200/api/semantic-search');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual(expect.objectContaining({
+      query: 'washing machine',
+      paranetId: 'agent-memory',
+      topK: 5,
+    }));
+  });
+
   // ---------------------------------------------------------------------------
   // Workspace write
   // ---------------------------------------------------------------------------

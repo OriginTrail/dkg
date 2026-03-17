@@ -82,6 +82,20 @@ export class DkgDaemonClient {
     });
   }
 
+  async semanticSearch(
+    query: string,
+    opts?: { paranetId?: string; graph?: string; topK?: number; minScore?: number },
+  ): Promise<Array<Record<string, unknown>>> {
+    const result = await this.post<{ results?: Array<Record<string, unknown>> }>('/api/semantic-search', {
+      query,
+      paranetId: opts?.paranetId,
+      graph: opts?.graph,
+      topK: opts?.topK,
+      minScore: opts?.minScore,
+    });
+    return result.results ?? [];
+  }
+
   // ---------------------------------------------------------------------------
   // Workspace write
   // ---------------------------------------------------------------------------

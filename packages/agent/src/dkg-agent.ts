@@ -7,6 +7,7 @@ import {
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
+  DKGEvent,
   Logger, createOperationContext, withRetry,
   type DKGNodeConfig, type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -23,6 +24,11 @@ import {
   DKGQueryEngine, QueryHandler,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
+import {
+  VectorSidecar,
+  type SemanticSearchResult,
+  type VectorSidecarConfig,
+} from '@origintrail-official/dkg-vector';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -107,6 +113,8 @@ export interface DKGAgentConfig {
   syncParanets?: string[];
   /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   workspaceTtlMs?: number;
+  /** Optional vector sidecar for triple-level semantic search. */
+  vector?: VectorSidecarConfig;
 }
 
 /**
@@ -131,6 +139,7 @@ export class DKGAgent {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   readonly eventBus: TypedEventBus;
+  vectorSidecar?: VectorSidecar;
   private readonly chain: ChainAdapter;
   /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
@@ -267,11 +276,15 @@ export class DKGAgent {
     }
 
     const queryEngine = new DKGQueryEngine(store);
-
-    return new DKGAgent(
+    const agent = new DKGAgent(
       config, wallet, node, store, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks,
     );
+    if (config.vector) {
+      agent.vectorSidecar = new VectorSidecar(store, eventBus, config.vector);
+      await agent.vectorSidecar.start();
+    }
+    return agent;
   }
 
   async start(): Promise<void> {
@@ -647,6 +660,14 @@ export class DKGAgent {
         onPhase?.('store', 'start');
         if (verified.data.length > 0) {
           await this.store.insert(verified.data);
+          if (!isSystemParanet) {
+            this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+              quads: verified.data,
+              paranetId: pid,
+              graph: dataGraph,
+              rootEntities: inferRootEntitiesFromQuads(verified.data),
+            });
+          }
           totalSynced += verified.data.length;
         }
         if (verified.meta.length > 0) {
@@ -777,6 +798,15 @@ export class DKGAgent {
 
         if (validWsQuads.length > 0) {
           await this.store.insert(validWsQuads);
+          const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+          if (!isSystemParanet) {
+            this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+              quads: validWsQuads,
+              paranetId: pid,
+              graph: wsGraph,
+              rootEntities: [...allowedRoots],
+            });
+          }
           totalSynced += validWsQuads.length;
         }
         if (wsMetaQuads.length > 0) {
@@ -977,6 +1007,13 @@ export class DKGAgent {
               graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
             });
             paranetDeleted += ownerDeleted;
+          }
+          if (rootEntities.length > 0) {
+            this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+              rootEntities,
+              paranetId: pid,
+              graph: wsGraph,
+            });
           }
 
           const ownedSet = this.workspaceOwnedEntities.get(pid);
@@ -1482,6 +1519,16 @@ export class DKGAgent {
     });
   }
 
+  async semanticSearch(
+    query: string,
+    opts?: { paranetId?: string; graph?: string; topK?: number; minScore?: number },
+  ): Promise<SemanticSearchResult[]> {
+    if (!this.vectorSidecar) {
+      throw new Error('Vector search not enabled. Set vector.enabled in config.');
+    }
+    return this.vectorSidecar.search(query, opts);
+  }
+
   subscribeToParanet(paranetId: string, options?: { trackSyncScope?: boolean }): void {
     if (options?.trackSyncScope !== false) {
       this.trackSyncParanet(paranetId);
@@ -1552,6 +1599,7 @@ export class DKGAgent {
       this.gossipPublishHandler = new GossipPublishHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
+        this.eventBus,
         this.subscribedParanets,
         {
           paranetExists: (id) => this.paranetExists(id),
@@ -1588,6 +1636,7 @@ export class DKGAgent {
       this.finalizationHandler = new FinalizationHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
+        this.eventBus,
       );
     }
     return this.finalizationHandler;
@@ -2177,7 +2226,12 @@ export class DKGAgent {
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return;
+    if (!this.started) {
+      if (this.vectorSidecar) {
+        await this.vectorSidecar.stop();
+      }
+      return;
+    }
     if (this.chainPoller) {
       this.chainPoller.stop();
       this.chainPoller = null;
@@ -2185,6 +2239,9 @@ export class DKGAgent {
     if (this.workspaceCleanupTimer) {
       clearInterval(this.workspaceCleanupTimer);
       this.workspaceCleanupTimer = null;
+    }
+    if (this.vectorSidecar) {
+      await this.vectorSidecar.stop();
     }
     await this.node.stop();
     this.started = false;
@@ -2309,6 +2366,15 @@ function stripLiteral(s: string): string {
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
   if (match) return match[1];
   return s;
+}
+
+function inferRootEntitiesFromQuads(quads: Quad[]): string[] {
+  const roots = new Set<string>();
+  for (const quad of quads) {
+    const skolemIndex = quad.subject.indexOf('/.well-known/genid/');
+    roots.add(skolemIndex === -1 ? quad.subject : quad.subject.slice(0, skolemIndex));
+  }
+  return [...roots];
 }
 
 /**

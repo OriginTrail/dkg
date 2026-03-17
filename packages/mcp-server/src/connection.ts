@@ -121,6 +121,20 @@ export class DkgClient {
     return this.post<{ result: unknown }>('/api/query', { sparql, paranetId });
   }
 
+  async semanticSearch(
+    query: string,
+    opts?: { paranetId?: string; graph?: string; topK?: number; minScore?: number },
+  ) {
+    const result = await this.post<{ results?: Array<Record<string, unknown>> }>('/api/semantic-search', {
+      query,
+      paranetId: opts?.paranetId,
+      graph: opts?.graph,
+      topK: opts?.topK,
+      minScore: opts?.minScore,
+    });
+    return result.results ?? [];
+  }
+
   async publish(paranetId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>) {

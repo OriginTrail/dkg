@@ -7,7 +7,7 @@ import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
  * the DKG daemon's agent-memory paranet via SPARQL.
  *
  * Memory reads go through this plugin:
- *   search(query) → SPARQL FILTER(CONTAINS) on dkg:ImportedMemory items
+ *   search(query) → hybrid semantic search + SPARQL FILTER(CONTAINS), merged by score
  *   readFile(path) → SPARQL text search fallback
  *   status()       → daemon health check
  *
@@ -129,22 +129,34 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
     const limit = options?.limit ?? 10;
-
-    // Strategy: search across both curated memories and chat message text.
-    // Uses FILTER(CONTAINS) for now — Spike B will assess whether this is
-    // sufficient or if a hybrid embedding approach is needed.
     const sparql = buildSearchSparql(query, limit);
-
-    try {
-      const result = await this.client.query(sparql, {
+    const [semanticResult, keywordResult] = await Promise.allSettled([
+      this.client.semanticSearch(query, {
+        paranetId: AGENT_MEMORY_PARANET,
+        topK: limit,
+      }),
+      this.client.query(sparql, {
         paranetId: AGENT_MEMORY_PARANET,
         includeWorkspace: true,
-      });
-      return formatSearchResults(result, query);
-    } catch (err: any) {
-      this.api?.logger.warn?.(`[dkg-memory] Search failed: ${err.message}`);
-      return [];
+      }),
+    ]);
+
+    if (semanticResult.status === 'rejected') {
+      this.api?.logger.debug?.(`[dkg-memory] Semantic search unavailable, falling back to SPARQL: ${semanticResult.reason?.message ?? semanticResult.reason}`);
     }
+
+    if (keywordResult.status === 'rejected') {
+      this.api?.logger.warn?.(`[dkg-memory] Search failed: ${keywordResult.reason?.message ?? keywordResult.reason}`);
+    }
+
+    const semanticMatches = semanticResult.status === 'fulfilled'
+      ? formatSemanticResults(semanticResult.value)
+      : [];
+    const keywordMatches = keywordResult.status === 'fulfilled'
+      ? formatSearchResults(keywordResult.value, query)
+      : [];
+
+    return mergeSearchResults(semanticMatches, keywordMatches, limit);
   }
 
   async readFile(path: string): Promise<string | null> {
@@ -283,6 +295,34 @@ function formatSearchResults(result: any, query: string): MemorySearchResult[] {
       score,
     };
   });
+}
+
+function formatSemanticResults(rows: Array<Record<string, unknown>>): MemorySearchResult[] {
+  return rows.map((row) => ({
+    path: `dkg://triple/${String(row.subject ?? '')}`,
+    content: String(row.text ?? row.object ?? ''),
+    score: typeof row.score === 'number' ? row.score : Number(row.score ?? 0),
+  }));
+}
+
+function mergeSearchResults(
+  semanticMatches: MemorySearchResult[],
+  keywordMatches: MemorySearchResult[],
+  limit: number,
+): MemorySearchResult[] {
+  const merged = new Map<string, MemorySearchResult>();
+  for (const result of [...semanticMatches, ...keywordMatches]) {
+    const key = `${result.path}\n${result.content}`;
+    const existing = merged.get(key);
+    const nextScore = result.score ?? 0;
+    const existingScore = existing?.score ?? 0;
+    if (!existing || nextScore > existingScore) {
+      merged.set(key, result);
+    }
+  }
+  return [...merged.values()]
+    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+    .slice(0, limit);
 }
 
 // ---------------------------------------------------------------------------

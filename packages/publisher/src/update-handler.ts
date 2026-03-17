@@ -159,6 +159,12 @@ export class UpdateHandler {
       }
 
       // Apply: delete exact root + skolemized children, then insert only manifest roots' quads
+      const rootEntities = manifest.map((m) => m.rootEntity);
+      this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+        rootEntities,
+        paranetId,
+        graph: dataGraph,
+      });
       for (const m of manifest) {
         await this.deleteEntityTriples(dataGraph, m.rootEntity);
       }
@@ -170,6 +176,12 @@ export class UpdateHandler {
         }
       }
       await this.store.insert(authenticatedQuads);
+      this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+        quads: authenticatedQuads,
+        paranetId,
+        graph: dataGraph,
+        rootEntities,
+      });
 
       // Record applied update for ordering + paranet binding
       if (verifiedBlockNumber !== undefined) {

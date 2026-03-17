@@ -260,6 +260,9 @@ export class DKGPublisher implements Publisher {
     }
 
     // Delete-then-insert for upserted entities (replace old triples).
+    const replacedRootEntities = manifestEntries
+      .map((m) => m.rootEntity)
+      .filter((rootEntity) => wsOwned.has(rootEntity));
     for (const m of manifestEntries) {
       if (wsOwned.has(m.rootEntity)) {
         await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
@@ -267,11 +270,24 @@ export class DKGPublisher implements Publisher {
         await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
       }
     }
+    if (replacedRootEntities.length > 0) {
+      this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+        rootEntities: replacedRootEntities,
+        paranetId,
+        graph: workspaceGraph,
+      });
+    }
 
     const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
     await this.store.insert(normalized);
 
     const rootEntities = manifestEntries.map((m) => m.rootEntity);
+    this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+      quads: normalized,
+      paranetId,
+      graph: workspaceGraph,
+      rootEntities,
+    });
     const metaQuads = generateWorkspaceMetadata(
       {
         workspaceOperationId,
@@ -516,8 +532,21 @@ export class DKGPublisher implements Publisher {
 
         if (publishResult.publicQuads && publishResult.publicQuads.length > 0) {
           const storedQuads = publishResult.publicQuads.map(q => ({ ...q, graph: defaultDataGraph }));
-          await this.store.insert(storedQuads.map(q => ({ ...q, graph: ctxDataGraph })));
+          const movedToContext = storedQuads.map((q) => ({ ...q, graph: ctxDataGraph }));
+          await this.store.insert(movedToContext);
           await this.store.delete(storedQuads);
+          const rootEntities = publishResult.kaManifest.map((ka) => ka.rootEntity);
+          this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+            quads: movedToContext,
+            paranetId,
+            graph: ctxDataGraph,
+            rootEntities,
+          });
+          this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+            rootEntities,
+            paranetId,
+            graph: defaultDataGraph,
+          });
         }
 
         const ual = publishResult.ual;
@@ -543,6 +572,7 @@ export class DKGPublisher implements Publisher {
       const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(paranetId);
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
+      const removedRootEntities = [...kaMap.keys()];
       for (const rootEntity of kaMap.keys()) {
         await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
         await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
@@ -555,6 +585,13 @@ export class DKGPublisher implements Publisher {
       }
       if (ownerDeletedTotal > 0) {
         this.log.info(ctx, `Cleared ${ownerDeletedTotal} ownership triple(s) during enshrine cleanup`);
+      }
+      if (removedRootEntities.length > 0) {
+        this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+          rootEntities: removedRootEntities,
+          paranetId,
+          graph: workspaceGraph,
+        });
       }
     }
 
@@ -728,9 +765,16 @@ export class DKGPublisher implements Publisher {
 
     const dataGraph = options.targetGraphUri ?? this.graphManager.dataGraphUri(paranetId);
     const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
+    const rootEntities = manifestEntries.map((entry) => entry.rootEntity);
 
     this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store`);
     await this.store.insert(normalizedQuads);
+    this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+      quads: normalizedQuads,
+      paranetId,
+      graph: dataGraph,
+      rootEntities,
+    });
 
     // Store private quads
     for (const [rootEntity] of kaMap) {
@@ -767,6 +811,11 @@ export class DKGPublisher implements Publisher {
         this.log.warn(ctx, `Receiver signature collection failed, rolling back stored data: ${msg}`);
         try {
           await this.store.delete(normalizedQuads);
+          this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+            rootEntities,
+            paranetId,
+            graph: dataGraph,
+          });
           for (const [rootEntity] of kaMap) {
             await this.privateStore.deletePrivateTriples(paranetId, rootEntity);
           }
@@ -1015,6 +1064,11 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'end');
 
     onPhase?.('store', 'start');
+    this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+      rootEntities: manifestEntries.map((entry) => entry.rootEntity),
+      paranetId,
+      graph: dataGraph,
+    });
     for (const [rootEntity, publicQuads] of kaMap) {
       await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
@@ -1028,6 +1082,12 @@ export class DKGPublisher implements Publisher {
         await this.privateStore.storePrivateTriples(paranetId, rootEntity, entityPrivateQuads);
       }
     }
+    this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+      quads: allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph })),
+      paranetId,
+      graph: dataGraph,
+      rootEntities: manifestEntries.map((entry) => entry.rootEntity),
+    });
 
     try {
       await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, kcId, kcMerkleRoot);

@@ -1,7 +1,8 @@
 import {
-  decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
+  decodePublishRequest, DKGEvent, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
   isSafeIri,
+  type EventBus,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -25,6 +26,7 @@ export interface GossipPublishHandlerCallbacks {
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
+  private readonly eventBus: EventBus;
   private readonly subscribedParanets: Map<string, any>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
@@ -32,13 +34,21 @@ export class GossipPublishHandler {
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    subscribedParanets: Map<string, any>,
-    callbacks: GossipPublishHandlerCallbacks,
+    eventBusOrSubscribedParanets: EventBus | Map<string, any>,
+    subscribedParanetsOrCallbacks: Map<string, any> | GossipPublishHandlerCallbacks,
+    maybeCallbacks?: GossipPublishHandlerCallbacks,
   ) {
     this.store = store;
     this.chain = chain;
-    this.subscribedParanets = subscribedParanets;
-    this.callbacks = callbacks;
+    if (maybeCallbacks) {
+      this.eventBus = eventBusOrSubscribedParanets as EventBus;
+      this.subscribedParanets = subscribedParanetsOrCallbacks as Map<string, any>;
+      this.callbacks = maybeCallbacks;
+    } else {
+      this.eventBus = NOOP_EVENT_BUS;
+      this.subscribedParanets = eventBusOrSubscribedParanets as Map<string, any>;
+      this.callbacks = subscribedParanetsOrCallbacks as GossipPublishHandlerCallbacks;
+    }
   }
 
   async handlePublishMessage(data: Uint8Array, paranetId: string, onPhase?: GossipPhaseCallback): Promise<void> {
@@ -166,6 +176,15 @@ export class GossipPublishHandler {
       phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
+        const rootEntities = request.kas?.map((ka) => ka.rootEntity).filter(isSafeIri) ?? [];
+        if (rootEntities.length > 0) {
+          this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+            quads: normalized,
+            paranetId: request.paranetId,
+            graph: dataGraph,
+            rootEntities,
+          });
+        }
       }
 
       if (request.ual) {
@@ -320,6 +339,12 @@ export class GossipPublishHandler {
     }
   }
 }
+
+const NOOP_EVENT_BUS: EventBus = {
+  emit() {},
+  on() {},
+  off() {},
+};
 
 function parseSimpleNQuads(text: string): Quad[] {
   const quads: Quad[] = [];

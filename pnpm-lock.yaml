@@ -156,6 +156,9 @@ importers:
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
+      '@origintrail-official/dkg-vector':
+        specifier: workspace:*
+        version: link:../vector
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -691,6 +694,32 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0)
+
+  packages/vector:
+    dependencies:
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
+      better-sqlite3:
+        specifier: ^11
+        version: 11.10.0
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7
+        version: 7.6.13
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0))
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0)
+    optionalDependencies:
+      sqlite-vec:
+        specifier: ^0.1.6
+        version: 0.1.7
 
 packages:
 
@@ -4415,6 +4444,34 @@ packages:
 
   sprintf-js@1.0.3:
     resolution: {integrity: sha512-D9cPgkvLlV3t3IzL0D0YLvGA9Ahk4PcvVwUbN0dSGr1aP0Nrt4AEnTUbuGvquEC0mA64Gqt1fzirlRs5ibXx8g==}
+
+  sqlite-vec-darwin-arm64@0.1.7:
+    resolution: {integrity: sha512-dQ7u4GKPdOPi3IfZ44K7HHdYup2JssM6fuKR9zgqRzW137uFOQmRhbYChNu+ZfW+yhJutsPgfNRFsuWKmy627w==}
+    cpu: [arm64]
+    os: [darwin]
+
+  sqlite-vec-darwin-x64@0.1.7:
+    resolution: {integrity: sha512-MDoczft1BriQcGMEz+CqeSCkB0OsAf12ytZOapS6MaB7zgNzLLSLH6Sxe3yzcPWUyDuCWgK7WzyRIo8u1vAIVA==}
+    cpu: [x64]
+    os: [darwin]
+
+  sqlite-vec-linux-arm64@0.1.7:
+    resolution: {integrity: sha512-V429sYT/gwr9PgtT8rbjQd6ls7CFchFpiS45TKSf7rU7wxt9MBmCVorUcheD4kEZb4VeZ6PnFXXCqPMeaHkaUw==}
+    cpu: [arm64]
+    os: [linux]
+
+  sqlite-vec-linux-x64@0.1.7:
+    resolution: {integrity: sha512-wZL+lXeW7y63DLv6FYU6Q4nv2lP5F94cWt7bJCWNiHmZ6NdKIgz/p0QlyuJA/51b8TyoDvsTdusLVlZz9cIh5A==}
+    cpu: [x64]
+    os: [linux]
+
+  sqlite-vec-windows-x64@0.1.7:
+    resolution: {integrity: sha512-FEZMjMT03irJxwqMQg+A+4hHCiFslxISOAkQ0eYn2lP7GdpppkgYveaT5Xnw/2V+GLq2MXOJb0nDGFNethHSkg==}
+    cpu: [x64]
+    os: [win32]
+
+  sqlite-vec@0.1.7:
+    resolution: {integrity: sha512-1Sge9uRc3B6wDKR4J6sGFi/E2ai9SAU5FenDki3OmhdP/a49PO2Juy1U5yQnx2bZP5t+C3BYJTkG+KkDi3q9Xg==}
 
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
@@ -9473,6 +9530,30 @@ snapshots:
   source-map@0.7.6: {}
 
   sprintf-js@1.0.3: {}
+
+  sqlite-vec-darwin-arm64@0.1.7:
+    optional: true
+
+  sqlite-vec-darwin-x64@0.1.7:
+    optional: true
+
+  sqlite-vec-linux-arm64@0.1.7:
+    optional: true
+
+  sqlite-vec-linux-x64@0.1.7:
+    optional: true
+
+  sqlite-vec-windows-x64@0.1.7:
+    optional: true
+
+  sqlite-vec@0.1.7:
+    optionalDependencies:
+      sqlite-vec-darwin-arm64: 0.1.7
+      sqlite-vec-darwin-x64: 0.1.7
+      sqlite-vec-linux-arm64: 0.1.7
+      sqlite-vec-linux-x64: 0.1.7
+      sqlite-vec-windows-x64: 0.1.7
+    optional: true
 
   stackback@0.0.2: {}
 

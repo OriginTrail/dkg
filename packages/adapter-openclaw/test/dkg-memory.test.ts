@@ -20,6 +20,7 @@ describe('DkgMemoryPlugin', () => {
   beforeEach(() => {
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
     plugin = new DkgMemoryPlugin(client, { enabled: true });
+    vi.spyOn(client, 'semanticSearch').mockRejectedValue(new Error('vector disabled'));
   });
 
   afterEach(() => {
@@ -54,6 +55,45 @@ describe('DkgMemoryPlugin', () => {
     expect(results[0].content).toBe('TypeScript patterns');
     expect(results[0].path).toContain('memory');
     expect(results[0].score).toBeGreaterThan(0);
+  });
+
+  it('search should merge semantic and keyword results when both are available', async () => {
+    vi.spyOn(client, 'semanticSearch').mockResolvedValueOnce([
+      { subject: 'urn:dkg:memory:1', object: 'TypeScript patterns', text: 'TypeScript patterns', score: 0.95 },
+    ]);
+    vi.spyOn(client, 'query').mockResolvedValueOnce({
+      results: {
+        bindings: [
+          { uri: { value: 'urn:dkg:memory:2' }, text: { value: 'TypeScript testing guide' }, type: { value: 'memory' } },
+        ],
+      },
+    });
+
+    const api = makeApi();
+    plugin.register(api);
+    const results = await plugin.search('TypeScript');
+
+    expect(results).toHaveLength(2);
+    expect(results.map((result) => result.content)).toEqual(
+      expect.arrayContaining(['TypeScript patterns', 'TypeScript testing guide']),
+    );
+    expect(results.find((result) => result.path.includes('urn:dkg:memory:1'))?.score).toBe(0.95);
+  });
+
+  it('search should keep semantic results when keyword search fails', async () => {
+    vi.spyOn(client, 'semanticSearch').mockResolvedValueOnce([
+      { subject: 'urn:dkg:memory:1', object: 'TypeScript patterns', text: 'TypeScript patterns', score: 0.95 },
+    ]);
+    vi.spyOn(client, 'query').mockRejectedValueOnce(new Error('daemon offline'));
+
+    const api = makeApi();
+    plugin.register(api);
+    const results = await plugin.search('TypeScript');
+
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toBe('TypeScript patterns');
+    expect(results[0].score).toBe(0.95);
+    expect(results[0].path).toContain('urn:dkg:memory:1');
   });
 
   it('search should return empty array on error', async () => {

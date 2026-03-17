@@ -355,6 +355,51 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'dkg_semantic_search',
+  {
+    title: 'Semantic Search',
+    description:
+      'Search the knowledge graph using natural language. Returns the actual ' +
+      'triples (subject, predicate, object, graph) most relevant to your query. ' +
+      'Use this when you do not know the SPARQL structure or want to discover data.',
+    inputSchema: {
+      query: z.string().describe('Natural language search query'),
+      paranetId: z.string().optional().describe('Paranet to search (omit to search all)'),
+      graph: z.string().optional().describe('Optional graph URI filter'),
+      limit: z.number().optional().default(10).describe('Maximum result count'),
+    },
+  },
+  async ({ query, paranetId, graph, limit }) => {
+    try {
+      const client = await getClient();
+      const rows = await client.semanticSearch(query, {
+        paranetId,
+        graph,
+        topK: limit,
+      });
+      if (rows.length === 0) {
+        return ok('(no results)');
+      }
+      const table = [
+        '| subject | predicate | object | graph | score |',
+        '| --- | --- | --- | --- | --- |',
+        ...rows.map((row) => `| ${cleanValue(String(row.subject ?? ''))} | ${cleanValue(String(row.predicate ?? ''))} | ${cleanValue(String(row.object ?? ''))} | ${cleanValue(String(row.graph ?? ''))} | ${Number(row.score ?? 0).toFixed(3)} |`),
+      ].join('\n');
+      return ok(table);
+    } catch (e) {
+      const message = formatError(e);
+      if (message.includes('Vector search not enabled')) {
+        return ok('Vector search is not enabled on this node. Set `vector.enabled` in the daemon config.');
+      }
+      if (message.includes('vector index unhealthy')) {
+        return ok('Vector search is temporarily unavailable because the vector index is unhealthy. Retry later or run a reindex.');
+      }
+      return err(`Semantic search error: ${message}`);
+    }
+  },
+);
+
 // ---------------------------------------------------------------------------
 // dkg_publish — Publish knowledge to the graph
 // ---------------------------------------------------------------------------

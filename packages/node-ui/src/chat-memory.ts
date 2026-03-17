@@ -4,6 +4,10 @@ import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
   query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => Promise<any>;
+  semanticSearch: (
+    query: string,
+    opts?: { paranetId?: string; graph?: string; topK?: number; minScore?: number },
+  ) => Promise<Array<Record<string, unknown>>>;
   writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ workspaceOperationId: string }>;
   enshrineFromWorkspace: (
     paranetId: string,

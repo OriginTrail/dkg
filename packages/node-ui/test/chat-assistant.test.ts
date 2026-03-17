@@ -179,6 +179,7 @@ describe('ChatAssistant', () => {
     it('falls back to blocking tool loop when streamed response requests tool calls', async () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
+        semanticSearch: vi.fn().mockResolvedValue([]),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
         enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
@@ -376,6 +377,7 @@ describe('ChatAssistant', () => {
     it('routes action messages to LLM when LLM + tools configured', async () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
+        semanticSearch: vi.fn().mockResolvedValue([]),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test-123' }),
         enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
@@ -431,6 +433,7 @@ describe('ChatAssistant', () => {
       seedMetrics();
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
+        semanticSearch: vi.fn().mockResolvedValue([]),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
         enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed' }),
         createParanet: vi.fn().mockResolvedValue(undefined),
@@ -455,6 +458,7 @@ describe('ChatAssistant', () => {
     beforeEach(() => {
       mockTools = {
         query: vi.fn().mockResolvedValue({ bindings: [{ s: 'x', p: 'y', o: 'z' }] }),
+        semanticSearch: vi.fn().mockResolvedValue([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g', score: 0.9, text: 'sample' }]),
         writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-abc' }),
         enshrineFromWorkspace: vi.fn().mockResolvedValue({ status: 'confirmed', kcId: 42n }),
         createParanet: vi.fn().mockResolvedValue(undefined),
@@ -480,6 +484,28 @@ describe('ChatAssistant', () => {
       expect(mockTools.query).toHaveBeenCalledWith('SELECT ?s WHERE { ?s ?p ?o } LIMIT 5', expect.objectContaining({ includeWorkspace: false }));
       expect(res.toolCalls).toHaveLength(1);
       expect(res.toolCalls![0].name).toBe('dkg_query');
+      fetchSpy.mockRestore();
+    });
+
+    it('executes dkg_semantic_search tool', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          choices: [{ message: { content: null, tool_calls: [{
+            id: 'c1', type: 'function',
+            function: { name: 'dkg_semantic_search', arguments: JSON.stringify({ query: 'washing machine service', paranetId: 'agent-memory', limit: 5 }) },
+          }] } }],
+        }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          choices: [{ message: { content: 'I found one relevant triple.' } }],
+        }), { status: 200 }));
+
+      const res = await toolAssistant.answer({ message: 'Find my washing machine service history' });
+      expect(mockTools.semanticSearch).toHaveBeenCalledWith('washing machine service', {
+        paranetId: 'agent-memory',
+        graph: undefined,
+        topK: 5,
+      });
+      expect(res.toolCalls![0].name).toBe('dkg_semantic_search');
       fetchSpy.mockRestore();
     });
 

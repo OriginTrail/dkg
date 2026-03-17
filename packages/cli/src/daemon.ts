@@ -114,6 +114,14 @@ interface CatchupTracker {
   latestByParanet: Map<string, string>;
 }
 
+export function vectorApiErrorResponse(error: unknown): { status: number; error: string } | null {
+  if (!(error instanceof Error)) return null;
+  if (error.name === 'VectorIndexUnhealthyError' || error.message.includes('vector index unhealthy')) {
+    return { status: 503, error: 'vector index unhealthy' };
+  }
+  return null;
+}
+
 type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
 interface PublishQuad {
@@ -255,6 +263,25 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     log('No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.');
   }
 
+  const vectorEmbeddingConfig = config.vector?.embedding;
+  const vectorApiKey = vectorEmbeddingConfig?.apiKey ?? config.llm?.apiKey;
+  const vectorBaseURL = vectorEmbeddingConfig?.baseURL ?? config.llm?.baseURL;
+  const vectorConfig = config.vector?.enabled && vectorApiKey
+    ? {
+        dataDir: config.vector.dataDir ?? join(dkgDir(), 'vector'),
+        embedding: {
+          apiKey: vectorApiKey,
+          model: vectorEmbeddingConfig?.model,
+          baseURL: vectorBaseURL,
+          dimensions: vectorEmbeddingConfig?.dimensions,
+          batchSize: vectorEmbeddingConfig?.batchSize,
+        },
+      }
+    : undefined;
+  if (config.vector?.enabled && !vectorApiKey) {
+    log('Vector search disabled: missing vector.embedding.apiKey and llm.apiKey');
+  }
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: 'DKG',
@@ -276,6 +303,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       chainId: chainBase.chainId,
     } : undefined,
     workspaceTtlMs: config.workspaceTtlMs,
+    vector: vectorConfig,
   });
 
   const networkId = await computeNetworkId();
@@ -635,6 +663,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   const agentToolsContext = {
     query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_workspace'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
+    semanticSearch: (query: string, opts?: { paranetId?: string; graph?: string; topK?: number; minScore?: number }) =>
+      agent.semanticSearch(query, opts).then((results) => results.map((result) => ({ ...result }))),
     writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.writeToWorkspace(paranetId, quads, opts),
     enshrineFromWorkspace: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.enshrineFromWorkspace(paranetId, selection, opts),
     createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createParanet(opts),
@@ -1961,6 +1991,59 @@ async function handleRequest(
       tracker.fail(ctx, err);
       throw err;
     }
+  }
+
+  // POST /api/semantic-search  { query, paranetId?, graph?, topK?, minScore? }
+  if (req.method === 'POST' && path === '/api/semantic-search') {
+    if (!agent.vectorSidecar) {
+      return jsonResponse(res, 501, { error: 'Vector search not enabled. Set vector.enabled in config.' });
+    }
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: any;
+    try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { query, paranetId, graph, topK, minScore } = payload;
+    if (!query) return jsonResponse(res, 400, { error: 'Missing "query"' });
+    try {
+      const results = await agent.semanticSearch(String(query), {
+        paranetId: paranetId ? String(paranetId) : undefined,
+        graph: graph ? String(graph) : undefined,
+        topK: Number.isFinite(Number(topK)) ? Number(topK) : undefined,
+        minScore: Number.isFinite(Number(minScore)) ? Number(minScore) : undefined,
+      });
+      return jsonResponse(res, 200, { results });
+    } catch (error) {
+      const vectorError = vectorApiErrorResponse(error);
+      if (vectorError) {
+        return jsonResponse(res, vectorError.status, { error: vectorError.error });
+      }
+      throw error;
+    }
+  }
+
+  // POST /api/vector/reindex  { paranetId, graph? }
+  if (req.method === 'POST' && path === '/api/vector/reindex') {
+    if (!agent.vectorSidecar) {
+      return jsonResponse(res, 501, { error: 'Vector search not enabled. Set vector.enabled in config.' });
+    }
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: any;
+    try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    const { paranetId, graph } = payload;
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const result = await agent.vectorSidecar.reindex(String(paranetId), {
+      graph: graph ? String(graph) : undefined,
+    });
+    return jsonResponse(res, 200, result);
+  }
+
+  // GET /api/vector/stats?paranetId=...
+  if (req.method === 'GET' && path === '/api/vector/stats') {
+    if (!agent.vectorSidecar) {
+      return jsonResponse(res, 501, { error: 'Vector search not enabled. Set vector.enabled in config.' });
+    }
+    const paranetId = url.searchParams.get('paranetId') ?? undefined;
+    const stats = await agent.vectorSidecar.stats({ paranetId });
+    return jsonResponse(res, 200, stats);
   }
 
   // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }

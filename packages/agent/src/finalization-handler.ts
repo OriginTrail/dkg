@@ -1,9 +1,11 @@
 import {
   decodeFinalizationMessage,
+  DKGEvent,
   paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
   Logger, createOperationContext,
   assertSafeIri, isSafeIri,
+  type EventBus,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -19,11 +21,13 @@ import { ethers } from 'ethers';
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
+  private readonly eventBus: EventBus;
   private readonly log = new Logger('FinalizationHandler');
 
-  constructor(store: TripleStore, chain: ChainAdapter | undefined) {
+  constructor(store: TripleStore, chain: ChainAdapter | undefined, eventBus: EventBus = NOOP_EVENT_BUS) {
     this.store = store;
     this.chain = chain;
+    this.eventBus = eventBus;
   }
 
   async handleFinalizationMessage(data: Uint8Array, paranetId: string): Promise<void> {
@@ -295,6 +299,12 @@ export class FinalizationHandler {
     const rootEntities = msgRootEntities.length > 0
       ? msgRootEntities
       : [...partitioned.keys()];
+    this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+      quads: canonicalQuads,
+      paranetId,
+      graph: dataGraph,
+      rootEntities,
+    });
 
     if (msgRootEntities.length > 0) {
       const msgSet = new Set(msgRootEntities);
@@ -379,6 +389,13 @@ export class FinalizationHandler {
       });
       await this.deleteMetaForRoot(wsMetaGraph, rootEntity);
     }
+    if (rootEntities.length > 0) {
+      this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+        rootEntities,
+        paranetId,
+        graph: workspaceGraph,
+      });
+    }
 
     this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from workspace to canonical for ${ual}`);
   }
@@ -409,6 +426,12 @@ export class FinalizationHandler {
   }
 }
 
+const NOOP_EVENT_BUS: EventBus = {
+  emit() {},
+  on() {},
+  off() {},
+};
+
 function protoToNumber(val: number | bigint | { low: number; high: number; unsigned: boolean }): number {
   if (typeof val === 'bigint') return Number(val);
   if (typeof val === 'number') return val;
@@ -420,4 +443,3 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   if (typeof val === 'number') return BigInt(val);
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
-

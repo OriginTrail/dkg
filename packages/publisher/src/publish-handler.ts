@@ -261,6 +261,13 @@ export class PublishHandler {
       const dataGraph = this.graphManager.dataGraphUri(paranetId);
       const normalized = quads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
+      const rootEntities = manifest.map((m) => m.rootEntity);
+      this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+        quads: normalized,
+        paranetId,
+        graph: dataGraph,
+        rootEntities,
+      });
 
       const kaMetadata: KAMetadata[] = manifest.map((m, i) => ({
         rootEntity: m.rootEntity,
@@ -288,7 +295,7 @@ export class PublishHandler {
 
       // ── Tentative lifecycle timeout ──
       const timeout = setTimeout(
-        () => this.expireTentativePublish(request.ual, paranetId, normalized, metadataQuads),
+        () => this.expireTentativePublish(request.ual, paranetId, normalized, metadataQuads, rootEntities),
         PublishHandler.TENTATIVE_TIMEOUT_MS,
       );
       this.pendingPublishes.set(request.ual, {
@@ -302,7 +309,7 @@ export class PublishHandler {
         expectedStartKAId: startKAId,
         expectedEndKAId: endKAId,
         expectedChainId: request.chainId ?? '',
-        rootEntities: manifest.map(m => m.rootEntity),
+        rootEntities,
         createdAt: Date.now(),
       });
       this.persistJournal();
@@ -371,6 +378,7 @@ export class PublishHandler {
     paranetId: string,
     dataQuads: Quad[],
     metadataQuads: Quad[],
+    rootEntities: string[],
   ): Promise<void> {
     const ctx = createOperationContext('publish');
     this.pendingPublishes.delete(ual);
@@ -383,6 +391,13 @@ export class PublishHandler {
 
       await this.store.delete(dataQuads);
       await this.store.delete(metadataQuads);
+      if (rootEntities.length > 0) {
+        this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+          rootEntities,
+          paranetId,
+          graph: this.graphManager.dataGraphUri(paranetId),
+        });
+      }
 
       const owned = this.ownedEntities.get(paranetId);
       if (owned) {
@@ -516,6 +531,13 @@ export class PublishHandler {
         }
         await this.store.deleteBySubjectPrefix(metaGraph, ual);
         await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
+        if (pending.rootEntities.length > 0) {
+          this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+            rootEntities: pending.rootEntities,
+            paranetId: pending.paranetId,
+            graph: dataGraph,
+          });
+        }
         this.log.info(ctx, `Restored tentative publish expired, data removed: ${ual} (${pending.rootEntities.length} root entities)`);
       } catch (err) {
         this.log.error(ctx, `Failed to clean up expired restored publish: ${ual} — ${err instanceof Error ? err.message : String(err)}`);

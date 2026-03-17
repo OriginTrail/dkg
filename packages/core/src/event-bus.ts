@@ -5,6 +5,8 @@ export const DKGEvent = {
   KC_CONFIRMED: 'kc:confirmed',
   KC_DELETED: 'kc:deleted',
   KA_UPDATED: 'ka:updated',
+  TRIPLES_STORED: 'triples:stored',
+  TRIPLES_REMOVED: 'triples:removed',
   PEER_CONNECTED: 'peer:connected',
   PEER_DISCONNECTED: 'peer:disconnected',
   CONNECTION_OPEN: 'connection:open',
@@ -29,6 +31,26 @@ export const DKGEvent = {
 } as const;
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];
+
+export interface TripleEventQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph: string;
+}
+
+export interface TriplesStoredEvent {
+  quads: TripleEventQuad[];
+  paranetId: string;
+  graph: string;
+  rootEntities: string[];
+}
+
+export interface TriplesRemovedEvent {
+  rootEntities: string[];
+  paranetId: string;
+  graph: string;
+}
 
 export class TypedEventBus implements EventBus {
   private listeners = new Map<string, Set<(data: unknown) => void>>();

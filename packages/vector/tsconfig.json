@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "paths": {
+      "@origintrail-official/dkg-core": ["../core/src/index.ts"],
+      "@origintrail-official/dkg-storage": ["../storage/src/index.ts"],
+      "better-sqlite3": ["../node-ui/node_modules/better-sqlite3"]
+    }
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../core" },
+    { "path": "../storage" }
+  ]
+}

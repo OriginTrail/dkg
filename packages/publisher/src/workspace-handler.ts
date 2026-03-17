@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm } from '@origintrail-official/dkg-core';
 import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
@@ -195,11 +195,27 @@ export class WorkspaceHandler {
             await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
           }
         }
+        const replacedRootEntities = manifestForValidation
+          .map((m) => m.rootEntity)
+          .filter((rootEntity) => wsOwned.has(rootEntity));
+        if (replacedRootEntities.length > 0) {
+          this.eventBus.emit(DKGEvent.TRIPLES_REMOVED, {
+            rootEntities: replacedRootEntities,
+            paranetId,
+            graph: workspaceGraph,
+          });
+        }
 
         const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
         await this.store.insert(normalized);
 
         const rootEntities = manifestForValidation.map((m) => m.rootEntity);
+        this.eventBus.emit(DKGEvent.TRIPLES_STORED, {
+          quads: normalized,
+          paranetId,
+          graph: workspaceGraph,
+          rootEntities,
+        });
         const metaQuads = generateWorkspaceMetadata(
           {
             workspaceOperationId,

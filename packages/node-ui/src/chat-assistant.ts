@@ -64,6 +64,23 @@ const DKG_TOOLS: OpenAITool[] = [
   {
     type: 'function',
     function: {
+      name: 'dkg_semantic_search',
+      description: 'Search the knowledge graph using natural language. Returns relevant triples. Prefer this over dkg_query with FILTER(CONTAINS) when the user asks fuzzy or natural-language questions about memories, preferences, or prior knowledge.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Natural language search query' },
+          paranetId: { type: 'string', description: 'Optional paranet id (defaults to agent-memory for personal knowledge)' },
+          graph: { type: 'string', description: 'Optional graph URI filter' },
+          limit: { type: 'number', description: 'Maximum result count (default 10)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'dkg_write_to_workspace',
       description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. For literal values use plain strings (e.g. "Tesla"). For URIs use full URIs (e.g. "http://example.org/Tesla").',
       parameters: {
@@ -172,7 +189,9 @@ Otherwise, just answer in plain language. Keep any queries read-only (SELECT, CO
     if (this.agentTools) {
       p += `
 
-You have DKG tools: dkg_query (read graph), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
+You have DKG tools: dkg_query (read graph), dkg_semantic_search (natural-language graph search), dkg_write_to_workspace (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_workspace with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
+
+Use dkg_semantic_search when the user asks a natural-language question about memories, preferences, past conversations, or stored knowledge and you do not know the exact RDF shape. Use dkg_query when you need precise SPARQL results or already know the schema. For questions like "when was my washing machine last serviced?", try dkg_semantic_search before building a manual FILTER(CONTAINS) query.
 
 The user may have imported memories from other AI assistants (Claude, ChatGPT, Gemini). These are stored in the "agent-memory" paranet. To query them, ALWAYS use dkg_query with paranetId "agent-memory". The data model:
 - Import batches: type <http://dkg.io/ontology/MemoryImport>, with predicates <http://dkg.io/ontology/importSource> (e.g. "claude"), <http://schema.org/dateCreated>, <http://dkg.io/ontology/itemCount>
@@ -184,7 +203,7 @@ Example queries:
 - List import batches: SELECT ?batch ?source ?date ?count WHERE { ?batch a <http://dkg.io/ontology/MemoryImport> ; <http://dkg.io/ontology/importSource> ?source ; <http://schema.org/dateCreated> ?date ; <http://dkg.io/ontology/itemCount> ?count } ORDER BY DESC(?date) LIMIT 10
 - Search memories by text: SELECT ?text WHERE { ?m a <http://dkg.io/ontology/ImportedMemory> ; <http://schema.org/text> ?text FILTER(CONTAINS(LCASE(?text), "dark mode")) } LIMIT 20
 
-When the user asks about their memories, imported memories, preferences, or what you know about them, use dkg_query to look up their imported memories from the agent-memory paranet. Do NOT say you can't access memories — always try the query first.`;
+When the user asks about their memories, imported memories, preferences, or what you know about them, use dkg_semantic_search first when the question is fuzzy or natural-language, and use dkg_query when you need exact schema-aware filtering over the agent-memory paranet. Do NOT say you can't access memories — always try a graph lookup first.`;
     }
     return p;
   }
@@ -199,6 +218,16 @@ When the user asks about their memories, imported memories, preferences, or what
           const res = await this.agentTools.query(sparql, { paranetId, includeWorkspace: paranetId === 'agent-memory' });
           const bindings = res?.result?.bindings ?? res?.bindings ?? [];
           return { result: bindings, summary: `Query returned ${bindings.length} result(s).` };
+        }
+        case 'dkg_semantic_search': {
+          const query = String(args.query ?? '');
+          const paranetId = args.paranetId != null ? String(args.paranetId) : 'agent-memory';
+          const results = await this.agentTools.semanticSearch(query, {
+            paranetId,
+            graph: args.graph != null ? String(args.graph) : undefined,
+            topK: Number(args.limit) || 10,
+          });
+          return { result: results, summary: `Found ${results.length} relevant triple(s).` };
         }
         case 'dkg_write_to_workspace': {
           const paranetId = String(args.paranetId ?? '');

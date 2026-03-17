@@ -83,6 +83,18 @@ export interface DkgConfig {
   chain?: ChainConfig;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  /** Optional vector index for triple-level semantic search. */
+  vector?: {
+    enabled: boolean;
+    dataDir?: string;
+    embedding?: {
+      apiKey?: string;
+      model?: string;
+      baseURL?: string;
+      dimensions?: number;
+      batchSize?: number;
+    };
+  };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
