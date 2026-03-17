@@ -48,7 +48,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
-import { handleCapture, EpcisValidationError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
 function getNodeVersion(): string {
@@ -2216,6 +2216,29 @@ async function handleRequest(
     jsonResponse(res, 200, { ok: true });
     setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100);
     return;
+  }
+
+  // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  if (req.method === 'GET' && path === '/api/epcis/events') {
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    }
+    const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
+    const epcisQueryEngine = {
+      query: (sparql: string, opts?: { paranetId?: string }) => agent.query(sparql, opts),
+    };
+    try {
+      const result = await handleEventsQuery(searchParams, {
+        paranetId: config.epcis.paranetId,
+        queryEngine: epcisQueryEngine,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      if (err instanceof EpcisQueryError) {
+        return jsonResponse(res, err.statusCode, { error: err.message });
+      }
+      throw err;
+    }
   }
 
   // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
