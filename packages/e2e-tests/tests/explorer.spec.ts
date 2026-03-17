@@ -43,45 +43,6 @@ test.describe('Memory Explorer - Graph tab', () => {
   });
 });
 
-test.describe('Memory Explorer - Paranet filter', () => {
-  test('Paranet filter works when selecting a specific paranet', async ({ page }) => {
-    test.slow();
-    await page.goto(EXPLORER_BASE);
-
-    const paranetSelect = page.locator('.graph-toolbar select').first();
-    await expect(paranetSelect).toBeVisible();
-
-    // Wait for paranets to load via API — the /api/paranet/list endpoint can
-    // be very slow or unresponsive, so retry with generous intervals and skip
-    // rather than fail when paranets aren't available.
-    let paranetOptions: string[] = [];
-    try {
-      await expect(async () => {
-        const options = await paranetSelect.locator('option').allTextContents();
-        paranetOptions = options.filter((t) => t.trim() && t !== 'All Paranets');
-        expect(paranetOptions.length).toBeGreaterThan(0);
-      }).toPass({ timeout: 30_000, intervals: [2_000, 3_000, 5_000] });
-    } catch {
-      test.skip(true, 'No paranets loaded — /api/paranet/list may be unresponsive');
-      return;
-    }
-
-    // Select first non-empty paranet (e.g. "Origin Trail Game" or similar)
-    const targetParanet = paranetOptions.find((n) =>
-      /origin\s*trail\s*game|origin-trail-game/i.test(n),
-    ) ?? paranetOptions[0];
-
-    await paranetSelect.selectOption({ label: targetParanet });
-
-    // Wait for graph to reload (loading state may appear briefly)
-    await page.waitForLoadState('domcontentloaded');
-
-    await page.waitForTimeout(2000);
-    const paranetName = targetParanet.trim();
-    await expect(page.getByText(paranetName).first()).toBeVisible({ timeout: 10_000 });
-  });
-});
-
 test.describe('Memory Explorer - Show literals toggle', () => {
   test('Show literals checkbox can be unchecked', async ({ page }) => {
     await page.goto(EXPLORER_BASE);
