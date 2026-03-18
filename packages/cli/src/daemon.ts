@@ -2247,13 +2247,23 @@ async function handleRequest(
       return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
     }
     const body = await readBody(req);
-    const { epcisDocument, publishOptions } = JSON.parse(body);
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
+    }
+    const { epcisDocument, publishOptions } = parsed;
     if (!epcisDocument) {
       return jsonResponse(res, 400, { error: 'Missing "epcisDocument" in request body' });
     }
     const epcisPublisher: EpcisPublisher = {
       async publish(paranetId, content, opts) {
-        const result = await agent.publish(paranetId, content as any, opts as any);
+        const result = await agent.publish(
+          paranetId,
+          content as Record<string, unknown>,
+          opts,
+        );
         return { ual: result.ual, kcId: String(result.kcId), status: result.status };
       },
     };
@@ -2262,6 +2272,9 @@ async function handleRequest(
         { epcisDocument, publishOptions },
         { paranetId: config.epcis.paranetId, publisher: epcisPublisher },
       );
+      // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
+      // Current sync model returns 200 with the full result. Switch to 202 + captureID +
+      // GET /capture/{captureID} polling endpoint when async capture is implemented (Phase 2).
       return jsonResponse(res, 200, result);
     } catch (err) {
       if (err instanceof EpcisValidationError) {

@@ -2363,6 +2363,12 @@ function parseNQuads(text: string): Quad[] {
   return quads;
 }
 
+let _jsonld: typeof import('jsonld') | undefined;
+async function getJsonld() {
+  if (!_jsonld) _jsonld = await import('jsonld');
+  return _jsonld;
+}
+
 /**
  * Convert a JSON-LD content object into public and private Quad arrays.
  *
@@ -2373,7 +2379,7 @@ function parseNQuads(text: string): Quad[] {
 async function jsonLdToQuads(
   content: JsonLdContent,
 ): Promise<{ publicQuads: Quad[]; privateQuads: Quad[] }> {
-  const jsonld = await import('jsonld');
+  const jsonld = await getJsonld();
 
   const obj = content as Record<string, unknown>;
   const isEnvelope = !Array.isArray(content) && ('public' in obj || 'private' in obj);
