@@ -44,11 +44,30 @@ export class DkgNodePlugin {
     this.config = { ...config };
   }
 
+  /** Whether the first full registration (lifecycle hooks, daemon handshake, integration modules) has run. */
+  private initialized = false;
+
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
-   * Registers lifecycle hooks, agent-facing tools, and integration modules.
+   * On the first call: full init (lifecycle hooks, daemon handshake, integration modules).
+   * On subsequent calls (gateway multi-phase init): re-registers tools into the new registry.
    */
   register(api: OpenClawPluginApi): void {
+    // Always re-register tools into the current registry context
+    for (const tool of this.tools()) {
+      api.registerTool(tool);
+    }
+
+    // First call: full initialization (lifecycle, daemon, integration modules)
+    // Subsequent calls (gateway multi-phase init): only re-register tools above
+    if (this.initialized) {
+      // Re-register integration module tools into the new registry,
+      // but don't recreate instances (avoids port conflicts, duplicate watchers, etc.)
+      this.reregisterIntegrationTools(api);
+      return;
+    }
+    this.initialized = true;
+
     // Create daemon client — used by all tools and integration modules
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
@@ -60,10 +79,6 @@ export class DkgNodePlugin {
     this.client.registerAdapter('openclaw').catch(err => {
       api.logger.warn?.(`[dkg] Adapter registration failed (will retry on next gateway start): ${err.message}`);
     });
-
-    for (const tool of this.tools()) {
-      api.registerTool(tool);
-    }
 
     // --- Integration modules ---
     this.registerIntegrationModules(api);
@@ -132,6 +147,16 @@ export class DkgNodePlugin {
 
       api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
     }
+  }
+
+  /**
+   * Re-register integration module tools into a new registry context
+   * without recreating instances (avoids port conflicts, duplicate watchers, etc.).
+   */
+  private reregisterIntegrationTools(api: OpenClawPluginApi): void {
+    this.gamePlugin?.registerTools(api);
+    this.memoryPlugin?.registerTools(api);
+    // channelPlugin and writeCapture don't register agent tools
   }
 
   async stop(): Promise<void> {

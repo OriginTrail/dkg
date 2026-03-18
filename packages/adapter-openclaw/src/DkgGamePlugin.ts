@@ -719,11 +719,16 @@ export class DkgGamePlugin {
       api.logger,
     );
 
+    this.registerTools(api);
+
+    api.logger.info?.('[dkg-game] Game plugin registered — 11 tools available');
+  }
+
+  /** Re-register tools into a new registry without recreating services. */
+  registerTools(api: OpenClawPluginApi): void {
     for (const tool of this.tools()) {
       api.registerTool(tool);
     }
-
-    api.logger.info?.('[dkg-game] Game plugin registered — 11 tools available');
   }
 
   async stop(): Promise<void> {

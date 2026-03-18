@@ -69,7 +69,10 @@ export default function (api) {
   // Reset singleton on gateway teardown so in-process restart re-registers fresh.
   // Listen on multiple lifecycle events — whichever the gateway version supports.
   if (typeof api.on === 'function') {
-    const reset = () => { instance = null; };
+    const reset = () => {
+      if (instance) { instance.stop().catch(() => {}); }
+      instance = null;
+    };
     for (const event of ['shutdown', 'close', 'restart', 'reload']) {
       api.on(event, reset);
     }

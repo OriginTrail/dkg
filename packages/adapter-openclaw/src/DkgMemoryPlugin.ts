@@ -47,7 +47,11 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
   register(api: OpenClawPluginApi): void {
     this.api = api;
+    this.registerTools(api);
+  }
 
+  /** Re-register tools into a new registry without recreating state. */
+  registerTools(api: OpenClawPluginApi): void {
     api.registerTool({
       name: 'dkg_memory_search',
       description:
