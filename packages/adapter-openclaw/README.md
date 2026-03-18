@@ -13,10 +13,11 @@ This gives your OpenClaw agent:
 
 ## Quick Start
 
-One command handles everything — installing the DKG node, writing configs, starting the daemon, funding wallets, and wiring the adapter into OpenClaw:
+Install the adapter globally, then run setup — it handles the DKG node install, config, daemon start, wallet funding, and OpenClaw wiring:
 
 ```bash
-npx @origintrail-official/dkg-adapter-openclaw setup
+npm install -g @origintrail-official/dkg-adapter-openclaw
+dkg-openclaw setup
 ```
 
 Or via the DKG CLI (if already installed):
@@ -28,6 +29,17 @@ dkg openclaw setup
 The setup script is **non-interactive** and **idempotent** — designed for both AI agents and human users. It auto-detects the OpenClaw workspace, agent name, and network defaults. Re-running is always safe.
 
 After setup completes, **restart the OpenClaw gateway** to load the adapter.
+
+### Updating
+
+To update the adapter to the latest version:
+
+```bash
+npm install -g @origintrail-official/dkg-adapter-openclaw
+dkg-openclaw setup
+```
+
+The setup re-run preserves all existing config — it only updates the adapter path and skill files. The DKG node has its own update mechanism (`dkg update`).
 
 ### What the setup script does
 
@@ -57,10 +69,11 @@ Override any auto-detected value:
 
 ### Agent Runbook
 
-If an agent is performing the setup, the single command is:
+If an agent is performing the setup:
 
 ```bash
-npx @origintrail-official/dkg-adapter-openclaw setup
+npm install -g @origintrail-official/dkg-adapter-openclaw
+dkg-openclaw setup
 ```
 
 After it completes, restart the OpenClaw gateway, then verify by calling `dkg_status`.
