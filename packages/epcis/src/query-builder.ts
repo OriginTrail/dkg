@@ -12,6 +12,20 @@ export function escapeSparql(value: string): string {
 }
 
 /**
+ * Normalize a GS1 CBV vocabulary value to a full URI.
+ * Accepts shorthand (e.g., "assembling" with prefix "BizStep") or full URI passthrough.
+ */
+export function normalizeGs1Vocabulary(prefix: 'BizStep' | 'Disp', value: string): string {
+  if (!value || typeof value !== 'string') {
+    throw new Error(`Invalid ${prefix} value`);
+  }
+  if (!value.includes('://')) {
+    return `https://ref.gs1.org/cbv/${prefix}-${value}`;
+  }
+  return value;
+}
+
+/**
  * Normalize bizStep to full GS1 CBV URI.
  * Accepts shorthand like "assembling" or full URI "https://ref.gs1.org/cbv/BizStep-assembling".
  */
@@ -19,10 +33,7 @@ export function normalizeBizStep(value: string): string {
   if (!value || typeof value !== 'string') {
     throw new Error('Invalid bizStep value');
   }
-  if (!value.includes('://')) {
-    return `https://ref.gs1.org/cbv/BizStep-${value}`;
-  }
-  return value;
+  return normalizeGs1Vocabulary('BizStep', value);
 }
 
 /**
@@ -47,20 +58,30 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
   // Must be an EPCIS event type
   filterClauses.push('FILTER(STRSTARTS(STR(?eventType), "https://gs1.github.io/EPCIS/"))');
 
-  // EPC filter
+  // eventType filter — narrow to a specific EPCIS event type
+  if (params.eventType) {
+    filterClauses.push(`FILTER(?eventType = <https://gs1.github.io/EPCIS/${escapeSparql(params.eventType)}>)`);
+  }
+
+  // EPC filter — UNION epcList + childEPCs per Section 8.2.7.1
   if (params.epc) {
     const epcValue = escapeSparql(params.epc);
-    if (params.fullTrace) {
-      wherePatterns.push(`{
+    wherePatterns.push(`{
           { ?event epcis:epcList "${epcValue}" }
-          UNION { ?event epcis:inputEPCList "${epcValue}" }
-          UNION { ?event epcis:outputEPCList "${epcValue}" }
+          UNION { ?event epcis:childEPCs "${epcValue}" }
+        }`);
+  }
+
+  // anyEPC — 5-way UNION across all EPC fields
+  if (params.anyEPC) {
+    const epcValue = escapeSparql(params.anyEPC);
+    wherePatterns.push(`{
+          { ?event epcis:epcList "${epcValue}" }
           UNION { ?event epcis:childEPCs "${epcValue}" }
           UNION { ?event epcis:parentID "${epcValue}" }
+          UNION { ?event epcis:inputEPCList "${epcValue}" }
+          UNION { ?event epcis:outputEPCList "${epcValue}" }
         }`);
-    } else {
-      wherePatterns.push(`?event epcis:epcList "${epcValue}" .`);
-    }
   }
   optionalClauses.push('OPTIONAL { ?event epcis:epcList ?epc . }');
 
@@ -105,21 +126,41 @@ export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): st
     wherePatterns.push('?event epcis:eventTime ?eventTime .');
     if (params.from && params.to) {
       filterClauses.push(
-        `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) <= xsd:dateTime("${escapeSparql(params.to)}"))`,
+        `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
       );
     } else if (params.from) {
       filterClauses.push(`FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}"))`);
     } else if (params.to) {
-      filterClauses.push(`FILTER(xsd:dateTime(?eventTime) <= xsd:dateTime("${escapeSparql(params.to)}"))`);
+      filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
     }
   } else {
     optionalClauses.push('OPTIONAL { ?event epcis:eventTime ?eventTime . }');
   }
 
-  // Always-optional fields
-  optionalClauses.push('OPTIONAL { ?event epcis:disposition ?disposition . }');
-  optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
-  optionalClauses.push('OPTIONAL { ?event epcis:action ?action . }');
+  // Action filter — required when filtered, OPTIONAL otherwise
+  if (params.action) {
+    wherePatterns.push('?event epcis:action ?action .');
+    filterClauses.push(`FILTER(STR(?action) = "${escapeSparql(params.action)}")`);
+  } else {
+    optionalClauses.push('OPTIONAL { ?event epcis:action ?action . }');
+  }
+
+  // Disposition filter — required when filtered, OPTIONAL otherwise
+  if (params.disposition) {
+    const dispUri = normalizeGs1Vocabulary('Disp', params.disposition);
+    wherePatterns.push('?event epcis:disposition ?disposition .');
+    filterClauses.push(`FILTER(STR(?disposition) = "${escapeSparql(dispUri)}")`);
+  } else {
+    optionalClauses.push('OPTIONAL { ?event epcis:disposition ?disposition . }');
+  }
+
+  // ReadPoint filter — required when filtered, OPTIONAL otherwise
+  if (params.readPoint) {
+    wherePatterns.push('?event epcis:readPoint ?readPoint .');
+    filterClauses.push(`FILTER(STR(?readPoint) = "${escapeSparql(params.readPoint)}")`);
+  } else {
+    optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
+  }
   optionalClauses.push('OPTIONAL { ?event epcis:parentID ?parentID . }');
   optionalClauses.push('OPTIONAL { ?event epcis:childEPCs ?childEPCs . }');
   optionalClauses.push('OPTIONAL { ?event epcis:inputEPCList ?inputEPCList . }');
@@ -149,7 +190,7 @@ WHERE {
   }
 }
 GROUP BY ?event ?eventType ?eventTime ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?ual
-ORDER BY DESC(?eventTime)
+ORDER BY DESC(?eventTime) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;
 }
