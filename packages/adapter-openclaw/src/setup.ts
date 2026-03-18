@@ -529,7 +529,7 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
 // Step 8: Write workspace config
 // ---------------------------------------------------------------------------
 
-export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): void {
+export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, portExplicit?: boolean): void {
   const configPath = join(workspaceDir, 'config.json');
 
   let existing: Record<string, any> = {};
@@ -541,14 +541,15 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number): voi
     }
   }
 
-  // Deep-merge: preserve existing dkg-node sub-config, but always set daemonUrl
-  // from the current port (so --port takes effect on re-runs).
+  // Deep-merge: preserve existing dkg-node sub-config.
+  // daemonUrl is only overridden when --port is explicitly passed; otherwise
+  // the existing value is kept so custom URLs (e.g. remote daemons) survive re-runs.
   // Feature flags default to true on first run but are not overridden on re-runs
   // so that user-configured `false` values are respected.
   const dkgNode = existing['dkg-node'] ?? {};
   existing['dkg-node'] = {
     ...dkgNode,
-    daemonUrl: `http://127.0.0.1:${apiPort}`,
+    daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
     memory: { enabled: true, ...dkgNode.memory },
     channel: { enabled: true, ...dkgNode.channel },
     game: { enabled: true, ...dkgNode.game },
@@ -754,7 +755,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
   // Step 8: Write workspace config
   if (!dryRun) {
-    writeWorkspaceConfig(workspaceDir, effectivePort);
+    writeWorkspaceConfig(workspaceDir, effectivePort, options.port != null);
   } else {
     log('[dry-run] Would write workspace config.json');
   }

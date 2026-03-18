@@ -246,7 +246,7 @@ describe('writeWorkspaceConfig', () => {
     expect(config['dkg-node']).toBeDefined();
   });
 
-  it('overrides daemonUrl with new port on re-run', () => {
+  it('preserves existing daemonUrl when --port not explicit', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, 'config.json'), JSON.stringify({
@@ -259,12 +259,27 @@ describe('writeWorkspaceConfig', () => {
     writeWorkspaceConfig(ws, 9200);
 
     const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    // daemonUrl is always set from the provided port (so --port takes effect)
-    expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
+    // daemonUrl is preserved when portExplicit is not set
+    expect(config['dkg-node'].daemonUrl).toBe('http://custom:8080');
     // Sub-config keys like watchDebounceMs are preserved
     expect(config['dkg-node'].memory.watchDebounceMs).toBe(3000);
     // User-configured enabled: false is respected on re-runs (idempotent)
     expect(config['dkg-node'].memory.enabled).toBe(false);
+  });
+
+  it('overrides daemonUrl when --port is explicit', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'config.json'), JSON.stringify({
+      'dkg-node': {
+        daemonUrl: 'http://custom:8080',
+      },
+    }));
+
+    writeWorkspaceConfig(ws, 9200, true);
+
+    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
+    expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
   });
 });
 
