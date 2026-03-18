@@ -382,6 +382,7 @@ export class DkgNodePlugin {
             nquads: { type: 'string', description: 'N-Quads triples, one per line. Each line: <subject> <predicate> "literal" or <uri> .' },
             access_policy: {
               type: 'string',
+              enum: ['public', 'ownerOnly', 'allowList'],
               description:
                 'Access control: "ownerOnly" (only you can read — the default), ' +
                 '"public" (anyone can read), or "allowList" (only listed peers).',
@@ -518,14 +519,14 @@ export class DkgNodePlugin {
       }
 
       // Access policy: default to ownerOnly (private) when not specified
-      const VALID_POLICIES = ['public', 'ownerOnly', 'allowList'] as const;
+      const VALID_POLICIES = new Set(['public', 'ownerOnly', 'allowList']);
       const accessPolicy = args.access_policy
-        ? String(args.access_policy)
+        ? String(args.access_policy).trim()
         : 'ownerOnly';
 
-      if (!VALID_POLICIES.includes(accessPolicy as any)) {
+      if (!VALID_POLICIES.has(accessPolicy)) {
         return this.error(
-          `Invalid access_policy "${accessPolicy}". Must be one of: ${VALID_POLICIES.join(', ')}.`,
+          `Invalid access_policy "${accessPolicy}". Must be one of: ${[...VALID_POLICIES].join(', ')}.`,
         );
       }
 
@@ -550,7 +551,7 @@ export class DkgNodePlugin {
       }
 
       const result = await this.client.publish(paranetId, quads, undefined, {
-        accessPolicy,
+        accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList',
         allowedPeers,
       });
       return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, triplesPublished: quads.length, accessPolicy });

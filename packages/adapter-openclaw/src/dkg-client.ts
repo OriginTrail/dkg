@@ -198,7 +198,7 @@ export class DkgDaemonClient {
     paranetId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-    opts?: { accessPolicy?: string; allowedPeers?: string[] },
+    opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
   ): Promise<any> {
     return this.post('/api/publish', {
       paranetId,
