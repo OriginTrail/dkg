@@ -9,7 +9,11 @@ export default defineConfig({
   fullyParallel: false,
   retries: 1,
   workers: 1,
-  reporter: [['html', { open: 'never' }], ['list']],
+  reporter: [
+    ['html', { open: 'never' }],
+    ['list'],
+    ['junit', { outputFile: './results/e2e-results.xml' }],
+  ],
   use: {
     baseURL: BASE_URL,
     headless: true,
