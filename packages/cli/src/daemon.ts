@@ -2231,8 +2231,12 @@ async function handleRequest(
       const result = await handleEventsQuery(searchParams, {
         paranetId: config.epcis.paranetId,
         queryEngine: epcisQueryEngine,
+        basePath: '/api/epcis/events',
       });
-      return jsonResponse(res, 200, result);
+      if (result.headers?.link) {
+        res.setHeader('Link', result.headers.link);
+      }
+      return jsonResponse(res, 200, result.body);
     } catch (err) {
       if (err instanceof EpcisQueryError) {
         return jsonResponse(res, err.statusCode, { error: err.message });
