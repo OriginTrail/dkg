@@ -43,23 +43,24 @@ test.describe('Agent Hub', () => {
   test.describe('OpenClaw chat history', () => {
     test('chat messages with timestamps are visible when history exists', async ({ page }) => {
       const openClawTab = page.getByRole('button', { name: /OpenClaw/ });
-      if (await openClawTab.isVisible()) {
-        await openClawTab.click();
+      if (!(await openClawTab.isVisible())) {
+        test.skip(true, 'OpenClaw not configured on this node');
+        return;
       }
-
-      // Wait for either loading, empty state, or messages
+      await openClawTab.click();
       await page.waitForLoadState('domcontentloaded');
 
-      // When messages exist, they show timestamps (AM/PM or HH:MM format)
       const messageInput = page.getByPlaceholder('Message your OpenClaw agent…');
       await expect(messageInput).toBeVisible({ timeout: 15_000 });
     });
 
     test('chat message input exists with correct placeholder', async ({ page }) => {
       const openClawTab = page.getByRole('button', { name: /OpenClaw/ });
-      if (await openClawTab.isVisible()) {
-        await openClawTab.click();
+      if (!(await openClawTab.isVisible())) {
+        test.skip(true, 'OpenClaw not configured on this node');
+        return;
       }
+      await openClawTab.click();
 
       const messageInput = page.getByPlaceholder('Message your OpenClaw agent…');
       await expect(messageInput).toBeVisible({ timeout: 15_000 });
