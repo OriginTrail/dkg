@@ -81,11 +81,21 @@ Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default,
 - Typed literal: `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`
 - Language-tagged literal: `"Bonjour"@fr`
 
+**Subject URI naming — avoid collisions:**
+
+Subject URIs identify Knowledge Assets globally. If two agents publish triples with the same subject URI, their data overlaps in queries. Always namespace your URIs to make them unique. Good patterns:
+- Include your agent/user name: `<did:dkg:entity:alice:research-note-1>`
+- Include a paranet scope: `<did:dkg:entity:my-paranet:topic-x>`
+- Include a UUID or timestamp: `<did:dkg:entity:alice:2024-03-19-finding>`
+
+Bad (too generic, will collide): `<did:dkg:entity:origintrail>`, `<did:dkg:entity:research>`
+
 **Common mistakes to avoid:**
 - Do NOT omit angle brackets around URIs — `urn:x` is wrong, `<urn:x>` is correct
 - Do NOT omit the trailing ` .` — each line must end with it
 - Do NOT use single quotes — only double quotes `"..."` for literals
 - Do NOT put a literal as the subject or predicate — only URIs
+- Do NOT use generic subject URIs — namespace them to avoid collisions with other publishers
 
 **Example — single entity (one Knowledge Asset):**
 ```nquads
