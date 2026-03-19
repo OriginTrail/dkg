@@ -86,21 +86,34 @@ Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default,
 - Do NOT omit the trailing ` .` — each line must end with it
 - Do NOT use single quotes — only double quotes `"..."` for literals
 - Do NOT put a literal as the subject or predicate — only URIs
+- Do NOT double-escape quotes in literals — `"Alice"` is correct, `"\"Alice\""` stores literal quote characters in the value
 
-**Example — single entity (one Knowledge Asset):**
+**How to structure quads:**
+
+Your job is to convert the user's input (documents, research data, messages, etc.) into a knowledge graph using appropriate ontologies and domain-specific URIs. Use standard ontologies where they exist (schema.org, Dublin Core, domain-specific vocabularies). Use meaningful URIs that reflect the content — do NOT invent `did:dkg:` URIs (those are assigned by the system for on-chain provenance).
+
+**Example — a person (using schema.org):**
 ```nquads
-<did:dkg:entity:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<did:dkg:entity:alice> <https://schema.org/name> "Alice" .
-<did:dkg:entity:alice> <https://schema.org/description> "A researcher on the DKG network" .
+<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/alice> <https://schema.org/name> "Alice Johnson" .
+<https://example.org/people/alice> <https://schema.org/jobTitle> "Research Scientist" .
+```
+
+**Example — clinical trial data (using a domain ontology):**
+```nquads
+<urn:trial:NCT01364597> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://oxpg.org/ontology/clinical-trial-ontology#ClinicalTrial> .
+<urn:trial:NCT01364597> <https://schema.org/name> "Brivaracetam Phase III Study" .
+<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#interventionName> "Brivaracetam" .
+<urn:intervention:NCT01364597:brv> <http://oxpg.org/ontology/clinical-trial-ontology#groundingTerm> "brivaracetam" .
 ```
 
 **Example — multiple entities (multiple Knowledge Assets in one publish):**
 ```nquads
-<did:dkg:entity:alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<did:dkg:entity:alice> <https://schema.org/name> "Alice" .
-<did:dkg:entity:bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
-<did:dkg:entity:bob> <https://schema.org/name> "Bob" .
-<did:dkg:entity:bob> <https://schema.org/knows> <did:dkg:entity:alice> .
+<https://example.org/people/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/alice> <https://schema.org/name> "Alice" .
+<https://example.org/people/bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Person> .
+<https://example.org/people/bob> <https://schema.org/name> "Bob" .
+<https://example.org/people/bob> <https://schema.org/knows> <https://example.org/people/alice> .
 ```
 
 **Understanding the response:**
@@ -108,10 +121,11 @@ Publish knowledge as RDF triples in N-Quads format to a DKG paranet. By default,
 The publish response includes `kcId` and `kaCount`:
 - **KC (Knowledge Collection)**: the batch of all triples from this publish call, identified by `kcId` (an on-chain token ID). Each `dkg_publish` call creates exactly one KC.
 - **KA (Knowledge Asset)**: a subset of the KC grouped by subject URI. Each unique subject in your N-Quads becomes one KA. The subject URI is the KA's **root entity**.
+- The system assigns a `did:dkg:{chainId}/{address}/{tokenId}` UAL to the KC for on-chain provenance — you do not create these.
 
 For example, publishing the multi-entity example above produces:
 - 1 KC (kcId: some number)
-- 2 KAs: one with root entity `did:dkg:entity:alice` (2 triples), one with root entity `did:dkg:entity:bob` (3 triples)
+- 2 KAs: one with root entity `https://example.org/people/alice` (2 triples), one with root entity `https://example.org/people/bob` (3 triples)
 
 Use `kcId` to reference the published collection in updates or queries.
 
