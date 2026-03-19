@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -13,13 +13,17 @@ import {
   AGENT_REGISTRY_PARANET,
 } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('AgentWallet', () => {
   it('generates a wallet with keypair', async () => {
@@ -757,6 +761,51 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
       expect(result.peersTried).toBe(0);
       expect(result.dataSynced).toBe(0);
       expect(result.workspaceSynced).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('deduplicates concurrent sync-on-connect attempts per peer', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncDedupTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+
+      const remotePeer = agent.node.peerId;
+      let releaseSync: (() => void) | undefined;
+      const syncGate = new Promise<void>((resolve) => {
+        releaseSync = resolve;
+      });
+
+      const syncFromPeer = vi.fn(async () => {
+        await syncGate;
+        return 7;
+      });
+
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        protocols: [PROTOCOL_SYNC],
+      } as any);
+      (agent as any).syncFromPeer = syncFromPeer;
+      (agent as any).discoverParanetsFromStore = vi.fn(async () => {});
+      (agent as any).syncWorkspaceFromPeer = vi.fn(async () => 0);
+
+      const first = (agent as any).trySyncFromPeer(remotePeer);
+      const second = (agent as any).trySyncFromPeer(remotePeer);
+
+      await vi.waitFor(() => {
+        expect(syncFromPeer).toHaveBeenCalledTimes(1);
+      });
+
+      releaseSync?.();
+      await Promise.all([first, second]);
+      expect((agent as any).syncingPeers.has(remotePeer)).toBe(false);
+
+      await (agent as any).trySyncFromPeer(remotePeer);
+      expect(syncFromPeer).toHaveBeenCalledTimes(2);
     } finally {
       await agent.stop().catch(() => {});
     }

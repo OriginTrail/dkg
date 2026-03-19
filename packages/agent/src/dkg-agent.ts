@@ -150,6 +150,7 @@ export class DKGAgent {
   private readonly gossipRegistered = new Set<string>();
   private readonly seenOnChainIds = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
+  private readonly syncingPeers = new Set<string>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -515,43 +516,30 @@ export class DKGAgent {
     // agents that published their profiles before we came online.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
-    const trySyncFromPeer = async (remotePeer: string) => {
+    const handleSyncError = (remotePeer: string, err: unknown): void => {
       const shortPeer = remotePeer.slice(-8);
-      try {
-        const { peerIdFromString } = await import('@libp2p/peer-id');
-        const pid = peerIdFromString(remotePeer);
-        const peer = await this.node.libp2p.peerStore.get(pid);
-        const hasSync = peer.protocols.includes(PROTOCOL_SYNC);
-        if (!hasSync) {
-          this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${peer.protocols.join(', ')})`);
-          return;
-        }
-        this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
-        const synced = await this.syncFromPeer(remotePeer);
-        this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
-
-        // After syncing ONTOLOGY, discover and auto-subscribe to any new paranets
-        await this.discoverParanetsFromStore();
-
-        const wsParanets = this.config.syncParanets ?? [];
-        if (wsParanets.length > 0) {
-          const wsSynced = await this.syncWorkspaceFromPeer(remotePeer, wsParanets);
-          this.log.info(ctx, `Synced ${wsSynced} workspace triples from peer ${shortPeer}`);
-        }
-      } catch (err: any) {
-        this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${err.message}`);
-      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
     };
 
     this.node.libp2p.addEventListener('peer:connect', (evt) => {
       const remotePeer = evt.detail.toString();
-      setTimeout(() => trySyncFromPeer(remotePeer), 3000);
+      setTimeout(() => {
+        this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
+          handleSyncError(remotePeer, err);
+        });
+      }, 3000);
     });
 
     // Sync from peers already connected (e.g. relay dialed during node.start())
     const alreadyConnected = this.node.libp2p.getPeers();
     for (const pid of alreadyConnected) {
-      setTimeout(() => trySyncFromPeer(pid.toString()), 3000);
+      const remotePeer = pid.toString();
+      setTimeout(() => {
+        this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
+          handleSyncError(remotePeer, err);
+        });
+      }, 3000);
     }
 
     // Start periodic workspace cleanup
@@ -567,8 +555,44 @@ export class DKGAgent {
 
   /**
    * Pull all triples for the given paranets from a remote peer and merge
-   * them into our local store. Used on peer:connect for initial catch-up.
+   * them into our local store. Used on peer:connect for initial catch-up,
+   * with a per-peer guard to avoid overlapping sync storms.
    */
+  private async trySyncFromPeer(remotePeer: string): Promise<void> {
+    const ctx = createOperationContext('sync');
+    const shortPeer = remotePeer.slice(-8);
+
+    if (this.syncingPeers.has(remotePeer)) return;
+    this.syncingPeers.add(remotePeer);
+
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const pid = peerIdFromString(remotePeer);
+      const peer = await this.node.libp2p.peerStore.get(pid);
+      const protocols = peer.protocols ?? [];
+      const hasSync = protocols.includes(PROTOCOL_SYNC);
+      if (!hasSync) {
+        this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
+        return;
+      }
+
+      this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
+      const synced = await this.syncFromPeer(remotePeer);
+      this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+
+      // After syncing ONTOLOGY, discover and auto-subscribe to any new paranets
+      await this.discoverParanetsFromStore();
+
+      const wsParanets = this.config.syncParanets ?? [];
+      if (wsParanets.length > 0) {
+        const wsSynced = await this.syncWorkspaceFromPeer(remotePeer, wsParanets);
+        this.log.info(ctx, `Synced ${wsSynced} workspace triples from peer ${shortPeer}`);
+      }
+    } finally {
+      this.syncingPeers.delete(remotePeer);
+    }
+  }
+
   /**
    * Pull triples for the given paranets from a remote peer in pages,
    * verify merkle roots against the KC metadata, and only insert
