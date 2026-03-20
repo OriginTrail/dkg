@@ -226,6 +226,11 @@ class GameService {
   get isRunning(): boolean { return this.running; }
   get activeSwarmId(): string | null { return this.swarmId; }
 
+  /** Update strategy hint mid-game (takes effect on next turn). */
+  setStrategyHint(hint: string): void {
+    this.strategyHint = hint;
+  }
+
   async start(swarmId: string, strategyHint?: string): Promise<void> {
     if (this.running) {
       throw new Error(`Autopilot already running for swarm ${this.swarmId}`);
@@ -714,6 +719,9 @@ export class DkgGamePlugin {
   private gameClient: GameClient | null = null;
   private gameService: GameService | null = null;
 
+  // Strategy hint — set via game_strategy, used by autopilot (manual or auto-engaged)
+  private strategyHint = '';
+
   // SwarmWatcher — background poller for auto-engage after join/create
   private watchTimer: ReturnType<typeof setInterval> | null = null;
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -778,7 +786,7 @@ export class DkgGamePlugin {
       // Bail if watcher was stopped/restarted (game_leave, game_autopilot_stop, etc.)
       if (cancelEpoch !== undefined && this.watchEpoch !== cancelEpoch) return null;
       try {
-        await this.gameService.start(swarmId);
+        await this.gameService.start(swarmId, this.strategyHint || undefined);
         return 'Autopilot automatically engaged for this swarm.';
       } catch (err: any) {
         this.api?.logger.warn?.(
@@ -1206,6 +1214,40 @@ export class DkgGamePlugin {
         },
       },
       {
+        name: 'game_strategy',
+        description:
+          'Set or update the strategy hint for autopilot play. ' +
+          'The hint guides the AI strategist\'s decisions each turn (e.g., "play defensively", ' +
+          '"conserve TRAC for tolls", "rush to epoch 1000"). ' +
+          'Can be called at any time — before joining, during a game, or mid-autopilot. ' +
+          'Call with an empty hint to clear it. The hint persists until changed.',
+        parameters: {
+          type: 'object',
+          properties: {
+            hint: {
+              type: 'string',
+              description: 'Strategy hint for the autopilot (e.g., "play aggressively", "always pay tolls"). Empty string clears the hint.',
+            },
+          },
+          required: ['hint'],
+        },
+        execute: async (_id, params) => {
+          const hint = String(params.hint ?? '').trim();
+          this.strategyHint = hint;
+          // Update the running game service if autopilot is active
+          if (this.gameService) {
+            this.gameService.setStrategyHint(hint);
+          }
+          return this.json({
+            status: hint ? 'strategy_set' : 'strategy_cleared',
+            hint: hint || null,
+            message: hint
+              ? `Strategy hint set: "${hint}". This will be used for all future autopilot decisions.`
+              : 'Strategy hint cleared. Autopilot will use the default decision framework.',
+          });
+        },
+      },
+      {
         name: 'game_autopilot_start',
         description:
           'Start autonomous game play. The agent will poll the game state every 2 seconds, ' +
@@ -1214,22 +1256,22 @@ export class DkgGamePlugin {
           'Requires the swarm to be in traveling state. ' +
           'NOTE: After game_join or game_create, autopilot auto-engages automatically — ' +
           'you do NOT need to call this manually unless auto-engage was disabled or you stopped autopilot. ' +
-          'Optional strategy_hint lets you guide the AI strategy (e.g., "play aggressively" or "conserve resources").',
+          'Use game_strategy to set a strategy hint before or during play.',
         parameters: {
           type: 'object',
           properties: {
             swarm_id: { type: 'string', description: 'Swarm ID to play autonomously' },
-            strategy_hint: { type: 'string', description: 'Optional strategy hint for the AI (e.g., "play defensively", "rush to epoch 1000")' },
           },
           required: ['swarm_id'],
         },
         execute: async (_id, params) => {
           try {
             this.stopWatch(); // Manual autopilot supersedes watcher
-            await this.gameService!.start(String(params.swarm_id), params.strategy_hint ? String(params.strategy_hint) : undefined);
+            await this.gameService!.start(String(params.swarm_id), this.strategyHint || undefined);
             return this.json({
               status: 'autopilot_started',
               swarmId: params.swarm_id,
+              ...(this.strategyHint ? { strategyHint: this.strategyHint } : {}),
               message: 'Autonomous play started. Use game_status to check progress, game_autopilot_stop to halt.',
             });
           } catch (err: any) { return this.gameError(err); }

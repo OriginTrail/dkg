@@ -29,7 +29,7 @@ function mockClient(): DkgDaemonClient {
 // ---------------------------------------------------------------------------
 
 describe('DkgGamePlugin', () => {
-  it('registers all 11 game tools', () => {
+  it('registers all 12 game tools', () => {
     const api = mockApi();
     const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
     plugin.register(api);
@@ -44,9 +44,10 @@ describe('DkgGamePlugin', () => {
     expect(toolNames).toContain('game_vote');
     expect(toolNames).toContain('game_locations');
     expect(toolNames).toContain('game_leaderboard');
+    expect(toolNames).toContain('game_strategy');
     expect(toolNames).toContain('game_autopilot_start');
     expect(toolNames).toContain('game_autopilot_stop');
-    expect(api.tools.length).toBe(11);
+    expect(api.tools.length).toBe(12);
   });
 
   it('all tools have name, description, parameters, and execute', () => {
@@ -153,12 +154,12 @@ describe('DkgNodePlugin with game module', () => {
     plugin.register(api);
 
     const toolNames = tools.map(t => t.name);
-    // 11 core DKG tools + 11 game tools = 22
+    // 11 core DKG tools + 12 game tools = 23
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('game_lobby');
     expect(toolNames).toContain('game_leave');
     expect(toolNames).toContain('game_autopilot_start');
-    expect(tools.length).toBe(22);
+    expect(tools.length).toBe(23);
   });
 
   it('does not register game tools when game.enabled is false/missing', () => {
