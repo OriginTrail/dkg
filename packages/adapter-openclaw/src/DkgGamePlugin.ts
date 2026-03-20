@@ -31,6 +31,7 @@ import type {
 export type ConsultAgentFn = (
   prompt: string,
   correlationId: string,
+  identity?: string,
 ) => Promise<string>;
 
 /** Minimal game config. */
@@ -358,7 +359,7 @@ class GameService {
       let agentReply: string;
       try {
         agentReply = await withTimeout(
-          this.consultAgent(prompt, correlationId),
+          this.consultAgent(prompt, correlationId, `game-autopilot-${this.swarmId}`),
           timeoutMs,
         );
       } catch (err: any) {

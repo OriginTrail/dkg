@@ -103,8 +103,8 @@ export class DkgNodePlugin {
       // Wire agent consultation through the channel bridge (if available).
       // Uses identity "game-autopilot" → separate session from user chat.
       const consultAgent = this.channelPlugin
-        ? (prompt: string, correlationId: string) =>
-            this.channelPlugin!.processInbound(prompt, correlationId, 'game-autopilot')
+        ? (prompt: string, correlationId: string, identity?: string) =>
+            this.channelPlugin!.processInbound(prompt, correlationId, identity || 'game-autopilot')
               .then(reply => reply.text)
         : undefined;
 
