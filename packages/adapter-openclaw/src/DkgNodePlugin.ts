@@ -523,15 +523,7 @@ export class DkgNodePlugin {
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const paranetId = String(args.paranet_id);
-      // Handle quads as either a parsed array or a JSON string (some tool frameworks stringify arrays)
-      let rawQuads = args.quads;
-      if (typeof rawQuads === 'string') {
-        try {
-          rawQuads = JSON.parse(rawQuads);
-        } catch {
-          return this.error('"quads" must be a JSON array of {subject, predicate, object} objects.');
-        }
-      }
+      const rawQuads = args.quads;
 
       if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
         return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');

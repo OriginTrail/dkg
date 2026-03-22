@@ -2242,7 +2242,7 @@ function isPublishQuad(value: unknown): value is PublishQuad {
     typeof v.subject === 'string' &&
     typeof v.predicate === 'string' &&
     typeof v.object === 'string' &&
-    (v.graph === undefined || typeof v.graph === 'string')
+    typeof v.graph === 'string'
   );
 }
 
