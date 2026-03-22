@@ -687,12 +687,48 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, '');      // strip leading/trailing hyphens
 }
 
+/** Wrap bare URIs (http://, https://, urn:, did:) in angle brackets if missing. */
+function wrapBareUris(line: string): string {
+  // Split into quoted literal vs non-quoted segments, only process non-quoted parts
+  const parts: string[] = [];
+  let remaining = line;
+  while (remaining) {
+    const quoteStart = remaining.indexOf('"');
+    if (quoteStart === -1) {
+      // No more quotes — process the rest
+      parts.push(wrapUrisInSegment(remaining));
+      break;
+    }
+    // Process text before the quote
+    parts.push(wrapUrisInSegment(remaining.slice(0, quoteStart)));
+    // Find matching close quote (handling escaped quotes)
+    let quoteEnd = quoteStart + 1;
+    while (quoteEnd < remaining.length) {
+      if (remaining[quoteEnd] === '"' && remaining[quoteEnd - 1] !== '\\') break;
+      quoteEnd++;
+    }
+    // Keep quoted segment as-is
+    parts.push(remaining.slice(quoteStart, quoteEnd + 1));
+    remaining = remaining.slice(quoteEnd + 1);
+  }
+  return parts.join('');
+}
+
+function wrapUrisInSegment(segment: string): string {
+  return segment.replace(
+    /(?<!<)(?:https?:\/\/|urn:|did:)\S+(?!>)/gi,
+    match => `<${match}>`,
+  );
+}
+
 function parseNQuadsText(text: string): Array<{ subject: string; predicate: string; object: string; graph?: string }> {
   const quads: Array<{ subject: string; predicate: string; object: string; graph?: string }> = [];
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const match = trimmed.match(/^<([^>]+)>\s+<([^>]+)>\s+("[^"]*(?:\\.[^"]*)*"(?:@\w+|(?:\^\^<[^>]+>))?|<[^>]+>)\s*(?:<([^>]+)>)?\s*\.?\s*$/);
+    // Try strict parse first, then retry with bare URI wrapping
+    const normalized = wrapBareUris(trimmed);
+    const match = normalized.match(/^<([^>]+)>\s+<([^>]+)>\s+("[^"]*(?:\\.[^"]*)*"(?:@\w+|(?:\^\^<[^>]+>))?|<[^>]+>)\s*(?:<([^>]+)>)?\s*\.?\s*$/);
     if (!match) continue;
     quads.push({
       subject: match[1],

@@ -193,6 +193,52 @@ describe('dkg_publish tool', () => {
 
     expect(parsed.triplesPublished).toBe(1);
   });
+
+  it('auto-wraps bare URIs in angle brackets', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-bare', kas: [{ tokenId: '1', rootEntity: 'https://example.org/wine' }] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    const nquads = 'https://example.org/wine https://schema.org/name "Cabernet" .\nhttps://example.org/wine http://www.w3.org/1999/02/22-rdf-syntax-ns#type https://schema.org/Product .';
+    const result = await tool.execute('call-bare', { paranet_id: 'testing', nquads });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.triplesPublished).toBe(2);
+
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(body.quads[0].subject).toBe('https://example.org/wine');
+    expect(body.quads[0].predicate).toBe('https://schema.org/name');
+    expect(body.quads[0].object).toBe('"Cabernet"');
+  });
+
+  it('handles mix of bare and angle-bracketed URIs', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    const nquads = '<urn:a> https://schema.org/name "Alice" .\nurn:b <https://schema.org/name> "Bob" .';
+    const result = await tool.execute('call-mix', { paranet_id: 'testing', nquads });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.triplesPublished).toBe(2);
+  });
+
+  it('does not wrap URIs inside quoted literals', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-lit', kas: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    const nquads = '<urn:x> <urn:y> "see https://example.org for details" .';
+    const result = await tool.execute('call-lit', { paranet_id: 'testing', nquads });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.triplesPublished).toBe(1);
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(body.quads[0].object).toBe('"see https://example.org for details"');
+  });
 });
 
 describe('dkg_query tool', () => {
