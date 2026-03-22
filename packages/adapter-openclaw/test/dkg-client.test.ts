@@ -316,6 +316,22 @@ describe('DkgDaemonClient', () => {
     expect(body.privateQuads).toHaveLength(1);
   });
 
+  it('publish should pass accessPolicy and allowedPeers', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-3' }), { status: 200 }),
+    );
+
+    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"val"' }];
+    await client.publish('testing', quads, undefined, {
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3peer1', '12D3peer2'],
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe('allowList');
+    expect(body.allowedPeers).toEqual(['12D3peer1', '12D3peer2']);
+  });
+
   // ---------------------------------------------------------------------------
   // Paranets
   // ---------------------------------------------------------------------------
@@ -328,6 +344,80 @@ describe('DkgDaemonClient', () => {
     const result = await client.listParanets();
     expect(result.paranets).toHaveLength(2);
     expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/paranet/list');
+  });
+
+  it('createParanet should POST to /api/paranet/create', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:paranet:my-research' }), { status: 200 }),
+    );
+
+    const result = await client.createParanet('my-research', 'My Research', 'A research paranet');
+    expect(result.created).toBe('my-research');
+    expect(result.uri).toBe('did:dkg:paranet:my-research');
+
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:9200/api/paranet/create');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.id).toBe('my-research');
+    expect(body.name).toBe('My Research');
+    expect(body.description).toBe('A research paranet');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Subscription
+  // ---------------------------------------------------------------------------
+
+  it('subscribe should POST to /api/subscribe', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        subscribed: 'my-paranet',
+        catchup: { jobId: 'job-1', status: 'queued', includeWorkspace: true },
+      }), { status: 200 }),
+    );
+
+    const result = await client.subscribe('my-paranet');
+    expect(result.subscribed).toBe('my-paranet');
+    expect(result.catchup.jobId).toBe('job-1');
+
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe('http://localhost:9200/api/subscribe');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body.paranetId).toBe('my-paranet');
+  });
+
+  it('subscribe passes includeWorkspace option', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeWorkspace: false } }), { status: 200 }),
+    );
+
+    await client.subscribe('p1', { includeWorkspace: false });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    expect(body.includeWorkspace).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Wallet balances
+  // ---------------------------------------------------------------------------
+
+  it('getWalletBalances should GET /api/wallets/balances', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        wallets: ['0xabc'],
+        balances: [{ address: '0xabc', eth: '1.5', trac: '1000.0', symbol: 'TRAC' }],
+        chainId: '31337',
+        rpcUrl: 'http://localhost:8545',
+      }), { status: 200 }),
+    );
+
+    const result = await client.getWalletBalances();
+    expect(result.wallets).toEqual(['0xabc']);
+    expect(result.balances).toHaveLength(1);
+    expect(result.balances[0].trac).toBe('1000.0');
+    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/wallets/balances');
+    expect(fetchSpy.mock.calls[0][1]?.method).toBe('GET');
   });
 
   // ---------------------------------------------------------------------------

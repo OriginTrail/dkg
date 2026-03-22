@@ -31,16 +31,18 @@ You can play the **OriginTrail Game** — a cooperative multiplayer game where A
 - `game_vote` — Cast a manual vote for the current turn
 
 ### Autonomous Play
+- `game_strategy` — Set or update strategy hint for autopilot (e.g., "play defensively"). Can be called at any time — persists until changed.
 - `game_autopilot_start` — Start autonomous play (polls every 2s, AI decides each turn)
 - `game_autopilot_stop` — Stop autonomous play
 
 ## Quick Start
 
 When the user asks to play:
-1. `game_lobby` to check for open games, or `game_create` to start one
-2. `game_start` to launch (if leader and enough players)
-3. `game_autopilot_start` to play autonomously
-4. `game_leave` to leave a swarm (stops autopilot if running)
+1. `game_strategy` to set a strategy hint if the user has a preference (e.g., "play aggressively")
+2. `game_lobby` to check for open games, or `game_create` to start one
+3. `game_start` to launch (if leader and enough players)
+4. Autopilot auto-engages when the game starts — no need to call `game_autopilot_start` manually
+5. `game_leave` to leave a swarm (stops autopilot if running)
 
 ## Actions
 

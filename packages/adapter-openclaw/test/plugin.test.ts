@@ -17,7 +17,7 @@ describe('DkgNodePlugin', () => {
     expect(plugin).toBeDefined();
   });
 
-  it('registers session_end hook and all 8 tools via register()', () => {
+  it('registers session_end hook and all 11 tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];
     const registeredTools: OpenClawTool[] = [];
@@ -36,14 +36,17 @@ describe('DkgNodePlugin', () => {
 
     const toolNames = registeredTools.map(t => t.name);
     expect(toolNames).toContain('dkg_status');
+    expect(toolNames).toContain('dkg_wallet_balances');
     expect(toolNames).toContain('dkg_list_paranets');
+    expect(toolNames).toContain('dkg_paranet_create');
+    expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(registeredTools.length).toBe(8);
+    expect(registeredTools.length).toBe(11);
   });
 
   it('all tools have name, description, parameters, and execute', () => {

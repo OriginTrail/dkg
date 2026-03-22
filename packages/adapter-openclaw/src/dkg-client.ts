@@ -198,8 +198,15 @@ export class DkgDaemonClient {
     paranetId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+    opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
   ): Promise<any> {
-    return this.post('/api/publish', { paranetId, quads, privateQuads });
+    return this.post('/api/publish', {
+      paranetId,
+      quads,
+      privateQuads,
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -208,6 +215,42 @@ export class DkgDaemonClient {
 
   async listParanets(): Promise<{ paranets: any[] }> {
     return this.get('/api/paranet/list');
+  }
+
+  async createParanet(
+    id: string,
+    name: string,
+    description?: string,
+  ): Promise<{ created: string; uri: string }> {
+    return this.post('/api/paranet/create', { id, name, description });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subscription
+  // ---------------------------------------------------------------------------
+
+  async subscribe(
+    paranetId: string,
+    opts?: { includeWorkspace?: boolean },
+  ): Promise<{ subscribed: string; catchup: { jobId: string; status: string; includeWorkspace: boolean } }> {
+    return this.post('/api/subscribe', {
+      paranetId,
+      includeWorkspace: opts?.includeWorkspace,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Wallet balances
+  // ---------------------------------------------------------------------------
+
+  async getWalletBalances(): Promise<{
+    wallets: string[];
+    balances: Array<{ address: string; eth: string; trac: string; symbol: string }>;
+    chainId: string | null;
+    rpcUrl: string | null;
+    error?: string;
+  }> {
+    return this.get('/api/wallets/balances');
   }
 
   // ---------------------------------------------------------------------------

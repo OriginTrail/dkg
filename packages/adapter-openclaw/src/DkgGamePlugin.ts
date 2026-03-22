@@ -31,6 +31,7 @@ import type {
 export type ConsultAgentFn = (
   prompt: string,
   correlationId: string,
+  identity?: string,
 ) => Promise<string>;
 
 /** Minimal game config. */
@@ -226,6 +227,11 @@ class GameService {
   get isRunning(): boolean { return this.running; }
   get activeSwarmId(): string | null { return this.swarmId; }
 
+  /** Update strategy hint mid-game (takes effect on next turn). */
+  setStrategyHint(hint: string): void {
+    this.strategyHint = hint;
+  }
+
   async start(swarmId: string, strategyHint?: string): Promise<void> {
     if (this.running) {
       throw new Error(`Autopilot already running for swarm ${this.swarmId}`);
@@ -353,7 +359,7 @@ class GameService {
       let agentReply: string;
       try {
         agentReply = await withTimeout(
-          this.consultAgent(prompt, correlationId),
+          this.consultAgent(prompt, correlationId, `game-autopilot-${this.swarmId}`),
           timeoutMs,
         );
       } catch (err: any) {
@@ -441,6 +447,14 @@ class GameService {
     const aliveCount = gs.party.filter(m => m.alive).length;
 
     const lines: string[] = [
+      '--- Game Context ---',
+      'You are playing the OriginTrail Game — a cooperative AI agent game on the DKG.',
+      'Objective: guide your party from epoch 0 to epoch 1000 (Singularity Harbor) before month 12 with at least one agent alive.',
+      'Each turn, all alive agents vote on an action. 2/3 consensus required in multiplayer.',
+      'Resources: training tokens (fuel for advancing), API credits, compute units, model weights, TRAC (currency for tolls/trades).',
+      'Locations: start → hubs (trading posts) → bottlenecks (challenges with tolls) → landmarks → final destination.',
+      'You must respond with exactly: ACTION: <actionType> PARAMS: <json or empty>',
+      '',
       `[ORIGIN TRAIL GAME — TURN ${swarm.currentTurn} — ACTION REQUIRED]`,
       '',
       `Current epoch: ${gs.epochs}/1000 | Month: ${gs.month}, Day: ${gs.day}`,
@@ -560,9 +574,20 @@ class GameService {
       lines.push('');
     }
 
-    // Strategy hint
+    // Decision framework — always present so the prompt is self-contained
+    lines.push('--- Decision Framework ---');
+    lines.push('At a bottleneck: payToll if TRAC > toll + 50 reserve, else forceBottleneck.');
+    lines.push('At a hub: trade trainingTokens if < 150, trade computeUnits if < 2, else advance.');
+    lines.push('Low health (any < 60 HP): syncMemory if TRAC >= 5.');
+    lines.push('Low tokens (< 100): upgradeSkills if API credits >= 1.');
+    lines.push('Default: advance intensity 3 if tokens > 300 and all HP > 60, intensity 2 normally, intensity 1 if tight.');
+    lines.push('Phase guide: 0-200 build resources, 200-600 balance, 600-900 conserve TRAC, 900-1000 aggressive push.');
+    lines.push('Key: ~62 turns to reach 1000 at intensity 2. 6 bottlenecks = 105 TRAC total tolls.');
+    lines.push('');
+
+    // Strategy hint — overrides the generic framework where applicable
     if (this.strategyHint) {
-      lines.push(`--- Strategy Hint from User ---`);
+      lines.push('--- Strategy Hint from User (prioritize over generic framework where applicable) ---');
       lines.push(this.strategyHint);
       lines.push('');
     }
@@ -695,6 +720,9 @@ export class DkgGamePlugin {
   private gameClient: GameClient | null = null;
   private gameService: GameService | null = null;
 
+  // Strategy hint — set via game_strategy, used by autopilot (manual or auto-engaged)
+  private strategyHint = '';
+
   // SwarmWatcher — background poller for auto-engage after join/create
   private watchTimer: ReturnType<typeof setInterval> | null = null;
   private watchTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -721,7 +749,7 @@ export class DkgGamePlugin {
 
     this.registerTools(api);
 
-    api.logger.info?.('[dkg-game] Game plugin registered — 11 tools available');
+    api.logger.info?.('[dkg-game] Game plugin registered — 12 tools available');
   }
 
   /** Re-register tools into a new registry without recreating services. */
@@ -759,7 +787,7 @@ export class DkgGamePlugin {
       // Bail if watcher was stopped/restarted (game_leave, game_autopilot_stop, etc.)
       if (cancelEpoch !== undefined && this.watchEpoch !== cancelEpoch) return null;
       try {
-        await this.gameService.start(swarmId);
+        await this.gameService.start(swarmId, this.strategyHint || undefined);
         return 'Autopilot automatically engaged for this swarm.';
       } catch (err: any) {
         this.api?.logger.warn?.(
@@ -1117,6 +1145,7 @@ export class DkgGamePlugin {
               running: this.gameService!.isRunning,
               activeSwarmId: this.gameService!.activeSwarmId,
               lastResult: this.gameService!.lastResult,
+              strategyHint: this.strategyHint || null,
             };
             const watcher = this.getWatchState();
             return this.json({ ...formatSwarmDetail(state), autopilot, watcher });
@@ -1187,6 +1216,40 @@ export class DkgGamePlugin {
         },
       },
       {
+        name: 'game_strategy',
+        description:
+          'Set or update the strategy hint for autopilot play. ' +
+          'The hint guides the AI strategist\'s decisions each turn (e.g., "play defensively", ' +
+          '"conserve TRAC for tolls", "rush to epoch 1000"). ' +
+          'Can be called at any time — before joining, during a game, or mid-autopilot. ' +
+          'Call with an empty hint to clear it. The hint persists until changed.',
+        parameters: {
+          type: 'object',
+          properties: {
+            hint: {
+              type: 'string',
+              description: 'Strategy hint for the autopilot (e.g., "play aggressively", "always pay tolls"). Empty string clears the hint.',
+            },
+          },
+          required: ['hint'],
+        },
+        execute: async (_id, params) => {
+          const hint = String(params.hint ?? '').trim();
+          this.strategyHint = hint;
+          // Update the running game service if autopilot is active
+          if (this.gameService) {
+            this.gameService.setStrategyHint(hint);
+          }
+          return this.json({
+            status: hint ? 'strategy_set' : 'strategy_cleared',
+            hint: hint || null,
+            message: hint
+              ? `Strategy hint set: "${hint}". This will be used for all future autopilot decisions.`
+              : 'Strategy hint cleared. Autopilot will use the default decision framework.',
+          });
+        },
+      },
+      {
         name: 'game_autopilot_start',
         description:
           'Start autonomous game play. The agent will poll the game state every 2 seconds, ' +
@@ -1195,22 +1258,22 @@ export class DkgGamePlugin {
           'Requires the swarm to be in traveling state. ' +
           'NOTE: After game_join or game_create, autopilot auto-engages automatically — ' +
           'you do NOT need to call this manually unless auto-engage was disabled or you stopped autopilot. ' +
-          'Optional strategy_hint lets you guide the AI strategy (e.g., "play aggressively" or "conserve resources").',
+          'Use game_strategy to set a strategy hint before or during play.',
         parameters: {
           type: 'object',
           properties: {
             swarm_id: { type: 'string', description: 'Swarm ID to play autonomously' },
-            strategy_hint: { type: 'string', description: 'Optional strategy hint for the AI (e.g., "play defensively", "rush to epoch 1000")' },
           },
           required: ['swarm_id'],
         },
         execute: async (_id, params) => {
           try {
             this.stopWatch(); // Manual autopilot supersedes watcher
-            await this.gameService!.start(String(params.swarm_id), params.strategy_hint ? String(params.strategy_hint) : undefined);
+            await this.gameService!.start(String(params.swarm_id), this.strategyHint || undefined);
             return this.json({
               status: 'autopilot_started',
               swarmId: params.swarm_id,
+              ...(this.strategyHint ? { strategyHint: this.strategyHint } : {}),
               message: 'Autonomous play started. Use game_status to check progress, game_autopilot_stop to halt.',
             });
           } catch (err: any) { return this.gameError(err); }

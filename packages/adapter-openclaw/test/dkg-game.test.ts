@@ -29,7 +29,7 @@ function mockClient(): DkgDaemonClient {
 // ---------------------------------------------------------------------------
 
 describe('DkgGamePlugin', () => {
-  it('registers all 11 game tools', () => {
+  it('registers all 12 game tools', () => {
     const api = mockApi();
     const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
     plugin.register(api);
@@ -44,9 +44,10 @@ describe('DkgGamePlugin', () => {
     expect(toolNames).toContain('game_vote');
     expect(toolNames).toContain('game_locations');
     expect(toolNames).toContain('game_leaderboard');
+    expect(toolNames).toContain('game_strategy');
     expect(toolNames).toContain('game_autopilot_start');
     expect(toolNames).toContain('game_autopilot_stop');
-    expect(api.tools.length).toBe(11);
+    expect(api.tools.length).toBe(12);
   });
 
   it('all tools have name, description, parameters, and execute', () => {
@@ -153,12 +154,12 @@ describe('DkgNodePlugin with game module', () => {
     plugin.register(api);
 
     const toolNames = tools.map(t => t.name);
-    // 8 core DKG tools + 11 game tools = 19
+    // 11 core DKG tools + 12 game tools = 23
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('game_lobby');
     expect(toolNames).toContain('game_leave');
     expect(toolNames).toContain('game_autopilot_start');
-    expect(tools.length).toBe(19);
+    expect(tools.length).toBe(23);
   });
 
   it('does not register game tools when game.enabled is false/missing', () => {
@@ -176,7 +177,7 @@ describe('DkgNodePlugin with game module', () => {
 
     const toolNames = tools.map(t => t.name);
     expect(toolNames).not.toContain('game_lobby');
-    expect(tools.length).toBe(8); // Only core DKG tools
+    expect(tools.length).toBe(11); // Only core DKG tools
   });
 
   it('warns when game enabled but channel disabled (no autopilot)', () => {
@@ -1461,6 +1462,37 @@ describe('tool description guards', () => {
     const startTool = api.tools.find(t => t.name === 'game_start')!;
     expect(startTool.description).toContain('Usually NOT needed');
     expect(startTool.description).toContain('watcher');
+  });
+
+  it('game_strategy sets and clears hint', async () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const tool = api.tools.find(t => t.name === 'game_strategy')!;
+
+    // Set a hint
+    const setResult = await tool.execute('call-1', { hint: 'play defensively' });
+    const setParsed = JSON.parse(setResult.content[0].text);
+    expect(setParsed.status).toBe('strategy_set');
+    expect(setParsed.hint).toBe('play defensively');
+
+    // Clear the hint
+    const clearResult = await tool.execute('call-2', { hint: '' });
+    const clearParsed = JSON.parse(clearResult.content[0].text);
+    expect(clearParsed.status).toBe('strategy_cleared');
+    expect(clearParsed.hint).toBeNull();
+  });
+
+  it('game_strategy trims whitespace-only hint to clear', async () => {
+    const api = mockApi();
+    const plugin = new DkgGamePlugin(mockClient(), {}, undefined);
+    plugin.register(api);
+
+    const tool = api.tools.find(t => t.name === 'game_strategy')!;
+    const result = await tool.execute('call-1', { hint: '   ' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.status).toBe('strategy_cleared');
   });
 
   it('game_autopilot_start does not suggest calling game_start', () => {
