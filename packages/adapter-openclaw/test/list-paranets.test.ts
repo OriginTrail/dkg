@@ -225,6 +225,19 @@ describe('dkg_publish tool', () => {
     expect(parsed.triplesPublished).toBe(2);
   });
 
+  it('auto-wraps bare type URI in typed literals', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ kcId: 'kc-typed', kas: [] }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_publish');
+    const nquads = '<urn:x> <urn:y> "14.5"^^http://www.w3.org/2001/XMLSchema#decimal .';
+    const result = await tool.execute('call-typed', { paranet_id: 'testing', nquads });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.triplesPublished).toBe(1);
+  });
+
   it('does not wrap URIs inside quoted literals', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ kcId: 'kc-lit', kas: [] }), { status: 200 }),

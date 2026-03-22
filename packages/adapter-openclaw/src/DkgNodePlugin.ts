@@ -716,7 +716,7 @@ function wrapBareUris(line: string): string {
 
 function wrapUrisInSegment(segment: string): string {
   return segment.replace(
-    /(?<!<)(?:https?:\/\/|urn:|did:)\S+(?!>)/gi,
+    /(?<!<)(?:https?:\/\/|urn:|did:)\S+/gi,
     match => `<${match}>`,
   );
 }
