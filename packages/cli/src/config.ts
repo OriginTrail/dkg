@@ -104,6 +104,8 @@ export interface DkgConfig {
   telemetry?: { enabled?: boolean };
   /** Workspace data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
   workspaceTtlMs?: number;
+  /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
+  epcis?: { paranetId: string };
 }
 
 /**

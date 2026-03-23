@@ -2370,6 +2370,38 @@ async function getJsonld() {
 }
 
 /**
+ * Replace blank node identifiers with deterministic uuid: URIs.
+ *
+ * JSON-LD documents without explicit @id produce blank nodes (_:b0, _:b1, etc.)
+ * which autoPartition cannot use as root entities. This function assigns a stable
+ * uuid: URI to each unique blank node, matching dkg.js v8's generateMissingIdsForBlankNodes.
+ *
+ * Mutates the array in place.
+ */
+function assignUrisToBlankNodes(quads: Quad[]): void {
+  const idMap = new Map<string, string>();
+
+  function resolve(value: string): string {
+    if (!value.startsWith('_:')) return value;
+    let uri = idMap.get(value);
+    if (!uri) {
+      uri = `uuid:${crypto.randomUUID()}`;
+      idMap.set(value, uri);
+    }
+    return uri;
+  }
+
+  for (let i = 0; i < quads.length; i++) {
+    const q = quads[i];
+    const subject = resolve(q.subject);
+    const object = q.object.startsWith('_:') ? resolve(q.object) : q.object;
+    if (subject !== q.subject || object !== q.object) {
+      quads[i] = { ...q, subject, object };
+    }
+  }
+}
+
+/**
  * Convert a JSON-LD content object into public and private Quad arrays.
  *
  * Accepts either:
@@ -2398,6 +2430,9 @@ async function jsonLdToQuads(
     const nquads = await jsonld.default.toRDF(privateDoc, { format: 'application/n-quads' }) as string;
     privateQuads = parseNQuads(nquads);
   }
+
+  assignUrisToBlankNodes(publicQuads);
+  assignUrisToBlankNodes(privateQuads);
 
   if (publicQuads.length === 0 && privateQuads.length === 0) {
     throw new Error('JSON-LD document produced no RDF quads');

@@ -15,3 +15,6 @@ packages/evm-module/artifacts/
 packages/evm-module/cache/
 packages/evm-module/typechain/
 .devnet/
+
+packages/evm-module/deployments/hardhat_contracts.json
+packages/evm-module/deployments/localhost_contracts.json
