@@ -48,6 +48,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
 function getNodeVersion(): string {
@@ -2215,6 +2216,78 @@ async function handleRequest(
     jsonResponse(res, 200, { ok: true });
     setTimeout(() => process.kill(process.pid, 'SIGTERM'), 100);
     return;
+  }
+
+  // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  if (req.method === 'GET' && path === '/api/epcis/events') {
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    }
+    const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
+    const epcisQueryEngine = {
+      query: (sparql: string, opts?: { paranetId?: string }) => agent.query(sparql, opts),
+    };
+    try {
+      const result = await handleEventsQuery(searchParams, {
+        paranetId: config.epcis.paranetId,
+        queryEngine: epcisQueryEngine,
+        basePath: '/api/epcis/events',
+      });
+      if (result.headers?.link) {
+        res.setHeader('Link', result.headers.link);
+      }
+      return jsonResponse(res, 200, result.body);
+    } catch (err) {
+      if (err instanceof EpcisQueryError) {
+        return jsonResponse(res, err.statusCode, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
+  if (req.method === 'POST' && path === '/api/epcis/capture') {
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    }
+    const body = await readBody(req);
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
+    }
+    const { epcisDocument, publishOptions } = parsed;
+    if (!epcisDocument) {
+      return jsonResponse(res, 400, { error: 'Missing "epcisDocument" in request body' });
+    }
+    const epcisPublisher: EpcisPublisher = {
+      async publish(paranetId, content, opts) {
+        // Using { public: content } because bare JSON-LD (private) publishing
+        // silently drops triples — see GitHub issue #221.
+        const result = await agent.publish(
+          paranetId,
+          { public: content } as Record<string, unknown>,
+          opts,
+        );
+        return { ual: result.ual, kcId: String(result.kcId), status: result.status };
+      },
+    };
+    try {
+      const result = await handleCapture(
+        { epcisDocument, publishOptions },
+        { paranetId: config.epcis.paranetId, publisher: epcisPublisher },
+      );
+      // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
+      // Current sync model returns 200 with the full result. Switch to 202 + captureID +
+      // GET /capture/{captureID} polling endpoint when async capture is implemented (Phase 2).
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      if (err instanceof EpcisValidationError) {
+        return jsonResponse(res, 400, { error: err.message, details: err.errors });
+      }
+      throw err;
+    }
   }
 
   jsonResponse(res, 404, { error: 'Not found' });

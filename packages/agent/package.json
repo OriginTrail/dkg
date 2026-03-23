@@ -11,18 +11,19 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@origintrail-official/dkg-chain": "workspace:*",
-    "@origintrail-official/dkg-core": "workspace:*",
-    "@origintrail-official/dkg-publisher": "workspace:*",
-    "@origintrail-official/dkg-query": "workspace:*",
-    "@origintrail-official/dkg-storage": "workspace:*",
     "@libp2p/peer-id": "^6.0.4",
     "@multiformats/multiaddr": "*",
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2",
     "@noble/ed25519": "^3",
     "@noble/hashes": "^2",
-    "ethers": "^6"
+    "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*",
+    "ethers": "^6",
+    "jsonld": "^8.3.3"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

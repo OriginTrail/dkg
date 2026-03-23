@@ -159,6 +159,9 @@ importers:
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      jsonld:
+        specifier: ^8.3.3
+        version: 8.3.3(web-streams-polyfill@3.3.3)
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -210,6 +213,9 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-epcis':
+        specifier: workspace:*
+        version: link:../epcis
       '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui
@@ -310,6 +316,19 @@ importers:
       uint8arrays:
         specifier: ^5
         version: 5.1.0
+    devDependencies:
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0)
+
+  packages/epcis:
+    dependencies:
+      ajv:
+        specifier: ^8
+        version: 8.18.0
+      ajv-formats:
+        specifier: ^3
+        version: 3.0.1(ajv@8.18.0)
     devDependencies:
       vitest:
         specifier: ^4.0.18

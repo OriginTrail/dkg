@@ -16,6 +16,7 @@
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
