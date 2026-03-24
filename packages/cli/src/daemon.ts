@@ -2171,8 +2171,11 @@ async function handleRequest(
   if (req.method === 'POST' && path === '/api/ccl/eval') {
     const body = await readBody(req, SMALL_BODY_BYTES * 8);
     const { paranetId, name, facts, contextType, view, snapshotId, scopeUal, publishResult } = JSON.parse(body);
-    if (!paranetId || !name || !Array.isArray(facts)) {
-      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name, facts[]' });
+    if (!paranetId || !name) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name' });
+    }
+    if (facts != null && !Array.isArray(facts)) {
+      return jsonResponse(res, 400, { error: 'facts must be an array when provided' });
     }
     const result = publishResult
       ? await agent.evaluateAndPublishCclPolicy({ paranetId, name, facts, contextType, view, snapshotId, scopeUal })
@@ -2456,12 +2459,15 @@ function parsePublishRequestBody(body: string):
 
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
+  const body = JSON.stringify(data, (_key, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)

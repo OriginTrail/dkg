@@ -144,15 +144,15 @@ The reference evaluator uses a canonical YAML representation.
 
 ```yaml
 - name: corroborated
-  params: [C]
+  params: [Claim]
   all:
-    - atom: {pred: claim, args: ["$C"]}
+    - atom: {pred: claim, args: ["$Claim"]}
     - count_distinct:
-        vars: [E]
+        vars: [Evidence]
         where:
-          - atom: {pred: supports, args: ["$E", "$C"]}
-          - atom: {pred: evidence_view, args: ["$E", "accepted"]}
-          - atom: {pred: independent, args: ["$E"]}
+          - atom: {pred: supports, args: ["$Evidence", "$Claim"]}
+          - atom: {pred: evidence_view, args: ["$Evidence", "accepted"]}
+          - atom: {pred: independent, args: ["$Evidence"]}
         op: ">="
         value: 2
 ```
@@ -161,9 +161,9 @@ The reference evaluator uses a canonical YAML representation.
 
 ```yaml
 - name: propose_accept
-  params: [C]
+  params: [Claim]
   all:
-    - atom: {pred: promotable, args: ["$C"]}
+    - atom: {pred: promotable, args: ["$Claim"]}
 ```
 
 ---
@@ -176,6 +176,8 @@ An `atom` joins against either:
 - already derived predicates
 
 Variables begin with `$`.
+
+Use descriptive names such as `$Claim`, `$Evidence`, `$Agent`, or `$Epoch` in human-authored policies.
 
 Example:
 
@@ -196,7 +198,7 @@ Example:
 
 ```yaml
 count_distinct:
-  vars: [E]
+  vars: [Evidence]
   where: ...
   op: ">="
   value: 2

@@ -35,9 +35,10 @@ import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
-import { buildCclPolicyQuads, buildPolicyApprovalQuads, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
-import { CclEvaluator, hashCclFacts, parseCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
+import { buildCclPolicyQuads, buildPolicyApprovalQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
+import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
+import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 
 export interface CclPublishedResultEntry {
   entryUri: string;
@@ -50,6 +51,9 @@ export interface CclPublishedEvaluationRecord {
   evaluationUri: string;
   policyUri: string;
   factSetHash: string;
+   factQueryHash?: string;
+   factResolverVersion?: string;
+   factResolutionMode?: CclFactResolutionMode;
   createdAt?: string;
   view?: string;
   snapshotId?: string;
@@ -2047,6 +2051,19 @@ export class DKGAgent {
       throw new Error(`Paranet "${opts.paranetId}" does not exist. Create it first with createParanet().`);
     }
 
+    validateCclPolicy(opts.content, { expectedName: opts.name, expectedVersion: opts.version });
+
+    const existing = (await this.listCclPolicies({ paranetId: opts.paranetId, name: opts.name }))
+      .find(policy => policy.version === opts.version);
+    const existingHash = existing?.hash;
+    const nextHash = hashCclPolicy(opts.content);
+    if (existingHash && existingHash !== nextHash) {
+      throw new Error(`CCL policy ${opts.paranetId}/${opts.name}@${opts.version} already exists with different content`);
+    }
+    if (existing?.policyUri && existingHash === nextHash) {
+      return { policyUri: existing.policyUri, hash: existing.hash, status: 'proposed' };
+    }
+
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
     const { policyUri, hash, quads } = buildCclPolicyQuads(opts, `did:dkg:agent:${this.peerId}`, ontologyGraph, now);
@@ -2063,7 +2080,7 @@ export class DKGAgent {
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
     const ctx = createOperationContext('system');
     await this.assertParanetOwner(opts.paranetId);
-    const record = await this.getCclPolicyByUri(opts.policyUri);
+    const record = await this.getCclPolicyByUri(opts.policyUri, { includeBody: true });
     if (!record) throw new Error(`CCL policy not found: ${opts.policyUri}`);
     if (record.paranetId !== opts.paranetId) {
       throw new Error(`CCL policy ${opts.policyUri} belongs to paranet "${record.paranetId}", not "${opts.paranetId}"`);
@@ -2071,6 +2088,8 @@ export class DKGAgent {
     if (record.contextType && opts.contextType && record.contextType !== opts.contextType) {
       throw new Error(`CCL policy contextType mismatch: policy=${record.contextType}, requested=${opts.contextType}`);
     }
+    if (!record.body) throw new Error(`CCL policy body missing: ${opts.policyUri}`);
+    validateCclPolicy(record.body, { expectedName: record.name, expectedVersion: record.version });
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const approvedAt = new Date().toISOString();
@@ -2210,10 +2229,34 @@ export class DKGAgent {
     return record;
   }
 
+  async resolveFactsFromSnapshot(opts: {
+    paranetId: string;
+    snapshotId?: string;
+    view?: string;
+    scopeUal?: string;
+    policyName?: string;
+    contextType?: string;
+  }): Promise<{
+    facts: CclFactTuple[];
+    factSetHash: string;
+    factQueryHash: string;
+    factResolverVersion: string;
+    factResolutionMode: 'snapshot-resolved';
+    context: {
+      paranetId: string;
+      contextType?: string;
+      view?: string;
+      snapshotId?: string;
+      scopeUal?: string;
+    };
+  }> {
+    return resolveFactsFromSnapshot(this.store, opts);
+  }
+
   async evaluateCclPolicy(opts: {
     paranetId: string;
     name: string;
-    facts: CclFactTuple[];
+    facts?: CclFactTuple[];
     contextType?: string;
     view?: string;
     snapshotId?: string;
@@ -2228,6 +2271,9 @@ export class DKGAgent {
       scopeUal?: string;
     };
     factSetHash: string;
+    factQueryHash: string;
+    factResolverVersion: string;
+    factResolutionMode: CclFactResolutionMode;
     result: CclEvaluationResult;
   }> {
     const policy = await this.resolveCclPolicy({
@@ -2241,7 +2287,17 @@ export class DKGAgent {
     }
 
     const parsed = parseCclPolicy(policy.body);
-    const evaluator = new CclEvaluator(parsed, opts.facts);
+    const factInput = opts.facts
+      ? buildManualCclFacts(opts.facts)
+      : await this.resolveFactsFromSnapshot({
+          paranetId: opts.paranetId,
+          snapshotId: opts.snapshotId,
+          view: opts.view,
+          scopeUal: opts.scopeUal,
+          policyName: policy.name,
+          contextType: opts.contextType ?? policy.contextType,
+        });
+    const evaluator = new CclEvaluator(parsed, factInput.facts);
     const result = evaluator.run();
 
     return {
@@ -2262,7 +2318,10 @@ export class DKGAgent {
         snapshotId: opts.snapshotId,
         scopeUal: opts.scopeUal,
       },
-      factSetHash: hashCclFacts(opts.facts),
+      factSetHash: factInput.factSetHash,
+      factQueryHash: factInput.factQueryHash,
+      factResolverVersion: factInput.factResolverVersion,
+      factResolutionMode: factInput.factResolutionMode,
       result,
     };
   }
@@ -2270,7 +2329,7 @@ export class DKGAgent {
   async evaluateAndPublishCclPolicy(opts: {
     paranetId: string;
     name: string;
-    facts: CclFactTuple[];
+    facts?: CclFactTuple[];
     contextType?: string;
     view?: string;
     snapshotId?: string;
@@ -2288,6 +2347,9 @@ export class DKGAgent {
         scopeUal?: string;
       };
       factSetHash: string;
+      factQueryHash: string;
+      factResolverVersion: string;
+      factResolutionMode: CclFactResolutionMode;
       result: CclEvaluationResult;
     };
   }> {
@@ -2297,6 +2359,9 @@ export class DKGAgent {
       paranetId: opts.paranetId,
       policyUri: evaluation.policy.policyUri,
       factSetHash: evaluation.factSetHash,
+      factQueryHash: evaluation.factQueryHash,
+      factResolverVersion: evaluation.factResolverVersion,
+      factResolutionMode: evaluation.factResolutionMode,
       result: evaluation.result,
       evaluatedAt: new Date().toISOString(),
       view: evaluation.context.view,
@@ -2328,11 +2393,14 @@ export class DKGAgent {
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
 
     const result = await this.store.query(`
-      SELECT ?evaluation ?policy ?factSetHash ?createdAt ?view ?snapshotId ?scopeUal ?contextType ?entry ?kind ?resultName ?arg ?argIndex ?argValue WHERE {
+      SELECT ?evaluation ?policy ?factSetHash ?factQueryHash ?factResolverVersion ?factResolutionMode ?createdAt ?view ?snapshotId ?scopeUal ?contextType ?entry ?kind ?resultName ?arg ?argIndex ?argValue WHERE {
         GRAPH <${graph}> {
           ?evaluation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CCL_EVALUATION}> ;
                       <${DKG_ONTOLOGY.DKG_EVALUATED_POLICY}> ?policy ;
                       <${DKG_ONTOLOGY.DKG_FACT_SET_HASH}> ?factSetHash .
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_FACT_QUERY_HASH}> ?factQueryHash }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_FACT_RESOLVER_VERSION}> ?factResolverVersion }
+          OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_FACT_RESOLUTION_MODE}> ?factResolutionMode }
           OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?createdAt }
           OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_VIEW}> ?view }
           OPTIONAL { ?evaluation <${DKG_ONTOLOGY.DKG_SNAPSHOT_ID}> ?snapshotId }
@@ -2365,6 +2433,9 @@ export class DKGAgent {
           evaluationUri,
           policyUri: row['policy'],
           factSetHash: stripLiteral(row['factSetHash']),
+          factQueryHash: row['factQueryHash'] ? stripLiteral(row['factQueryHash']) : undefined,
+          factResolverVersion: row['factResolverVersion'] ? stripLiteral(row['factResolverVersion']) : undefined,
+          factResolutionMode: row['factResolutionMode'] ? stripLiteral(row['factResolutionMode']) as CclFactResolutionMode : undefined,
           createdAt: row['createdAt'] ? stripLiteral(row['createdAt']) : undefined,
           view: row['view'] ? stripLiteral(row['view']) : undefined,
           snapshotId: row['snapshotId'] ? stripLiteral(row['snapshotId']) : undefined,

@@ -22,6 +22,41 @@ CCL is for evaluating questions like:
 
 CCL is **not** a general reasoning engine and **not** an LLM-facing tool language.
 
+## Current v0.1 boundary
+
+CCL v0.1 evaluation is deterministic with respect to the policy body and the fact tuples supplied to the evaluator.
+
+- facts may still be caller-provided for manual/dev evaluation
+- the agent now also supports snapshot-resolved evaluation for bundled policy families via a canonical input-fact resolver
+- `snapshotId`, `view`, and `scopeUal` are recorded as evaluation context metadata
+- snapshot-backed resolution currently works only for resolver profiles that know how to project RDF into canonical CCL facts; arbitrary RDF is not evaluated directly
+
+That means `factSetHash` gives replayability and auditability for a concrete evaluation input, while snapshot-backed determinism depends on using an explicit resolver profile such as the canonical input-fact resolver.
+
+## Snapshot-resolved facts
+
+For bundled policy families such as `owner_assertion` and `context_corroboration`, the agent can resolve facts directly from snapshot-tagged RDF input facts instead of requiring the caller to provide tuples manually.
+
+Current canonical resolver expectations:
+
+- each fact is stored as a `cclf:InputFact` node
+- the predicate is stored in `cclf:predicate`
+- arguments are stored in `cclf:arg0`, `cclf:arg1`, ...
+- each argument value is JSON-encoded in the RDF literal so strings, numbers, and booleans round-trip correctly
+- `dkg:snapshotId`, `dkg:view`, and optional `dkg:scopeUal` are used to select the fact set
+
+The current resolver vocabulary is:
+
+- `cclf:InputFact` = `https://example.org/ccl-fact#InputFact`
+- `cclf:predicate` = `https://example.org/ccl-fact#predicate`
+- `cclf:argN` = `https://example.org/ccl-fact#argN`
+
+Published evaluations now also record:
+
+- `factResolutionMode`
+- `factResolverVersion`
+- `factQueryHash`
+
 ## Trustless-network constraints
 
 CCL v0.1 is intentionally restricted:
@@ -55,6 +90,8 @@ The reference evaluator consumes a canonical YAML policy format. This is deliber
 - human authors may write surface CCL
 - nodes should evaluate a normalized canonical form
 - canonical form is easier to serialize, audit, hash, and replay
+
+For human and agent authoring, prefer descriptive variable names in surface CCL such as `Claim`, `Evidence`, `Agent`, `Epoch`, or `Contradiction` instead of short names like `C`, `E`, or `A`.
 
 ## Running the tests
 
@@ -91,6 +128,10 @@ CCL produces two kinds of outputs:
    - e.g. `propose_accept(c1)`, `propose_reject(c2)`
 
 A decision is still **non-authoritative** until a normal DKG `PUBLISH` introduces it as a typed transition into shared state.
+
+## Current lifecycle limitation
+
+CCL v0.1 supports `publish -> approve -> resolve -> evaluate`, but does not yet include explicit policy revocation or deactivation. If multiple approvals exist for the same `paranetId + policy name + context`, resolution currently selects the most recently approved binding for that scope.
 
 ## Included policies
 

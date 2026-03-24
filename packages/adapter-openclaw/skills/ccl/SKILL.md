@@ -170,4 +170,5 @@ These outputs do not change authoritative DKG state by themselves.
 - Version policies explicitly.
 - Evaluate only against a declared snapshot or case input.
 - Prefer publishing the supporting facts first, then evaluating.
+- Prefer descriptive surface-CCL variable names such as `Claim`, `Evidence`, `Agent`, and `Epoch` when authoring policies.
 - If agents disagree, check the facts, the snapshot boundary, and the policy version before anything else.

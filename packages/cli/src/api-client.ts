@@ -352,7 +352,7 @@ export class ApiClient {
   async evaluateCclPolicy(request: {
     paranetId: string;
     name: string;
-    facts: Array<[string, ...unknown[]]>;
+    facts?: Array<[string, ...unknown[]]>;
     contextType?: string;
     view?: string;
     snapshotId?: string;
@@ -362,6 +362,9 @@ export class ApiClient {
     policy: any;
     context: any;
     factSetHash: string;
+    factQueryHash: string;
+    factResolverVersion: string;
+    factResolutionMode: 'manual' | 'snapshot-resolved';
     result: any;
   }> {
     return this.post('/api/ccl/eval', request);

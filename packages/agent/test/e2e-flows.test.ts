@@ -27,6 +27,59 @@ afterEach(async () => {
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+function literal(value: unknown) {
+  return JSON.stringify(String(value));
+}
+
+function jsonLiteral(value: unknown) {
+  return JSON.stringify(JSON.stringify(value));
+}
+
+function buildSnapshotFactQuads(paranetId: string, snapshotId: string, scopeUal: string, facts: Array<[string, ...unknown[]]>) {
+  return facts.flatMap((fact, index) => {
+    const [predicate, ...args] = fact;
+    const subject = `did:dkg:ccl-fact:${paranetId}:${snapshotId}:${index}`;
+    return [
+      {
+        subject,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://example.org/ccl-fact#InputFact',
+        graph: '',
+      },
+      {
+        subject,
+        predicate: 'https://example.org/ccl-fact#predicate',
+        object: literal(predicate),
+        graph: '',
+      },
+      ...args.map((arg, argIndex) => ({
+        subject,
+        predicate: `https://example.org/ccl-fact#arg${argIndex}`,
+        object: jsonLiteral(arg),
+        graph: '',
+      })),
+      {
+        subject,
+        predicate: 'https://dkg.network/ontology#snapshotId',
+        object: literal(snapshotId),
+        graph: '',
+      },
+      {
+        subject,
+        predicate: 'https://dkg.network/ontology#view',
+        object: literal('accepted'),
+        graph: '',
+      },
+      {
+        subject,
+        predicate: 'https://dkg.network/ontology#scopeUal',
+        object: literal(scopeUal),
+        graph: '',
+      },
+    ];
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Publish + Query (single agent)
 // ---------------------------------------------------------------------------
@@ -132,6 +185,104 @@ describe('Publish → Replicate → Query (two agents)', () => {
     expect(qr.bindings.length).toBeGreaterThanOrEqual(1);
     expect(qr.bindings[0]['name']).toBe('"Carol"');
   }, 20000);
+});
+
+describe('CCL snapshot-resolved evaluation (two agents)', () => {
+  it('resolves the same snapshot facts on both nodes and evaluates without caller facts', async () => {
+    const agentA = await DKGAgent.create({
+      name: 'CclSnapshotA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    const agentB = await DKGAgent.create({
+      name: 'CclSnapshotB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agentA, agentB);
+
+    await agentA.start();
+    await agentB.start();
+    await agentB.connectTo(agentA.multiaddrs[0]);
+    await sleep(1000);
+
+    await agentA.createParanet({ id: 'ccl-snapshot-e2e', name: 'CCL Snapshot', description: '' });
+    agentA.subscribeToParanet('ccl-snapshot-e2e');
+    agentB.subscribeToParanet('ccl-snapshot-e2e');
+    await sleep(1000);
+
+    const published = await agentA.publishCclPolicy({
+      paranetId: 'ccl-snapshot-e2e',
+      name: 'owner_assertion',
+      version: '0.1.0',
+      content: `policy: owner_assertion
+version: 0.1.0
+rules:
+  - name: owner_asserted
+    params: [Claim]
+    all:
+      - atom: { pred: claim, args: ["$Claim"] }
+      - exists:
+          where:
+            - atom: { pred: owner_of, args: ["$Claim", "$Agent"] }
+            - atom: { pred: signed_by, args: ["$Claim", "$Agent"] }
+decisions:
+  - name: propose_accept
+    params: [Claim]
+    all:
+      - atom: { pred: owner_asserted, args: ["$Claim"] }
+`,
+    });
+    await agentA.approveCclPolicy({ paranetId: 'ccl-snapshot-e2e', policyUri: published.policyUri });
+
+    await agentA.publish(
+      'ccl-snapshot-e2e',
+      buildSnapshotFactQuads('ccl-snapshot-e2e', 'snap-01', 'ual:dkg:example:owner-assertion', [
+        ['claim', 'p1'],
+        ['owner_of', 'p1', '0xalice'],
+        ['signed_by', 'p1', '0xalice'],
+      ]),
+    );
+
+    await sleep(4000);
+
+    const resolvedA = await agentA.resolveFactsFromSnapshot({
+      paranetId: 'ccl-snapshot-e2e',
+      policyName: 'owner_assertion',
+      snapshotId: 'snap-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+    const resolvedB = await agentB.resolveFactsFromSnapshot({
+      paranetId: 'ccl-snapshot-e2e',
+      policyName: 'owner_assertion',
+      snapshotId: 'snap-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+
+    expect(resolvedA.facts).toEqual(resolvedB.facts);
+    expect(resolvedA.factSetHash).toBe(resolvedB.factSetHash);
+    expect(resolvedA.factQueryHash).toBe(resolvedB.factQueryHash);
+    expect(resolvedA.factResolutionMode).toBe('snapshot-resolved');
+
+    const evaluationA = await agentA.evaluateCclPolicy({
+      paranetId: 'ccl-snapshot-e2e',
+      name: 'owner_assertion',
+      snapshotId: 'snap-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+    const evaluationB = await agentB.evaluateCclPolicy({
+      paranetId: 'ccl-snapshot-e2e',
+      name: 'owner_assertion',
+      snapshotId: 'snap-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+
+    expect(evaluationA.factResolutionMode).toBe('snapshot-resolved');
+    expect(evaluationA.factSetHash).toBe(evaluationB.factSetHash);
+    expect(evaluationA.result).toEqual(evaluationB.result);
+    expect(evaluationA.result.derived.owner_asserted).toEqual([['p1']]);
+    expect(evaluationA.result.decisions.propose_accept).toEqual([['p1']]);
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
