@@ -1,22 +1,26 @@
 import React, { useState, useCallback } from 'react';
 import { executeQuery } from '../api.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
+import { useRepo, repoKey } from '../context/RepoContext.js';
 
 export function GraphExplorerPage() {
+  const { selectedRepo } = useRepo();
   const [tab, setTab] = useState<'visual' | 'sparql'>('visual');
   const [sparql, setSparql] = useState(
     'CONSTRUCT { ?s ?p ?o } WHERE { ?s a <https://ontology.dkg.io/ghcode#PullRequest> ; ?p ?o } LIMIT 200'
   );
-  const [repo, setRepo] = useState('');
+  const [includeWorkspace, setIncludeWorkspace] = useState(true);
   const [triples, setTriples] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const scopedRepo = selectedRepo ? repoKey(selectedRepo) : undefined;
 
   const runQuery = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await executeQuery(sparql, repo || undefined);
+      const result = await executeQuery(sparql, scopedRepo, includeWorkspace);
       const data = result?.result;
       if (data?.triples) {
         setTriples(data.triples);
@@ -30,11 +34,22 @@ export function GraphExplorerPage() {
     } finally {
       setLoading(false);
     }
-  }, [sparql, repo]);
+  }, [sparql, scopedRepo, includeWorkspace]);
 
   return (
     <div className="page">
       <h2 className="page-title">Graph Explorer</h2>
+
+      {selectedRepo && (
+        <div className="scope-banner">
+          Scoped to <strong className="mono">{repoKey(selectedRepo)}</strong>
+          {selectedRepo.paranetId && (
+            <span className="text-muted" style={{ marginLeft: 8 }}>
+              paranet: {selectedRepo.paranetId}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="explorer-tabs">
         <button
@@ -52,7 +67,7 @@ export function GraphExplorerPage() {
       </div>
 
       {tab === 'visual' && (
-        <GraphCanvas repo={repo || undefined} />
+        <GraphCanvas repo={scopedRepo} />
       )}
 
       {tab === 'sparql' && (
@@ -66,13 +81,17 @@ export function GraphExplorerPage() {
               placeholder="Enter SPARQL query..."
             />
             <div className="input-row">
-              <input
-                type="text"
-                className="input"
-                placeholder="Repository (optional)"
-                value={repo}
-                onChange={e => setRepo(e.target.value)}
-              />
+              <span className="mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                Repo: {scopedRepo ?? 'all'}
+              </span>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={includeWorkspace}
+                  onChange={e => setIncludeWorkspace(e.target.checked)}
+                />
+                Include workspace data
+              </label>
               <button className="btn" onClick={runQuery} disabled={loading}>
                 {loading ? 'Running...' : 'Execute'}
               </button>

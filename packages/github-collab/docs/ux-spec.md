@@ -80,9 +80,10 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 
 **Step 3: Configure Repository Settings**
 - **Branch selection**: Multi-select of branches to track (default: main/master + open PR branches)
-- **Privacy level**: Radio group
-  - `workspace_only` — data stays in local node workspace (default)
-  - `paranet_shared` — published to a shared paranet for collaboration
+- **Privacy level**: Radio group with descriptions
+  - `workspace_only` — "Local Only: data stays on this node. Not visible to other DKG nodes." (default)
+  - `paranet_shared` — "Shared: data is published to a paranet. Nodes that subscribe can query it."
+  - For private repos, show warning: "This is a private repository. Selecting 'Shared' will make PR titles, issue descriptions, and code references visible to collaborating nodes."
 - **File filters**:
   - Include patterns (default: `**/*.{ts,js,py,sol,go,rs,java,md,json,yaml,toml}`)
   - Exclude patterns (default: `node_modules/**, dist/**, .git/**`)
@@ -227,6 +228,15 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 - Activity feed: real-time log of who synced, what changed, agent actions
 - Collaborator list with online/offline status
 - Conflict indicators if multiple agents modified same entity
+
+**Collaborator onboarding (receiving side)**:
+- Collaborator receives an invitation via P2P (GossipSub `node:invited` message) or enters a paranet ID manually
+- Accept/Decline dialog: "Node {name} invited you to collaborate on {owner}/{repo}. Accept to subscribe and receive PR/issue data."
+- On accept: auto-subscribe to paranet, sync existing data from peers
+- Repo appears in collaborator's Overview with "Collaborator" role badge
+- Collaborators can browse graph, view PRs, and participate in reviews
+- Collaborators cannot trigger GitHub sync (no token required or stored)
+- Access can be revoked by either party (unsubscribe from paranet)
 
 ### 3.5 Sync Status Flow
 
@@ -452,13 +462,21 @@ App stores token in memory → uses Authorization: Bearer <token> for all API ca
 
 ## 5. View Specifications
 
-### 5.1 Top Bar (persistent)
+### 5.1 Top Bar (persistent) — CRITICAL: Requires Implementation
 
 | Element | Data | Interaction |
 |---------|------|-------------|
-| Tab navigation | Static labels: Overview, Graph, PRs, Agents, Settings | Click → route change |
-| Repo selector | List from `/api/apps/github-collab/repos` | Dropdown → sets active repo context |
-| Sync badge | Sync status from `/api/apps/github-collab/repos/:id/sync` | Click → navigates to sync details |
+| Tab navigation | Static labels: Overview, Graph, PRs, Collaboration, Settings | Click → route change |
+| **Repo selector** | List from `GET /status` → `repos[].repoKey` | Dropdown → sets active repo context in `RepoContext` |
+| Sync badge | Sync status per selected repo | Click → navigates to sync details |
+
+**Repo selector details:**
+- Populated from `GET /status` → shows `repoKey` with sync status dot (green/amber/red)
+- "All Repositories" option at top (Overview and PRs only — Graph Explorer requires specific repo)
+- "Add Repository" option at bottom → navigates to Settings
+- If no repos configured, show onboarding CTA instead of dropdown
+- Each entry shows: `{owner}/{repo}` with privacy badge (lock or globe icon) and sync status dot
+- Selected repo stored in React context, consumed by all pages
 
 **Layout**: Horizontal bar, border-bottom, `background: var(--bg)`. Tabs use underline active indicator (2px `var(--green)` bottom border).
 
@@ -1005,3 +1023,272 @@ Agents publish knowledge via the DKG publish API:
 - Screen reader: ARIA labels on controls, graph summary text for non-visual users
 - Color: all status indicators use shape/icon in addition to color (not color-only)
 - Motion: respect `prefers-reduced-motion` — disable graph animations and particles
+
+---
+
+## 13. UX Reassessment (2026-03-25)
+
+This section documents a thorough UX review focused on privacy, multi-repo management, workspace separation, and collaboration flows. It identifies gaps between the spec and the current implementation, and specifies improvements.
+
+### 13.1 Privacy Model — Gaps & Improvements
+
+**Gap 1: Privacy level is invisible in the UI.**
+The spec defines `workspace_only` vs `paranet_shared` privacy levels (Section 3.1, Step 3), but neither the OverviewPage nor the SettingsPage exposes or displays this setting. The `POST /config/repo` API accepts a `paranetId` but not a `privacyLevel` field.
+
+**Improvement — Privacy Badge on Every Repo:**
+Each repo row (in Overview and Settings tables) must show a privacy badge:
+- `workspace_only` — lock icon, label "Local Only", tooltip: "Data stays on this node. Not shared with other nodes."
+- `paranet_shared` — globe icon, label "Shared Paranet", tooltip: "Data is published to a paranet. Collaborators who subscribe can see it."
+
+**Gap 2: No visibility into who can see data.**
+The Agents/Collaboration page is a placeholder. There is no way for users to see which nodes are subscribed to a repo's paranet, or what data is visible to collaborators vs. what stays local.
+
+**Improvement — Data Visibility Panel (Settings page, per repo):**
+Add a "Data Visibility" section per repo in Settings:
+- Shows current privacy level with option to change it
+- Lists which node peers are subscribed to this paranet (if `paranet_shared`)
+- Shows counts: "X triples in workspace (local only)" vs "Y triples in shared paranet"
+- Warning when switching from `workspace_only` to `paranet_shared`: "This will make existing workspace data visible to collaborators who subscribe."
+- Warning when switching from `paranet_shared` to `workspace_only`: "Existing enshrined data cannot be retracted. New data will remain local."
+
+**Gap 3: GitHub PAT handling is adequate but the UX can improve.**
+The token is sent via POST and stored server-side (correct). But the Settings page shows the token input as a password field with no indication of whether a token is already saved. After page reload, the input is blank even if a token exists server-side.
+
+**Improvement — Token Status Indicator:**
+- If a token is configured for a repo, show "Token configured" with a checkmark, the authenticated username, and a "Revoke / Replace" button
+- Only show the token input when adding a new repo or replacing an existing token
+- Never echo the token back to the UI — only show metadata (username, scopes, expiry if available)
+
+**Gap 4: Private repos vs public repos are not distinguished.**
+Users need to know whether their private repo data is safe. The onboarding flow mentions a lock icon for private repos (Section 3.1, Step 1), but there is no explicit statement about what happens to private repo data.
+
+**Improvement — Private Repo Data Notice:**
+During onboarding for private repos, display an explicit notice:
+> "This is a private repository. Data synced from it (PRs, issues, code references) will be stored on your local DKG node. If you select 'Shared Paranet', this data will be visible to other nodes that subscribe. If you select 'Local Only', it stays on this node."
+
+### 13.2 Multi-Repo Management — Gaps & Improvements
+
+**Gap 1: No global repo selector in the top bar.**
+The spec (Section 5.1) defines a `<RepoSelector>` in the TopBar, but the implementation (`AppShell.tsx`) has no repo selector — just static tab navigation. This means every page that needs repo context (PRs, Graph Explorer, Sync) forces users to manually type the `owner/repo` string. This is a critical usability gap.
+
+**Improvement — Global Repo Selector:**
+Add a `<RepoSelector>` dropdown in the AppShell header, between the title and the tab navigation:
+- Populated from `GET /status` → `repos[].repoKey`
+- Selected repo stored in React context (`RepoContext`)
+- All pages consume the selected repo automatically — no more manual text inputs
+- Shows sync status dot per repo (green=idle, amber=syncing, red=error)
+- "Add Repository" option at the bottom opens Settings
+- If no repos configured, show onboarding CTA instead of dropdown
+
+**Gap 2: Adding a repo is too minimal.**
+The SettingsPage has bare owner/repo text inputs with no validation, no URL parsing, no repo preview, and no configuration options (branches, privacy, sync schedule, file filters). This diverges significantly from the spec's onboarding flow (Section 3.1).
+
+**Improvement — Repo Addition Wizard:**
+Replace the bare inputs with a multi-step form matching Section 3.1:
+1. URL or owner/repo input with validation and repo preview
+2. Token input with test (or use existing token)
+3. Configuration: privacy level, sync schedule, sync scope checkboxes
+4. Confirmation and start initial sync
+
+At minimum for the first implementation pass, the "Add Repository" form should include:
+- Privacy level radio: `workspace_only` / `paranet_shared`
+- Sync schedule dropdown: Manual / 15min / 1hr / 6hr
+- Sync scope checkboxes: PRs, Issues, Reviews, Commits
+
+**Gap 3: Removing a repo has no confirmation.**
+The "Remove" button calls `removeRepo()` immediately with no confirmation dialog.
+
+**Improvement:**
+Show a confirmation dialog: "Remove {owner}/{repo}? This will delete the local paranet and all synced data. Enshrined data on-chain cannot be removed." With "Cancel" and "Remove Repository" (destructive) buttons.
+
+**Gap 4: Per-repo settings not scoped.**
+There is no way to view or edit settings for an individual repo after it is added (change sync schedule, update token, change privacy, manage branches).
+
+**Improvement — Per-Repo Settings Expansion:**
+Each repo row in the Settings table should be expandable (or link to a repo detail page) showing:
+- Current configuration (privacy, sync schedule, scope, branches)
+- Token status (authenticated as X, scopes)
+- Sync history (last 10 syncs with status)
+- "Edit" for each setting, "Remove" in danger zone
+
+### 13.3 Collaboration & Invitations — Gaps & Improvements
+
+**Gap 1: Agents page is a placeholder.**
+The `AgentsPage.tsx` renders only static placeholder text. None of the specified collaboration features (agent roster, task board, file claims, activity log) exist in the implementation.
+
+**Gap 2: No invitation flow exists.**
+The spec mentions "Invite" buttons and peer ID inputs (Section 3.4), but there are no API endpoints for invitations and no UI for sending or receiving them.
+
+**Gap 3: No collaborator management UI.**
+The architecture doc defines a `GET /collaborators` endpoint (Section 4.5), but this endpoint does not exist in `handler.ts`.
+
+**Improvement — Collaboration Tab Redesign:**
+Rename "Agents" tab to "Collaboration" and implement in phases:
+
+**Phase 1 (MVP):**
+- Collaborator list: Query subscribed peers from the paranet, show peerId (truncated), node name, online/offline status, last seen
+- Invite flow: Input for peer ID + "Invite to {repo}" button. Sends a GossipSub `node:invited` message. Show pending/accepted/rejected status.
+- Activity log: SPARQL-queried list of recent sync events, review actions, and node join/leave
+
+**Phase 2:**
+- Agent roster with current tasks (from `ghc:Agent` entities in the graph)
+- Task board (Kanban: claimed/active/done)
+- File claim table
+
+**Collaborator's perspective (receiving an invitation):**
+This is an entirely missing flow. When Node B receives an invitation via GossipSub, it needs:
+- A notification in the DKG node UI (or within the GitHub Collab app if it's already installed)
+- An "Accept / Decline" action
+- On accept: auto-configure the repo (without needing a GitHub token — collaborators may be observers only)
+- Clear indication of what access level they get: "You will receive PR and issue data from {owner}/{repo}. You can participate in reviews but cannot sync directly from GitHub."
+
+### 13.4 Knowledge Graph & Workspace Storage — Gaps & Improvements
+
+**Gap 1: Workspace vs enshrined distinction is invisible.**
+The spec defines a clear data lifecycle (architecture doc Section 5.2): open PRs live in workspace, merged PRs get enshrined. But the UI provides no indication of whether data is in the workspace (ephemeral) or enshrined (permanent).
+
+**Improvement — Data Lifecycle Indicators:**
+- In the PR list, add a column or badge: "Workspace" (gray) vs "Enshrined" (green with chain icon)
+- In the Graph Explorer, allow filtering by storage tier: "All" / "Workspace only" / "Enshrined only" (maps to `includeWorkspace` param)
+- In PR detail view, show enshrinement status: "This PR was enshrined on {date}" with UAL link, or "This PR is in workspace (will be enshrined when merged)"
+
+**Gap 2: "Enshrine" / "Workspace" / "Paranet" terminology is DKG-internal jargon.**
+Users unfamiliar with DKG will not understand these terms.
+
+**Improvement — Terminology Glossary & Contextual Help:**
+Add a glossary accessible from the Settings page or a "?" icon:
+- **Workspace**: Temporary storage on your node. Like a draft — data can be updated or deleted.
+- **Enshrined**: Permanently recorded on the network with a cryptographic proof. Like a published record — cannot be modified.
+- **Paranet**: A shared knowledge space. Nodes that subscribe to the same paranet can see and query the same data.
+- **Knowledge Asset**: A self-contained unit of knowledge (e.g., one PR with all its reviews) stored as a verifiable graph.
+
+Use friendlier labels in the UI where possible:
+- "Workspace" -> "Draft" or "Staging"
+- "Enshrined" -> "Published" or "Permanent"
+- "Paranet" -> "Shared Space" (with "paranet" in parentheses for technical users)
+
+### 13.5 Paranet Workspace Separation — Gaps & Improvements
+
+**Gap 1: Multiple repos share the same UI with no scope separation.**
+When a user has repos A and B configured, the Overview page lists both in a flat table. The Graph Explorer, PR page, and Agents page have no repo scoping — they either require manual text input or show data from all repos mixed together.
+
+**Improvement — Repo-Scoped Everything:**
+With the global `<RepoSelector>` (Section 13.2), every page is automatically scoped:
+- Overview shows stats for the selected repo only
+- Graph Explorer queries only the selected repo's paranet
+- PRs page shows PRs from the selected repo
+- Collaboration tab shows collaborators for the selected repo's paranet
+
+The repo selector should visually show the paranet ID alongside the repo name to reinforce the 1:1 repo-paranet mapping:
+```
+[v] OriginTrail/dkg-v9
+    Paranet: github-collab:OriginTrail/dkg-v9 | Shared | 3 collaborators
+```
+
+**Gap 2: No "All Repos" view.**
+Sometimes users want a cross-repo overview.
+
+**Improvement — "All Repositories" option in RepoSelector:**
+When "All Repositories" is selected:
+- Overview shows the repo table (current behavior)
+- Graph Explorer is disabled (must select a specific repo)
+- PRs page shows a combined list with repo column
+- Collaboration shows all collaborators across all repos
+
+**Gap 3: Graph Explorer has no paranet indicator.**
+Users querying the graph cannot see which paranet/workspace their query is scoped to.
+
+**Improvement:**
+Show a banner in the Graph Explorer: "Querying: github-collab:{owner}/{repo} (workspace + enshrined)" or "Querying: enshrined only". This maps to the `includeWorkspace` toggle that should be exposed in the UI.
+
+### 13.6 Missing Flows
+
+**Missing Flow 1: Onboarding for collaborators (not repo owners).**
+The current onboarding assumes the user is the repo owner adding their own repo with a GitHub token. A collaborator who receives an invitation has a completely different flow — they don't need a GitHub token, they just need to subscribe to the paranet.
+
+**Collaborator Onboarding Flow:**
+```
+Receive invitation (via P2P or shared paranet ID)
+  -> "Join Collaboration" button
+  -> Auto-subscribe to paranet
+  -> Sync existing data from peers
+  -> Show repo in Overview with "Collaborator" role badge
+  -> Can browse graph, view PRs, participate in reviews
+  -> Cannot trigger GitHub sync (no token)
+```
+
+**Missing Flow 2: Review consensus UI.**
+The API supports `POST /review/request` and `POST /review/submit` with consensus tracking, but there is no UI for:
+- Viewing active review sessions
+- Submitting a review decision
+- Seeing consensus progress (2/3 approvals)
+- Seeing the final enshrined review result
+
+This should be part of the PR detail view:
+- "Request Review" button → opens a dialog to select peer reviewers and required approvals
+- Review status panel showing each reviewer's decision
+- Consensus bar (e.g., "2 of 3 required approvals")
+- "Enshrined" badge when consensus is reached and the review is published
+
+**Missing Flow 3: Webhook setup guidance.**
+The webhook endpoint exists (`POST /webhook`) but there is no UI guidance for setting up the GitHub webhook. Users need to know:
+- The webhook URL to configure in GitHub
+- Which events to select
+- How to set a webhook secret
+- How to verify it's working
+
+**Improvement — Webhook Setup Helper (Settings page, per repo):**
+A "Webhook Setup" card with:
+- The webhook URL (copyable): `https://{node-host}/api/apps/github-collab/webhook`
+- Checklist of events to enable
+- Optional: webhook secret input (generates one or lets user paste one)
+- "Test Webhook" button that sends a ping event
+- Status indicator: "Webhook active" / "No webhook configured" / "Last webhook received: 5min ago"
+
+**Missing Flow 4: Error recovery and sync failure handling.**
+Section 11 defines error states, but the implementation has minimal error handling. The SettingsPage swallows errors silently (`catch(() => {})`). There is no retry mechanism for failed syncs.
+
+**Improvement:**
+- Failed syncs should show an error detail expandable with the failure message
+- "Retry" button next to failed sync entries
+- If GitHub API rate limit is hit, show remaining quota and reset time
+- If the DKG agent is unavailable (503), show a clear "DKG node offline" banner with guidance
+
+### 13.7 Security Concerns
+
+**Concern 1: CORS is `Access-Control-Allow-Origin: *`.**
+The API handler sets `*` for CORS. While the app runs in an iframe sandbox (origin `null`), this means any web page could call these endpoints if it knows the node's address.
+
+**Recommendation:** Restrict CORS to the iframe origin or use a token-based auth check (which already exists via the Bearer token). Document that the Bearer token is the security boundary, not CORS.
+
+**Concern 2: No rate limiting on the API.**
+The `POST /auth/test` endpoint accepts any token and calls GitHub's API. This could be abused for token validation attacks.
+
+**Recommendation:** Rate-limit sensitive endpoints (auth test, sync trigger) to prevent abuse. Even simple in-memory rate limiting (e.g., 10 requests per minute per endpoint) would suffice.
+
+**Concern 3: SPARQL injection potential.**
+The `POST /query` endpoint accepts raw SPARQL. While this queries a local store (not a remote database), malicious or malformed queries could cause DoS via expensive graph patterns.
+
+**Recommendation:** Implement query complexity limits (max triples returned, timeout) and document that SPARQL queries are local-only (not a network-wide query).
+
+### 13.8 Implementation Priority
+
+Based on severity of gaps between spec and implementation:
+
+| Priority | Item | Effort |
+|----------|------|--------|
+| **P0** | Global `<RepoSelector>` in AppShell + RepoContext | Medium |
+| **P0** | Privacy level display (badges on repo rows) | Small |
+| **P0** | Repo removal confirmation dialog | Small |
+| **P1** | Settings: per-repo expandable detail (privacy, schedule, scope) | Medium |
+| **P1** | Settings: token status indicator (not raw input) | Small |
+| **P1** | PRs page: auto-scope to selected repo, enshrinement badge | Small |
+| **P1** | Graph Explorer: paranet scope indicator + workspace toggle | Small |
+| **P1** | Collaboration tab: collaborator list (from paranet subscribers) | Medium |
+| **P2** | Onboarding wizard (multi-step repo addition) | Large |
+| **P2** | Review consensus UI (in PR detail view) | Medium |
+| **P2** | Webhook setup helper | Medium |
+| **P2** | Invitation send/receive flow | Large |
+| **P3** | Terminology glossary / contextual help | Small |
+| **P3** | Activity log (SPARQL-based event feed) | Medium |
+| **P3** | Cross-repo "All Repositories" view | Small |

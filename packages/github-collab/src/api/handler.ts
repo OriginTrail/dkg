@@ -230,9 +230,15 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
       if (req.method === 'GET' && prsMatch) {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
         const [, owner, repo] = prsMatch;
-        const state = url.searchParams.get('state') ?? 'all';
-        const limit = Math.min(Number(url.searchParams.get('limit') ?? 50), 200);
-        const offset = Number(url.searchParams.get('offset') ?? 0);
+
+        const allowedStates = ['open', 'closed', 'merged', 'all'];
+        const rawState = url.searchParams.get('state') ?? 'all';
+        const state = allowedStates.includes(rawState) ? rawState : 'all';
+
+        const parsedLimit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+        const limit = Math.min(Math.max(Number.isFinite(parsedLimit) ? parsedLimit : 50, 1), 200);
+        const parsedOffset = parseInt(url.searchParams.get('offset') ?? '0', 10);
+        const offset = Math.max(Number.isFinite(parsedOffset) ? parsedOffset : 0, 0);
 
         const sparql = `
           SELECT ?pr ?number ?title ?state ?author ?createdAt ?mergedAt WHERE {

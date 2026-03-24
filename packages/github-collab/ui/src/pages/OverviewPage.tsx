@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { fetchStatus, fetchInfo } from '../api.js';
+import { useRepo, repoKey } from '../context/RepoContext.js';
 
 export function OverviewPage() {
+  const { selectedRepo } = useRepo();
   const [status, setStatus] = useState<any>(null);
   const [info, setInfo] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -13,6 +15,11 @@ export function OverviewPage() {
   }, []);
 
   if (error) return <div className="error-banner">{error}</div>;
+
+  // Filter repos to selected repo if one is selected
+  const displayRepos = selectedRepo
+    ? (status?.repos ?? []).filter((r: any) => r.repoKey === repoKey(selectedRepo))
+    : (status?.repos ?? []);
 
   return (
     <div className="page">
@@ -37,7 +44,7 @@ export function OverviewPage() {
         </div>
       </div>
 
-      {status?.repos?.length > 0 && (
+      {displayRepos.length > 0 && (
         <div className="section">
           <h3>Configured Repositories</h3>
           <div className="table-container">
@@ -51,7 +58,7 @@ export function OverviewPage() {
                 </tr>
               </thead>
               <tbody>
-                {status.repos.map((r: any) => (
+                {displayRepos.map((r: any) => (
                   <tr key={r.repoKey}>
                     <td className="mono">{r.repoKey}</td>
                     <td className="mono">{r.paranetId}</td>
@@ -65,7 +72,7 @@ export function OverviewPage() {
         </div>
       )}
 
-      {(!status?.repos || status.repos.length === 0) && (
+      {displayRepos.length === 0 && (
         <div className="empty-state">
           <p>No repositories configured yet.</p>
           <p>Go to <strong>Settings</strong> to add a GitHub repository.</p>

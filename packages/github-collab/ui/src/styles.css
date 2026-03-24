@@ -257,3 +257,198 @@ body {
 }
 
 .explorer-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+
+/* --- Repo Selector --- */
+
+.repo-selector {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.repo-selector-loading {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.repo-select {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  min-width: 180px;
+}
+
+.repo-select:focus { outline: none; border-color: var(--accent); }
+
+.repo-privacy-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.repo-privacy-local { background: #14532d; color: #86efac; }
+.repo-privacy-shared { background: #1e3a5f; color: #93c5fd; }
+
+.repo-sync-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.sync-active { background: var(--success); }
+.sync-inactive { background: var(--text-muted); }
+
+/* --- Scope Banner --- */
+
+.scope-banner {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* --- Selected Row --- */
+
+.row-selected td { background: var(--bg-hover); }
+.badge-selected { background: var(--accent); color: var(--bg-primary); font-size: 10px; }
+
+/* --- Token Status --- */
+
+.token-status-row { display: flex; align-items: center; margin-bottom: 8px; }
+
+.token-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.token-configured { background: #14532d; color: #86efac; }
+.token-not-configured { background: var(--bg-hover); color: var(--text-muted); }
+
+/* --- Privacy Radios --- */
+
+.privacy-radios { display: flex; gap: 16px; margin-top: 4px; }
+
+.radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.radio-label input[type="radio"] { accent-color: var(--accent); }
+.radio-text { font-weight: 500; }
+.radio-hint { color: var(--text-muted); font-size: 11px; }
+
+/* --- Repo Card --- */
+
+.repo-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.repo-card-selected { border-color: var(--accent); }
+
+.repo-card-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+.repo-card-header:hover { background: var(--bg-hover); }
+
+.repo-card-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.repo-card-details {
+  border-top: 1px solid var(--border);
+  padding: 14px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.detail-item { display: flex; flex-direction: column; }
+.detail-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 2px; }
+.detail-value { font-size: 13px; }
+
+.repo-card-actions { display: flex; gap: 6px; }
+
+/* --- Dialog --- */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.dialog {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 460px;
+  width: 90%;
+}
+
+.dialog h3 { font-size: 16px; margin-bottom: 12px; }
+.dialog p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.dialog .input { margin-top: 8px; width: 100%; }
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* --- Checkbox --- */
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.checkbox-label input[type="checkbox"] { accent-color: var(--accent); }
+
+/* --- Enshrinement Badges --- */
+
+.badge-workspace { background: #78350f; color: #fbbf24; }
+.badge-enshrined { background: #14532d; color: #86efac; }

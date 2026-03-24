@@ -148,6 +148,20 @@ export class GitHubCollabCoordinator {
     const config = this.repos.get(repoKey);
     if (!config) return;
 
+    // Broadcast leave before cleanup
+    this.broadcastMessage(config.paranetId, {
+      app: APP_ID,
+      type: 'node:left',
+      peerId: this.myPeerId,
+      timestamp: Date.now(),
+      repo: repoKey,
+    }).catch(() => {});
+
+    // Unsubscribe from gossip
+    const topic = `dkg/paranet/${config.paranetId}/app`;
+    this.agent.gossip.offMessage(topic, this.gossipHandler);
+    this.subscribedTopics.delete(topic);
+
     this.syncEngine.removeRepo(owner, repo);
     this.repos.delete(repoKey);
     this.log(`Removed repo ${repoKey}`);
@@ -443,18 +457,13 @@ export class GitHubCollabCoordinator {
   }
 
   private async broadcastPing(): Promise<void> {
-    const repos = [...this.repos.keys()];
-    if (repos.length === 0) return;
-
-    // Send ping on first repo's paranet (all repos share presence)
-    const firstConfig = this.repos.values().next().value;
-    if (firstConfig) {
-      await this.broadcastMessage(firstConfig.paranetId, {
+    for (const config of this.repos.values()) {
+      await this.broadcastMessage(config.paranetId, {
         app: APP_ID,
         type: 'ping',
         peerId: this.myPeerId,
         timestamp: Date.now(),
-        repos,
+        repos: [...this.repos.keys()],
       });
     }
   }
