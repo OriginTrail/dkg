@@ -3,7 +3,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node tests/run_all_tests.js"
+    "test": "node tests/run_all_tests.js && node tests/run_surface_tests.js && node tests/run_inline_surface_tests.js"
   },
   "dependencies": {
     "js-yaml": "^4.1.1"

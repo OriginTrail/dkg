@@ -1,10 +1,10 @@
 policy owner_assertion v0.1.0
 
-rule owner_asserted(C):
-  claim(C)
-  exists A where
-    owner_of(C, A)
-    signed_by(C, A)
+rule owner_asserted(Claim):
+  claim(Claim)
+  exists Agent where
+    owner_of(Claim, Agent)
+    signed_by(Claim, Agent)
 
-decision propose_accept(C):
-  owner_asserted(C)
+decision propose_accept(Claim):
+  owner_asserted(Claim)

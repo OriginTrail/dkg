@@ -29,6 +29,11 @@ export interface CclEvaluationResult {
   decisions: Record<string, unknown[][]>;
 }
 
+export interface ValidateCclPolicyOptions {
+  expectedName?: string;
+  expectedVersion?: string;
+}
+
 type Binding = Record<string, unknown>;
 
 function isVar(value: unknown): value is string {
@@ -53,6 +58,31 @@ export function parseCclPolicy(content: string): CclCanonicalPolicy {
     throw new Error('CCL policy must be a YAML object');
   }
   return parsed as CclCanonicalPolicy;
+}
+
+export function validateCclPolicy(content: string, opts: ValidateCclPolicyOptions = {}): CclCanonicalPolicy {
+  const policy = parseCclPolicy(content);
+  if (!policy.policy || typeof policy.policy !== 'string') {
+    throw new Error('CCL policy must define a string "policy" name');
+  }
+  if (!policy.version || typeof policy.version !== 'string') {
+    throw new Error('CCL policy must define a string "version"');
+  }
+  if (opts.expectedName && policy.policy !== opts.expectedName) {
+    throw new Error(`CCL policy name mismatch: expected ${opts.expectedName}, got ${policy.policy}`);
+  }
+  if (opts.expectedVersion && policy.version !== opts.expectedVersion) {
+    throw new Error(`CCL policy version mismatch: expected ${opts.expectedVersion}, got ${policy.version}`);
+  }
+  if (policy.rules != null && !Array.isArray(policy.rules)) {
+    throw new Error('CCL policy "rules" must be an array when provided');
+  }
+  if (policy.decisions != null && !Array.isArray(policy.decisions)) {
+    throw new Error('CCL policy "decisions" must be an array when provided');
+  }
+  for (const rule of policy.rules ?? []) validateEntry(rule, 'rule');
+  for (const decision of policy.decisions ?? []) validateEntry(decision, 'decision');
+  return policy;
 }
 
 export function hashCclFacts(facts: CclFactTuple[]): string {
@@ -208,4 +238,58 @@ function compareInts(left: number, op: string, right: number): boolean {
     case '<': return left < right;
     default: throw new Error(`Unsupported CCL comparison operator: ${op}`);
   }
+}
+
+function validateEntry(entry: { name: string; params?: string[]; all?: CclCondition[] }, kind: 'rule' | 'decision'): void {
+  if (!entry || typeof entry !== 'object') {
+    throw new Error(`CCL ${kind} entry must be an object`);
+  }
+  if (!entry.name || typeof entry.name !== 'string') {
+    throw new Error(`CCL ${kind} entry must define a string name`);
+  }
+  if (entry.params != null && !Array.isArray(entry.params)) {
+    throw new Error(`CCL ${kind} ${entry.name} params must be an array when provided`);
+  }
+  if (entry.all != null && !Array.isArray(entry.all)) {
+    throw new Error(`CCL ${kind} ${entry.name} all-clause must be an array when provided`);
+  }
+  for (const condition of entry.all ?? []) validateCondition(condition);
+}
+
+function validateCondition(condition: CclCondition): void {
+  if ('atom' in condition) {
+    if (!condition.atom?.pred || typeof condition.atom.pred !== 'string') {
+      throw new Error('CCL atom condition must define a string pred');
+    }
+    if (condition.atom.args != null && !Array.isArray(condition.atom.args)) {
+      throw new Error(`CCL atom ${condition.atom.pred} args must be an array when provided`);
+    }
+    return;
+  }
+  if ('exists' in condition || 'not_exists' in condition) {
+    const where = 'exists' in condition ? condition.exists.where : condition.not_exists.where;
+    if (where != null && !Array.isArray(where)) {
+      throw new Error(`CCL ${'exists' in condition ? 'exists' : 'not_exists'} where-clause must be an array when provided`);
+    }
+    for (const nested of where ?? []) validateCondition(nested);
+    return;
+  }
+  if ('count_distinct' in condition) {
+    const spec = condition.count_distinct;
+    if (spec.vars != null && !Array.isArray(spec.vars)) {
+      throw new Error('CCL count_distinct vars must be an array when provided');
+    }
+    if (!['>=', '>', '==', '<=', '<'].includes(spec.op)) {
+      throw new Error(`Unsupported CCL comparison operator: ${spec.op}`);
+    }
+    if (typeof spec.value !== 'number' || !Number.isFinite(spec.value)) {
+      throw new Error('CCL count_distinct value must be a finite number');
+    }
+    if (spec.where != null && !Array.isArray(spec.where)) {
+      throw new Error('CCL count_distinct where-clause must be an array when provided');
+    }
+    for (const nested of spec.where ?? []) validateCondition(nested);
+    return;
+  }
+  throw new Error(`Unsupported CCL condition: ${JSON.stringify(condition)}`);
 }

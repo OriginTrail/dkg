@@ -10,12 +10,22 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   CclEvaluator,
   parseCclPolicy,
+  validateCclPolicy,
   hashCclFacts,
   type CclFactTuple,
   type CclCanonicalPolicy,
   type CclCondition,
   type CclEvaluationResult,
+  type ValidateCclPolicyOptions,
 } from './ccl-evaluator.js';
+export {
+  buildManualCclFacts,
+  resolveFactsFromSnapshot,
+  type CclFactResolutionMode,
+  type ManualCclFacts,
+  type ResolveCclFactsFromSnapshotOptions,
+  type ResolvedCclFacts,
+} from './ccl-fact-resolution.js';
 export {
   buildCclEvaluationQuads,
   type PublishCclEvaluationInput,

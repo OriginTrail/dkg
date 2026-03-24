@@ -6,6 +6,9 @@ export interface PublishCclEvaluationInput {
   paranetId: string;
   policyUri: string;
   factSetHash: string;
+  factQueryHash?: string;
+  factResolverVersion?: string;
+  factResolutionMode?: 'manual' | 'snapshot-resolved';
   result: CclEvaluationResult;
   evaluatedAt: string;
   view?: string;
@@ -28,6 +31,9 @@ export function buildCclEvaluationQuads(input: PublishCclEvaluationInput, graph:
     { subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: sparqlString(input.evaluatedAt), graph: graphUri },
   ];
 
+  if (input.factQueryHash) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_FACT_QUERY_HASH, object: sparqlString(input.factQueryHash), graph: graphUri });
+  if (input.factResolverVersion) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_FACT_RESOLVER_VERSION, object: sparqlString(input.factResolverVersion), graph: graphUri });
+  if (input.factResolutionMode) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_FACT_RESOLUTION_MODE, object: sparqlString(input.factResolutionMode), graph: graphUri });
   if (input.view) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_VIEW, object: sparqlString(input.view), graph: graphUri });
   if (input.snapshotId) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_SNAPSHOT_ID, object: sparqlString(input.snapshotId), graph: graphUri });
   if (input.scopeUal) quads.push({ subject: evaluationUri, predicate: DKG_ONTOLOGY.DKG_SCOPE_UAL, object: sparqlString(input.scopeUal), graph: graphUri });

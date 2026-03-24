@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 
-const fs = require('node:fs');
-const path = require('node:path');
-const { compareExpected, loadYaml, resolvePolicyPath, runCase } = require('../evaluator/reference_evaluator.js');
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  compareExpected,
+  loadYaml,
+  resolvePolicyPath,
+  runCase,
+} = require("../evaluator/reference_evaluator.js");
 
-const casesDir = path.resolve(__dirname, 'cases');
+const casesDir = path.resolve(__dirname, "cases");
 
 function main() {
-  const caseFiles = fs.readdirSync(casesDir)
-    .filter((file) => file.endsWith('.yaml'))
+  const caseFiles = fs
+    .readdirSync(casesDir)
+    .filter((file) => file.endsWith(".yaml"))
     .sort();
 
   let passed = 0;

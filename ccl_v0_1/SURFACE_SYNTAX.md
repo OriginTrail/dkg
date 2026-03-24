@@ -13,38 +13,38 @@ The surface syntax is intentionally small.
 ```ccl
 policy context_corroboration v0.1.0
 
-rule corroborated(C):
-  claim(C)
-  count_distinct E where
-    supports(E, C)
-    evidence_view(E, accepted)
-    independent(E)
+rule corroborated(Claim):
+  claim(Claim)
+  count_distinct Evidence where
+    supports(Evidence, Claim)
+    evidence_view(Evidence, accepted)
+    independent(Evidence)
   >= 2
-  exists E where
-    supports(E, C)
-    evidence_view(E, accepted)
-    authority_class(E, vendor)
-  not exists C2 where
-    contradicts(C2, C)
-    accepted_status(C2, accepted)
+  exists Evidence where
+    supports(Evidence, Claim)
+    evidence_view(Evidence, accepted)
+    authority_class(Evidence, vendor)
+  not exists Contradiction where
+    contradicts(Contradiction, Claim)
+    accepted_status(Contradiction, accepted)
 
-rule disputed(C):
-  claim(C)
-  exists C2 where
-    contradicts(C2, C)
-    accepted_status(C2, accepted)
+rule disputed(Claim):
+  claim(Claim)
+  exists Contradiction where
+    contradicts(Contradiction, Claim)
+    accepted_status(Contradiction, accepted)
 
-rule promotable(C):
-  corroborated(C)
-  claim_epoch(C, E)
-  quorum_epoch(incident_review, E)
+rule promotable(Claim):
+  corroborated(Claim)
+  claim_epoch(Claim, Epoch)
+  quorum_epoch(incident_review, Epoch)
   quorum_reached(incident_review, 3, 4)
 
-decision propose_accept(C):
-  promotable(C)
+decision propose_accept(Claim):
+  promotable(Claim)
 
-decision propose_reject(C):
-  disputed(C)
+decision propose_reject(Claim):
+  disputed(Claim)
 ```
 
 ---
@@ -52,21 +52,21 @@ decision propose_reject(C):
 ## 2. Design notes
 
 ### Variables
-- Uppercase identifiers are variables: `C`, `E`
+- Uppercase identifiers are variables: `Claim`, `Evidence`, `Agent`
 - Lowercase identifiers are predicate names or constants: `claim`, `accepted`, `vendor`
 
 ### Rule heads
 A rule head defines a derived predicate:
 
 ```ccl
-rule corroborated(C):
+rule corroborated(Claim):
 ```
 
 ### Decisions
 A decision head defines a named output that may later feed a normal publish flow:
 
 ```ccl
-decision propose_accept(C):
+decision propose_accept(Claim):
 ```
 
 ### Condition blocks
@@ -75,23 +75,23 @@ Every listed condition must hold.
 
 ### Exists
 ```ccl
-exists E where
-  supports(E, C)
-  authority_class(E, vendor)
+exists Evidence where
+  supports(Evidence, Claim)
+  authority_class(Evidence, vendor)
 ```
 
 ### Not exists
 ```ccl
-not exists C2 where
-  contradicts(C2, C)
-  accepted_status(C2, accepted)
+not exists Contradiction where
+  contradicts(Contradiction, Claim)
+  accepted_status(Contradiction, accepted)
 ```
 
 ### Count distinct
 ```ccl
-count_distinct E where
-  supports(E, C)
-  independent(E)
+count_distinct Evidence where
+  supports(Evidence, Claim)
+  independent(Evidence)
 >= 2
 ```
 
@@ -104,25 +104,25 @@ A surface rule compiles into canonical YAML.
 Example:
 
 ```ccl
-rule owner_asserted(C):
-  claim(C)
-  exists A where
-    owner_of(C, A)
-    signed_by(C, A)
+rule owner_asserted(Claim):
+  claim(Claim)
+  exists Agent where
+    owner_of(Claim, Agent)
+    signed_by(Claim, Agent)
 ```
 
 Compiles conceptually to:
 
 ```yaml
 - name: owner_asserted
-  params: [C]
+  params: [Claim]
   all:
-    - atom: {pred: claim, args: ["$C"]}
+    - atom: {pred: claim, args: ["$Claim"]}
     - exists:
-        vars: [A]
+        vars: [Agent]
         where:
-          - atom: {pred: owner_of, args: ["$C", "$A"]}
-          - atom: {pred: signed_by, args: ["$C", "$A"]}
+          - atom: {pred: owner_of, args: ["$Claim", "$Agent"]}
+          - atom: {pred: signed_by, args: ["$Claim", "$Agent"]}
 ```
 
 ---
