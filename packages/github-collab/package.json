@@ -1,0 +1,59 @@
+{
+  "name": "@origintrail-official/dkg-app-github-collab",
+  "version": "0.1.0",
+  "description": "GitHub Collaboration — multi-agent collaboration on GitHub via the DKG. Installable DKG app.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dkgApp": {
+    "id": "github-collab",
+    "label": "GitHub Collaboration",
+    "apiHandler": "./dist/api/handler.js",
+    "staticDir": "./dist-ui"
+  },
+  "scripts": {
+    "build": "tsc && pnpm build:ui",
+    "build:api": "tsc",
+    "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
+    "dev:ui": "vite",
+    "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "clean": "rm -rf dist dist-ui tsconfig.tsbuildinfo"
+  },
+  "peerDependencies": {
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-graph-viz": "workspace:*"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0",
+    "@types/node": "^22",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4",
+    "react": "^19",
+    "react-dom": "^19",
+    "react-router-dom": "^7",
+    "typescript": "^5.7",
+    "vite": "^6",
+    "vitest": "^4.0.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "dist-ui",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/github-collab"
+  }
+}

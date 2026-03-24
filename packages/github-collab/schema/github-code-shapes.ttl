@@ -1,0 +1,784 @@
+@prefix sh:       <http://www.w3.org/ns/shacl#> .
+@prefix ghcode:   <https://ontology.dkg.io/ghcode#> .
+@prefix devgraph: <https://ontology.dkg.io/devgraph#> .
+@prefix schema:   <https://schema.org/> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# =============================================================================
+# SHACL Shapes for GitHub Code Ontology
+#
+# Constraints for validating RDF data conforming to the ghcode: vocabulary.
+# Documentation/tooling-level — NOT enforced in the DKG publish pipeline.
+#
+# Usage:
+#   - Pre-publish validation in the GitHub Collab App
+#   - Data quality checks in CI/CD
+#   - Documentation of expected data shape
+# =============================================================================
+
+
+# =============================================================================
+# §1  Repository Structure Shapes
+# =============================================================================
+
+ghcode:RepositoryShape a sh:NodeShape ;
+  sh:targetClass ghcode:Repository ;
+  sh:property [
+    sh:path ghcode:fullName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:pattern "^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$" ;
+    sh:message "Repository must have exactly one fullName in 'owner/repo' format."
+  ] ;
+  sh:property [
+    sh:path ghcode:owner ;
+    sh:class ghcode:Owner ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Repository must have exactly one owner."
+  ] ;
+  sh:property [
+    sh:path ghcode:htmlUrl ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Repository must have a GitHub web URL."
+  ] ;
+  sh:property [
+    sh:path ghcode:defaultBranch ;
+    sh:datatype xsd:string ;
+    sh:maxCount 1 ;
+    sh:message "Repository may have at most one default branch."
+  ] ;
+  sh:property [
+    sh:path ghcode:visibility ;
+    sh:datatype xsd:string ;
+    sh:in ( "public" "private" "internal" ) ;
+    sh:maxCount 1 ;
+    sh:message "Visibility must be 'public', 'private', or 'internal'."
+  ] ;
+  sh:property [
+    sh:path ghcode:primaryLanguage ;
+    sh:datatype xsd:string ;
+    sh:maxCount 1 ;
+    sh:message "Repository may have at most one primary language."
+  ] ;
+  sh:property [
+    sh:path ghcode:snapshotAt ;
+    sh:datatype xsd:dateTime ;
+    sh:maxCount 1 ;
+    sh:message "Snapshot timestamp must be a dateTime."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:maxCount 0 ;
+    sh:message "Repository should not have inRepo (it IS the repo)."
+  ] .
+
+
+ghcode:OwnerShape a sh:NodeShape ;
+  sh:targetClass ghcode:Owner ;
+  sh:property [
+    sh:path ghcode:login ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Owner must have exactly one login."
+  ] ;
+  sh:property [
+    sh:path ghcode:githubId ;
+    sh:datatype xsd:integer ;
+    sh:maxCount 1 ;
+    sh:message "Owner may have at most one GitHub numeric ID."
+  ] .
+
+
+ghcode:BranchShape a sh:NodeShape ;
+  sh:targetClass ghcode:Branch ;
+  sh:property [
+    sh:path ghcode:branchName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Branch must have exactly one name."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Branch must belong to exactly one repository."
+  ] ;
+  sh:property [
+    sh:path ghcode:headCommit ;
+    sh:class ghcode:Commit ;
+    sh:maxCount 1 ;
+    sh:message "Branch may point to at most one head commit."
+  ] .
+
+
+ghcode:DirectoryShape a sh:NodeShape ;
+  sh:targetClass ghcode:Directory ;
+  sh:property [
+    sh:path ghcode:dirPath ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Directory must have a path."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Directory must belong to a repository."
+  ] .
+
+
+ghcode:FileShape a sh:NodeShape ;
+  sh:targetClass ghcode:File ;
+  sh:property [
+    sh:path ghcode:filePath ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "File must have a path."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "File must belong to a repository."
+  ] .
+
+
+ghcode:PackageShape a sh:NodeShape ;
+  sh:targetClass ghcode:Package ;
+  sh:property [
+    sh:path ghcode:packageName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Package must have a name."
+  ] ;
+  sh:property [
+    sh:path ghcode:packageManager ;
+    sh:datatype xsd:string ;
+    sh:in ( "npm" "pip" "cargo" "maven" "gradle" "go" "nuget" "composer" "gem" ) ;
+    sh:maxCount 1 ;
+    sh:message "Package manager must be one of the supported values."
+  ] .
+
+
+# =============================================================================
+# §2  Source Code Shapes
+# =============================================================================
+
+ghcode:ClassShape a sh:NodeShape ;
+  sh:targetClass ghcode:Class ;
+  sh:property [
+    sh:path ghcode:typeName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Class must have a name."
+  ] ;
+  sh:property [
+    sh:path ghcode:definedInFile ;
+    sh:class ghcode:File ;
+    sh:maxCount 1 ;
+    sh:message "Class may be defined in at most one file."
+  ] .
+
+
+ghcode:InterfaceShape a sh:NodeShape ;
+  sh:targetClass ghcode:Interface ;
+  sh:property [
+    sh:path ghcode:typeName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Interface must have a name."
+  ] .
+
+
+ghcode:FunctionShape a sh:NodeShape ;
+  sh:targetClass ghcode:Function ;
+  sh:property [
+    sh:path ghcode:functionName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Function must have a name."
+  ] ;
+  sh:property [
+    sh:path ghcode:definedInFile ;
+    sh:class ghcode:File ;
+    sh:maxCount 1 ;
+    sh:message "Function may be defined in at most one file."
+  ] .
+
+
+ghcode:ParameterShape a sh:NodeShape ;
+  sh:targetClass ghcode:Parameter ;
+  sh:property [
+    sh:path ghcode:paramName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Parameter must have a name."
+  ] ;
+  sh:property [
+    sh:path ghcode:paramPosition ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxCount 1 ;
+    sh:message "Parameter position must be a non-negative integer."
+  ] .
+
+
+# =============================================================================
+# §3  Git History Shapes
+# =============================================================================
+
+ghcode:CommitShape a sh:NodeShape ;
+  sh:targetClass ghcode:Commit ;
+  sh:property [
+    sh:path ghcode:sha ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:pattern "^[0-9a-f]{40}$" ;
+    sh:message "Commit must have exactly one 40-character hex SHA."
+  ] ;
+  sh:property [
+    sh:path ghcode:message ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Commit must have a message."
+  ] ;
+  sh:property [
+    sh:path ghcode:committedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Commit must have a committed timestamp."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:maxCount 1 ;
+    sh:message "Commit may have at most one author."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Commit must belong to exactly one repository."
+  ] .
+
+
+ghcode:TagShape a sh:NodeShape ;
+  sh:targetClass ghcode:Tag ;
+  sh:property [
+    sh:path ghcode:tagName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Tag must have exactly one name."
+  ] ;
+  sh:property [
+    sh:path ghcode:tagCommit ;
+    sh:class ghcode:Commit ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Tag must point to exactly one commit."
+  ] .
+
+
+ghcode:FileDiffShape a sh:NodeShape ;
+  sh:targetClass ghcode:FileDiff ;
+  sh:property [
+    sh:path ghcode:diffPath ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "FileDiff must have a file path."
+  ] ;
+  sh:property [
+    sh:path ghcode:diffStatus ;
+    sh:datatype xsd:string ;
+    sh:in ( "added" "modified" "removed" "renamed" "copied" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "FileDiff status must be: added, modified, removed, renamed, or copied."
+  ] ;
+  sh:property [
+    sh:path ghcode:additions ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxCount 1 ;
+    sh:message "additions must be a non-negative integer."
+  ] ;
+  sh:property [
+    sh:path ghcode:deletions ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxCount 1 ;
+    sh:message "deletions must be a non-negative integer."
+  ] .
+
+
+ghcode:HunkShape a sh:NodeShape ;
+  sh:targetClass ghcode:Hunk ;
+  sh:property [
+    sh:path ghcode:inFileDiff ;
+    sh:class ghcode:FileDiff ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Hunk must belong to exactly one FileDiff."
+  ] ;
+  sh:property [
+    sh:path ghcode:oldStart ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Hunk must have an old start line."
+  ] ;
+  sh:property [
+    sh:path ghcode:newStart ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Hunk must have a new start line."
+  ] .
+
+
+# =============================================================================
+# §4  Pull Request Shapes
+# =============================================================================
+
+ghcode:PullRequestShape a sh:NodeShape ;
+  sh:targetClass ghcode:PullRequest ;
+  sh:property [
+    sh:path ghcode:prNumber ;
+    sh:datatype xsd:integer ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:minInclusive 1 ;
+    sh:message "PullRequest must have a positive PR number."
+  ] ;
+  sh:property [
+    sh:path ghcode:title ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must have a title."
+  ] ;
+  sh:property [
+    sh:path ghcode:state ;
+    sh:datatype xsd:string ;
+    sh:in ( "open" "closed" "merged" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest state must be 'open', 'closed', or 'merged'."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must have an author."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must belong to exactly one repository."
+  ] ;
+  sh:property [
+    sh:path ghcode:baseBranch ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must have a base branch."
+  ] ;
+  sh:property [
+    sh:path ghcode:headBranch ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must have a head branch."
+  ] ;
+  sh:property [
+    sh:path ghcode:createdAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest must have a creation timestamp."
+  ] ;
+  sh:property [
+    sh:path ghcode:mergedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:maxCount 1 ;
+    sh:message "PullRequest may have at most one merged timestamp."
+  ] ;
+  sh:property [
+    sh:path ghcode:totalAdditions ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxCount 1 ;
+    sh:message "totalAdditions must be a non-negative integer."
+  ] ;
+  sh:property [
+    sh:path ghcode:totalDeletions ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 0 ;
+    sh:maxCount 1 ;
+    sh:message "totalDeletions must be a non-negative integer."
+  ] .
+
+
+ghcode:LabelShape a sh:NodeShape ;
+  sh:targetClass ghcode:Label ;
+  sh:property [
+    sh:path ghcode:labelName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Label must have exactly one name."
+  ] ;
+  sh:property [
+    sh:path ghcode:labelColor ;
+    sh:datatype xsd:string ;
+    sh:pattern "^[0-9a-fA-F]{6}$" ;
+    sh:maxCount 1 ;
+    sh:message "Label color must be a 6-digit hex code."
+  ] .
+
+
+# =============================================================================
+# §5  Review Shapes
+# =============================================================================
+
+ghcode:ReviewShape a sh:NodeShape ;
+  sh:targetClass ghcode:Review ;
+  sh:property [
+    sh:path ghcode:reviewState ;
+    sh:datatype xsd:string ;
+    sh:in ( "APPROVED" "CHANGES_REQUESTED" "COMMENTED" "DISMISSED" "PENDING" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Review state must be APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, or PENDING."
+  ] ;
+  sh:property [
+    sh:path ghcode:reviewOf ;
+    sh:class ghcode:PullRequest ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Review must reference exactly one PullRequest."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Review must have an author."
+  ] .
+
+
+ghcode:ReviewCommentShape a sh:NodeShape ;
+  sh:targetClass ghcode:ReviewComment ;
+  sh:property [
+    sh:path ghcode:commentBody ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ReviewComment must have body text."
+  ] ;
+  sh:property [
+    sh:path ghcode:commentPath ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ReviewComment must reference a file path."
+  ] ;
+  sh:property [
+    sh:path ghcode:inReview ;
+    sh:class ghcode:Review ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ReviewComment must belong to exactly one review."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ReviewComment must have an author."
+  ] ;
+  sh:property [
+    sh:path ghcode:commentSide ;
+    sh:datatype xsd:string ;
+    sh:in ( "LEFT" "RIGHT" ) ;
+    sh:maxCount 1 ;
+    sh:message "commentSide must be 'LEFT' or 'RIGHT'."
+  ] .
+
+
+# =============================================================================
+# §6  Issue Shapes
+# =============================================================================
+
+ghcode:IssueShape a sh:NodeShape ;
+  sh:targetClass ghcode:Issue ;
+  sh:property [
+    sh:path ghcode:issueNumber ;
+    sh:datatype xsd:integer ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:minInclusive 1 ;
+    sh:message "Issue must have a positive issue number."
+  ] ;
+  sh:property [
+    sh:path ghcode:title ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Issue must have a title."
+  ] ;
+  sh:property [
+    sh:path ghcode:state ;
+    sh:datatype xsd:string ;
+    sh:in ( "open" "closed" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Issue state must be 'open' or 'closed'."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Issue must have an author."
+  ] ;
+  sh:property [
+    sh:path ghcode:inRepo ;
+    sh:class ghcode:Repository ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Issue must belong to exactly one repository."
+  ] ;
+  sh:property [
+    sh:path ghcode:createdAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Issue must have a creation timestamp."
+  ] .
+
+
+ghcode:IssueCommentShape a sh:NodeShape ;
+  sh:targetClass ghcode:IssueComment ;
+  sh:property [
+    sh:path ghcode:commentBody ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "IssueComment must have body text."
+  ] ;
+  sh:property [
+    sh:path ghcode:commentOn ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "IssueComment must reference exactly one issue or PR."
+  ] ;
+  sh:property [
+    sh:path ghcode:author ;
+    sh:class ghcode:User ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "IssueComment must have an author."
+  ] ;
+  sh:property [
+    sh:path ghcode:createdAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "IssueComment must have a creation timestamp."
+  ] .
+
+
+# =============================================================================
+# §7  CI/CD Shapes
+# =============================================================================
+
+ghcode:CheckSuiteShape a sh:NodeShape ;
+  sh:targetClass ghcode:CheckSuite ;
+  sh:property [
+    sh:path ghcode:checkStatus ;
+    sh:datatype xsd:string ;
+    sh:in ( "queued" "in_progress" "completed" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "CheckSuite must have a status."
+  ] ;
+  sh:property [
+    sh:path ghcode:checkConclusion ;
+    sh:datatype xsd:string ;
+    sh:in ( "success" "failure" "neutral" "cancelled" "timed_out" "action_required" "skipped" ) ;
+    sh:maxCount 1 ;
+    sh:message "Conclusion must be one of the allowed values."
+  ] ;
+  sh:property [
+    sh:path ghcode:triggeredBy ;
+    sh:class ghcode:Commit ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "CheckSuite must be triggered by a commit."
+  ] .
+
+
+ghcode:CheckRunShape a sh:NodeShape ;
+  sh:targetClass ghcode:CheckRun ;
+  sh:property [
+    sh:path ghcode:checkName ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "CheckRun must have a name."
+  ] ;
+  sh:property [
+    sh:path ghcode:checkStatus ;
+    sh:datatype xsd:string ;
+    sh:in ( "queued" "in_progress" "completed" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "CheckRun must have a status."
+  ] ;
+  sh:property [
+    sh:path ghcode:inSuite ;
+    sh:class ghcode:CheckSuite ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "CheckRun must belong to a CheckSuite."
+  ] .
+
+
+# =============================================================================
+# §8  Agent Coordination Shapes
+# =============================================================================
+
+ghcode:AgentSessionShape a sh:NodeShape ;
+  sh:targetClass ghcode:AgentSession ;
+  sh:property [
+    sh:path devgraph:agent ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "AgentSession must identify the agent."
+  ] ;
+  sh:property [
+    sh:path devgraph:startedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "AgentSession must have a start time."
+  ] .
+
+
+ghcode:ClaimedRegionShape a sh:NodeShape ;
+  sh:targetClass ghcode:ClaimedRegion ;
+  sh:property [
+    sh:path ghcode:claimedFile ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ClaimedRegion must specify a file."
+  ] ;
+  sh:property [
+    sh:path ghcode:claimedByAgent ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ClaimedRegion must identify the claiming agent."
+  ] ;
+  sh:property [
+    sh:path ghcode:claimScope ;
+    sh:datatype xsd:string ;
+    sh:in ( "file" "function" "class" "lines" ) ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "Claim scope must be 'file', 'function', 'class', or 'lines'."
+  ] ;
+  sh:property [
+    sh:path ghcode:claimedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ClaimedRegion must have a timestamp."
+  ] ;
+  sh:property [
+    sh:path ghcode:expiresAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "ClaimedRegion must have an expiration time."
+  ] .
+
+
+ghcode:WorkInProgressShape a sh:NodeShape ;
+  sh:targetClass ghcode:WorkInProgress ;
+  sh:property [
+    sh:path ghcode:wipAgent ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "WIP must identify the agent."
+  ] ;
+  sh:property [
+    sh:path ghcode:wipFile ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:message "WIP must specify at least one file."
+  ] ;
+  sh:property [
+    sh:path ghcode:wipStartedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "WIP must have a start time."
+  ] .
+
+
+ghcode:TaskAssignmentShape a sh:NodeShape ;
+  sh:targetClass ghcode:TaskAssignment ;
+  sh:property [
+    sh:path ghcode:assignedTask ;
+    sh:class devgraph:Task ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "TaskAssignment must reference a task."
+  ] ;
+  sh:property [
+    sh:path ghcode:assignedAgent ;
+    sh:datatype xsd:string ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "TaskAssignment must specify an agent."
+  ] ;
+  sh:property [
+    sh:path ghcode:assignedAt ;
+    sh:datatype xsd:dateTime ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "TaskAssignment must have a timestamp."
+  ] .

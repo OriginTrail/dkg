@@ -1,0 +1,1508 @@
+@prefix ghcode:   <https://ontology.dkg.io/ghcode#> .
+@prefix devgraph: <https://ontology.dkg.io/devgraph#> .
+@prefix rdf:      <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:     <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:      <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl:      <http://www.w3.org/2002/07/owl#> .
+@prefix schema:   <https://schema.org/> .
+@prefix prov:     <http://www.w3.org/ns/prov#> .
+@prefix doap:     <http://usefulinc.com/ns/doap#> .
+@prefix spdx:     <http://spdx.org/rdf/terms#> .
+
+# =============================================================================
+# GitHub Code Ontology for DKG
+#
+# A comprehensive vocabulary for representing GitHub repositories, source code
+# structure, collaboration workflows, and multi-agent coordination over the
+# Decentralized Knowledge Graph.
+#
+# Design goals:
+#   - Language-agnostic core with extension points for language-specific constructs
+#   - Optimized for SPARQL querying and graph traversal
+#   - Interoperable with schema.org, DOAP, PROV-O, SPDX
+#   - Supports temporal evolution (code changes across commits)
+#   - rootEntity-compatible for DKG publish/Merkle proofs
+#   - Bridges to devgraph# code symbols for cross-domain queries
+#
+# Namespace: https://ontology.dkg.io/ghcode#
+# Imports:   devgraph# (code graph classes), schema.org, PROV-O, DOAP, SPDX
+# =============================================================================
+
+ghcode: a owl:Ontology ;
+  rdfs:label "GitHub Code Ontology" ;
+  rdfs:comment "RDF vocabulary for GitHub repositories, source code, collaboration, and agent coordination over the DKG." ;
+  owl:imports devgraph: ;
+  owl:versionInfo "1.0.0" .
+
+
+# #############################################################################
+#
+#   PART I — REPOSITORY STRUCTURE
+#
+# #############################################################################
+
+# =============================================================================
+# §1  Repository & Ownership
+#
+# Root entities: Repository (one KA per repo snapshot)
+# =============================================================================
+
+ghcode:Repository a rdfs:Class ;
+  rdfs:subClassOf doap:GitRepository ;
+  rdfs:label "Repository" ;
+  rdfs:comment "A GitHub repository. Natural rootEntity for DKG publish." .
+
+ghcode:fullName a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Full name in 'owner/repo' format (e.g. 'OriginTrail/dkg-v9')." .
+
+ghcode:htmlUrl a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "GitHub web URL for this entity." .
+
+ghcode:apiUrl a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "GitHub REST API URL for this entity." .
+
+ghcode:defaultBranch a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the default branch (e.g. 'main')." .
+
+ghcode:visibility a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Visibility or access modifier." .
+
+ghcode:primaryLanguage a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Primary programming language of the repository." .
+
+ghcode:topics a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:string ;
+  rdfs:comment "A topic/tag assigned to this repository (one triple per topic)." .
+
+ghcode:license a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:string ;
+  rdfs:comment "SPDX license identifier (e.g. 'Apache-2.0')." .
+
+ghcode:forkedFrom a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range ghcode:Repository ;
+  rdfs:comment "Parent repository this was forked from." .
+
+ghcode:starCount a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of stars." .
+
+ghcode:forkCount a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of forks." .
+
+ghcode:openIssueCount a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of open issues." .
+
+ghcode:archived a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether the repository is archived." .
+
+ghcode:snapshotAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Timestamp when this snapshot was taken." .
+
+ghcode:hasBuildConfig a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range ghcode:BuildConfig ;
+  rdfs:comment "Build configuration used by this repository." .
+
+# --- Owner (Organization or User) ---
+
+ghcode:Owner a rdfs:Class ;
+  rdfs:label "Owner" ;
+  rdfs:comment "A GitHub user or organization that owns repositories." .
+
+ghcode:Organization a rdfs:Class ;
+  rdfs:subClassOf ghcode:Owner ;
+  rdfs:label "Organization" ;
+  rdfs:comment "A GitHub organization." .
+
+ghcode:User a rdfs:Class ;
+  rdfs:subClassOf ghcode:Owner ;
+  rdfs:label "User" ;
+  rdfs:comment "A GitHub user account." .
+
+ghcode:login a rdf:Property ;
+  rdfs:domain ghcode:Owner ;
+  rdfs:range xsd:string ;
+  rdfs:comment "GitHub username/login." .
+
+ghcode:avatarUrl a rdf:Property ;
+  rdfs:domain ghcode:Owner ;
+  rdfs:range xsd:string ;
+  rdfs:comment "URL to the user/org avatar image." .
+
+ghcode:owner a rdf:Property ;
+  rdfs:domain ghcode:Repository ;
+  rdfs:range ghcode:Owner ;
+  rdfs:comment "User or organization that owns this repository." .
+
+# --- Branch ---
+
+ghcode:Branch a rdfs:Class ;
+  rdfs:label "Branch" ;
+  rdfs:comment "A git branch in a repository." .
+
+ghcode:branchName a rdf:Property ;
+  rdfs:domain ghcode:Branch ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Branch name (e.g. 'main', 'feat/new-feature')." .
+
+ghcode:headCommit a rdf:Property ;
+  rdfs:domain ghcode:Branch ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "The commit at the tip of this branch." .
+
+ghcode:protected a rdf:Property ;
+  rdfs:domain ghcode:Branch ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether the branch has protection rules." .
+
+ghcode:inRepo a rdf:Property ;
+  rdfs:range ghcode:Repository ;
+  rdfs:comment "Repository this entity belongs to." .
+
+# --- Tag ---
+
+ghcode:Tag a rdfs:Class ;
+  rdfs:label "Tag" ;
+  rdfs:comment "A git tag pointing to a commit." .
+
+ghcode:tagName a rdf:Property ;
+  rdfs:domain ghcode:Tag ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Tag name (e.g. 'v1.0.0')." .
+
+ghcode:tagCommit a rdf:Property ;
+  rdfs:domain ghcode:Tag ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Commit this tag points to." .
+
+# --- Directory ---
+
+ghcode:Directory a rdfs:Class ;
+  rdfs:label "Directory" ;
+  rdfs:comment "A directory in the repository file tree." .
+
+ghcode:dirPath a rdf:Property ;
+  rdfs:domain ghcode:Directory ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Path relative to repo root (e.g. 'packages/core/src')." .
+
+ghcode:parentDir a rdf:Property ;
+  rdfs:domain ghcode:Directory ;
+  rdfs:range ghcode:Directory ;
+  rdfs:comment "Parent directory." .
+
+# --- File ---
+
+ghcode:File a rdfs:Class ;
+  rdfs:label "File" ;
+  rdfs:comment "A file in the repository. More general than devgraph:CodeModule." .
+
+ghcode:filePath a rdf:Property ;
+  rdfs:domain ghcode:File ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Path relative to repo root." .
+
+ghcode:fileSize a rdf:Property ;
+  rdfs:domain ghcode:File ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "File size in bytes." .
+
+ghcode:language a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Programming language of this file or symbol." .
+
+ghcode:inDirectory a rdf:Property ;
+  rdfs:domain ghcode:File ;
+  rdfs:range ghcode:Directory ;
+  rdfs:comment "Directory containing this file." .
+
+ghcode:linksToModule a rdf:Property ;
+  rdfs:domain ghcode:File ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "Corresponding devgraph:CodeModule (when indexed)." .
+
+# --- Module ---
+
+ghcode:Module a rdfs:Class ;
+  rdfs:label "Module" ;
+  rdfs:comment "A logical code module (may span multiple files in some languages)." .
+
+ghcode:moduleName a rdf:Property ;
+  rdfs:domain ghcode:Module ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Module name or qualified path." .
+
+ghcode:moduleFile a rdf:Property ;
+  rdfs:domain ghcode:Module ;
+  rdfs:range ghcode:File ;
+  rdfs:comment "File(s) that define this module." .
+
+# --- Package ---
+
+ghcode:Package a rdfs:Class ;
+  rdfs:label "Package" ;
+  rdfs:comment "A software package within the repository (npm, pip, cargo, etc.)." .
+
+ghcode:packageName a rdf:Property ;
+  rdfs:domain ghcode:Package ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Package name (e.g. '@origintrail-official/dkg-core')." .
+
+ghcode:packageVersion a rdf:Property ;
+  rdfs:domain ghcode:Package ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Package version string." .
+
+ghcode:packageManager a rdf:Property ;
+  rdfs:domain ghcode:Package ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Package manager: 'npm', 'pip', 'cargo', 'maven', etc." .
+
+ghcode:linksToPackage a rdf:Property ;
+  rdfs:domain ghcode:Package ;
+  rdfs:range devgraph:Package ;
+  rdfs:comment "Corresponding devgraph:Package." .
+
+# --- BuildConfig ---
+
+ghcode:BuildConfig a rdfs:Class ;
+  rdfs:label "BuildConfig" ;
+  rdfs:comment "A build/toolchain configuration (tsconfig, webpack, Dockerfile, etc.)." .
+
+ghcode:configPath a rdf:Property ;
+  rdfs:domain ghcode:BuildConfig ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Path to the configuration file." .
+
+ghcode:configType a rdf:Property ;
+  rdfs:domain ghcode:BuildConfig ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Configuration type: 'typescript', 'webpack', 'docker', 'ci', etc." .
+
+
+# #############################################################################
+#
+#   PART II — SOURCE CODE REPRESENTATION
+#
+#   Language-agnostic type system. These classes represent abstract syntax
+#   tree structure found across most programming languages. Language-specific
+#   extensions (e.g. Solidity's modifier, Rust's lifetime) can subclass these
+#   or use ghcode:languageConstruct for ad-hoc annotation.
+#
+# #############################################################################
+
+# =============================================================================
+# §2  Type Declarations
+# =============================================================================
+
+ghcode:Class a rdfs:Class ;
+  rdfs:label "Class" ;
+  rdfs:comment "A class declaration. Language-agnostic." .
+
+ghcode:Interface a rdfs:Class ;
+  rdfs:label "Interface" ;
+  rdfs:comment "An interface declaration (TypeScript, Java, Go, etc.)." .
+
+ghcode:Struct a rdfs:Class ;
+  rdfs:label "Struct" ;
+  rdfs:comment "A struct declaration (Go, Rust, C, Solidity, etc.)." .
+
+ghcode:Enum a rdfs:Class ;
+  rdfs:label "Enum" ;
+  rdfs:comment "An enumeration type." .
+
+ghcode:Trait a rdfs:Class ;
+  rdfs:label "Trait" ;
+  rdfs:comment "A trait (Rust), protocol (Swift), or mixin." .
+
+ghcode:TypeAlias a rdfs:Class ;
+  rdfs:label "TypeAlias" ;
+  rdfs:comment "A type alias or typedef." .
+
+ghcode:typeName a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the type, class, interface, struct, enum, or trait." .
+
+ghcode:typeSignature a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Full type expression as a string." .
+
+ghcode:generic a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Generic/template type parameter (e.g. 'T extends Comparable')." .
+
+ghcode:abstract a rdf:Property ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this type/method is abstract." .
+
+ghcode:decorator a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Decorator/annotation applied to this symbol." .
+
+ghcode:docComment a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Documentation comment (JSDoc, Javadoc, docstring, etc.)." .
+
+ghcode:deprecated a rdf:Property ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this symbol is deprecated." .
+
+ghcode:languageConstruct a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Language-specific construct type for extensibility (e.g. 'solidity:modifier')." .
+
+# =============================================================================
+# §3  Functions & Methods
+# =============================================================================
+
+ghcode:Function a rdfs:Class ;
+  rdfs:label "Function" ;
+  rdfs:comment "A standalone function." .
+
+ghcode:Method a rdfs:Class ;
+  rdfs:subClassOf ghcode:Function ;
+  rdfs:label "Method" ;
+  rdfs:comment "A method belonging to a class, struct, trait, or interface." .
+
+ghcode:Constructor a rdfs:Class ;
+  rdfs:subClassOf ghcode:Method ;
+  rdfs:label "Constructor" ;
+  rdfs:comment "A constructor method." .
+
+ghcode:functionName a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the function or method." .
+
+ghcode:Signature a rdfs:Class ;
+  rdfs:label "Signature" ;
+  rdfs:comment "The full type signature of a function or method." .
+
+ghcode:hasSignature a rdf:Property ;
+  rdfs:domain ghcode:Function ;
+  rdfs:range ghcode:Signature ;
+  rdfs:comment "Type signature of this function." .
+
+ghcode:signatureText a rdf:Property ;
+  rdfs:domain ghcode:Signature ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Full signature as text." .
+
+ghcode:Parameter a rdfs:Class ;
+  rdfs:label "Parameter" ;
+  rdfs:comment "A function or method parameter." .
+
+ghcode:hasParameter a rdf:Property ;
+  rdfs:domain ghcode:Function ;
+  rdfs:range ghcode:Parameter ;
+  rdfs:comment "Parameter of this function." .
+
+ghcode:paramName a rdf:Property ;
+  rdfs:domain ghcode:Parameter ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Parameter name." .
+
+ghcode:paramType a rdf:Property ;
+  rdfs:domain ghcode:Parameter ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Parameter type annotation." .
+
+ghcode:paramPosition a rdf:Property ;
+  rdfs:domain ghcode:Parameter ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Zero-based position in the parameter list." .
+
+ghcode:paramOptional a rdf:Property ;
+  rdfs:domain ghcode:Parameter ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this parameter is optional." .
+
+ghcode:paramDefault a rdf:Property ;
+  rdfs:domain ghcode:Parameter ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Default value expression." .
+
+ghcode:ReturnType a rdfs:Class ;
+  rdfs:label "ReturnType" ;
+  rdfs:comment "The return type of a function." .
+
+ghcode:hasReturnType a rdf:Property ;
+  rdfs:domain ghcode:Function ;
+  rdfs:range ghcode:ReturnType ;
+  rdfs:comment "Return type of this function." .
+
+ghcode:returnTypeName a rdf:Property ;
+  rdfs:domain ghcode:ReturnType ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Return type expression as text." .
+
+ghcode:async a rdf:Property ;
+  rdfs:domain ghcode:Function ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this function is async." .
+
+ghcode:static a rdf:Property ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this member is static." .
+
+# =============================================================================
+# §4  Variables, Constants, Fields, Properties
+# =============================================================================
+
+ghcode:Variable a rdfs:Class ;
+  rdfs:label "Variable" ;
+  rdfs:comment "A variable declaration." .
+
+ghcode:Constant a rdfs:Class ;
+  rdfs:subClassOf ghcode:Variable ;
+  rdfs:label "Constant" ;
+  rdfs:comment "A constant or readonly declaration." .
+
+ghcode:Field a rdfs:Class ;
+  rdfs:label "Field" ;
+  rdfs:comment "A field in a class, struct, or interface." .
+
+ghcode:Property a rdfs:Class ;
+  rdfs:subClassOf ghcode:Field ;
+  rdfs:label "Property" ;
+  rdfs:comment "A property with getter/setter accessors." .
+
+ghcode:variableName a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the variable, constant, field, or property." .
+
+ghcode:variableType a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Type annotation of the variable." .
+
+ghcode:initializer a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Initialization expression." .
+
+# =============================================================================
+# §5  Imports, Exports & Dependencies
+# =============================================================================
+
+ghcode:Import a rdfs:Class ;
+  rdfs:label "Import" ;
+  rdfs:comment "An import statement." .
+
+ghcode:importSource a rdf:Property ;
+  rdfs:domain ghcode:Import ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Module specifier being imported." .
+
+ghcode:importedName a rdf:Property ;
+  rdfs:domain ghcode:Import ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the imported symbol." .
+
+ghcode:importAlias a rdf:Property ;
+  rdfs:domain ghcode:Import ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Local alias ('as' name)." .
+
+ghcode:importType a rdf:Property ;
+  rdfs:domain ghcode:Import ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Import kind: 'named', 'default', 'namespace', 'side-effect'." .
+
+ghcode:Export a rdfs:Class ;
+  rdfs:label "Export" ;
+  rdfs:comment "An export statement." .
+
+ghcode:exportedName a rdf:Property ;
+  rdfs:domain ghcode:Export ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the exported symbol." .
+
+ghcode:reExportSource a rdf:Property ;
+  rdfs:domain ghcode:Export ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Source module for re-exports." .
+
+# =============================================================================
+# §6  Source Code Relationships
+# =============================================================================
+
+ghcode:inherits a rdf:Property ;
+  rdfs:comment "Class/struct inherits from another." .
+
+ghcode:implements a rdf:Property ;
+  rdfs:comment "Class/struct implements an interface or trait." .
+
+ghcode:mixesIn a rdf:Property ;
+  rdfs:comment "Class includes a mixin or trait." .
+
+ghcode:calls a rdf:Property ;
+  rdfs:comment "Function/method calls another function/method." .
+
+ghcode:references a rdf:Property ;
+  rdfs:comment "Symbol references another symbol." .
+
+ghcode:instantiates a rdf:Property ;
+  rdfs:comment "Code instantiates a class." .
+
+ghcode:throws a rdf:Property ;
+  rdfs:domain ghcode:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Exception/error type this function may throw." .
+
+ghcode:declares a rdf:Property ;
+  rdfs:comment "File or module declares this symbol." .
+
+ghcode:defines a rdf:Property ;
+  rdfs:comment "Provides the implementation/body of a declaration." .
+
+ghcode:contains a rdf:Property ;
+  rdfs:comment "Structural containment: class contains method, module contains class." .
+
+ghcode:hasField a rdf:Property ;
+  rdfs:comment "Type has this field." .
+
+ghcode:hasMethod a rdf:Property ;
+  rdfs:comment "Type has this method." .
+
+ghcode:hasConstructor a rdf:Property ;
+  rdfs:comment "Type has this constructor." .
+
+ghcode:hasEnumValue a rdf:Property ;
+  rdfs:comment "Enum has this value/variant." .
+
+ghcode:imports a rdf:Property ;
+  rdfs:comment "Module/file imports from another module." .
+
+ghcode:exports a rdf:Property ;
+  rdfs:comment "Module/file exports a symbol." .
+
+ghcode:dependsOn a rdf:Property ;
+  rdfs:comment "Package depends on another package." .
+
+ghcode:definedInFile a rdf:Property ;
+  rdfs:range ghcode:File ;
+  rdfs:comment "File where this symbol is defined." .
+
+ghcode:startLine a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Start line number of this symbol's definition." .
+
+ghcode:endLine a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "End line number of this symbol's definition." .
+
+ghcode:startColumn a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Start column." .
+
+ghcode:testFor a rdf:Property ;
+  rdfs:comment "This test file/function tests the target symbol or module." .
+
+ghcode:testFramework a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Testing framework: 'vitest', 'jest', 'mocha', 'pytest', etc." .
+
+
+# #############################################################################
+#
+#   PART III — COLLABORATION ARTIFACTS
+#
+# #############################################################################
+
+# =============================================================================
+# §7  Git History & Diffs
+# =============================================================================
+
+ghcode:Commit a rdfs:Class ;
+  rdfs:subClassOf prov:Activity ;
+  rdfs:label "Commit" ;
+  rdfs:comment "A git commit. Modeled as a PROV-O Activity." .
+
+ghcode:sha a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Full 40-character SHA hash." .
+
+ghcode:shortSha a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Short SHA (first 7 characters)." .
+
+ghcode:message a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Commit message or body text." .
+
+ghcode:committedAt a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Commit timestamp (committer date)." .
+
+ghcode:authoredAt a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Author date (may differ from committer date for rebases)." .
+
+ghcode:parentCommit a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Parent commit (multiple for merge commits)." .
+
+ghcode:onBranch a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range ghcode:Branch ;
+  rdfs:comment "Branch this commit was made on." .
+
+ghcode:isMergeCommit a rdf:Property ;
+  rdfs:domain ghcode:Commit ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this commit has multiple parents." .
+
+# --- Diff ---
+
+ghcode:Diff a rdfs:Class ;
+  rdfs:label "Diff" ;
+  rdfs:comment "A complete diff (set of file changes) for a commit or PR." .
+
+ghcode:diffCommit a rdf:Property ;
+  rdfs:domain ghcode:Diff ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Commit this diff represents." .
+
+ghcode:hasFileDiff a rdf:Property ;
+  rdfs:domain ghcode:Diff ;
+  rdfs:range ghcode:FileDiff ;
+  rdfs:comment "A file-level change within this diff." .
+
+ghcode:FileDiff a rdfs:Class ;
+  rdfs:label "FileDiff" ;
+  rdfs:comment "A file-level diff." .
+
+ghcode:diffPath a rdf:Property ;
+  rdfs:domain ghcode:FileDiff ;
+  rdfs:range xsd:string ;
+  rdfs:comment "File path affected by this diff." .
+
+ghcode:diffStatus a rdf:Property ;
+  rdfs:domain ghcode:FileDiff ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Status: 'added', 'modified', 'removed', 'renamed', 'copied'." .
+
+ghcode:additions a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Lines added." .
+
+ghcode:deletions a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Lines deleted." .
+
+ghcode:previousPath a rdf:Property ;
+  rdfs:domain ghcode:FileDiff ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Previous file path (for renames)." .
+
+ghcode:patch a rdf:Property ;
+  rdfs:domain ghcode:FileDiff ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Unified diff patch text." .
+
+ghcode:inCommit a rdf:Property ;
+  rdfs:domain ghcode:FileDiff ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Commit containing this diff." .
+
+# --- Hunk ---
+
+ghcode:Hunk a rdfs:Class ;
+  rdfs:label "Hunk" ;
+  rdfs:comment "A contiguous changed region within a FileDiff." .
+
+ghcode:inFileDiff a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range ghcode:FileDiff ;
+  rdfs:comment "FileDiff this hunk belongs to." .
+
+ghcode:oldStart a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Start line in the old file." .
+
+ghcode:oldLines a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of lines in the old file." .
+
+ghcode:newStart a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Start line in the new file." .
+
+ghcode:newLines a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of lines in the new file." .
+
+ghcode:hunkHeader a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:string ;
+  rdfs:comment "The @@ header line." .
+
+ghcode:hunkBody a rdf:Property ;
+  rdfs:domain ghcode:Hunk ;
+  rdfs:range xsd:string ;
+  rdfs:comment "The diff content lines." .
+
+# --- Merge ---
+
+ghcode:Merge a rdfs:Class ;
+  rdfs:subClassOf ghcode:Commit ;
+  rdfs:label "Merge" ;
+  rdfs:comment "A merge commit joining two or more branches." .
+
+ghcode:mergeSource a rdf:Property ;
+  rdfs:domain ghcode:Merge ;
+  rdfs:range ghcode:Branch ;
+  rdfs:comment "Source branch being merged." .
+
+ghcode:mergeTarget a rdf:Property ;
+  rdfs:domain ghcode:Merge ;
+  rdfs:range ghcode:Branch ;
+  rdfs:comment "Target branch being merged into." .
+
+ghcode:mergeStrategy a rdf:Property ;
+  rdfs:domain ghcode:Merge ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Strategy: 'merge', 'squash', 'rebase'." .
+
+# =============================================================================
+# §8  Pull Requests
+#
+# Root entities: PullRequest (one KA per PR)
+# =============================================================================
+
+ghcode:PullRequest a rdfs:Class ;
+  rdfs:subClassOf prov:Activity ;
+  rdfs:label "PullRequest" ;
+  rdfs:comment "A GitHub pull request. Natural rootEntity for DKG publish." .
+
+ghcode:prNumber a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "PR number within the repository." .
+
+ghcode:title a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Title of this entity (PR, issue, release)." .
+
+ghcode:body a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Markdown body text." .
+
+ghcode:state a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Current state: 'open', 'closed', 'merged' (PR) or 'open', 'closed' (issue)." .
+
+ghcode:draft a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether the PR is in draft state." .
+
+ghcode:createdAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this entity was created." .
+
+ghcode:updatedAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this entity was last updated." .
+
+ghcode:closedAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this entity was closed." .
+
+ghcode:mergedAt a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this PR was merged." .
+
+ghcode:mergeCommit a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "The merge commit." .
+
+ghcode:baseBranch a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Target branch name." .
+
+ghcode:headBranch a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Source branch name." .
+
+ghcode:headSha a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range xsd:string ;
+  rdfs:comment "SHA of the head commit at time of snapshot." .
+
+ghcode:author a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who created this entity." .
+
+ghcode:assignedTo a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User assigned to this PR or issue." .
+
+ghcode:reviewRequestedFrom a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User requested to review this PR." .
+
+ghcode:hasLabel a rdf:Property ;
+  rdfs:range ghcode:Label ;
+  rdfs:comment "Label attached to this PR or issue." .
+
+ghcode:milestone a rdf:Property ;
+  rdfs:range ghcode:Milestone ;
+  rdfs:comment "Milestone this PR or issue belongs to." .
+
+ghcode:prCommit a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "A commit included in this PR." .
+
+ghcode:prDiff a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:Diff ;
+  rdfs:comment "The aggregate diff of this PR." .
+
+ghcode:prFileDiff a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:FileDiff ;
+  rdfs:comment "A file diff in this PR." .
+
+ghcode:totalAdditions a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Total lines added across all files." .
+
+ghcode:totalDeletions a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Total lines deleted across all files." .
+
+ghcode:changedFileCount a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of files changed." .
+
+ghcode:mergedBy a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who merged the PR." .
+
+ghcode:closesIssue a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:Issue ;
+  rdfs:comment "Issue that this PR closes when merged." .
+
+ghcode:fixesIssue a rdf:Property ;
+  rdfs:domain ghcode:PullRequest ;
+  rdfs:range ghcode:Issue ;
+  rdfs:comment "Issue that this PR fixes." .
+
+# --- Label ---
+
+ghcode:Label a rdfs:Class ;
+  rdfs:label "Label" ;
+  rdfs:comment "A label that can be applied to issues and PRs." .
+
+ghcode:labelName a rdf:Property ;
+  rdfs:domain ghcode:Label ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Label text." .
+
+ghcode:labelColor a rdf:Property ;
+  rdfs:domain ghcode:Label ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Hex color code (e.g. 'ff0000')." .
+
+# --- Milestone ---
+
+ghcode:Milestone a rdfs:Class ;
+  rdfs:label "Milestone" ;
+  rdfs:comment "A GitHub milestone." .
+
+ghcode:milestoneTitle a rdf:Property ;
+  rdfs:domain ghcode:Milestone ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Milestone title." .
+
+ghcode:dueOn a rdf:Property ;
+  rdfs:domain ghcode:Milestone ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Due date for this milestone." .
+
+# =============================================================================
+# §9  Reviews & Comments
+# =============================================================================
+
+ghcode:Review a rdfs:Class ;
+  rdfs:subClassOf prov:Activity ;
+  rdfs:label "Review" ;
+  rdfs:comment "A PR review submitted by a user." .
+
+ghcode:reviewState a rdf:Property ;
+  rdfs:domain ghcode:Review ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Verdict: 'APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'." .
+
+ghcode:submittedAt a rdf:Property ;
+  rdfs:domain ghcode:Review ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When the review was submitted." .
+
+ghcode:reviewOf a rdf:Property ;
+  rdfs:domain ghcode:Review ;
+  rdfs:range ghcode:PullRequest ;
+  rdfs:comment "PR this review belongs to." .
+
+ghcode:commitReviewed a rdf:Property ;
+  rdfs:domain ghcode:Review ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Specific commit the reviewer looked at." .
+
+ghcode:ReviewComment a rdfs:Class ;
+  rdfs:label "ReviewComment" ;
+  rdfs:comment "An inline code comment within a PR review." .
+
+ghcode:commentBody a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Comment text (markdown)." .
+
+ghcode:commentPath a rdf:Property ;
+  rdfs:domain ghcode:ReviewComment ;
+  rdfs:range xsd:string ;
+  rdfs:comment "File path the comment is on." .
+
+ghcode:commentLine a rdf:Property ;
+  rdfs:domain ghcode:ReviewComment ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Line number in the diff." .
+
+ghcode:commentSide a rdf:Property ;
+  rdfs:domain ghcode:ReviewComment ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Diff side: 'LEFT' or 'RIGHT'." .
+
+ghcode:inReview a rdf:Property ;
+  rdfs:domain ghcode:ReviewComment ;
+  rdfs:range ghcode:Review ;
+  rdfs:comment "Review this comment belongs to." .
+
+ghcode:replyTo a rdf:Property ;
+  rdfs:domain ghcode:ReviewComment ;
+  rdfs:range ghcode:ReviewComment ;
+  rdfs:comment "Comment this is a reply to (threading)." .
+
+ghcode:IssueComment a rdfs:Class ;
+  rdfs:label "IssueComment" ;
+  rdfs:comment "A comment on an issue or PR timeline." .
+
+ghcode:commentOn a rdf:Property ;
+  rdfs:domain ghcode:IssueComment ;
+  rdfs:comment "Issue or PR this comment is posted on." .
+
+# =============================================================================
+# §10  Issues & Discussions
+#
+# Root entities: Issue (one KA per issue)
+# =============================================================================
+
+ghcode:Issue a rdfs:Class ;
+  rdfs:label "Issue" ;
+  rdfs:comment "A GitHub issue. Natural rootEntity for DKG publish." .
+
+ghcode:issueNumber a rdf:Property ;
+  rdfs:domain ghcode:Issue ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Issue number within the repository." .
+
+ghcode:issueType a rdf:Property ;
+  rdfs:domain ghcode:Issue ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Classification: 'bug', 'feature', 'task', etc." .
+
+ghcode:relatedIssue a rdf:Property ;
+  rdfs:domain ghcode:Issue ;
+  rdfs:range ghcode:Issue ;
+  rdfs:comment "Another issue related to this one." .
+
+ghcode:duplicateOf a rdf:Property ;
+  rdfs:domain ghcode:Issue ;
+  rdfs:range ghcode:Issue ;
+  rdfs:comment "Issue this is a duplicate of." .
+
+ghcode:closedBy a rdf:Property ;
+  rdfs:domain ghcode:Issue ;
+  rdfs:range ghcode:PullRequest ;
+  rdfs:comment "PR that closed this issue." .
+
+ghcode:Discussion a rdfs:Class ;
+  rdfs:label "Discussion" ;
+  rdfs:comment "A GitHub Discussions thread." .
+
+ghcode:discussionCategory a rdf:Property ;
+  rdfs:domain ghcode:Discussion ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Category: 'Announcements', 'Q&A', 'Ideas', etc." .
+
+ghcode:answered a rdf:Property ;
+  rdfs:domain ghcode:Discussion ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this discussion has an accepted answer." .
+
+
+# #############################################################################
+#
+#   PART IV — CI/CD, RELEASES, CONTRIBUTORS
+#
+# #############################################################################
+
+# =============================================================================
+# §11  CI/CD & Checks
+# =============================================================================
+
+ghcode:CheckSuite a rdfs:Class ;
+  rdfs:label "CheckSuite" ;
+  rdfs:comment "A group of check runs triggered by a commit." .
+
+ghcode:checkConclusion a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Conclusion: 'success', 'failure', 'neutral', 'cancelled', 'timed_out', 'action_required', 'skipped'." .
+
+ghcode:checkStatus a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Status: 'queued', 'in_progress', 'completed'." .
+
+ghcode:triggeredBy a rdf:Property ;
+  rdfs:domain ghcode:CheckSuite ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Commit that triggered this check suite." .
+
+ghcode:CheckRun a rdfs:Class ;
+  rdfs:label "CheckRun" ;
+  rdfs:comment "An individual CI check run." .
+
+ghcode:checkName a rdf:Property ;
+  rdfs:domain ghcode:CheckRun ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the check." .
+
+ghcode:inSuite a rdf:Property ;
+  rdfs:domain ghcode:CheckRun ;
+  rdfs:range ghcode:CheckSuite ;
+  rdfs:comment "CheckSuite this run belongs to." .
+
+ghcode:startedCheckAt a rdf:Property ;
+  rdfs:domain ghcode:CheckRun ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this check run started." .
+
+ghcode:completedCheckAt a rdf:Property ;
+  rdfs:domain ghcode:CheckRun ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When this check run completed." .
+
+ghcode:checkOutput a rdf:Property ;
+  rdfs:domain ghcode:CheckRun ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Summary output or error message." .
+
+ghcode:Workflow a rdfs:Class ;
+  rdfs:label "Workflow" ;
+  rdfs:comment "A GitHub Actions workflow definition." .
+
+ghcode:workflowName a rdf:Property ;
+  rdfs:domain ghcode:Workflow ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Workflow name from the YAML file." .
+
+ghcode:workflowPath a rdf:Property ;
+  rdfs:domain ghcode:Workflow ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Path to the workflow YAML file." .
+
+ghcode:WorkflowRun a rdfs:Class ;
+  rdfs:label "WorkflowRun" ;
+  rdfs:comment "A single execution of a GitHub Actions workflow." .
+
+ghcode:runsWorkflow a rdf:Property ;
+  rdfs:domain ghcode:WorkflowRun ;
+  rdfs:range ghcode:Workflow ;
+  rdfs:comment "Workflow definition this run executes." .
+
+ghcode:runNumber a rdf:Property ;
+  rdfs:domain ghcode:WorkflowRun ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Sequential run number." .
+
+ghcode:runEvent a rdf:Property ;
+  rdfs:domain ghcode:WorkflowRun ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Triggering event: 'push', 'pull_request', 'schedule', etc." .
+
+ghcode:durationMs a rdf:Property ;
+  rdfs:domain ghcode:WorkflowRun ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Run duration in milliseconds." .
+
+# =============================================================================
+# §12  Releases & Changelogs
+# =============================================================================
+
+ghcode:Release a rdfs:Class ;
+  rdfs:label "Release" ;
+  rdfs:comment "A GitHub release." .
+
+ghcode:tagRef a rdf:Property ;
+  rdfs:domain ghcode:Release ;
+  rdfs:range ghcode:Tag ;
+  rdfs:comment "Tag associated with this release." .
+
+ghcode:prerelease a rdf:Property ;
+  rdfs:domain ghcode:Release ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "Whether this is a pre-release." .
+
+ghcode:releaseAsset a rdf:Property ;
+  rdfs:domain ghcode:Release ;
+  rdfs:range ghcode:ReleaseAsset ;
+  rdfs:comment "A downloadable asset attached to this release." .
+
+ghcode:ReleaseAsset a rdfs:Class ;
+  rdfs:label "ReleaseAsset" ;
+  rdfs:comment "A file attached to a release." .
+
+ghcode:assetName a rdf:Property ;
+  rdfs:domain ghcode:ReleaseAsset ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Filename of the release asset." .
+
+ghcode:downloadUrl a rdf:Property ;
+  rdfs:domain ghcode:ReleaseAsset ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Download URL." .
+
+ghcode:downloadCount a rdf:Property ;
+  rdfs:domain ghcode:ReleaseAsset ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Number of downloads." .
+
+ghcode:Changelog a rdfs:Class ;
+  rdfs:label "Changelog" ;
+  rdfs:comment "A changelog entry for a release." .
+
+ghcode:changelogRelease a rdf:Property ;
+  rdfs:domain ghcode:Changelog ;
+  rdfs:range ghcode:Release ;
+  rdfs:comment "Release this changelog entry describes." .
+
+ghcode:changeCategory a rdf:Property ;
+  rdfs:domain ghcode:Changelog ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Category: 'added', 'changed', 'deprecated', 'removed', 'fixed', 'security'." .
+
+ghcode:changeDescription a rdf:Property ;
+  rdfs:domain ghcode:Changelog ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Description of the change." .
+
+# =============================================================================
+# §13  Contributors & Authorship
+# =============================================================================
+
+ghcode:Contributor a rdfs:Class ;
+  rdfs:subClassOf ghcode:User ;
+  rdfs:label "Contributor" ;
+  rdfs:comment "A user who has contributed to a repository." .
+
+ghcode:contributionCount a rdf:Property ;
+  rdfs:domain ghcode:Contributor ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Total contributions (commits) by this user." .
+
+ghcode:contributesTo a rdf:Property ;
+  rdfs:domain ghcode:Contributor ;
+  rdfs:range ghcode:Repository ;
+  rdfs:comment "Repository this user contributes to." .
+
+ghcode:role a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Role: 'admin', 'maintain', 'write', 'triage', 'read'." .
+
+ghcode:email a rdf:Property ;
+  rdfs:domain ghcode:User ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Email address from git commit authorship." .
+
+ghcode:Author a rdfs:Class ;
+  rdfs:subClassOf ghcode:User ;
+  rdfs:label "Author" ;
+  rdfs:comment "Git commit author (may differ from committer)." .
+
+ghcode:authored a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who authored this entity." .
+
+ghcode:reviewed a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who reviewed this entity." .
+
+ghcode:approved a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who approved this entity." .
+
+ghcode:merged a rdf:Property ;
+  rdfs:range ghcode:User ;
+  rdfs:comment "User who merged this entity." .
+
+
+# #############################################################################
+#
+#   PART V — AGENT COORDINATION
+#
+# #############################################################################
+
+# =============================================================================
+# §14  Agent Sessions & Task Assignment
+# =============================================================================
+
+ghcode:AgentSession a rdfs:Class ;
+  rdfs:subClassOf devgraph:Session ;
+  rdfs:label "AgentSession" ;
+  rdfs:comment "An agent work session operating on GitHub resources." .
+
+ghcode:worksOnPR a rdf:Property ;
+  rdfs:domain ghcode:AgentSession ;
+  rdfs:range ghcode:PullRequest ;
+  rdfs:comment "PR the agent is working on." .
+
+ghcode:worksOnIssue a rdf:Property ;
+  rdfs:domain ghcode:AgentSession ;
+  rdfs:range ghcode:Issue ;
+  rdfs:comment "Issue the agent is working on." .
+
+ghcode:worksOnRepo a rdf:Property ;
+  rdfs:domain ghcode:AgentSession ;
+  rdfs:range ghcode:Repository ;
+  rdfs:comment "Repository the agent is working on." .
+
+ghcode:sessionBranch a rdf:Property ;
+  rdfs:domain ghcode:AgentSession ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Branch the agent is working on." .
+
+ghcode:TaskAssignment a rdfs:Class ;
+  rdfs:label "TaskAssignment" ;
+  rdfs:comment "Assignment of a devgraph:Task to an agent for a GitHub resource." .
+
+ghcode:assignedTask a rdf:Property ;
+  rdfs:domain ghcode:TaskAssignment ;
+  rdfs:range devgraph:Task ;
+  rdfs:comment "The task being assigned." .
+
+ghcode:assignedAgent a rdf:Property ;
+  rdfs:domain ghcode:TaskAssignment ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent receiving the assignment." .
+
+ghcode:assignedResource a rdf:Property ;
+  rdfs:domain ghcode:TaskAssignment ;
+  rdfs:comment "GitHub resource the assignment is for." .
+
+ghcode:assignedAt a rdf:Property ;
+  rdfs:domain ghcode:TaskAssignment ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When the assignment was made." .
+
+# =============================================================================
+# §15  Work-in-Progress & Claimed Regions
+# =============================================================================
+
+ghcode:WorkInProgress a rdfs:Class ;
+  rdfs:label "WorkInProgress" ;
+  rdfs:comment "Marker for an agent's in-progress work on a code region." .
+
+ghcode:wipAgent a rdf:Property ;
+  rdfs:domain ghcode:WorkInProgress ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent performing the work." .
+
+ghcode:wipFile a rdf:Property ;
+  rdfs:domain ghcode:WorkInProgress ;
+  rdfs:range xsd:string ;
+  rdfs:comment "File being worked on." .
+
+ghcode:wipDescription a rdf:Property ;
+  rdfs:domain ghcode:WorkInProgress ;
+  rdfs:range xsd:string ;
+  rdfs:comment "What the agent is doing." .
+
+ghcode:wipStartedAt a rdf:Property ;
+  rdfs:domain ghcode:WorkInProgress ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When work started." .
+
+ghcode:wipRelatedTask a rdf:Property ;
+  rdfs:domain ghcode:WorkInProgress ;
+  rdfs:range devgraph:Task ;
+  rdfs:comment "DevGraph task this work relates to." .
+
+ghcode:ClaimedRegion a rdfs:Class ;
+  rdfs:label "ClaimedRegion" ;
+  rdfs:comment "A region of code claimed by an agent to prevent edit conflicts." .
+
+ghcode:claimedFile a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:string ;
+  rdfs:comment "File path being claimed." .
+
+ghcode:claimedByAgent a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent ID holding this claim." .
+
+ghcode:claimScope a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Scope: 'file', 'function', 'class', 'lines'." .
+
+ghcode:claimStartLine a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Start line of the claimed region." .
+
+ghcode:claimEndLine a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "End line of the claimed region." .
+
+ghcode:claimedAt a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When the claim was made." .
+
+ghcode:expiresAt a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When the claim automatically expires." .
+
+ghcode:claimInSession a rdf:Property ;
+  rdfs:domain ghcode:ClaimedRegion ;
+  rdfs:range ghcode:AgentSession ;
+  rdfs:comment "Session in which this claim was made." .
+
+# =============================================================================
+# §16  Communication Threads
+# =============================================================================
+
+ghcode:CommunicationThread a rdfs:Class ;
+  rdfs:label "CommunicationThread" ;
+  rdfs:comment "A discussion thread between agents about code or a PR." .
+
+ghcode:threadTopic a rdf:Property ;
+  rdfs:domain ghcode:CommunicationThread ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Subject of the discussion." .
+
+ghcode:threadAbout a rdf:Property ;
+  rdfs:domain ghcode:CommunicationThread ;
+  rdfs:comment "Entity this thread is about." .
+
+ghcode:AgentMessage a rdfs:Class ;
+  rdfs:label "AgentMessage" ;
+  rdfs:comment "A single message in a communication thread." .
+
+ghcode:inThread a rdf:Property ;
+  rdfs:domain ghcode:AgentMessage ;
+  rdfs:range ghcode:CommunicationThread ;
+  rdfs:comment "Thread this message belongs to." .
+
+ghcode:messageFrom a rdf:Property ;
+  rdfs:domain ghcode:AgentMessage ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Agent who sent this message." .
+
+ghcode:messageAt a rdf:Property ;
+  rdfs:domain ghcode:AgentMessage ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "When the message was sent." .
+
+
+# #############################################################################
+#
+#   PART VI — CROSS-CUTTING PROPERTIES
+#
+# #############################################################################
+
+# =============================================================================
+# §17  GitHub IDs & Cross-references
+# =============================================================================
+
+ghcode:githubId a rdf:Property ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "GitHub's numeric ID (globally unique per entity type)." .
+
+ghcode:nodeId a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "GitHub's GraphQL node ID." .
+
+ghcode:implementsTask a rdf:Property ;
+  rdfs:range devgraph:Task ;
+  rdfs:comment "DevGraph task this PR or commit implements." .
+
+ghcode:implementsDecision a rdf:Property ;
+  rdfs:range devgraph:Decision ;
+  rdfs:comment "DevGraph decision this PR or commit implements." .
+
+ghcode:touchesModule a rdf:Property ;
+  rdfs:range devgraph:CodeModule ;
+  rdfs:comment "CodeModule touched by this commit, PR, or diff." .
+
+ghcode:touchesFunction a rdf:Property ;
+  rdfs:range devgraph:Function ;
+  rdfs:comment "Function affected by this commit or PR." .
+
+ghcode:touchesClass a rdf:Property ;
+  rdfs:range devgraph:Class ;
+  rdfs:comment "Class affected by this commit or PR." .
+
+ghcode:touchesPackage a rdf:Property ;
+  rdfs:range devgraph:Package ;
+  rdfs:comment "Package affected by this commit or PR." .
+
+ghcode:stateAt a rdf:Property ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Timestamp this state was recorded (for temporal queries)." .
+
+ghcode:previousState a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Previous state value before this change." .
+
+ghcode:atCommit a rdf:Property ;
+  rdfs:range ghcode:Commit ;
+  rdfs:comment "Commit at which this snapshot/state was captured." .
