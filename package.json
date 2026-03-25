@@ -56,7 +56,7 @@
     }
   },
   "dependencies": {
-    "@origintrail-official/dkg-app-github-collab": "workspace:*",
+    "@origintrail-official/dkg-app-multi-agent-coding": "workspace:*",
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*"
   }
 }

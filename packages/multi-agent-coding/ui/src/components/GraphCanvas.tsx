@@ -6,10 +6,11 @@ import { ALL_VIEWS } from '../lib/view-configs.js';
 
 const VIEW_DESCRIPTIONS: Record<string, string> = {
   'repo-overview': 'Repository structure with PRs, issues, branches, and contributors',
-  'code-structure': 'Classes, functions, files and their relationships (imports, inheritance, calls)',
-  'dependency-flow': 'Package dependencies and module import chains',
+  'code-structure': 'Classes, functions, interfaces, methods, and type aliases',
+  'dependency-flow': 'Import declarations and their source modules',
+  'files': 'File tree structure with directories and files',
   'pr-impact': 'Pull request changes mapped to affected code entities',
-  'branch-diff': 'Visual diff of entities between two branches',
+  'branch-diff': 'Branches, commits, and merge history',
   'issues': 'Issue tracking with labels, milestones, and assignees',
   'agent-activity': 'Active agents, their tasks, and claimed code regions',
 };
@@ -37,13 +38,14 @@ interface GraphCanvasProps {
   repo?: string;
   branch?: string;
   limit?: number;
+  searchText?: string;
   onNodeClick?: (nodeId: string) => void;
   onTripleCount?: (count: number) => void;
   /** Optional floating toolbar rendered inside the graph viewport */
   toolbar?: React.ReactNode;
 }
 
-export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCount, toolbar }: GraphCanvasProps) {
+export function GraphCanvas({ repo, branch, limit = 500, searchText, onNodeClick, onTripleCount, toolbar }: GraphCanvasProps) {
   const [viewKey, setViewKey] = useState('pr-impact');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +63,13 @@ export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCo
     setError(null);
     try {
       const sparql = view.defaultSparql.replace(/LIMIT\s+\d+/i, `LIMIT ${limit}`);
-      const result = await executeQuery(sparql, repo || undefined);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Query timed out after 30 seconds. Try reducing the limit.')), 30_000)
+      );
+      const result = await Promise.race([
+        executeQuery(sparql, repo || undefined),
+        timeout,
+      ]);
       const data = result?.result;
       let parsed: Array<{ subject: string; predicate: string; object: string }> = [];
       if (data?.quads && data.quads.length > 0) {
@@ -111,6 +119,24 @@ export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCo
   // Memoize options so RdfGraph doesn't remount on every render
   const graphOptions = useMemo(() => GRAPH_OPTIONS, []);
 
+  // Filter triples by search text (matches subject/predicate/object URIs)
+  const filteredTriples = useMemo(() => {
+    if (!searchText || searchText.trim().length === 0) return triples;
+    const q = searchText.toLowerCase();
+    // Find matching node URIs first
+    const matchingNodes = new Set<string>();
+    for (const t of triples) {
+      if (t.subject.toLowerCase().includes(q) || t.object.toLowerCase().includes(q)) {
+        matchingNodes.add(t.subject);
+        if (t.object.startsWith('http') || t.object.startsWith('urn:')) {
+          matchingNodes.add(t.object);
+        }
+      }
+    }
+    // Keep all triples that involve a matching node
+    return triples.filter(t => matchingNodes.has(t.subject) || matchingNodes.has(t.object));
+  }, [triples, searchText]);
+
   return (
     <div className="graph-canvas-container">
       <div className="graph-toolbar">
@@ -142,10 +168,10 @@ export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCo
 
       <div className="graph-viewport">
         {toolbar}
-        {triples.length > 0 ? (
+        {filteredTriples.length > 0 ? (
           <RdfGraph
             key={viewKey}
-            data={triples}
+            data={filteredTriples}
             format="triples"
             options={graphOptions}
             viewConfig={currentView}
@@ -157,9 +183,11 @@ export function GraphCanvas({ repo, branch, limit = 500, onNodeClick, onTripleCo
           <div className="graph-placeholder">
             {loading
               ? 'Loading graph data...'
-              : hasLoaded
-                ? 'No data found for this view.'
-                : 'Select a view and click Refresh to load graph data.'}
+              : searchText && triples.length > 0
+                ? 'No nodes match the current filter.'
+                : hasLoaded
+                  ? 'No data found for this view.'
+                  : 'Select a view and click Refresh to load graph data.'}
           </div>
         )}
       </div>

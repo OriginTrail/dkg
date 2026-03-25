@@ -340,6 +340,24 @@ body {
   max-width: 400px;
 }
 
+.graph-limit-input {
+  background: var(--bg-secondary, #111820);
+  border: 1px solid var(--border, #1e293b);
+  color: var(--text, #e2e8f0);
+  width: 70px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+.graph-limit-input::-webkit-outer-spin-button,
+.graph-limit-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .graph-search-input-inline {
   width: 140px;
   padding: 2px 8px;

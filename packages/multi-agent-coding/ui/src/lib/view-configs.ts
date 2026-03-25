@@ -71,7 +71,7 @@ WHERE {
     <${GH}Repository>, <${GH}PullRequest>, <${GH}Issue>,
     <${GH}User>, <${GH}Branch>
   ))
-} LIMIT 300`,
+} LIMIT 200`,
 };
 
 export const ISSUES_VIEW: ViewConfig = {
@@ -118,7 +118,7 @@ export const PR_IMPACT_VIEW: ViewConfig = {
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
   ?s a <${GH}PullRequest> ; ?p ?o .
-} LIMIT 500`,
+} LIMIT 300`,
 };
 
 export const BRANCH_DIFF_VIEW: ViewConfig = {
@@ -132,22 +132,15 @@ export const BRANCH_DIFF_VIEW: ViewConfig = {
     [`${GH}Merge`]: { color: COLORS.merge, shape: 'hexagon', sizeMultiplier: 0.7 },
   },
   circleTypes: ['FileDiff'],
-  animation: {
-    linkParticles: true,
-    linkParticleCount: 1,
-    linkParticleSpeed: 0.003,
-    linkParticleColor: 'rgba(6, 182, 212, 0.4)',
-  },
   tooltip: {
     titleProperties: ['name', 'message', 'path'],
     titleMaxLength: 50,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
-  { ?s a <${GH}Branch> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Commit> ; ?p ?o }
-} LIMIT 500`,
+  ?s a ?type ; ?p ?o .
+  FILTER(?type IN (<${GH}Branch>, <${GH}Commit>, <${GH}Merge>))
+} LIMIT 300`,
 };
 
 export const AGENT_ACTIVITY_VIEW: ViewConfig = {
@@ -167,43 +160,14 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
     titleProperties: ['agentName', 'goal', 'decisionSummary', 'name'],
     titleMaxLength: 60,
   },
-  defaultSparql: `CONSTRUCT {
-  ?session a <${GH}AgentSession> ;
-           <${GH}agentName> ?agent ;
-           <${GH}sessionStatus> ?status ;
-           <${GH}startedAt> ?started ;
-           <${GH}goal> ?goal .
-  ?session <${GH}modifiedFile> ?file .
-  ?claim a <${GH}ClaimedRegion> ;
-         <${GH}claimedFile> ?file ;
-         <${GH}claimedBy> ?claimAgent .
-  ?decision a <${GH}Decision> ;
-            <${GH}decisionSummary> ?decSum ;
-            <${GH}madeBy> ?decAgent .
-  ?decision <${GH}affectsFile> ?decFile .
-  ?session <${GH}relatedPR> ?pr .
-}
+  defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
-  {
-    ?session a <${GH}AgentSession> ;
-             <${GH}agentName> ?agent ;
-             <${GH}sessionStatus> ?status ;
-             <${GH}startedAt> ?started .
-    OPTIONAL { ?session <${GH}goal> ?goal }
-    OPTIONAL { ?session <${GH}modifiedFile> ?file }
-    OPTIONAL { ?session <${GH}relatedPR> ?pr }
-  } UNION {
-    ?claim a <${GH}ClaimedRegion> ;
-           <${GH}claimedFile> ?file ;
-           <${GH}claimedBy> ?claimAgent ;
-           <${GH}claimStatus> "active" .
-  } UNION {
-    ?decision a <${GH}Decision> ;
-              <${GH}decisionSummary> ?decSum ;
-              <${GH}madeBy> ?decAgent .
-    OPTIONAL { ?decision <${GH}affectsFile> ?decFile }
-  }
-} LIMIT 500`,
+  ?s a ?type ; ?p ?o .
+  FILTER(?type IN (
+    <${GH}AgentSession>, <${GH}Decision>,
+    <${GH}ClaimedRegion>, <${GH}Annotation>
+  ))
+} LIMIT 300`,
 };
 
 export const CODE_STRUCTURE_VIEW: ViewConfig = {
@@ -211,33 +175,27 @@ export const CODE_STRUCTURE_VIEW: ViewConfig = {
   palette: 'midnight',
   paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
-    [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 1.2 },
-    [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 0.7 },
-    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
-    [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 0.6 },
-    [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.3 },
-    [`${GH}Interface`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 0.5 },
-    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.25 },
+    [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 0.8 },
+    [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.4 },
+    [`${GH}Interface`]: { color: '#8b5cf6', shape: 'hexagon', sizeMultiplier: 0.6 },
+    [`${GH}Method`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}TypeAlias`]: { color: '#a78bfa', shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}Enum`]: { color: '#fb923c', shape: 'hexagon', sizeMultiplier: 0.5 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.25 },
   },
-  circleTypes: ['File', 'Function', 'Interface', 'Import'],
+  circleTypes: ['Function', 'Method', 'TypeAlias', 'File'],
   tooltip: {
-    titleProperties: ['name', 'path'],
-    titleMaxLength: 40,
+    titleProperties: ['name', 'signature', 'path'],
+    titleMaxLength: 50,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
-  { ?s a <${GH}Class> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Function> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Interface> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Import> ; ?p ?o }
-  UNION
-  { ?s a <${GH}File> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Directory> ; ?p ?o }
-} LIMIT 2000`,
+  ?s a ?type ; ?p ?o .
+  FILTER(?type IN (
+    <${GH}Class>, <${GH}Function>, <${GH}Interface>,
+    <${GH}Method>, <${GH}TypeAlias>, <${GH}Enum>
+  ))
+} LIMIT 500`,
 };
 
 export const DEPENDENCY_FLOW_VIEW: ViewConfig = {
@@ -245,30 +203,41 @@ export const DEPENDENCY_FLOW_VIEW: ViewConfig = {
   palette: 'midnight',
   paletteOverrides: EDGE_OVERRIDES,
   nodeTypes: {
+    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.4 },
     [`${GH}Class`]: { color: COLORS.class, shape: 'hexagon', sizeMultiplier: 0.8 },
     [`${GH}Function`]: { color: COLORS.function, shape: 'circle', sizeMultiplier: 0.4 },
-    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
-    [`${GH}Import`]: { color: COLORS.import, shape: 'circle', sizeMultiplier: 0.3 },
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.3 },
   },
   circleTypes: ['File', 'Import', 'Function'],
-  animation: {
-    linkParticles: true,
-    linkParticleCount: 1,
-    linkParticleSpeed: 0.003,
-    linkParticleColor: 'rgba(251, 191, 36, 0.4)',
-  },
   tooltip: {
-    titleProperties: ['name', 'path'],
+    titleProperties: ['name', 'importSource', 'path'],
     titleMaxLength: 40,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
 WHERE {
-  { ?s a <${GH}File> ; <${GH}imports> ?o . ?s ?p ?o }
-  UNION
-  { ?s a <${GH}Class> ; ?p ?o }
-  UNION
-  { ?s a <${GH}Function> ; ?p ?o }
+  ?s a <${GH}Import> ; ?p ?o .
 } LIMIT 500`,
+};
+
+export const FILES_VIEW: ViewConfig = {
+  name: 'Files',
+  palette: 'midnight',
+  paletteOverrides: EDGE_OVERRIDES,
+  nodeTypes: {
+    [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.4 },
+    [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 0.7 },
+    [`${GH}Repository`]: { color: COLORS.repository, shape: 'hexagon', sizeMultiplier: 1.2 },
+  },
+  circleTypes: ['File'],
+  tooltip: {
+    titleProperties: ['filePath', 'dirPath', 'name'],
+    titleMaxLength: 50,
+  },
+  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+WHERE {
+  ?s a ?type ; ?p ?o .
+  FILTER(?type IN (<${GH}File>, <${GH}Directory>))
+} LIMIT 300`,
 };
 
 export const ALL_VIEWS: Record<string, ViewConfig> = {
@@ -276,6 +245,7 @@ export const ALL_VIEWS: Record<string, ViewConfig> = {
   'repo-overview': REPO_OVERVIEW_VIEW,
   'code-structure': CODE_STRUCTURE_VIEW,
   'dependency-flow': DEPENDENCY_FLOW_VIEW,
+  'files': FILES_VIEW,
   'branch-diff': BRANCH_DIFF_VIEW,
   'issues': ISSUES_VIEW,
   'agent-activity': AGENT_ACTIVITY_VIEW,

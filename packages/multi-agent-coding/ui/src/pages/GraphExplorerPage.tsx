@@ -108,6 +108,7 @@ export function GraphExplorerPage() {
   const [searchText, setSearchText] = useState('');
   const [tripleCount, setTripleCount] = useState(0);
   const [graphLimit, setGraphLimit] = useState(500);
+  const [graphLoading, setGraphLoading] = useState(false);
 
   // Node detail state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -147,7 +148,13 @@ export function GraphExplorerPage() {
     setError(null);
     setTriples([]);
     try {
-      const result = await executeQuery(sparql, scopedRepo, includeWorkspace);
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Query timed out after 30 seconds. Try reducing the LIMIT or simplifying the query.')), 30_000)
+      );
+      const result = await Promise.race([
+        executeQuery(sparql, scopedRepo, includeWorkspace),
+        timeout,
+      ]);
       const data = result?.result ?? result;
       const rows = data?.triples ?? data?.bindings ?? data?.quads ?? [];
       if (Array.isArray(rows) && rows.length > 0) {
@@ -232,8 +239,9 @@ export function GraphExplorerPage() {
               repo={scopedRepo}
               branch={selectedBranch || undefined}
               limit={graphLimit}
+              searchText={searchText}
               onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
-              onTripleCount={setTripleCount}
+              onTripleCount={(count) => { setTripleCount(count); setGraphLoading(false); }}
               toolbar={
                 <div className="graph-floating-toolbar">
                   <div className="graph-toolbar-pill">
@@ -245,20 +253,18 @@ export function GraphExplorerPage() {
                       max={10000}
                       onChange={e => {
                         const v = parseInt(e.target.value, 10);
-                        if (!isNaN(v) && v > 0) setGraphLimit(v);
+                        if (!isNaN(v) && v > 0) {
+                          setGraphLimit(v);
+                          setGraphLoading(true);
+                        }
                       }}
-                      style={{ width: 60, textAlign: 'right', marginRight: 4 }}
                     />
-                    <span className="graph-triple-count">limit ({tripleCount} loaded)</span>
+                    <span className="graph-triple-count">
+                      limit ({graphLoading ? 'Loading...' : `${tripleCount} loaded`})
+                    </span>
                   </div>
-                  <div className="graph-toolbar-pill">
-                    <input
-                      type="text"
-                      className="graph-search-input-inline"
-                      placeholder="Filter nodes..."
-                      value={searchText}
-                      onChange={e => setSearchText(e.target.value)}
-                    />
+                  <div className="graph-toolbar-pill" style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                    Search (coming soon)
                   </div>
                   <button
                     className="graph-toolbar-pill graph-toolbar-toggle"
@@ -323,9 +329,16 @@ export function GraphExplorerPage() {
             </div>
           </div>
 
+          {loading && (
+            <div className="empty-state">
+              <p>Executing query...</p>
+              <p className="text-muted" style={{ marginTop: 4 }}>Timeout: 30 seconds</p>
+            </div>
+          )}
+
           {error && <div className="error-banner">{error}</div>}
 
-          {triples.length > 0 && (
+          {!loading && triples.length > 0 && (
             <div className="section">
               <h3>{triples.length} result{triples.length !== 1 ? 's' : ''}</h3>
               <div className="table-container">

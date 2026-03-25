@@ -85,6 +85,17 @@ export class StyleEngine {
       if (this._config.classColors[type]) {
         return this._config.classColors[type];
       }
+      // Also check short name (last segment after # or /) against classColors keys
+      // that are full URIs — match by short name suffix
+      const shortName = type.split('#').pop()?.split('/').pop() ?? '';
+      if (shortName) {
+        for (const [key, color] of Object.entries(this._config.classColors)) {
+          const keyShort = key.split('#').pop()?.split('/').pop() ?? '';
+          if (keyShort === shortName) {
+            return color;
+          }
+        }
+      }
     }
 
     // 2. Check per-namespace colors (user-supplied first, then built-in)
