@@ -243,12 +243,7 @@ export class SyncEngine {
     if (config.syncScope.includes('pull_requests')) {
       scopes.push('pull_requests');
       const since = this.highWaterMarks.get(`${repoKey}:prs`);
-      const prs = await client.listPullRequests(owner, repo, {
-        state: 'all',
-        sort: 'updated',
-        direction: 'desc',
-        perPage: 30,
-      });
+      const prs = await client.fetchAllPages(`/repos/${owner}/${repo}/pulls?state=all&sort=updated&direction=desc`);
       const quads: Quad[] = [];
       for (const pr of prs) {
         if (since && pr.updated_at && pr.updated_at <= since) break;
@@ -266,13 +261,8 @@ export class SyncEngine {
     if (config.syncScope.includes('issues')) {
       scopes.push('issues');
       const since = this.highWaterMarks.get(`${repoKey}:issues`);
-      const issues = await client.listIssues(owner, repo, {
-        state: 'all',
-        sort: 'updated',
-        direction: 'desc',
-        perPage: 30,
-        since,
-      });
+      const sinceParam = since ? `&since=${since}` : '';
+      const issues = await client.fetchAllPages(`/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc${sinceParam}`);
       const quads: Quad[] = [];
       for (const issue of issues) {
         quads.push(...transformIssue(issue, owner, repo, graph));

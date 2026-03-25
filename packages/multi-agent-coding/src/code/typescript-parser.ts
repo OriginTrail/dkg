@@ -37,28 +37,29 @@ export class TypeScriptParser implements LanguageParser {
     imports: ParsedImport[],
     exports: ParsedExport[],
     parentClassName: string | undefined,
+    depth: number = 0,
   ): void {
     if (ts.isClassDeclaration(node)) {
       this.extractClass(node, sourceFile, entities, exports);
-      // Visit class members with parent context
+      // Visit class members with parent context (depth 1 = class body)
       const className = node.name?.text;
-      ts.forEachChild(node, child => this.visit(child, sourceFile, entities, imports, exports, className));
+      ts.forEachChild(node, child => this.visit(child, sourceFile, entities, imports, exports, className, 1));
       return;
     }
 
     if (ts.isInterfaceDeclaration(node)) {
       this.extractInterface(node, sourceFile, entities, exports);
-    } else if (ts.isFunctionDeclaration(node)) {
+    } else if (ts.isFunctionDeclaration(node) && depth === 0) {
       this.extractFunction(node, sourceFile, entities, exports);
     } else if (ts.isMethodDeclaration(node) && parentClassName) {
       this.extractMethod(node, sourceFile, entities, parentClassName);
     } else if (ts.isConstructorDeclaration(node) && parentClassName) {
       this.extractConstructor(node, sourceFile, entities, parentClassName);
-    } else if (ts.isTypeAliasDeclaration(node)) {
+    } else if (ts.isTypeAliasDeclaration(node) && depth === 0) {
       this.extractTypeAlias(node, sourceFile, entities, exports);
-    } else if (ts.isEnumDeclaration(node)) {
+    } else if (ts.isEnumDeclaration(node) && depth === 0) {
       this.extractEnum(node, sourceFile, entities, exports);
-    } else if (ts.isVariableStatement(node)) {
+    } else if (ts.isVariableStatement(node) && depth === 0) {
       this.extractVariables(node, sourceFile, entities, exports);
     } else if (ts.isImportDeclaration(node)) {
       this.extractImport(node, sourceFile, imports);
@@ -69,8 +70,14 @@ export class TypeScriptParser implements LanguageParser {
     }
 
     // Don't recurse into class children here (handled above)
+    // Don't recurse into function/method bodies — only index module-level declarations
     if (!ts.isClassDeclaration(node)) {
-      ts.forEachChild(node, child => this.visit(child, sourceFile, entities, imports, exports, parentClassName));
+      const isBodyNode = ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) ||
+        ts.isFunctionExpression(node) || ts.isMethodDeclaration(node) ||
+        ts.isConstructorDeclaration(node) || ts.isBlock(node) && depth > 0;
+      if (!isBodyNode) {
+        ts.forEachChild(node, child => this.visit(child, sourceFile, entities, imports, exports, parentClassName, depth));
+      }
     }
   }
 

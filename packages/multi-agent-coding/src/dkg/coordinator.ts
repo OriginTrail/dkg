@@ -745,10 +745,21 @@ export class GitHubCollabCoordinator {
     const msg = decodeMessage(data);
     if (!msg) return;
 
+    // Reject messages where payload peerId doesn't match actual sender
+    if (msg.peerId && msg.peerId !== from) {
+      this.log(`Rejected spoofed message: payload peerId ${msg.peerId} != sender ${from}`);
+      return;
+    }
+
     switch (msg.type) {
       case 'review:submitted': {
         const session = this.reviewSessions.get(msg.sessionId);
         if (session) {
+          // Only listed reviewers may submit reviews
+          if (!session.reviewers.includes(from)) {
+            this.log(`Rejected review from non-reviewer ${from} for session ${msg.sessionId}`);
+            break;
+          }
           // Replace existing review from this peer, or append
           const existingIdx = session.reviews.findIndex(r => r.peerId === msg.peerId);
           const reviewEntry = { peerId: msg.peerId, decision: msg.decision, timestamp: msg.timestamp };

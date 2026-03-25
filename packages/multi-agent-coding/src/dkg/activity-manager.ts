@@ -214,6 +214,10 @@ export class ActivityManager {
           conflicts.push({ file: filePath, existingClaim: existing });
           continue;
         }
+        // Same session already owns this file — skip, don't duplicate
+        if (existing && existing.sessionId === sessionId) {
+          continue;
+        }
       }
 
       const claimId = `clm-${randomUUID().slice(0, 8)}`;
