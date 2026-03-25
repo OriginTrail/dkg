@@ -408,20 +408,8 @@ export class GitHubCollabCoordinator {
 
     const result = await this.syncEngine.processWebhook(event, action, payload, deliveryId);
 
-    // Auto-enshrine on PR merge/close
-    if (result.ok && result.quadsWritten > 0) {
-      if (event === 'pull_request' && (action === 'closed' || action === 'merged')) {
-        const owner = repoData.owner.login;
-        const repo = repoData.name;
-        const prNumber = payload.pull_request?.number;
-        const config = this.repos.get(`${owner}/${repo}`);
-        if (config && prNumber) {
-          const prEntityUri = `urn:github:${owner}/${repo}/pr/${prNumber}`;
-          this.enshrineData(config.paranetId, { rootEntities: [prEntityUri] }, { clearWorkspaceAfter: false })
-            .catch(err => this.log(`Enshrine failed for PR #${prNumber}: ${err.message}`));
-        }
-      }
-    }
+    // Enshrinement is user-initiated only — no auto-enshrine on PR merge/close.
+    // The data stays in the workspace until the user explicitly chooses to publish.
 
     return result;
   }
