@@ -5,7 +5,7 @@ import { AppShell } from './components/AppShell.js';
 import { OverviewPage } from './pages/OverviewPage.js';
 import { PrIssuePage } from './pages/PrIssuePage.js';
 import { GraphExplorerPage } from './pages/GraphExplorerPage.js';
-import { AgentsPage } from './pages/AgentsPage.js';
+import { AgentsPage } from './pages/CollaborationPage.js';
 import { SettingsPage } from './pages/SettingsPage.js';
 import './styles.css';
 

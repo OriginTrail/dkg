@@ -34,7 +34,7 @@ export function commitUri(owner: string, repo: string, sha: string): string {
 }
 
 export function branchUri(owner: string, repo: string, name: string): string {
-  return `urn:github:${owner}/${repo}/branch/${name}`;
+  return `urn:github:${owner}/${repo}/branch/${encodeURIComponent(name)}`;
 }
 
 export function reviewUri(owner: string, repo: string, prNumber: number, reviewId: number): string {

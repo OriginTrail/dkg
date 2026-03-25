@@ -52,6 +52,7 @@ function makeMockClient() {
         size: source.length,
       });
     }),
+    getRateLimit: vi.fn().mockReturnValue(null),
   };
 }
 

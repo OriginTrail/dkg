@@ -144,6 +144,7 @@ All endpoints are prefixed with `/api/apps/github-collab`.
 | GET | `/config` | Current configuration |
 | POST | `/config/repo` | Add or update a repository |
 | DELETE | `/config/repo` | Remove a repository |
+| POST | `/convert-to-shared` | Convert a local repo to shared mode |
 | POST | `/webhook` | GitHub webhook receiver |
 | POST | `/sync` | Trigger a manual sync |
 | GET | `/sync/status` | Check sync job progress |
@@ -152,6 +153,12 @@ All endpoints are prefixed with `/api/apps/github-collab`.
 | POST | `/review/request` | Start a collaborative review session |
 | POST | `/review/submit` | Submit a review decision |
 | GET | `/review/status` | Check review session status |
+| POST | `/invite` | Send a collaboration invitation to a peer |
+| GET | `/invitations` | List sent and received invitations |
+| POST | `/invitations/:id/accept` | Accept an incoming invitation |
+| POST | `/invitations/:id/decline` | Decline an incoming invitation |
+| DELETE | `/invitations/:id` | Revoke a sent invitation |
+| GET | `/collaborators` | List collaborators for a shared repo |
 | GET | `/repos/:owner/:repo/prs` | List PRs from knowledge graph |
 | GET | `/repos/:owner/:repo/prs/:number` | Get PR details |
 | GET | `/repos/:owner/:repo/branches` | List branches via GitHub API |

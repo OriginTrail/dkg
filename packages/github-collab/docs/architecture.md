@@ -1012,7 +1012,11 @@ packages/github-collab/
 ├── tsconfig.json
 ├── vitest.config.ts
 ├── docs/
-│   └── architecture.md       # This document
+│   ├── architecture.md       # This document
+│   ├── code-parsing-plan.md  # Code parsing pipeline design
+│   ├── graph-retrieval.md    # URI reference + graph retrieval patterns
+│   ├── sparql-queries.md     # Example SPARQL queries
+│   └── ux-spec.md            # UI/UX specification
 ├── schema/
 │   ├── github-code.ttl       # OWL ontology for GitHub concepts
 │   └── github-code.shacl.ttl # SHACL shapes for validation
@@ -1020,39 +1024,67 @@ packages/github-collab/
 │   ├── index.ts              # Package entry (re-exports)
 │   ├── api/
 │   │   └── handler.ts        # createHandler() factory + route dispatch
+│   ├── code/                 # Code parsing pipeline
+│   │   ├── parser.ts         # Parser interface + ParseResult type
+│   │   ├── parser-registry.ts        # Language-aware parser selection
+│   │   ├── typescript-parser.ts      # TypeScript/JavaScript AST parser
+│   │   ├── tree-sitter-parser.ts     # Tree-sitter based parser (multi-lang)
+│   │   └── relationship-extractor.ts # Cross-file relationship resolution
 │   ├── dkg/
 │   │   ├── coordinator.ts    # DKG bridge (paranets, workspace, gossip)
 │   │   ├── protocol.ts       # GossipSub message types + serialization
-│   │   └── rdf.ts            # RDF quad helpers, URI minting, ontology constants
+│   │   └── sync-engine.ts    # Webhook receiver + polling sync engine
 │   ├── github/
-│   │   ├── sync-engine.ts    # Webhook receiver + polling engine
-│   │   ├── client.ts         # GitHub REST API client (rate-limited)
-│   │   ├── transformer.ts    # GitHub JSON → RDF quad transformation
-│   │   └── types.ts          # GitHub API response types
-│   └── review/
-│       ├── session.ts        # Collaborative review session management
-│       └── consensus.ts      # Context graph + signature collection
+│   │   ├── client.ts         # GitHub REST API client (rate-limited, ETag cache)
+│   │   └── code-sync.ts      # File tree + code entity sync (Phase A/B/C)
+│   └── rdf/
+│       ├── uri.ts            # URI minting helpers + quad builders
+│       ├── transformer.ts    # GitHub JSON → RDF quad transformation
+│       └── code-transformer.ts # Code entities → RDF quad transformation
 ├── test/
 │   ├── handler.test.ts
 │   ├── coordinator.test.ts
 │   ├── sync-engine.test.ts
 │   ├── transformer.test.ts
-│   ├── client.test.ts
-│   ├── session.test.ts
-│   └── consensus.test.ts
+│   ├── github-client.test.ts
+│   ├── code-sync.test.ts
+│   ├── code-transformer.test.ts
+│   ├── parser-registry.test.ts
+│   ├── typescript-parser.test.ts
+│   ├── tree-sitter-parser.test.ts
+│   ├── relationship-extractor.test.ts
+│   ├── protocol.test.ts
+│   └── helpers/              # Mock agent, GitHub, HTTP helpers
 └── ui/                       # React UI (Vite)
     ├── index.html
     ├── vite.config.ts
     └── src/
-        ├── App.tsx
-        ├── pages/
-        │   ├── Dashboard.tsx
-        │   ├── RepoView.tsx
-        │   ├── PRDetail.tsx
-        │   └── ReviewSession.tsx
-        └── components/
-            └── ...
+        ├── App.tsx           # React app with HashRouter
+        ├── api.ts            # Frontend API client
+        ├── styles.css        # Global styles
+        ├── components/
+        │   ├── AppShell.tsx   # Layout shell with nav
+        │   └── GraphCanvas.tsx # RDF graph visualization component
+        ├── context/
+        │   ├── RepoContext.tsx # Repository selection context
+        │   └── TokenContext.tsx
+        ├── lib/
+        │   └── view-configs.ts # Graph visualization ViewConfigs
+        └── pages/
+            ├── OverviewPage.tsx
+            ├── PrIssuePage.tsx
+            ├── GraphExplorerPage.tsx
+            ├── CollaborationPage.tsx  # Multi-node collaboration
+            └── SettingsPage.tsx
 ```
+
+### Code Parsing Pipeline
+
+The code parsing pipeline (Phase B+C of code sync) fetches repository file contents, parses them into structured code entities, and extracts cross-file relationships:
+
+1. **Phase A (File Tree):** `CodeSync.syncFileTree()` uses the recursive Git tree API to index all files and directories, filtering by extension, size, and path.
+2. **Phase B (Entity Parsing):** `CodeSync.syncCodeEntities()` fetches blob contents in rate-limit-aware batches, routes each file to the appropriate parser via `ParserRegistry`, and transforms parsed entities (classes, functions, imports) into RDF quads.
+3. **Phase C (Relationships):** `RelationshipExtractor` resolves cross-file import paths, builds a file index, and emits `ghcode:imports`, `ghcode:inherits`, and `ghcode:calls` relationships as RDF quads.
 
 ---
 

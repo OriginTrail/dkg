@@ -63,6 +63,7 @@ export class GitHubClient {
   private readonly token: string | undefined;
   private readonly baseUrl: string;
   private rateLimitInfo: RateLimitInfo | null = null;
+  private static readonly ETAG_CACHE_MAX = 1000;
   private readonly etagCache = new Map<string, { etag: string; data: any }>();
 
   constructor(options: GitHubClientOptions) {
@@ -279,11 +280,16 @@ export class GitHubClient {
       });
     }
 
-    // Cache ETag
+    // Cache ETag (with LRU eviction at max size)
     const etag = response.headers.get('etag');
     if (etag && response.ok && method === 'GET') {
       const cloned = response.clone();
       cloned.json().then(data => {
+        if (this.etagCache.size >= GitHubClient.ETAG_CACHE_MAX) {
+          // Delete the oldest entry (first key in insertion-order Map)
+          const oldest = this.etagCache.keys().next().value;
+          if (oldest !== undefined) this.etagCache.delete(oldest);
+        }
         this.etagCache.set(url, { etag, data });
       }).catch(() => {});
     }

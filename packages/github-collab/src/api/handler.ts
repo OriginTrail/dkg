@@ -4,6 +4,11 @@ import { GitHubClient } from '../github/client.js';
 
 const PREFIX = '/api/apps/github-collab';
 
+/** Strip characters that could break IRI syntax in SPARQL interpolation. */
+function sanitizeIriSegment(value: string): string {
+  return value.replace(/[<>"{}|\\^`\s]/g, '');
+}
+
 function json(res: ServerResponse, status: number, data: unknown): true {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
   res.end(JSON.stringify(data));
@@ -295,7 +300,8 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
       const prsMatch = subpath.match(/^\/repos\/([^/]+)\/([^/]+)\/prs$/);
       if (req.method === 'GET' && prsMatch) {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-        const [, owner, repo] = prsMatch;
+        const owner = sanitizeIriSegment(prsMatch[1]);
+        const repo = sanitizeIriSegment(prsMatch[2]);
 
         const allowedStates = ['open', 'closed', 'merged', 'all'];
         const rawState = url.searchParams.get('state') ?? 'all';
@@ -331,7 +337,9 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
       const prDetailMatch = subpath.match(/^\/repos\/([^/]+)\/([^/]+)\/prs\/(\d+)$/);
       if (req.method === 'GET' && prDetailMatch) {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-        const [, owner, repo, numStr] = prDetailMatch;
+        const owner = sanitizeIriSegment(prDetailMatch[1]);
+        const repo = sanitizeIriSegment(prDetailMatch[2]);
+        const numStr = prDetailMatch[3];
         const prNumber = Number(numStr);
 
         const sparql = `
@@ -348,7 +356,8 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
       const branchesMatch = subpath.match(/^\/repos\/([^/]+)\/([^/]+)\/branches$/);
       if (req.method === 'GET' && branchesMatch) {
         if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-        const [, owner, repo] = branchesMatch;
+        const owner = sanitizeIriSegment(branchesMatch[1]);
+        const repo = sanitizeIriSegment(branchesMatch[2]);
         const repoConfig = coordinator.getRepoConfig(owner, repo);
         if (!repoConfig?.githubToken) {
           return json(res, 400, { error: 'No GitHub token configured for this repo' });
@@ -360,7 +369,10 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
 
       return json(res, 404, { error: 'Not found' });
     } catch (err: any) {
-      return json(res, 400, { error: err.message });
+      const msg = err.message ?? '';
+      const isClientError = err instanceof SyntaxError
+        || /Missing|not found|not configured|shared mode|Invalid/i.test(msg);
+      return json(res, isClientError ? 400 : 500, { error: msg });
     }
   }) as AppRequestHandler & { destroy: () => void };
 

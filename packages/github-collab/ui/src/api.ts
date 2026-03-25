@@ -140,6 +140,48 @@ export function fetchPullRequest(owner: string, repo: string, number: number) {
   return apiFetch(`/repos/${owner}/${repo}/prs/${number}`);
 }
 
+// --- Issues ---
+
+export async function fetchIssues(owner: string, repo: string, state = 'all', limit = 50) {
+  const sparql = `
+    SELECT ?issue ?number ?title ?state ?author ?createdAt WHERE {
+      ?issue a <https://ontology.dkg.io/ghcode#Issue> ;
+             <https://ontology.dkg.io/ghcode#issueNumber> ?number ;
+             <https://ontology.dkg.io/ghcode#inRepo> <urn:github:${owner}/${repo}> .
+      OPTIONAL { ?issue <https://ontology.dkg.io/ghcode#title> ?title }
+      OPTIONAL { ?issue <https://ontology.dkg.io/ghcode#state> ?state }
+      OPTIONAL { ?issue <https://ontology.dkg.io/ghcode#author> ?authorUri . ?authorUri <https://ontology.dkg.io/ghcode#login> ?author }
+      OPTIONAL { ?issue <https://ontology.dkg.io/ghcode#createdAt> ?createdAt }
+      ${state !== 'all' ? `FILTER(?state = "${state}")` : ''}
+    }
+    ORDER BY DESC(?createdAt)
+    LIMIT ${limit}
+  `;
+  const raw = await executeQuery(sparql, `${owner}/${repo}`);
+  const bindings = raw?.result?.bindings ?? [];
+  return { issues: cleanBindings(bindings), total: bindings.length };
+}
+
+// --- Commits ---
+
+export async function fetchCommits(owner: string, repo: string, limit = 50) {
+  const sparql = `
+    SELECT ?commit ?sha ?message ?author ?committedAt WHERE {
+      ?commit a <https://ontology.dkg.io/ghcode#Commit> ;
+              <https://ontology.dkg.io/ghcode#sha> ?sha ;
+              <https://ontology.dkg.io/ghcode#inRepo> <urn:github:${owner}/${repo}> .
+      OPTIONAL { ?commit <https://ontology.dkg.io/ghcode#message> ?message }
+      OPTIONAL { ?commit <https://ontology.dkg.io/ghcode#author> ?authorUri . ?authorUri <https://ontology.dkg.io/ghcode#login> ?author }
+      OPTIONAL { ?commit <https://ontology.dkg.io/ghcode#committedAt> ?committedAt }
+    }
+    ORDER BY DESC(?committedAt)
+    LIMIT ${limit}
+  `;
+  const raw = await executeQuery(sparql, `${owner}/${repo}`);
+  const bindings = raw?.result?.bindings ?? [];
+  return { commits: cleanBindings(bindings), total: bindings.length };
+}
+
 // --- Conversion ---
 
 export function convertToShared(owner: string, repo: string) {

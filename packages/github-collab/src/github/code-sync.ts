@@ -141,12 +141,13 @@ export class CodeSync {
     graph: string,
     options: CodeSyncOptions = {},
     onProgress?: (progress: CodeSyncProgress) => void,
+    existingTreeSha?: string,
   ): Promise<CodeEntitySyncResult> {
     const maxSize = options.maxFileSize ?? 100_000;
 
-    // 1. Get tree
+    // 1. Get tree (reuse treeSha if already fetched by syncFileTree)
     onProgress?.({ phase: 'tree', current: 0, total: 1 });
-    const { treeSha } = await this.client.getCommitSha(owner, repo, branch);
+    const treeSha = existingTreeSha ?? (await this.client.getCommitSha(owner, repo, branch)).treeSha;
     const treeData = await this.client.getTree(owner, repo, treeSha, true);
     const allEntries: GitTreeEntry[] = treeData.tree ?? [];
     const filtered = this.filterEntries(allEntries, maxSize, options);
@@ -156,15 +157,23 @@ export class CodeSync {
     const parseableFiles = filtered.filter(e => e.type === 'blob' && isParseable(e.path));
 
     // 3. Fetch and parse blobs in batches
-    const BATCH_SIZE = 20;
-    const BATCH_DELAY_MS = 50;
+    let batchSize = 20;
+    let batchDelayMs = 50;
     const parsedFiles = new Map<string, ParseResult>();
     const quads: Quad[] = [];
     let totalEntities = 0;
     let totalImports = 0;
 
-    for (let i = 0; i < parseableFiles.length; i += BATCH_SIZE) {
-      const batch = parseableFiles.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < parseableFiles.length; i += batchSize) {
+      // Check rate limit before each batch and throttle if running low
+      const rateLimit = this.client.getRateLimit();
+      if (rateLimit && rateLimit.remaining < 100) {
+        console.warn(`[CodeSync] Rate limit low (${rateLimit.remaining} remaining), reducing batch size`);
+        batchSize = 5;
+        batchDelayMs = 500;
+      }
+
+      const batch = parseableFiles.slice(i, i + batchSize);
       onProgress?.({ phase: 'parsing', current: i, total: parseableFiles.length });
 
       const results = await Promise.all(
@@ -192,8 +201,8 @@ export class CodeSync {
       }
 
       // Delay between batches to be respectful of rate limits
-      if (i + BATCH_SIZE < parseableFiles.length) {
-        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+      if (i + batchSize < parseableFiles.length) {
+        await new Promise(resolve => setTimeout(resolve, batchDelayMs));
       }
     }
 
@@ -221,7 +230,7 @@ export class CodeSync {
     maxSize: number,
     options: CodeSyncOptions,
   ): GitTreeEntry[] {
-    const includeExt = DEFAULT_INCLUDE_EXTENSIONS;
+    const includeExt = new Set(DEFAULT_INCLUDE_EXTENSIONS);
     if (options.includeExtensions) {
       for (const ext of options.includeExtensions) {
         includeExt.add(ext.startsWith('.') ? ext : `.${ext}`);

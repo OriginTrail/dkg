@@ -1,7 +1,90 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { executeQuery, fetchBranches } from '../api.js';
 import { GraphCanvas } from '../components/GraphCanvas.js';
 import { useRepo, repoKey } from '../context/RepoContext.js';
+
+const ENTITY_TYPES = [
+  'Repository', 'PullRequest', 'Issue', 'Commit', 'Branch',
+  'File', 'Directory', 'Class', 'Function', 'User', 'Review',
+];
+
+function NodeDetailPanel({ nodeId, repo, onClose }: { nodeId: string; repo?: string; onClose: () => void }) {
+  const [properties, setProperties] = useState<Array<{ p: string; o: string }>>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    const sparql = `SELECT ?p ?o WHERE { <${nodeId}> ?p ?o } LIMIT 100`;
+    executeQuery(sparql, repo)
+      .then(result => {
+        const bindings = result?.result?.bindings ?? [];
+        setProperties(bindings.map((b: any) => ({
+          p: String(b.p ?? ''),
+          o: String(b.o ?? ''),
+        })));
+      })
+      .catch(() => setProperties([]))
+      .finally(() => setLoading(false));
+  }, [nodeId, repo]);
+
+  // Determine type from properties
+  const rdfType = properties.find(p => p.p.includes('rdf-syntax-ns#type'));
+  const typeName = rdfType?.o.split('#').pop() ?? rdfType?.o.split('/').pop() ?? '';
+
+  // Check if it's a GitHub entity
+  const isGitHub = nodeId.startsWith('urn:github:');
+  let githubUrl: string | null = null;
+  if (isGitHub) {
+    const parts = nodeId.replace('urn:github:', '').split('/');
+    if (parts.length >= 2) {
+      const [owner, repoName, ...rest] = parts;
+      if (rest[0] === 'pr') githubUrl = `https://github.com/${owner}/${repoName}/pull/${rest[1]}`;
+      else if (rest[0] === 'issue') githubUrl = `https://github.com/${owner}/${repoName}/issues/${rest[1]}`;
+      else if (rest[0] === 'commit') githubUrl = `https://github.com/${owner}/${repoName}/commit/${rest[1]}`;
+      else if (rest.length === 0) githubUrl = `https://github.com/${owner}/${repoName}`;
+    }
+  }
+
+  return (
+    <div className="node-detail-panel">
+      <div className="node-detail-header">
+        <span className="node-detail-title">
+          {typeName || 'Node'} Detail
+        </span>
+        <button className="btn btn-small btn-secondary" onClick={onClose}>Close</button>
+      </div>
+      <div className="node-detail-uri mono">{nodeId}</div>
+
+      {loading ? (
+        <p className="text-muted">Loading properties...</p>
+      ) : properties.length > 0 ? (
+        <div className="table-container">
+          <table className="data-table">
+            <thead><tr><th>Predicate</th><th>Value</th></tr></thead>
+            <tbody>
+              {properties.map((row, i) => (
+                <tr key={i}>
+                  <td className="mono truncate">{row.p}</td>
+                  <td className="mono truncate">{row.o}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="text-muted">No properties found for this node.</p>
+      )}
+
+      {githubUrl && (
+        <div style={{ marginTop: 8 }}>
+          <a href={githubUrl} target="_blank" rel="noopener noreferrer" className="btn btn-small btn-secondary">
+            View on GitHub
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function GraphExplorerPage() {
   const { selectedRepo } = useRepo();
@@ -18,19 +101,38 @@ export function GraphExplorerPage() {
   const [branches, setBranches] = useState<Array<{ name: string; protected: boolean }>>([]);
   const [selectedBranch, setSelectedBranch] = useState<string>('');
   const [branchesLoading, setBranchesLoading] = useState(false);
+  const [defaultBranch, setDefaultBranch] = useState<string>('');
+
+  // Graph sidebar state
+  const [typeFilters, setTypeFilters] = useState<Set<string>>(new Set(ENTITY_TYPES));
+  const [searchText, setSearchText] = useState('');
+  const [tripleCount, setTripleCount] = useState(0);
+
+  // Node detail state
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const scopedRepo = selectedRepo ? repoKey(selectedRepo) : undefined;
 
-  // Load branches when repo changes
+  // Load branches when repo changes, detect default branch
   useEffect(() => {
     if (!selectedRepo) {
       setBranches([]);
+      setDefaultBranch('');
       return;
     }
     setBranchesLoading(true);
     fetchBranches(selectedRepo.owner, selectedRepo.repo)
       .then(result => {
-        setBranches(result.branches ?? []);
+        const branchList = result.branches ?? [];
+        setBranches(branchList);
+        // Default to main or master if available
+        const def = branchList.find((b: any) => b.name === 'main')
+          ?? branchList.find((b: any) => b.name === 'master')
+          ?? branchList[0];
+        if (def) {
+          setDefaultBranch(def.name);
+          setSelectedBranch(def.name);
+        }
       })
       .catch(() => {
         setBranches([]);
@@ -57,6 +159,15 @@ export function GraphExplorerPage() {
       setLoading(false);
     }
   }, [sparql, scopedRepo, includeWorkspace]);
+
+  const toggleTypeFilter = (type: string) => {
+    setTypeFilters(prev => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
+    });
+  };
 
   return (
     <div className="page">
@@ -92,7 +203,7 @@ export function GraphExplorerPage() {
             ))}
           </select>
           <span className="text-muted" style={{ marginTop: 0 }}>
-            Select a branch to filter the knowledge graph to entities on that branch
+            {defaultBranch ? `Default: ${defaultBranch}` : 'Select a branch to filter'}
           </span>
         </div>
       )}
@@ -113,7 +224,58 @@ export function GraphExplorerPage() {
       </div>
 
       {tab === 'visual' && (
-        <GraphCanvas repo={scopedRepo} branch={selectedBranch || undefined} />
+        <div className="graph-explorer-layout">
+          <div className="graph-explorer-main">
+            <GraphCanvas
+              repo={scopedRepo}
+              branch={selectedBranch || undefined}
+              onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
+              onTripleCount={setTripleCount}
+            />
+            {selectedNodeId && (
+              <NodeDetailPanel
+                nodeId={selectedNodeId}
+                repo={scopedRepo}
+                onClose={() => setSelectedNodeId(null)}
+              />
+            )}
+          </div>
+
+          {/* Sidebar with filters */}
+          <div className="graph-sidebar">
+            <div className="graph-sidebar-section">
+              <div className="graph-sidebar-title">Triples</div>
+              <div className="graph-triple-count">{tripleCount} loaded</div>
+            </div>
+
+            <div className="graph-sidebar-section">
+              <div className="graph-sidebar-title">Search Nodes</div>
+              <input
+                type="text"
+                className="graph-search-input"
+                placeholder="Filter nodes..."
+                value={searchText}
+                onChange={e => setSearchText(e.target.value)}
+              />
+            </div>
+
+            <div className="graph-sidebar-section">
+              <div className="graph-sidebar-title">Entity Types</div>
+              <div className="graph-filter-list">
+                {ENTITY_TYPES.map(type => (
+                  <label key={type} className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={typeFilters.has(type)}
+                      onChange={() => toggleTypeFilter(type)}
+                    />
+                    {type}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {tab === 'sparql' && (
