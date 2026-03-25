@@ -8,7 +8,8 @@ import {
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
-  type DKGNodeConfig, type OperationContext,
+  resolveVisibility,
+  type DKGNodeConfig, type OperationContext, type Visibility, type AccessPolicy,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -36,7 +37,10 @@ import { multiaddr } from '@multiformats/multiaddr';
 interface PublishOpts {
   onPhase?: PhaseCallback;
   operationCtx?: OperationContext;
-  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  visibility?: Visibility;
+  /** @deprecated Use visibility instead */
+  accessPolicy?: AccessPolicy;
+  /** @deprecated Use visibility: { peers: [...] } instead */
   allowedPeers?: string[];
 }
 
@@ -1273,13 +1277,17 @@ export class DKGAgent {
         );
       }
     }
+    const resolved = resolveVisibility(opts?.visibility, {
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
+    });
     const result = await this.publisher.publish({
       paranetId,
       quads,
       privateQuads,
       publisherPeerId: this.peerId,
-      accessPolicy: opts?.accessPolicy,
-      allowedPeers: opts?.allowedPeers,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
       operationCtx: ctx,
       onPhase,
     });
@@ -1347,17 +1355,38 @@ export class DKGAgent {
 
   /**
    * Write quads to the paranet's workspace graph (no chain, no TRAC).
-   * When localOnly is false (default), replicates via GossipSub workspace topic.
-   * When localOnly is true, stores locally without broadcasting — use for private data.
+   *
+   * Visibility controls both broadcast and access policy:
+   * - `'private'` — local-only, no broadcast, ownerOnly access (new default)
+   * - `'public'` — broadcast to peers, public access
+   * - `{ peers: [...] }` — broadcast to peers, allowList access
+   *
+   * The legacy `localOnly` option is still supported for backward compatibility.
+   * When neither `visibility` nor `localOnly` is specified, defaults to `'private'`
+   * (no broadcast) — a deliberate change from the previous broadcast-by-default.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ workspaceOperationId: string }> {
+  async writeToWorkspace(
+    paranetId: string,
+    quads: Quad[],
+    opts?: {
+      visibility?: Visibility;
+      /** @deprecated Use visibility: 'private' instead */
+      localOnly?: boolean;
+      operationCtx?: OperationContext;
+    },
+  ): Promise<{ workspaceOperationId: string }> {
+    // When neither visibility nor localOnly is specified, default to private
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly === false ? 'public' : undefined);
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly ?? true });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
-    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId} (visibility=${typeof effectiveVisibility === 'object' ? 'peers' : effectiveVisibility ?? 'private'})`);
     const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
     });
-    if (!opts?.localOnly) {
+    if (resolved.broadcast) {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);
@@ -1372,21 +1401,32 @@ export class DKGAgent {
    * Compare-and-swap workspace write. Verifies each condition against the
    * current workspace graph before applying the write atomically.
    * Throws StaleWriteError if any condition fails.
+   *
+   * Visibility semantics are identical to writeToWorkspace().
    */
   async writeConditionalToWorkspace(
     paranetId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+    opts?: {
+      visibility?: Visibility;
+      /** @deprecated Use visibility: 'private' instead */
+      localOnly?: boolean;
+      operationCtx?: OperationContext;
+    },
   ): Promise<{ workspaceOperationId: string }> {
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly === false ? 'public' : undefined);
+    const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly ?? true });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
     const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
     });
-    if (!opts?.localOnly) {
+    if (resolved.broadcast) {
       const topic = paranetWorkspaceTopic(paranetId);
       try {
         await this.gossip.publish(topic, message);
@@ -1401,11 +1441,14 @@ export class DKGAgent {
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
+   *
+   * Default visibility is 'public' for enshrinement (it is the explicit "make permanent" action).
    */
   async enshrineFromWorkspace(
     paranetId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
+      visibility?: Visibility;
       clearWorkspaceAfter?: boolean;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
@@ -1416,12 +1459,17 @@ export class DKGAgent {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
 
+    // Default to public for enshrinement — this is the deliberate "make permanent" action
+    const resolved = resolveVisibility(options?.visibility ?? 'public');
+
     const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
       operationCtx: ctx,
       clearWorkspaceAfter: options?.clearWorkspaceAfter,
       onPhase: options?.onPhase,
       contextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
+      accessPolicy: resolved.accessPolicy,
+      allowedPeers: resolved.allowedPeers,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1758,7 +1806,8 @@ export class DKGAgent {
     replicationPolicy?: string;
     accessPolicy?: number;
     revealOnChain?: boolean;
-    /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
+    visibility?: Visibility;
+    /** @deprecated Use visibility: 'private' instead */
     private?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
@@ -1766,6 +1815,9 @@ export class DKGAgent {
     const paranetUri = paranetDataGraphUri(opts.id);
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
+
+    const resolved = resolveVisibility(opts.visibility, { private: opts.private });
+    const isPrivate = resolved.accessPolicy === 'ownerOnly' && !resolved.broadcast;
 
     const exists = await this.paranetExists(opts.id);
     if (exists) {
@@ -1775,7 +1827,7 @@ export class DKGAgent {
     // Register on chain if a real chain adapter is configured.
     // Private paranets skip on-chain registration and gossip entirely.
     let onChainId: string | undefined;
-    if (opts.private) {
+    if (isPrivate) {
       this.log.info(ctx, `Creating private paranet "${opts.id}" (local-only, no chain, no gossip)`);
     } else if (this.chain.chainId !== 'none') {
       try {
@@ -1825,6 +1877,27 @@ export class DKGAgent {
       });
     }
 
+    // Store access policy in the paranet definition so sync/query can check it.
+    // Uses the same DKG ontology namespace as workspace/publish metadata.
+    if (resolved.accessPolicy !== 'public') {
+      quads.push({
+        subject: paranetUri,
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: `"${resolved.accessPolicy}"`,
+        graph: ontologyGraph,
+      });
+    }
+    if (resolved.allowedPeers.length > 0) {
+      for (const peer of resolved.allowedPeers) {
+        quads.push({
+          subject: paranetUri,
+          predicate: 'http://dkg.io/ontology/allowedPeer',
+          object: `"${peer}"`,
+          graph: ontologyGraph,
+        });
+      }
+    }
+
     // Provenance activity
     const activityUri = `did:dkg:activity:create-paranet:${opts.id}:${Date.now()}`;
     quads.push(
@@ -1842,12 +1915,12 @@ export class DKGAgent {
 
     this.subscribedParanets.set(opts.id, {
       name: opts.name,
-      subscribed: !opts.private,
+      subscribed: !isPrivate,
       synced: true,
       onChainId: onChainId,
     });
 
-    if (!opts.private) {
+    if (!isPrivate) {
       // Auto-subscribe to the new paranet's GossipSub topic
       this.subscribeToParanet(opts.id);
 

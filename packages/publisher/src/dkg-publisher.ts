@@ -397,6 +397,10 @@ export class DKGPublisher implements Publisher {
       onPhase?: PhaseCallback;
       contextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      /** Access policy for the enshrined KC. Default: 'public'. */
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      /** Allowed peer IDs when accessPolicy is 'allowList'. */
+      allowedPeers?: string[];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
@@ -453,6 +457,8 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      accessPolicy: options?.accessPolicy,
+      allowedPeers: options?.allowedPeers,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
