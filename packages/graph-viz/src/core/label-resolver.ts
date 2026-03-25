@@ -61,8 +61,8 @@ export class LabelResolver {
       return this._prefixManager.compact(uri) ?? PrefixManager.localName(uri);
     }
 
-    // Humanized mode
-    return humanize(PrefixManager.localName(uri));
+    // Humanized mode — decode percent-encoding before humanizing
+    return humanize(decodeUriLabel(PrefixManager.localName(uri)));
   }
 
   /** Resolve a type label (used for type badges) */
@@ -89,6 +89,28 @@ export class LabelResolver {
     for (const edge of edges.values()) {
       edge.label = this.resolveEdgeLabel(edge);
     }
+  }
+}
+
+/**
+ * Decode percent-encoded URI segments and extract just the meaningful part.
+ * e.g., "packages%2Fstorage%2Fvitest.config.ts" → "vitest.config.ts"
+ * e.g., "src%2Futils%2Fhelper.ts" → "helper.ts"
+ */
+function decodeUriLabel(label: string): string {
+  if (!label.includes('%')) return label;
+
+  try {
+    const decoded = decodeURIComponent(label);
+    // If the decoded result contains slashes, show just the last segment
+    // (the filename or meaningful identifier)
+    const lastSlash = decoded.lastIndexOf('/');
+    if (lastSlash !== -1) {
+      return decoded.slice(lastSlash + 1);
+    }
+    return decoded;
+  } catch {
+    return label;
   }
 }
 

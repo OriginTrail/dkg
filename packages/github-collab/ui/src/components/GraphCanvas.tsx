@@ -14,20 +14,20 @@ const VIEW_DESCRIPTIONS: Record<string, string> = {
   'agent-activity': 'Active agents, their tasks, and claimed code regions',
 };
 
-/** Graph viz options tuned for the GitHub collaboration views */
+/** Graph viz options tuned for the GitHub collaboration views (500+ nodes) */
 const GRAPH_OPTIONS: RdfGraphVizConfig = {
   labelMode: 'humanized',
   hexagon: {
-    baseSize: 20,
-    minSize: 12,
-    maxSize: 48,
+    baseSize: 10,
+    minSize: 5,
+    maxSize: 24,
     scaleWithDegree: true,
   },
   style: {
-    edgeWidth: 0.8,
-    edgeArrowSize: 3,
-    borderWidth: 1,
-    fontSize: 11,
+    edgeWidth: 0.5,
+    edgeArrowSize: 2,
+    borderWidth: 0.8,
+    fontSize: 10,
     gradient: true,
     gradientIntensity: 0.25,
   },
@@ -57,13 +57,7 @@ export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphC
     setLoading(true);
     setError(null);
     try {
-      let sparql = view.defaultSparql;
-      // If a branch is selected, inject a branch filter into the query
-      if (branch) {
-        const branchFilter = `FILTER(EXISTS { ?s <https://ontology.dkg.io/ghcode#branch> "${branch}" } || !BOUND(?s))`;
-        // Insert branch filter before the closing brace and LIMIT
-        sparql = sparql.replace(/}\s*(LIMIT\s+\d+)/i, `${branchFilter}\n} $1`);
-      }
+      const sparql = view.defaultSparql;
       const result = await executeQuery(sparql, repo || undefined);
       const data = result?.result;
       let parsed: Array<{ subject: string; predicate: string; object: string }> = [];
@@ -87,7 +81,7 @@ export function GraphCanvas({ repo, branch, onNodeClick, onTripleCount }: GraphC
     } finally {
       setLoading(false);
     }
-  }, [repo, branch, onTripleCount]);
+  }, [repo, onTripleCount]);
 
   // Auto-load PR Impact view when repo becomes available
   React.useEffect(() => {

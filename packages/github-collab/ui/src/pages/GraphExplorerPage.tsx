@@ -110,6 +110,7 @@ export function GraphExplorerPage() {
 
   // Node detail state
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [showFilters, setShowFilters] = useState(false);
 
   const scopedRepo = selectedRepo ? repoKey(selectedRepo) : undefined;
 
@@ -170,7 +171,7 @@ export function GraphExplorerPage() {
   };
 
   return (
-    <div className="page">
+    <div className="page page-wide">
       <h2 className="page-title">Graph Explorer</h2>
 
       {selectedRepo && (
@@ -232,6 +233,43 @@ export function GraphExplorerPage() {
               onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
               onTripleCount={setTripleCount}
             />
+
+            {/* Floating toolbar overlay on graph */}
+            <div className="graph-floating-toolbar">
+              <div className="graph-toolbar-pill">
+                <span className="graph-triple-count">{tripleCount} triples</span>
+              </div>
+              <div className="graph-toolbar-pill">
+                <input
+                  type="text"
+                  className="graph-search-input-inline"
+                  placeholder="Filter nodes..."
+                  value={searchText}
+                  onChange={e => setSearchText(e.target.value)}
+                />
+              </div>
+              <button
+                className="graph-toolbar-pill graph-toolbar-toggle"
+                onClick={() => setShowFilters(prev => !prev)}
+              >
+                Types {showFilters ? '\u25B4' : '\u25BE'}
+              </button>
+              {showFilters && (
+                <div className="graph-filter-dropdown">
+                  {ENTITY_TYPES.map(type => (
+                    <label key={type} className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={typeFilters.has(type)}
+                        onChange={() => toggleTypeFilter(type)}
+                      />
+                      {type}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {selectedNodeId && (
               <NodeDetailPanel
                 nodeId={selectedNodeId}
@@ -239,41 +277,6 @@ export function GraphExplorerPage() {
                 onClose={() => setSelectedNodeId(null)}
               />
             )}
-          </div>
-
-          {/* Sidebar with filters */}
-          <div className="graph-sidebar">
-            <div className="graph-sidebar-section">
-              <div className="graph-sidebar-title">Triples</div>
-              <div className="graph-triple-count">{tripleCount} loaded</div>
-            </div>
-
-            <div className="graph-sidebar-section">
-              <div className="graph-sidebar-title">Search Nodes</div>
-              <input
-                type="text"
-                className="graph-search-input"
-                placeholder="Filter nodes..."
-                value={searchText}
-                onChange={e => setSearchText(e.target.value)}
-              />
-            </div>
-
-            <div className="graph-sidebar-section">
-              <div className="graph-sidebar-title">Entity Types</div>
-              <div className="graph-filter-list">
-                {ENTITY_TYPES.map(type => (
-                  <label key={type} className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={typeFilters.has(type)}
-                      onChange={() => toggleTypeFilter(type)}
-                    />
-                    {type}
-                  </label>
-                ))}
-              </div>
-            </div>
           </div>
         </div>
       )}
