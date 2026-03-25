@@ -39,6 +39,7 @@ const COLORS = {
   codeClaim: '#f97316',   // orange
   annotation: '#a78bfa',  // soft violet
   import: '#fbbf24',      // yellow
+  agent: '#e11d48',       // rose/red — distinct from user (teal)
 };
 
 // ── Shared palette overrides for better edge visibility ──
@@ -58,10 +59,11 @@ export const REPO_OVERVIEW_VIEW: ViewConfig = {
     [`${GH}User`]: { color: COLORS.user, shape: 'circle', sizeMultiplier: 0.4 },
     [`${GH}Branch`]: { color: COLORS.branch, shape: 'circle', sizeMultiplier: 0.5 },
     [`${GH}Commit`]: { color: COLORS.commit, shape: 'circle', sizeMultiplier: 0.35 },
+    [`${GH}Agent`]: { color: COLORS.agent, shape: 'hexagon', sizeMultiplier: 0.6 },
   },
   circleTypes: ['User', 'Branch', 'Commit'],
   tooltip: {
-    titleProperties: ['name', 'title', 'fullName'],
+    titleProperties: ['name', 'title', 'fullName', 'agentName'],
     titleMaxLength: 50,
   },
   defaultSparql: `CONSTRUCT { ?s ?p ?o }
@@ -69,7 +71,7 @@ WHERE {
   ?s a ?type ; ?p ?o .
   FILTER(?type IN (
     <${GH}Repository>, <${GH}PullRequest>, <${GH}Issue>,
-    <${GH}User>, <${GH}Branch>
+    <${GH}User>, <${GH}Branch>, <${GH}Agent>
   ))
 } LIMIT 200`,
 };
@@ -154,7 +156,7 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
     [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.35 },
     [`${GH}PullRequest`]: { color: COLORS.pullRequest, shape: 'hexagon', sizeMultiplier: 0.7 },
     [`${GH}Annotation`]: { color: COLORS.annotation, shape: 'circle', sizeMultiplier: 0.3 },
-    [`${GH}Agent`]: { color: COLORS.user, shape: 'hexagon', sizeMultiplier: 1.0 },
+    [`${GH}Agent`]: { color: COLORS.agent, shape: 'hexagon', sizeMultiplier: 1.0 },
   },
   circleTypes: ['ClaimedRegion', 'File', 'Annotation'],
   tooltip: {

@@ -1291,6 +1291,14 @@ ghcode:merged a rdf:Property ;
 # §14  Agent Sessions & Task Assignment
 # =============================================================================
 
+ghcode:Agent a rdfs:Class ;
+  rdfs:label "Agent" ;
+  rdfs:comment "A coding agent (AI or human) identified by name + DKG node peerId. First-class entity in the graph connected to all its activity." .
+
+ghcode:agent a rdf:Property ;
+  rdfs:range ghcode:Agent ;
+  rdfs:comment "Links an activity (session, claim, decision, annotation) to the agent that performed it." .
+
 ghcode:AgentSession a rdfs:Class ;
   rdfs:subClassOf devgraph:Session ;
   rdfs:label "AgentSession" ;
