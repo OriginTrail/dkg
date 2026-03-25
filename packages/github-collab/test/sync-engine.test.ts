@@ -253,6 +253,37 @@ describe('SyncEngine', () => {
       const found = engine.getSyncJobForRepo('octocat/Hello-World');
       expect(found).toBeDefined();
     });
+
+    it('getSyncJobForRepo returns most recent job (not just running ones)', async () => {
+      engine.addRepo(makeConfig());
+      const job1 = await engine.startFullSync('octocat', 'Hello-World');
+      // Wait briefly for the first job to potentially start
+      await new Promise(r => setTimeout(r, 50));
+      const job2 = await engine.startFullSync('octocat', 'Hello-World');
+
+      const found = engine.getSyncJobForRepo('octocat/Hello-World');
+      expect(found).toBeDefined();
+      expect(found!.jobId).toBe(job2.jobId);
+    });
+
+    it('getSyncJobForRepo returns failed jobs', async () => {
+      engine.addRepo(makeConfig());
+      const job = await engine.startFullSync('octocat', 'Hello-World');
+      // Wait for the background sync to fail (no real GitHub API).
+      // The sync fires fetch requests that fail immediately, so a short wait suffices.
+      await new Promise(r => setTimeout(r, 500));
+
+      const found = engine.getSyncJobForRepo('octocat/Hello-World');
+      expect(found).toBeDefined();
+      // The job should be failed since the mock GitHub client will error
+      expect(['failed', 'running']).toContain(found!.status);
+      // At minimum, the job is visible regardless of status
+      expect(found!.jobId).toBe(job.jobId);
+    });
+
+    it('getSyncJobForRepo returns undefined for unconfigured repo', () => {
+      expect(engine.getSyncJobForRepo('unknown/repo')).toBeUndefined();
+    });
   });
 
   // =========================================================================

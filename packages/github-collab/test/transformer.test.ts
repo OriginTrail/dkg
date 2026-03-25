@@ -7,7 +7,7 @@ import {
   GH, RDF, XSD, PROV, RDFS,
   repoUri, userUri, prUri, issueUri, commitUri, branchUri,
   reviewUri, reviewCommentUri, issueCommentUri, labelUri, milestoneUri, fileDiffUri,
-  paranetId,
+  paranetId, generateParanetSuffix,
   tripleStr, tripleInt, tripleBool, tripleDateTime, tripleUri, tripleTyped,
   type Quad,
 } from '../src/rdf/uri.js';
@@ -109,6 +109,32 @@ describe('URI helpers', () => {
 
   it('paranetId follows github-collab:{owner}/{repo} pattern', () => {
     expect(paranetId('octocat', 'Hello-World')).toBe('github-collab:octocat/Hello-World');
+  });
+
+  it('paranetId with suffix appends colon-separated suffix', () => {
+    expect(paranetId('octocat', 'Hello-World', 'a8f3b2c1')).toBe('github-collab:octocat/Hello-World:a8f3b2c1');
+  });
+
+  it('paranetId without suffix omits trailing colon', () => {
+    const id = paranetId('octocat', 'Hello-World');
+    expect(id).not.toContain('::');
+    expect(id.endsWith(':')).toBe(false);
+  });
+
+  it('paranetId with undefined suffix behaves like no suffix', () => {
+    expect(paranetId('octocat', 'Hello-World', undefined)).toBe('github-collab:octocat/Hello-World');
+  });
+
+  it('generateParanetSuffix returns 8-character hex string', () => {
+    const suffix = generateParanetSuffix();
+    expect(suffix).toHaveLength(8);
+    expect(suffix).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('generateParanetSuffix returns different values on each call', () => {
+    const suffixes = new Set(Array.from({ length: 10 }, () => generateParanetSuffix()));
+    // At least most should be unique (extremely high probability)
+    expect(suffixes.size).toBeGreaterThan(5);
   });
 });
 

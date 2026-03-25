@@ -82,6 +82,7 @@ export interface InviteSentMessage extends BaseMessage {
   repo: string;
   paranetId: string;
   targetPeerId: string;
+  nodeName?: string;
 }
 
 export interface InviteAcceptedMessage extends BaseMessage {
@@ -89,6 +90,7 @@ export interface InviteAcceptedMessage extends BaseMessage {
   invitationId: string;
   repo: string;
   paranetId: string;
+  nodeName?: string;
 }
 
 export interface InviteDeclinedMessage extends BaseMessage {

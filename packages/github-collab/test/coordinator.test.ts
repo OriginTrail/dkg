@@ -235,6 +235,207 @@ describe('GitHubCollabCoordinator', () => {
   });
 
   // =========================================================================
+  // convertToShared
+  // =========================================================================
+
+  describe('convertToShared', () => {
+    it('converts a local repo to shared mode', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World');
+      expect(config!.privacyLevel).toBe('local');
+
+      const result = await coordinator.convertToShared('octocat', 'Hello-World');
+      expect(result.paranetId).toBeTruthy();
+      // The new paranetId should contain a suffix
+      expect(result.paranetId).toMatch(/^github-collab:octocat\/Hello-World:.+$/);
+
+      const updated = coordinator.getRepoConfig('octocat', 'Hello-World');
+      expect(updated!.privacyLevel).toBe('shared');
+      expect(updated!.suffix).toBeTruthy();
+      expect(updated!.paranetId).toBe(result.paranetId);
+    });
+
+    it('is idempotent for already-shared repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World');
+      const originalParanetId = config!.paranetId;
+
+      const result = await coordinator.convertToShared('octocat', 'Hello-World');
+      expect(result.paranetId).toBe(originalParanetId);
+    });
+
+    it('subscribes to GossipSub after conversion', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      expect(agent._subscriptions.size).toBe(0);
+
+      await coordinator.convertToShared('octocat', 'Hello-World');
+      expect(agent._subscriptions.size).toBeGreaterThan(0);
+    });
+
+    it('throws for unconfigured repo', async () => {
+      await expect(
+        coordinator.convertToShared('unknown', 'repo'),
+      ).rejects.toThrow('not configured');
+    });
+  });
+
+  // =========================================================================
+  // Invitations
+  // =========================================================================
+
+  describe('invitations', () => {
+    describe('sendInvitation', () => {
+      it('creates an invitation for a shared repo', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        const invitation = await coordinator.sendInvitation('octocat/Hello-World', 'peer-2');
+        expect(invitation.invitationId).toBeTruthy();
+        expect(invitation.repoKey).toBe('octocat/Hello-World');
+        expect(invitation.toPeerId).toBe('peer-2');
+        expect(invitation.fromPeerId).toBe('test-peer-1');
+        expect(invitation.status).toBe('pending');
+        expect(invitation.direction).toBe('sent');
+      });
+
+      it('throws for unconfigured repo', async () => {
+        await expect(
+          coordinator.sendInvitation('unknown/repo', 'peer-2'),
+        ).rejects.toThrow('not configured');
+      });
+
+      it('throws for local-only repo', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+        await expect(
+          coordinator.sendInvitation('octocat/Hello-World', 'peer-2'),
+        ).rejects.toThrow('shared mode');
+      });
+    });
+
+    describe('acceptInvitation', () => {
+      it('throws for unknown invitation', async () => {
+        await expect(
+          coordinator.acceptInvitation('inv-nonexistent'),
+        ).rejects.toThrow('not found');
+      });
+
+      it('accepts a received invitation and subscribes to paranet', async () => {
+        // Set up a shared repo and simulate receiving an invitation via gossip
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+        const topic = `dkg/paranet/${config.paranetId}/app`;
+
+        // Inject invite:sent message targeted at our peer
+        const inviteMsg = {
+          app: 'github-collab',
+          type: 'invite:sent',
+          peerId: 'remote-peer',
+          timestamp: Date.now(),
+          invitationId: 'inv-test-1',
+          repo: 'octocat/Hello-World',
+          paranetId: config.paranetId,
+          targetPeerId: 'test-peer-1',
+          nodeName: 'remote-node',
+        };
+        agent._injectMessage(topic, new TextEncoder().encode(JSON.stringify(inviteMsg)), 'remote-peer');
+
+        // Now accept the invitation
+        const accepted = await coordinator.acceptInvitation('inv-test-1');
+        expect(accepted.status).toBe('accepted');
+      });
+
+      it('throws for already-processed invitation', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+        const topic = `dkg/paranet/${config.paranetId}/app`;
+
+        const inviteMsg = {
+          app: 'github-collab',
+          type: 'invite:sent',
+          peerId: 'remote-peer',
+          timestamp: Date.now(),
+          invitationId: 'inv-test-2',
+          repo: 'octocat/Hello-World',
+          paranetId: config.paranetId,
+          targetPeerId: 'test-peer-1',
+        };
+        agent._injectMessage(topic, new TextEncoder().encode(JSON.stringify(inviteMsg)), 'remote-peer');
+
+        await coordinator.acceptInvitation('inv-test-2');
+        await expect(
+          coordinator.acceptInvitation('inv-test-2'),
+        ).rejects.toThrow('already accepted');
+      });
+    });
+
+    describe('declineInvitation', () => {
+      it('throws for unknown invitation', async () => {
+        await expect(
+          coordinator.declineInvitation('inv-nonexistent'),
+        ).rejects.toThrow('not found');
+      });
+
+      it('declines a received invitation', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+        const topic = `dkg/paranet/${config.paranetId}/app`;
+
+        const inviteMsg = {
+          app: 'github-collab',
+          type: 'invite:sent',
+          peerId: 'remote-peer',
+          timestamp: Date.now(),
+          invitationId: 'inv-test-3',
+          repo: 'octocat/Hello-World',
+          paranetId: config.paranetId,
+          targetPeerId: 'test-peer-1',
+        };
+        agent._injectMessage(topic, new TextEncoder().encode(JSON.stringify(inviteMsg)), 'remote-peer');
+
+        const declined = await coordinator.declineInvitation('inv-test-3');
+        expect(declined.status).toBe('declined');
+      });
+    });
+
+    describe('getInvitations', () => {
+      it('returns empty sent and received by default', () => {
+        const invitations = coordinator.getInvitations();
+        expect(invitations.sent).toEqual([]);
+        expect(invitations.received).toEqual([]);
+      });
+
+      it('returns sent invitations after sending', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        await coordinator.sendInvitation('octocat/Hello-World', 'peer-2');
+
+        const invitations = coordinator.getInvitations();
+        expect(invitations.sent).toHaveLength(1);
+        expect(invitations.sent[0].toPeerId).toBe('peer-2');
+      });
+
+      it('returns received invitations from gossip', async () => {
+        await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+        const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+        const topic = `dkg/paranet/${config.paranetId}/app`;
+
+        const inviteMsg = {
+          app: 'github-collab',
+          type: 'invite:sent',
+          peerId: 'remote-peer',
+          timestamp: Date.now(),
+          invitationId: 'inv-recv-1',
+          repo: 'octocat/Hello-World',
+          paranetId: config.paranetId,
+          targetPeerId: 'test-peer-1',
+        };
+        agent._injectMessage(topic, new TextEncoder().encode(JSON.stringify(inviteMsg)), 'remote-peer');
+
+        const invitations = coordinator.getInvitations();
+        expect(invitations.received).toHaveLength(1);
+        expect(invitations.received[0].fromPeerId).toBe('remote-peer');
+      });
+    });
+  });
+
+  // =========================================================================
   // destroy
   // =========================================================================
 

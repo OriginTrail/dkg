@@ -18,7 +18,7 @@ export function App() {
             <Route path="/" element={<OverviewPage />} />
             <Route path="/prs" element={<PrIssuePage />} />
             <Route path="/graph" element={<GraphExplorerPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/collaboration" element={<AgentsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

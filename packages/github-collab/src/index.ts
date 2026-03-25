@@ -39,7 +39,7 @@ export type {
 
 // Coordinator
 export { GitHubCollabCoordinator } from './dkg/coordinator.js';
-export type { RepoConfig, ReviewSession, Invitation } from './dkg/coordinator.js';
+export type { RepoConfig, ReviewSession, Invitation, PeerInfo } from './dkg/coordinator.js';
 
 // Sync engine
 export { SyncEngine } from './dkg/sync-engine.js';

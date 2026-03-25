@@ -1,18 +1,36 @@
-import React, { type ReactNode } from 'react';
+import React, { type ReactNode, useState, useEffect, useCallback } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useRepo, repoKey } from '../context/RepoContext.js';
+import { fetchInvitations } from '../api.js';
 
 const TABS = [
   { to: '/', label: 'Overview' },
   { to: '/prs', label: 'PRs & Issues' },
   { to: '/graph', label: 'Graph Explorer' },
-  { to: '/agents', label: 'Agents' },
+  { to: '/collaboration', label: 'Collaboration', badgeKey: 'collaboration' },
   { to: '/settings', label: 'Settings' },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { repos, selectedRepo, selectRepo, loading } = useRepo();
   const navigate = useNavigate();
+  const [pendingInvitationCount, setPendingInvitationCount] = useState(0);
+
+  const pollInvitations = useCallback(async () => {
+    try {
+      const data = await fetchInvitations();
+      const pending = (data.received ?? []).filter((i: any) => i.status === 'pending');
+      setPendingInvitationCount(pending.length);
+    } catch {
+      // silent — badge is not critical
+    }
+  }, []);
+
+  useEffect(() => {
+    pollInvitations();
+    const interval = setInterval(pollInvitations, 30_000);
+    return () => clearInterval(interval);
+  }, [pollInvitations]);
 
   return (
     <div className="app">
@@ -27,6 +45,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}
             >
               {tab.label}
+              {tab.badgeKey === 'collaboration' && pendingInvitationCount > 0 && (
+                <span className="tab-badge">{pendingInvitationCount}</span>
+              )}
             </NavLink>
           ))}
         </nav>

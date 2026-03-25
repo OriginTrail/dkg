@@ -74,10 +74,19 @@ export interface Invitation {
   repoKey: string;
   paranetId: string;
   fromPeerId: string;
+  fromNodeName?: string;
   toPeerId: string;
-  status: 'pending' | 'accepted' | 'declined';
+  status: 'pending' | 'accepted' | 'declined' | 'revoked';
   direction: 'sent' | 'received';
   createdAt: number;
+}
+
+export interface PeerInfo {
+  peerId: string;
+  name?: string;
+  connected: boolean;
+  lastSeen: number;
+  repos: string[];
 }
 
 export class GitHubCollabCoordinator {
@@ -89,6 +98,7 @@ export class GitHubCollabCoordinator {
   private readonly reviewSessions = new Map<string, ReviewSession>();
   private readonly sentInvitations = new Map<string, Invitation>();
   private readonly receivedInvitations = new Map<string, Invitation>();
+  private readonly peers = new Map<string, PeerInfo>();
   private readonly subscribedTopics = new Set<string>();
   private readonly gossipHandler: (topic: string, data: Uint8Array, from: string) => void;
   private readonly log: (msg: string) => void;
@@ -505,6 +515,7 @@ export class GitHubCollabCoordinator {
       repo: repoKey,
       paranetId: config.paranetId,
       targetPeerId: peerId,
+      nodeName: this.nodeName,
     });
 
     this.log(`Sent invitation ${invitationId} to ${peerId} for ${repoKey}`);
@@ -529,10 +540,19 @@ export class GitHubCollabCoordinator {
       invitationId,
       repo: invitation.repoKey,
       paranetId: invitation.paranetId,
+      nodeName: this.nodeName,
     });
 
     this.log(`Accepted invitation ${invitationId} for ${invitation.repoKey}`);
     return invitation;
+  }
+
+  revokeInvitation(invitationId: string): void {
+    const invitation = this.sentInvitations.get(invitationId);
+    if (!invitation) throw new Error(`Invitation ${invitationId} not found`);
+    invitation.status = 'revoked';
+    this.sentInvitations.delete(invitationId);
+    this.log(`Revoked invitation ${invitationId}`);
   }
 
   async declineInvitation(invitationId: string): Promise<Invitation> {
@@ -555,11 +575,22 @@ export class GitHubCollabCoordinator {
     return invitation;
   }
 
-  getInvitations(): { sent: Invitation[]; received: Invitation[] } {
-    return {
-      sent: [...this.sentInvitations.values()],
-      received: [...this.receivedInvitations.values()],
-    };
+  getInvitations(repoKey?: string): { sent: Invitation[]; received: Invitation[] } {
+    let sent = [...this.sentInvitations.values()];
+    let received = [...this.receivedInvitations.values()];
+    if (repoKey) {
+      sent = sent.filter(i => i.repoKey === repoKey);
+      received = received.filter(i => i.repoKey === repoKey);
+    }
+    return { sent, received };
+  }
+
+  getCollaborators(repoKey: string): PeerInfo[] {
+    const config = this.repos.get(repoKey);
+    if (!config) return [];
+    return [...this.peers.values()].filter(p =>
+      p.peerId !== this.myPeerId && p.repos.includes(repoKey),
+    );
   }
 
   // --- GossipSub ---
@@ -634,13 +665,26 @@ export class GitHubCollabCoordinator {
         break;
       }
 
-      case 'node:joined':
+      case 'node:joined': {
+        const peer = this.peers.get(msg.peerId) ?? { peerId: msg.peerId, connected: true, lastSeen: msg.timestamp, repos: [] };
+        peer.connected = true;
+        peer.lastSeen = msg.timestamp;
+        if (msg.nodeName) peer.name = msg.nodeName;
+        if (msg.repo && !peer.repos.includes(msg.repo)) peer.repos.push(msg.repo);
+        this.peers.set(msg.peerId, peer);
         this.log(`Node ${msg.peerId} joined ${msg.repo}`);
         break;
+      }
 
-      case 'node:left':
+      case 'node:left': {
+        const peer = this.peers.get(msg.peerId);
+        if (peer) {
+          peer.repos = peer.repos.filter(r => r !== msg.repo);
+          if (peer.repos.length === 0) peer.connected = false;
+        }
         this.log(`Node ${msg.peerId} left ${msg.repo}`);
         break;
+      }
 
       case 'sync:announce':
         this.log(`Node ${msg.peerId} synced ${msg.repo}: ${msg.quadsWritten} quads`);
@@ -654,6 +698,7 @@ export class GitHubCollabCoordinator {
             repoKey: msg.repo,
             paranetId: msg.paranetId,
             fromPeerId: msg.peerId,
+            fromNodeName: msg.nodeName,
             toPeerId: this.myPeerId,
             status: 'pending',
             direction: 'received',
@@ -682,9 +727,14 @@ export class GitHubCollabCoordinator {
         break;
       }
 
-      case 'ping':
-        // Presence tracking handled externally if needed
+      case 'ping': {
+        const peer = this.peers.get(msg.peerId) ?? { peerId: msg.peerId, connected: true, lastSeen: msg.timestamp, repos: [] };
+        peer.connected = true;
+        peer.lastSeen = msg.timestamp;
+        peer.repos = msg.repos ?? peer.repos;
+        this.peers.set(msg.peerId, peer);
         break;
+      }
     }
   }
 

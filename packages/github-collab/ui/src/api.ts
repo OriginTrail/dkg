@@ -109,10 +109,10 @@ export function fetchPullRequest(owner: string, repo: string, number: number) {
   return apiFetch(`/repos/${owner}/${repo}/prs/${number}`);
 }
 
-// --- Sharing ---
+// --- Conversion ---
 
 export function convertToShared(owner: string, repo: string) {
-  return apiFetch('/config/repo/share', { method: 'POST', body: JSON.stringify({ owner, repo }) });
+  return apiFetch('/convert-to-shared', { method: 'POST', body: JSON.stringify({ owner, repo }) });
 }
 
 // --- Invitations ---
@@ -121,16 +121,27 @@ export function sendInvitation(owner: string, repo: string, peerId: string) {
   return apiFetch('/invite', { method: 'POST', body: JSON.stringify({ owner, repo, peerId }) });
 }
 
-export function getInvitations() {
-  return apiFetch('/invitations');
+export function fetchInvitations(repo?: string) {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  return apiFetch(`/invitations${params}`);
 }
 
 export function acceptInvitation(invitationId: string) {
-  return apiFetch('/invite/accept', { method: 'POST', body: JSON.stringify({ invitationId }) });
+  return apiFetch(`/invitations/${invitationId}/accept`, { method: 'POST' });
 }
 
 export function declineInvitation(invitationId: string) {
-  return apiFetch('/invite/decline', { method: 'POST', body: JSON.stringify({ invitationId }) });
+  return apiFetch(`/invitations/${invitationId}/decline`, { method: 'POST' });
+}
+
+export function revokeInvitation(invitationId: string) {
+  return apiFetch(`/invitations/${invitationId}`, { method: 'DELETE' });
+}
+
+// --- Collaborators ---
+
+export function fetchCollaborators(owner: string, repo: string) {
+  return apiFetch(`/collaborators?repo=${encodeURIComponent(`${owner}/${repo}`)}`);
 }
 
 // --- Branches ---

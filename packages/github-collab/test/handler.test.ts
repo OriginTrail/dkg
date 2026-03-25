@@ -505,6 +505,133 @@ describe('GitHub Collab API handler', () => {
   });
 
   // =========================================================================
+  // POST /convert-to-shared
+  // =========================================================================
+
+  describe('POST /convert-to-shared', () => {
+    it('converts a local repo to shared and returns new paranetId', async () => {
+      await post(handler, '/config/repo', { owner: 'octocat', repo: 'Hello-World' });
+      const result = await post(handler, '/convert-to-shared', { owner: 'octocat', repo: 'Hello-World' });
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      expect(result.body.paranetId).toBeTruthy();
+      expect(result.body.paranetId).toMatch(/^github-collab:octocat\/Hello-World:.+$/);
+    });
+
+    it('returns 400 when owner or repo is missing', async () => {
+      const result = await post(handler, '/convert-to-shared', { owner: 'octocat' });
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('Missing');
+    });
+
+    it('returns 400 for unconfigured repo', async () => {
+      const result = await post(handler, '/convert-to-shared', { owner: 'unknown', repo: 'repo' });
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('not configured');
+    });
+
+    it('returns 503 when no coordinator', async () => {
+      const noAgentHandler = createHandler();
+      const result = await post(noAgentHandler, '/convert-to-shared', { owner: 'o', repo: 'r' });
+      expect(result.status).toBe(503);
+      noAgentHandler.destroy();
+    });
+  });
+
+  // =========================================================================
+  // POST /invite
+  // =========================================================================
+
+  describe('POST /invite', () => {
+    it('sends an invitation for a shared repo', async () => {
+      await post(handler, '/config/repo', { owner: 'octocat', repo: 'Hello-World', privacyLevel: 'shared' });
+      const result = await post(handler, '/invite', { owner: 'octocat', repo: 'Hello-World', peerId: 'peer-2' });
+      expect(result.status).toBe(200);
+      expect(result.body.ok).toBe(true);
+      expect(result.body.invitationId).toBeTruthy();
+      expect(result.body.toPeerId).toBe('peer-2');
+    });
+
+    it('returns 400 when owner, repo, or peerId is missing', async () => {
+      const result = await post(handler, '/invite', { owner: 'octocat', repo: 'Hello-World' });
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('Missing');
+    });
+
+    it('returns 400 for local-only repo', async () => {
+      await post(handler, '/config/repo', { owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      const result = await post(handler, '/invite', { owner: 'octocat', repo: 'Hello-World', peerId: 'peer-2' });
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('shared mode');
+    });
+
+    it('returns 503 when no coordinator', async () => {
+      const noAgentHandler = createHandler();
+      const result = await post(noAgentHandler, '/invite', { owner: 'o', repo: 'r', peerId: 'p' });
+      expect(result.status).toBe(503);
+      noAgentHandler.destroy();
+    });
+  });
+
+  // =========================================================================
+  // GET /invitations
+  // =========================================================================
+
+  describe('GET /invitations', () => {
+    it('returns empty sent and received by default', async () => {
+      const result = await get(handler, '/invitations');
+      expect(result.status).toBe(200);
+      expect(result.body.sent).toEqual([]);
+      expect(result.body.received).toEqual([]);
+    });
+
+    it('returns 503 when no coordinator', async () => {
+      const noAgentHandler = createHandler();
+      const result = await get(noAgentHandler, '/invitations');
+      expect(result.status).toBe(503);
+      noAgentHandler.destroy();
+    });
+  });
+
+  // =========================================================================
+  // POST /invitations/:id/accept
+  // =========================================================================
+
+  describe('POST /invitations/:id/accept', () => {
+    it('returns 400 for unknown invitation', async () => {
+      const result = await post(handler, '/invitations/inv-nonexistent/accept', {});
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('not found');
+    });
+
+    it('returns 503 when no coordinator', async () => {
+      const noAgentHandler = createHandler();
+      const result = await post(noAgentHandler, '/invitations/inv-1/accept', {});
+      expect(result.status).toBe(503);
+      noAgentHandler.destroy();
+    });
+  });
+
+  // =========================================================================
+  // POST /invitations/:id/decline
+  // =========================================================================
+
+  describe('POST /invitations/:id/decline', () => {
+    it('returns 400 for unknown invitation', async () => {
+      const result = await post(handler, '/invitations/inv-nonexistent/decline', {});
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('not found');
+    });
+
+    it('returns 503 when no coordinator', async () => {
+      const noAgentHandler = createHandler();
+      const result = await post(noAgentHandler, '/invitations/inv-1/decline', {});
+      expect(result.status).toBe(503);
+      noAgentHandler.destroy();
+    });
+  });
+
+  // =========================================================================
   // destroy()
   // =========================================================================
 
