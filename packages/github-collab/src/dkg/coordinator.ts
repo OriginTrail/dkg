@@ -16,6 +16,15 @@ import { homedir } from 'node:os';
 import { SyncEngine, type RepoSyncConfig, type SyncScope, type SyncJob, type WebhookResult } from './sync-engine.js';
 import { APP_ID, encodeMessage, decodeMessage, type AppMessage, type MessageType } from './protocol.js';
 import { paranetId as makeParanetId, generateParanetSuffix, type Quad } from '../rdf/uri.js';
+import {
+  ActivityManager,
+  type AgentSession,
+  type CodeClaim,
+  type Decision,
+  type Annotation,
+  type ClaimResult,
+  type ActivityEntry,
+} from './activity-manager.js';
 
 /** Path to persistent config file. */
 function configFilePath(): string {
@@ -115,6 +124,8 @@ export class GitHubCollabCoordinator {
   private readonly log: (msg: string) => void;
   private readonly configPath: string | null;
   private pingTimer?: ReturnType<typeof setInterval>;
+  private cleanupTimer?: ReturnType<typeof setInterval>;
+  readonly activity: ActivityManager;
 
   constructor(agent: DKGAgent, config?: { name?: string; configPath?: string | null }, log?: (msg: string) => void) {
     this.agent = agent;
@@ -129,12 +140,17 @@ export class GitHubCollabCoordinator {
       (repoKey, scope, quadsWritten) => this.onSyncComplete(repoKey, scope, quadsWritten),
     );
 
+    this.activity = new ActivityManager(this.log);
+
     this.gossipHandler = (topic: string, data: Uint8Array, from: string) => {
       this.handleGossipMessage(topic, data, from);
     };
 
     // Ping timer for presence tracking
     this.pingTimer = setInterval(() => this.broadcastPing(), 60_000);
+
+    // Cleanup timer for abandoned sessions (every 2 min)
+    this.cleanupTimer = setInterval(() => this.activity.cleanupAbandonedSessions(), 120_000);
 
     // Restore saved repo configs from disk
     this.restoreFromDisk();
@@ -298,7 +314,7 @@ export class GitHubCollabCoordinator {
     this.saveToDisk();
   }
 
-  async convertToShared(owner: string, repo: string): Promise<{ paranetId: string }> {
+  async convertToShared(owner: string, repo: string): Promise<{ paranetId: string; syncJobId?: string }> {
     const repoKey = `${owner}/${repo}`;
     const config = this.repos.get(repoKey);
     if (!config) throw new Error(`Repository ${repoKey} is not configured`);
@@ -341,7 +357,22 @@ export class GitHubCollabCoordinator {
 
     this.log(`Converted ${repoKey} to shared mode → paranet ${newParanetId}`);
     this.saveToDisk();
-    return { paranetId: newParanetId };
+
+    // Auto-trigger full sync to migrate data into the new shared paranet
+    let syncJobId: string | undefined;
+    if (config.githubToken) {
+      try {
+        const job = await this.syncEngine.startFullSync(owner, repo);
+        syncJobId = job.jobId;
+        this.log(`Migration sync started for ${repoKey}: job ${syncJobId}`);
+      } catch (err: any) {
+        this.log(`Migration sync failed to start for ${repoKey}: ${err.message}`);
+      }
+    } else {
+      this.log(`No GitHub token for ${repoKey} — re-sync requires a GitHub token. Add one in Settings.`);
+    }
+
+    return { paranetId: newParanetId, syncJobId };
   }
 
   getRepoConfig(owner: string, repo: string): RepoConfig | undefined {
@@ -829,12 +860,228 @@ export class GitHubCollabCoordinator {
     }).catch(() => {});
   }
 
+  // --- Agent Activity ---
+
+  async startAgentSession(
+    repoKey: string,
+    agentName: string,
+    opts?: { goal?: string; relatedPr?: number; relatedIssue?: number },
+  ): Promise<AgentSession> {
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+
+    const session = this.activity.startSession(agentName, this.myPeerId, opts);
+
+    // Write RDF to workspace
+    const quads = this.activity.generateSessionQuads(session, config.owner, config.repo, config.paranetId);
+    await this.writeToWorkspace(config.paranetId, quads);
+
+    // Broadcast if shared
+    if (config.privacyLevel === 'shared') {
+      await this.broadcastMessage(config.paranetId, {
+        app: APP_ID,
+        type: 'session:started',
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        repo: repoKey,
+        sessionId: session.sessionId,
+        agent: agentName,
+        goal: opts?.goal,
+      });
+    }
+
+    return session;
+  }
+
+  heartbeatAgentSession(sessionId: string): AgentSession {
+    return this.activity.heartbeatSession(sessionId);
+  }
+
+  async addSessionFiles(
+    sessionId: string,
+    files: string[],
+    repoKey: string,
+  ): Promise<{ totalFiles: number; warnings: Array<{ file: string; claimedBy: string; since: string }> }> {
+    const result = this.activity.addModifiedFiles(sessionId, files);
+    return { totalFiles: result.session.modifiedFiles.length, warnings: result.warnings };
+  }
+
+  async endAgentSession(
+    sessionId: string,
+    repoKey: string,
+    summary?: string,
+  ): Promise<{ session: AgentSession; releasedClaims: string[] }> {
+    const config = this.repos.get(repoKey);
+    const result = this.activity.endSession(sessionId, summary);
+
+    // Write final session RDF
+    if (config) {
+      const quads = this.activity.generateSessionQuads(result.session, config.owner, config.repo, config.paranetId);
+      await this.writeToWorkspace(config.paranetId, quads);
+
+      if (config.privacyLevel === 'shared') {
+        const durationSec = Math.floor((Date.now() - result.session.startedAt) / 1000);
+        await this.broadcastMessage(config.paranetId, {
+          app: APP_ID,
+          type: 'session:ended',
+          peerId: this.myPeerId,
+          timestamp: Date.now(),
+          repo: repoKey,
+          sessionId,
+          agent: result.session.agentName,
+          summary,
+          duration: durationSec,
+          filesModified: result.session.modifiedFiles.length,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  async claimFiles(
+    repoKey: string,
+    filePaths: string[],
+    sessionId: string,
+    agentName: string,
+  ): Promise<ClaimResult> {
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+
+    const result = this.activity.claimFiles(filePaths, sessionId, agentName, this.myPeerId);
+
+    // Write RDF for successful claims
+    for (const claim of result.claimed) {
+      const quads = this.activity.generateClaimQuads(claim, config.owner, config.repo, config.paranetId);
+      await this.writeToWorkspace(config.paranetId, quads);
+
+      if (config.privacyLevel === 'shared') {
+        await this.broadcastMessage(config.paranetId, {
+          app: APP_ID,
+          type: 'claim:created',
+          peerId: this.myPeerId,
+          timestamp: Date.now(),
+          repo: repoKey,
+          claimId: claim.claimId,
+          file: claim.filePath,
+          agent: agentName,
+        });
+      }
+    }
+
+    // Broadcast conflicts
+    for (const conflict of result.conflicts) {
+      if (config.privacyLevel === 'shared') {
+        await this.broadcastMessage(config.paranetId, {
+          app: APP_ID,
+          type: 'claim:conflict',
+          peerId: this.myPeerId,
+          timestamp: Date.now(),
+          repo: repoKey,
+          file: conflict.file,
+          claimingAgent: agentName,
+          existingAgent: conflict.existingClaim.agentName,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  releaseClaim(claimId: string): CodeClaim | undefined {
+    return this.activity.releaseClaim(claimId);
+  }
+
+  getActiveClaims(repoKey?: string): CodeClaim[] {
+    return this.activity.getActiveClaims(repoKey);
+  }
+
+  async recordDecision(
+    repoKey: string,
+    input: {
+      summary: string;
+      rationale: string;
+      alternatives?: string[];
+      affectedFiles: string[];
+      agentName: string;
+      sessionId?: string;
+    },
+  ): Promise<Decision> {
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+
+    const decision = this.activity.recordDecision({
+      ...input,
+      peerId: this.myPeerId,
+    });
+
+    // Write RDF
+    const quads = this.activity.generateDecisionQuads(decision, config.owner, config.repo, config.paranetId);
+    await this.writeToWorkspace(config.paranetId, quads);
+
+    if (config.privacyLevel === 'shared') {
+      await this.broadcastMessage(config.paranetId, {
+        app: APP_ID,
+        type: 'decision:recorded',
+        peerId: this.myPeerId,
+        timestamp: Date.now(),
+        repo: repoKey,
+        decisionId: decision.decisionId,
+        summary: decision.summary,
+        agent: decision.agentName,
+      });
+    }
+
+    return decision;
+  }
+
+  async addAnnotation(
+    repoKey: string,
+    input: {
+      targetUri: string;
+      kind: 'finding' | 'suggestion' | 'warning' | 'note';
+      content: string;
+      agentName: string;
+      sessionId?: string;
+    },
+  ): Promise<Annotation> {
+    const config = this.repos.get(repoKey);
+    if (!config) throw new Error(`Repository ${repoKey} is not configured`);
+
+    const annotation = this.activity.addAnnotation({
+      ...input,
+      peerId: this.myPeerId,
+    });
+
+    // Write RDF
+    const quads = this.activity.generateAnnotationQuads(annotation, config.owner, config.repo, config.paranetId);
+    await this.writeToWorkspace(config.paranetId, quads);
+
+    return annotation;
+  }
+
+  getAgentSessions(opts?: { status?: string }): AgentSession[] {
+    return this.activity.getSessions(opts);
+  }
+
+  getDecisions(repoKey?: string): Decision[] {
+    return this.activity.getDecisions(repoKey);
+  }
+
+  getAgentActivity(repoKey?: string, limit?: number): ActivityEntry[] {
+    return this.activity.getActivity(limit);
+  }
+
   // --- Cleanup ---
 
   destroy(): void {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = undefined;
+    }
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
     }
 
     for (const topic of this.subscribedTopics) {

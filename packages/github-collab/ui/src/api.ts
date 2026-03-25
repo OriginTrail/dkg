@@ -222,3 +222,74 @@ export function fetchCollaborators(owner: string, repo: string) {
 export function fetchBranches(owner: string, repo: string) {
   return apiFetch(`/repos/${owner}/${repo}/branches`);
 }
+
+// --- Agent Activity ---
+
+export function startSession(repoKey: string, agentName: string, opts?: { goal?: string; relatedPr?: number; relatedIssue?: number }) {
+  return apiFetch('/sessions', { method: 'POST', body: JSON.stringify({ repoKey, agentName, ...opts }) });
+}
+
+export function heartbeatSession(sessionId: string) {
+  return apiFetch(`/sessions/${sessionId}/heartbeat`, { method: 'POST' });
+}
+
+export function addSessionFiles(sessionId: string, files: string[], repoKey?: string) {
+  return apiFetch(`/sessions/${sessionId}/files`, { method: 'POST', body: JSON.stringify({ files, repoKey }) });
+}
+
+export function endSession(sessionId: string, summary?: string, repoKey?: string) {
+  return apiFetch(`/sessions/${sessionId}/end`, { method: 'POST', body: JSON.stringify({ summary, repoKey }) });
+}
+
+export function fetchSessions(status?: string) {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  const qs = params.toString();
+  return apiFetch(`/sessions${qs ? '?' + qs : ''}`);
+}
+
+export function createClaim(repoKey: string, files: string[], sessionId: string, agentName: string) {
+  return apiFetch('/claims', { method: 'POST', body: JSON.stringify({ repoKey, files, sessionId, agentName }) });
+}
+
+export function releaseClaim(claimId: string) {
+  return apiFetch(`/claims/${claimId}`, { method: 'DELETE' });
+}
+
+export function fetchClaims(repo?: string) {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  return apiFetch(`/claims${params}`);
+}
+
+export function recordDecision(repoKey: string, input: {
+  summary: string;
+  rationale: string;
+  alternatives?: string[];
+  affectedFiles?: string[];
+  agentName: string;
+  sessionId?: string;
+}) {
+  return apiFetch('/decisions', { method: 'POST', body: JSON.stringify({ repoKey, ...input }) });
+}
+
+export function fetchDecisions(repo?: string) {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  return apiFetch(`/decisions${params}`);
+}
+
+export function addAnnotation(repoKey: string, input: {
+  targetUri: string;
+  kind: string;
+  content: string;
+  agentName: string;
+  sessionId?: string;
+}) {
+  return apiFetch('/annotations', { method: 'POST', body: JSON.stringify({ repoKey, ...input }) });
+}
+
+export function fetchActivity(repo?: string, limit = 50) {
+  const params = new URLSearchParams();
+  if (repo) params.set('repo', repo);
+  params.set('limit', String(limit));
+  return apiFetch(`/activity?${params}`);
+}

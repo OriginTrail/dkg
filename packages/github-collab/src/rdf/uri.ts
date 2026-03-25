@@ -69,6 +69,24 @@ export function directoryUri(owner: string, repo: string, path: string): string 
   return `urn:github:${owner}/${repo}/dir/${encodeURIComponent(path)}`;
 }
 
+// --- Agent Activity URIs ---
+
+export function sessionUri(owner: string, repo: string, sessionId: string): string {
+  return `urn:github:${owner}/${repo}/session/${sessionId}`;
+}
+
+export function decisionUri(owner: string, repo: string, decisionId: string): string {
+  return `urn:github:${owner}/${repo}/decision/${decisionId}`;
+}
+
+export function claimUri(owner: string, repo: string, claimId: string): string {
+  return `urn:github:${owner}/${repo}/claim/${claimId}`;
+}
+
+export function annotationUri(owner: string, repo: string, annotationId: string): string {
+  return `urn:github:${owner}/${repo}/annotation/${annotationId}`;
+}
+
 // --- Graph URIs ---
 
 export function generateParanetSuffix(): string {

@@ -131,7 +131,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         const body = JSON.parse((await readBody(req)).toString());
         if (!body.owner || !body.repo) return json(res, 400, { error: 'Missing owner or repo' });
         const result = await coordinator.convertToShared(body.owner, body.repo);
-        return json(res, 200, { ok: true, ...result });
+        return json(res, 200, { ok: true, paranetId: result.paranetId, syncJobId: result.syncJobId ?? null });
       }
 
       // --- DELETE /config/repo ---
@@ -365,6 +365,178 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         const client = new GitHubClient({ token: repoConfig.githubToken });
         const branches = await client.listBranches(owner, repo);
         return json(res, 200, { branches: branches.map((b: any) => ({ name: b.name, protected: b.protected })) });
+      }
+
+      // =====================================================================
+      // Agent Activity Endpoints
+      // =====================================================================
+
+      // --- POST /sessions ---
+      if (req.method === 'POST' && subpath === '/sessions') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.agentName || !body.repoKey) return json(res, 400, { error: 'Missing agentName or repoKey' });
+        const session = await coordinator.startAgentSession(body.repoKey, body.agentName, {
+          goal: body.goal,
+          relatedPr: body.relatedPr,
+          relatedIssue: body.relatedIssue,
+        });
+        return json(res, 200, { ok: true, sessionId: session.sessionId, startedAt: new Date(session.startedAt).toISOString() });
+      }
+
+      // --- GET /sessions ---
+      if (req.method === 'GET' && subpath === '/sessions') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const status = url.searchParams.get('status') ?? undefined;
+        const sessions = coordinator.getAgentSessions({ status });
+        return json(res, 200, { sessions });
+      }
+
+      // --- POST /sessions/:id/heartbeat ---
+      {
+        const hbMatch = subpath.match(/^\/sessions\/([^/]+)\/heartbeat$/);
+        if (hbMatch && req.method === 'POST') {
+          if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+          const session = coordinator.heartbeatAgentSession(hbMatch[1]);
+          const sessionAge = Math.floor((Date.now() - session.startedAt) / 1000);
+          const activeClaims = coordinator.getActiveClaims().filter(c => c.sessionId === hbMatch[1]).length;
+          return json(res, 200, { ok: true, sessionAge, activeClaims });
+        }
+      }
+
+      // --- POST /sessions/:id/files ---
+      {
+        const filesMatch = subpath.match(/^\/sessions\/([^/]+)\/files$/);
+        if (filesMatch && req.method === 'POST') {
+          if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+          const body = JSON.parse((await readBody(req)).toString());
+          if (!Array.isArray(body.files)) return json(res, 400, { error: 'Missing files array' });
+          const repoKeyParam = body.repoKey ?? url.searchParams.get('repo') ?? '';
+          const result = await coordinator.addSessionFiles(filesMatch[1], body.files, repoKeyParam);
+          return json(res, 200, { ok: true, totalFiles: result.totalFiles, warnings: result.warnings });
+        }
+      }
+
+      // --- POST /sessions/:id/end ---
+      {
+        const endMatch = subpath.match(/^\/sessions\/([^/]+)\/end$/);
+        if (endMatch && req.method === 'POST') {
+          if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+          const body = JSON.parse((await readBody(req)).toString());
+          const repoKeyParam = body.repoKey ?? '';
+          const result = await coordinator.endAgentSession(endMatch[1], repoKeyParam, body.summary);
+          const duration = Math.floor((Date.now() - result.session.startedAt) / 1000);
+          return json(res, 200, {
+            ok: true,
+            sessionId: endMatch[1],
+            duration,
+            filesModified: result.session.modifiedFiles.length,
+            claimsReleased: result.releasedClaims.length,
+          });
+        }
+      }
+
+      // --- POST /claims ---
+      if (req.method === 'POST' && subpath === '/claims') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!Array.isArray(body.files) || !body.sessionId || !body.agentName || !body.repoKey) {
+          return json(res, 400, { error: 'Missing files, sessionId, agentName, or repoKey' });
+        }
+        const result = await coordinator.claimFiles(body.repoKey, body.files, body.sessionId, body.agentName);
+        return json(res, 200, {
+          ok: true,
+          claims: result.claimed.map(c => ({ claimId: c.claimId, file: c.filePath, status: 'active' })),
+          conflicts: result.conflicts.map(c => ({
+            file: c.file,
+            status: 'conflict',
+            existingClaim: {
+              claimId: c.existingClaim.claimId,
+              claimedBy: c.existingClaim.agentName,
+              since: new Date(c.existingClaim.claimedAt).toISOString(),
+            },
+          })),
+        });
+      }
+
+      // --- GET /claims ---
+      if (req.method === 'GET' && subpath === '/claims') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const repoFilter = url.searchParams.get('repo') ?? undefined;
+        const claims = coordinator.getActiveClaims(repoFilter);
+        return json(res, 200, {
+          claims: claims.map(c => ({
+            claimId: c.claimId,
+            file: c.filePath,
+            agent: c.agentName,
+            sessionId: c.sessionId,
+            since: new Date(c.claimedAt).toISOString(),
+          })),
+        });
+      }
+
+      // --- DELETE /claims/:id ---
+      {
+        const claimDeleteMatch = subpath.match(/^\/claims\/([^/]+)$/);
+        if (claimDeleteMatch && req.method === 'DELETE') {
+          if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+          const released = coordinator.releaseClaim(claimDeleteMatch[1]);
+          if (!released) return json(res, 404, { error: 'Claim not found' });
+          return json(res, 200, { ok: true, claimId: claimDeleteMatch[1], releasedAt: new Date().toISOString() });
+        }
+      }
+
+      // --- POST /decisions ---
+      if (req.method === 'POST' && subpath === '/decisions') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.summary || !body.rationale || !body.agentName || !body.repoKey) {
+          return json(res, 400, { error: 'Missing summary, rationale, agentName, or repoKey' });
+        }
+        const decision = await coordinator.recordDecision(body.repoKey, {
+          summary: body.summary,
+          rationale: body.rationale,
+          alternatives: body.alternatives,
+          affectedFiles: body.affectedFiles ?? [],
+          agentName: body.agentName,
+          sessionId: body.sessionId,
+        });
+        return json(res, 200, { ok: true, decisionId: decision.decisionId });
+      }
+
+      // --- GET /decisions ---
+      if (req.method === 'GET' && subpath === '/decisions') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const repoFilter = url.searchParams.get('repo') ?? undefined;
+        const decisions = coordinator.getDecisions(repoFilter);
+        return json(res, 200, { decisions });
+      }
+
+      // --- POST /annotations ---
+      if (req.method === 'POST' && subpath === '/annotations') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const body = JSON.parse((await readBody(req)).toString());
+        if (!body.targetUri || !body.kind || !body.content || !body.agentName || !body.repoKey) {
+          return json(res, 400, { error: 'Missing targetUri, kind, content, agentName, or repoKey' });
+        }
+        const annotation = await coordinator.addAnnotation(body.repoKey, {
+          targetUri: body.targetUri,
+          kind: body.kind,
+          content: body.content,
+          agentName: body.agentName,
+          sessionId: body.sessionId,
+        });
+        return json(res, 200, { ok: true, annotationId: annotation.annotationId });
+      }
+
+      // --- GET /activity ---
+      if (req.method === 'GET' && subpath === '/activity') {
+        if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
+        const repoFilter = url.searchParams.get('repo') ?? undefined;
+        const parsedLimit = parseInt(url.searchParams.get('limit') ?? '50', 10);
+        const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+        const activities = coordinator.getAgentActivity(repoFilter, limit);
+        return json(res, 200, { activities });
       }
 
       return json(res, 404, { error: 'Not found' });

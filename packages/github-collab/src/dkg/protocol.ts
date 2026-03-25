@@ -17,7 +17,14 @@ export type MessageType =
   | 'ping'
   | 'invite:sent'
   | 'invite:accepted'
-  | 'invite:declined';
+  | 'invite:declined'
+  | 'session:started'
+  | 'session:ended'
+  | 'session:heartbeat'
+  | 'claim:created'
+  | 'claim:released'
+  | 'claim:conflict'
+  | 'decision:recorded';
 
 export interface BaseMessage {
   app: typeof APP_ID;
@@ -99,6 +106,62 @@ export interface InviteDeclinedMessage extends BaseMessage {
   repo: string;
 }
 
+export interface SessionStartedMessage extends BaseMessage {
+  type: 'session:started';
+  repo: string;
+  sessionId: string;
+  agent: string;
+  agentType?: string;
+  goal?: string;
+}
+
+export interface SessionEndedMessage extends BaseMessage {
+  type: 'session:ended';
+  repo: string;
+  sessionId: string;
+  agent: string;
+  summary?: string;
+  duration: number;
+  filesModified: number;
+}
+
+export interface SessionHeartbeatMessage extends BaseMessage {
+  type: 'session:heartbeat';
+  repo: string;
+  sessionId: string;
+}
+
+export interface ClaimCreatedMessage extends BaseMessage {
+  type: 'claim:created';
+  repo: string;
+  claimId: string;
+  file: string;
+  agent: string;
+}
+
+export interface ClaimReleasedMessage extends BaseMessage {
+  type: 'claim:released';
+  repo: string;
+  claimId: string;
+  file: string;
+}
+
+export interface ClaimConflictMessage extends BaseMessage {
+  type: 'claim:conflict';
+  repo: string;
+  file: string;
+  claimingAgent: string;
+  existingAgent: string;
+}
+
+export interface DecisionRecordedMessage extends BaseMessage {
+  type: 'decision:recorded';
+  repo: string;
+  decisionId: string;
+  summary: string;
+  agent: string;
+}
+
 export type AppMessage =
   | NodeJoinedMessage
   | NodeLeftMessage
@@ -109,7 +172,14 @@ export type AppMessage =
   | PingMessage
   | InviteSentMessage
   | InviteAcceptedMessage
-  | InviteDeclinedMessage;
+  | InviteDeclinedMessage
+  | SessionStartedMessage
+  | SessionEndedMessage
+  | SessionHeartbeatMessage
+  | ClaimCreatedMessage
+  | ClaimReleasedMessage
+  | ClaimConflictMessage
+  | DecisionRecordedMessage;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

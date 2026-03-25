@@ -92,18 +92,50 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
   name: 'Agent Activity',
   palette: 'midnight',
   nodeTypes: {
-    [`${GH}User`]: { color: '#22d3ee', shape: 'hexagon', sizeMultiplier: 1.4 },
-    [`${GH}PullRequest`]: { color: '#fbbf24', shape: 'hexagon' },
-    [`${GH}Issue`]: { color: '#f97316', shape: 'hexagon' },
-    [`${GH}Review`]: { color: '#a78bfa', shape: 'circle' },
-    [`${GH}Commit`]: { color: '#34d399', shape: 'circle' },
+    [`${GH}AgentSession`]: { color: '#4ade80', shape: 'hexagon', sizeMultiplier: 1.5 },
+    [`${GH}Decision`]: { color: '#fbbf24', shape: 'hexagon' },
+    [`${GH}CodeClaim`]: { color: '#f97316', shape: 'circle' },
+    [`${GH}File`]: { color: '#60a5fa', shape: 'circle' },
+    [`${GH}PullRequest`]: { color: '#8b5cf6', shape: 'hexagon' },
+    [`${GH}Annotation`]: { color: '#a78bfa', shape: 'circle', sizeMultiplier: 0.6 },
   },
-  circleTypes: ['Review', 'Commit'],
-  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+  circleTypes: ['CodeClaim', 'File', 'Annotation'],
+  defaultSparql: `CONSTRUCT {
+  ?session a <${GH}AgentSession> ;
+           <${GH}agentName> ?agent ;
+           <${GH}sessionStatus> ?status ;
+           <${GH}startedAt> ?started ;
+           <${GH}goal> ?goal .
+  ?session <${GH}modifiedFile> ?file .
+  ?claim a <${GH}CodeClaim> ;
+         <${GH}claimedFile> ?file ;
+         <${GH}claimedBy> ?claimAgent .
+  ?decision a <${GH}Decision> ;
+            <${GH}decisionSummary> ?decSum ;
+            <${GH}madeBy> ?decAgent .
+  ?decision <${GH}affectsFile> ?decFile .
+  ?session <${GH}relatedPR> ?pr .
+}
 WHERE {
-  { ?s a <${GH}User> ; ?p ?o }
-  UNION
-  { ?pr <${GH}author> ?s . ?pr ?p ?o }
+  {
+    ?session a <${GH}AgentSession> ;
+             <${GH}agentName> ?agent ;
+             <${GH}sessionStatus> ?status ;
+             <${GH}startedAt> ?started .
+    OPTIONAL { ?session <${GH}goal> ?goal }
+    OPTIONAL { ?session <${GH}modifiedFile> ?file }
+    OPTIONAL { ?session <${GH}relatedPR> ?pr }
+  } UNION {
+    ?claim a <${GH}CodeClaim> ;
+           <${GH}claimedFile> ?file ;
+           <${GH}claimedBy> ?claimAgent ;
+           <${GH}claimStatus> "active" .
+  } UNION {
+    ?decision a <${GH}Decision> ;
+              <${GH}decisionSummary> ?decSum ;
+              <${GH}madeBy> ?decAgent .
+    OPTIONAL { ?decision <${GH}affectsFile> ?decFile }
+  }
 } LIMIT 500`,
 };
 

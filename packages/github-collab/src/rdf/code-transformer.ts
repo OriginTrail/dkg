@@ -10,6 +10,8 @@ import {
   GH, RDF,
   type Quad,
   repoUri, fileUri, directoryUri,
+  sessionUri, decisionUri, claimUri, annotationUri,
+  prUri, issueUri,
   tripleUri, tripleStr, tripleInt, tripleDateTime, tripleBool,
 } from './uri.js';
 import { extname } from 'node:path';
@@ -290,6 +292,180 @@ export function transformRelationships(
       : `${GH}implements`;
 
     quads.push(tripleUri(rel.sourceUri, predicate, rel.targetUri, graph));
+  }
+
+  return quads;
+}
+
+// --- Phase D: Agent Activity Transformation ---
+
+export interface AgentSessionData {
+  sessionId: string;
+  agentName: string;
+  peerId: string;
+  goal?: string;
+  relatedPr?: number;
+  relatedIssue?: number;
+  startedAt: number;
+  endedAt?: number;
+  status: 'active' | 'ended' | 'abandoned';
+  modifiedFiles: string[];
+  summary?: string;
+}
+
+export interface CodeClaimData {
+  claimId: string;
+  filePath: string;
+  peerId: string;
+  agentName: string;
+  sessionId: string;
+  claimedAt: number;
+}
+
+export interface DecisionData {
+  decisionId: string;
+  summary: string;
+  rationale: string;
+  alternatives?: string[];
+  affectedFiles: string[];
+  peerId: string;
+  agentName: string;
+  sessionId?: string;
+  createdAt: number;
+}
+
+export interface AnnotationData {
+  annotationId: string;
+  targetUri: string;
+  kind: 'finding' | 'suggestion' | 'warning' | 'note';
+  content: string;
+  peerId: string;
+  agentName: string;
+  sessionId?: string;
+  createdAt: number;
+}
+
+/**
+ * Transform an agent session to RDF quads.
+ */
+export function transformSession(
+  session: AgentSessionData,
+  owner: string,
+  repo: string,
+  graph: string,
+): Quad[] {
+  const uri = sessionUri(owner, repo, session.sessionId);
+  const quads: Quad[] = [
+    tripleUri(uri, `${RDF}type`, `${GH}AgentSession`, graph),
+    tripleStr(uri, `${GH}sessionId`, session.sessionId, graph),
+    tripleStr(uri, `${GH}agentName`, session.agentName, graph),
+    tripleStr(uri, `${GH}peerId`, session.peerId, graph),
+    tripleDateTime(uri, `${GH}startedAt`, new Date(session.startedAt).toISOString(), graph),
+    tripleStr(uri, `${GH}sessionStatus`, session.status, graph),
+    tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
+  ];
+
+  if (session.goal) {
+    quads.push(tripleStr(uri, `${GH}goal`, session.goal, graph));
+  }
+  if (session.endedAt) {
+    quads.push(tripleDateTime(uri, `${GH}endedAt`, new Date(session.endedAt).toISOString(), graph));
+  }
+  if (session.summary) {
+    quads.push(tripleStr(uri, `${GH}summary`, session.summary, graph));
+  }
+  if (session.relatedPr != null) {
+    quads.push(tripleUri(uri, `${GH}relatedPR`, prUri(owner, repo, session.relatedPr), graph));
+  }
+  if (session.relatedIssue != null) {
+    quads.push(tripleUri(uri, `${GH}relatedIssue`, issueUri(owner, repo, session.relatedIssue), graph));
+  }
+  for (const file of session.modifiedFiles) {
+    quads.push(tripleUri(uri, `${GH}modifiedFile`, fileUri(owner, repo, file), graph));
+  }
+
+  return quads;
+}
+
+/**
+ * Transform a code claim to RDF quads.
+ */
+export function transformClaim(
+  claim: CodeClaimData,
+  owner: string,
+  repo: string,
+  graph: string,
+): Quad[] {
+  const uri = claimUri(owner, repo, claim.claimId);
+  return [
+    tripleUri(uri, `${RDF}type`, `${GH}CodeClaim`, graph),
+    tripleStr(uri, `${GH}claimId`, claim.claimId, graph),
+    tripleUri(uri, `${GH}claimedFile`, fileUri(owner, repo, claim.filePath), graph),
+    tripleStr(uri, `${GH}claimedPath`, claim.filePath, graph),
+    tripleStr(uri, `${GH}claimedBy`, claim.agentName, graph),
+    tripleUri(uri, `${GH}claimSession`, sessionUri(owner, repo, claim.sessionId), graph),
+    tripleStr(uri, `${GH}claimStatus`, 'active', graph),
+    tripleDateTime(uri, `${GH}claimedAt`, new Date(claim.claimedAt).toISOString(), graph),
+    tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
+  ];
+}
+
+/**
+ * Transform a decision to RDF quads.
+ */
+export function transformDecision(
+  decision: DecisionData,
+  owner: string,
+  repo: string,
+  graph: string,
+): Quad[] {
+  const uri = decisionUri(owner, repo, decision.decisionId);
+  const quads: Quad[] = [
+    tripleUri(uri, `${RDF}type`, `${GH}Decision`, graph),
+    tripleStr(uri, `${GH}decisionId`, decision.decisionId, graph),
+    tripleStr(uri, `${GH}decisionSummary`, decision.summary, graph),
+    tripleStr(uri, `${GH}rationale`, decision.rationale, graph),
+    tripleStr(uri, `${GH}madeBy`, decision.agentName, graph),
+    tripleDateTime(uri, `${GH}madeAt`, new Date(decision.createdAt).toISOString(), graph),
+    tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
+  ];
+
+  if (decision.alternatives && decision.alternatives.length > 0) {
+    quads.push(tripleStr(uri, `${GH}alternatives`, decision.alternatives.join('; '), graph));
+  }
+  if (decision.sessionId) {
+    quads.push(tripleUri(uri, `${GH}inSession`, sessionUri(owner, repo, decision.sessionId), graph));
+  }
+  for (const file of decision.affectedFiles) {
+    quads.push(tripleUri(uri, `${GH}affectsFile`, fileUri(owner, repo, file), graph));
+  }
+
+  return quads;
+}
+
+/**
+ * Transform an annotation to RDF quads.
+ */
+export function transformAnnotation(
+  annotation: AnnotationData,
+  owner: string,
+  repo: string,
+  graph: string,
+): Quad[] {
+  const uri = annotationUri(owner, repo, annotation.annotationId);
+  const quads: Quad[] = [
+    tripleUri(uri, `${RDF}type`, `${GH}Annotation`, graph),
+    tripleStr(uri, `${GH}annotationId`, annotation.annotationId, graph),
+    tripleUri(uri, `${GH}annotates`, annotation.targetUri, graph),
+    tripleStr(uri, `${GH}annotationType`, annotation.kind, graph),
+    tripleStr(uri, `${GH}annotationText`, annotation.content, graph),
+    tripleStr(uri, `${GH}annotatedBy`, annotation.agentName, graph),
+    tripleDateTime(uri, `${GH}annotatedAt`, new Date(annotation.createdAt).toISOString(), graph),
+    tripleUri(uri, `${GH}inRepo`, repoUri(owner, repo), graph),
+  ];
+
+  if (annotation.sessionId) {
+    quads.push(tripleUri(uri, `${GH}inSession`, sessionUri(owner, repo, annotation.sessionId), graph));
   }
 
   return quads;

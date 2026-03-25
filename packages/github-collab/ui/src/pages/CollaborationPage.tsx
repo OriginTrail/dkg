@@ -9,6 +9,11 @@ import {
   declineInvitation,
   revokeInvitation,
   fetchCollaborators,
+  fetchSessions,
+  fetchClaims,
+  fetchDecisions,
+  fetchActivity,
+  fetchSyncStatus,
 } from '../api.js';
 
 // --- Types ---
@@ -83,6 +88,14 @@ export function AgentsPage() {
   const [inviting, setInviting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showConvertDialog, setShowConvertDialog] = useState(false);
+  const [migrationSyncJobId, setMigrationSyncJobId] = useState<string | null>(null);
+  const [migrationProgress, setMigrationProgress] = useState<string | null>(null);
+
+  // Activity state
+  const [activeSessions, setActiveSessions] = useState<any[]>([]);
+  const [claims, setClaims] = useState<any[]>([]);
+  const [decisions, setDecisions] = useState<any[]>([]);
+  const [activityFeed, setActivityFeed] = useState<any[]>([]);
 
   const isLocal = !selectedRepo || (selectedRepo.privacyLevel ?? 'local') === 'local';
   const isShared = selectedRepo && selectedRepo.privacyLevel === 'shared';
@@ -123,22 +136,83 @@ export function AgentsPage() {
     return () => clearInterval(interval);
   }, [selectedRepo, isShared]);
 
+  // Poll agent activity for shared repos
+  useEffect(() => {
+    if (!selectedRepo || !isShared) {
+      setActiveSessions([]);
+      setClaims([]);
+      setDecisions([]);
+      setActivityFeed([]);
+      return;
+    }
+    const rk = `${selectedRepo.owner}/${selectedRepo.repo}`;
+    const loadActivity = async () => {
+      try {
+        const [sessData, claimData, decData, actData] = await Promise.all([
+          fetchSessions('active'),
+          fetchClaims(rk),
+          fetchDecisions(rk),
+          fetchActivity(rk, 50),
+        ]);
+        setActiveSessions(sessData.sessions ?? []);
+        setClaims(claimData.claims ?? []);
+        setDecisions(decData.decisions ?? []);
+        setActivityFeed(actData.activities ?? []);
+      } catch { /* silent */ }
+    };
+    loadActivity();
+    const interval = setInterval(loadActivity, 10_000);
+    return () => clearInterval(interval);
+  }, [selectedRepo, isShared]);
+
   // --- Actions ---
 
   async function handleConvert() {
     if (!selectedRepo) return;
     setSharing(true);
     setError(null);
+    setMigrationProgress('Creating shared space...');
     try {
-      await convertToShared(selectedRepo.owner, selectedRepo.repo);
+      const result = await convertToShared(selectedRepo.owner, selectedRepo.repo);
+      if (result.syncJobId) {
+        setMigrationSyncJobId(result.syncJobId);
+        setMigrationProgress('Migrating data to shared space...');
+      } else {
+        setShowConvertDialog(false);
+      }
       await refreshRepos();
-      setShowConvertDialog(false);
     } catch (err: any) {
       setError(err.message ?? 'Failed to convert to shared mode');
+      setMigrationProgress(null);
     } finally {
       setSharing(false);
     }
   }
+
+  // Poll migration sync progress
+  useEffect(() => {
+    if (!migrationSyncJobId) return;
+    const interval = setInterval(async () => {
+      try {
+        const job = await fetchSyncStatus(migrationSyncJobId);
+        if (job.status === 'completed') {
+          setMigrationProgress(null);
+          setMigrationSyncJobId(null);
+          setShowConvertDialog(false);
+        } else if (job.status === 'failed') {
+          setMigrationProgress('Sync incomplete. You can retry from the Settings page.');
+          setMigrationSyncJobId(null);
+        } else {
+          // Show progress phases
+          const phases = Object.entries(job.progress ?? {}).map(
+            ([phase, p]: [string, any]) => `${phase}: ${p.synced}/${p.total}`,
+          );
+          setMigrationProgress(`Syncing from GitHub... ${phases.join(', ')}`);
+        }
+      } catch { /* silent */ }
+    }, 2_000);
+    return () => clearInterval(interval);
+  }, [migrationSyncJobId]);
 
   async function handleInvite() {
     if (!selectedRepo || !peerIdInput.trim()) return;
@@ -234,10 +308,15 @@ export function AgentsPage() {
             <p className="collab-text collab-text--xs collab-text--italic">
               Note: Workspace data in shared mode expires after 30 days unless enshrined (made permanent).
             </p>
+            {migrationProgress && (
+              <p className="collab-text collab-text--small" style={{ color: 'var(--green, #4ade80)' }}>
+                {migrationProgress}
+              </p>
+            )}
             <div className="collab-dialog-actions">
-              <button className="btn btn-secondary" onClick={() => setShowConvertDialog(false)} disabled={sharing}>Cancel</button>
-              <button className="btn btn-success" onClick={handleConvert} disabled={sharing}>
-                {sharing ? 'Converting...' : 'Convert to Shared'}
+              <button className="btn btn-secondary" onClick={() => { setShowConvertDialog(false); setMigrationProgress(null); }} disabled={sharing || !!migrationSyncJobId}>Cancel</button>
+              <button className="btn btn-success" onClick={handleConvert} disabled={sharing || !!migrationSyncJobId}>
+                {sharing ? 'Converting...' : migrationSyncJobId ? 'Syncing...' : 'Convert & Sync'}
               </button>
             </div>
           </div>
@@ -395,16 +474,93 @@ export function AgentsPage() {
         )}
       </div>
 
-      {/* Activity section */}
+      {/* ===== Agent Activity Section ===== */}
       {isShared && (
-        <div className="collab-card">
-          <div className="collab-section-label">Activity</div>
-          {collaborators.length === 0 ? (
-            <p className="collab-text">No activity yet. Invite peers to get started.</p>
-          ) : (
-            <p className="collab-text">Activity log coming soon.</p>
+        <>
+          {/* Active Sessions */}
+          <div className="collab-card">
+            <div className="collab-section-label">Active Sessions ({activeSessions.length})</div>
+            {activeSessions.length === 0 ? (
+              <p className="collab-text">No active agent sessions.</p>
+            ) : (
+              activeSessions.map((s: any) => (
+                <div key={s.sessionId} className="collab-peer-row">
+                  <span className="collab-peer-dot collab-peer-dot--online" />
+                  <div className="collab-peer-info">
+                    <div className="collab-peer-name">{s.agentName}</div>
+                    {s.goal && <div className="collab-text collab-text--xs">{s.goal}</div>}
+                    {s.modifiedFiles?.length > 0 && (
+                      <div className="mono collab-text collab-text--xs">
+                        Files: {s.modifiedFiles.slice(0, 3).join(', ')}{s.modifiedFiles.length > 3 ? ` (+${s.modifiedFiles.length - 3} more)` : ''}
+                      </div>
+                    )}
+                  </div>
+                  <span className="collab-peer-status collab-peer-status--online">
+                    Active {timeAgo(s.startedAt)}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* File Claims */}
+          {claims.length > 0 && (
+            <div className="collab-card">
+              <div className="collab-section-label">File Claims ({claims.length})</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9em' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border, #333)', textAlign: 'left' }}>
+                    <th style={{ padding: '4px 8px' }}>File</th>
+                    <th style={{ padding: '4px 8px' }}>Agent</th>
+                    <th style={{ padding: '4px 8px' }}>Since</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {claims.map((c: any) => (
+                    <tr key={c.claimId} style={{ borderBottom: '1px solid var(--border, #222)' }}>
+                      <td className="mono" style={{ padding: '4px 8px', fontSize: '0.85em' }}>{c.file}</td>
+                      <td style={{ padding: '4px 8px' }}>{c.agent}</td>
+                      <td style={{ padding: '4px 8px' }}>{c.since ? timeAgo(new Date(c.since).getTime()) : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
-        </div>
+
+          {/* Decisions */}
+          {decisions.length > 0 && (
+            <div className="collab-card">
+              <div className="collab-section-label">Recent Decisions ({decisions.length})</div>
+              {decisions.slice(0, 5).map((d: any) => (
+                <div key={d.decisionId} style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid var(--border, #222)' }}>
+                  <div style={{ fontWeight: 600, marginBottom: '4px' }}>{d.summary}</div>
+                  <div className="collab-text collab-text--xs">{d.rationale}</div>
+                  <div className="collab-text collab-text--xs" style={{ marginTop: '4px', opacity: 0.6 }}>
+                    by {d.agentName} {d.createdAt ? timeAgo(d.createdAt) : ''}
+                    {d.affectedFiles?.length > 0 && ` | Affects: ${d.affectedFiles.join(', ')}`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Activity Timeline */}
+          <div className="collab-card">
+            <div className="collab-section-label">Timeline</div>
+            {activityFeed.length === 0 ? (
+              <p className="collab-text">No activity recorded yet.</p>
+            ) : (
+              activityFeed.slice(0, 20).map((a: any, i: number) => (
+                <div key={`${a.entityId ?? i}-${a.timestamp}`} style={{ display: 'flex', gap: '12px', padding: '4px 0', fontSize: '0.9em', borderBottom: '1px solid var(--border, #1a1a1a)' }}>
+                  <span style={{ minWidth: '60px', opacity: 0.5, fontSize: '0.85em' }}>{timeAgo(a.timestamp)}</span>
+                  <span style={{ minWidth: '120px' }}>{a.agent}</span>
+                  <span>{a.detail}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </>
       )}
     </div>
   );

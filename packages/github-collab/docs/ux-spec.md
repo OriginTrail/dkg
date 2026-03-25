@@ -2179,3 +2179,1263 @@ export function convertToShared(owner: string, repo: string) {
   return apiFetch('/convert-to-shared', { method: 'POST', body: JSON.stringify({ owner, repo }) });
 }
 ```
+
+---
+
+## 17. Auto Data Migration on Local-to-Shared Conversion (2026-03-25)
+
+When a user converts a repository from Local Only to Shared mode, existing data in the old local workspace should be migrated to the new shared paranet workspace. This section defines the complete migration UX.
+
+### 17.1 Migration Strategy: Re-sync from GitHub
+
+**Decision**: Re-sync from GitHub rather than copying existing quads.
+
+**Rationale**:
+- The local workspace may contain stale or partial data from earlier sync runs
+- A fresh sync guarantees the shared paranet starts with a clean, consistent snapshot
+- Quad-level copy would require resolving graph URIs (the paranet ID changes, which changes the named graph), introducing fragile rewriting logic
+- Re-sync is already a well-tested path (the sync engine handles it)
+- The migration is a one-time operation per repo, so the extra GitHub API calls are acceptable
+
+**Exception**: If the repo has no GitHub token configured (unlikely for an owner, but possible), fall back to quad copy with graph URI rewriting.
+
+### 17.2 Migration UX Flow
+
+**Trigger**: User clicks "Convert to Shared" in the conversion confirmation dialog (Section 16.7).
+
+**Step 1 — Confirmation dialog** (extends Section 16.7):
+```
+┌──────────────────────────────────────────────────────────┐
+│  Convert to Shared Mode?                                  │
+│                                                          │
+│  Repository: owner/repo                                  │
+│                                                          │
+│  This will:                                              │
+│  * Create a shared space (paranet) for this repo         │
+│  * Re-sync data from GitHub into the shared space        │
+│  * Allow you to invite other DKG V9 nodes                │
+│                                                          │
+│  Your existing local data will remain on this node as    │
+│  a read-only archive. The shared space gets a fresh      │
+│  sync from GitHub.                                       │
+│                                                          │
+│  Estimated time: depends on repo size (typically 10-60s) │
+│                                                          │
+│              [Cancel]  [Convert & Sync]                   │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Step 2 — Progress indicator** (replaces the simple progress in 16.7):
+```
+┌──────────────────────────────────────────────────────────┐
+│  Converting to Shared Mode...                             │
+│                                                          │
+│  [============================] Creating shared space     │
+│  [============================] Subscribing to network    │
+│  [================            ] Syncing from GitHub...    │
+│                                 Fetching PRs: 12 found   │
+│                                 Fetching issues: 34 found│
+│                                 Building graph: 1,247     │
+│                                 triples created           │
+│  [                            ] Finalizing                │
+│                                                          │
+│                                           [Cancel]        │
+└──────────────────────────────────────────────────────────┘
+```
+
+The progress display reuses the sync engine's phase reporting (same phases as "Sync Now" in Section 3.5). Each phase updates in-place.
+
+**Step 3 — Success**:
+```
+┌──────────────────────────────────────────────────────────┐
+│  Conversion Complete                                      │
+│                                                          │
+│  Shared Space ID: github-collab:owner/repo:a1b2c3d4      │
+│  Data synced: 2,847 triples from GitHub                  │
+│  Your local archive remains accessible.                  │
+│                                                          │
+│                              [View Collaboration Tab]     │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Step 4 — Tab refreshes** to State B (Shared, no peers).
+
+### 17.3 Migration Failure Handling
+
+**Failure during paranet creation** (Step 1 of backend):
+- Show error: "Failed to create shared space. Your repo remains in Local Only mode."
+- Offer "Retry" button
+- No data is lost — nothing has changed yet
+
+**Failure during sync** (Step 3 of backend — partial sync):
+- The shared paranet already exists but has incomplete data
+- Show warning: "Sync incomplete. {N} triples were written before the error. You can retry the sync from the Collaboration tab."
+- The repo is now in Shared mode (conversion succeeded) but with partial data
+- "Sync Now" button on Overview tab will complete the sync
+- Activity log records the partial migration
+
+**GitHub rate limit hit during sync**:
+- Show: "GitHub API rate limit reached. The shared space was created successfully. Remaining data will sync on your next scheduled sync (or click 'Sync Now' when the rate limit resets at {time})."
+- Conversion is considered successful — the paranet exists and the user can invite peers
+
+**Network error during GossipSub subscription**:
+- Show: "Shared space created but could not connect to the P2P network. Check your node's network configuration."
+- The repo is in Shared mode locally but not discoverable until the node reconnects
+
+### 17.4 Backend Sequence — `POST /convert-to-shared` (Extended)
+
+```
+1. Generate suffix → new paranetId
+2. createParanet({ id: newParanetId, private: false })
+3. subscribeToParanet(newParanetId)
+4. Update repo config: privacyLevel = 'shared', paranetId = newParanetId
+5. Broadcast node:joined
+6. IF githubToken exists:
+     startSync(owner, repo, allScopes)  // re-sync into new paranet
+   ELSE:
+     copyWorkspaceQuads(oldParanetId, newParanetId)  // fallback
+7. Return { ok, paranetId, syncJobId? }
+```
+
+The caller can poll `GET /sync/status?jobId=X` to track sync progress during migration.
+
+### 17.5 Local Archive Behavior
+
+After conversion, the old local paranet data remains readable but is no longer updated. The sync engine writes exclusively to the new shared paranet.
+
+- The old local paranet ID is stored in the repo config as `previousLocalParanetId`
+- Users can query the local archive via SPARQL if needed (niche use case)
+- No UI is provided to browse the archive — it is a safety net, not a feature
+- Future: A "Delete Local Archive" option in Settings > Danger Zone
+
+---
+
+## 18. Agent Activity Recording (2026-03-25)
+
+This is the core value proposition for multi-agent collaboration. Agents record structured activity so that other agents (and humans) can understand what is happening across the codebase.
+
+### 18.1 Design Principles
+
+1. **Agent-first API**: The primary consumers are coding agents (Claude Code, Cursor, OpenClaw). The API must be simple enough that an MCP tool or CLI wrapper can call it without complex setup.
+2. **Structured, not free-form**: Activity data follows a schema that enables SPARQL queries, graph visualization, and conflict detection. Not a chat log.
+3. **Session lifecycle**: Agents have explicit start/end boundaries for their work sessions. This enables duration tracking, cost estimation, and "what changed in this session" queries.
+4. **File claims are advisory**: Claims signal intent, not hard locks. Two agents can work on the same file, but the system surfaces the conflict so they can coordinate.
+5. **Decisions are first-class**: Architectural decisions are recorded with rationale, alternatives considered, and affected code entities. This creates institutional memory.
+6. **Automatic linking**: Activity data links to existing graph entities (files, PRs, issues, functions). This enriches the knowledge graph over time.
+
+### 18.2 Ontology — Agent Activity Classes
+
+All classes use the `ghcode:` namespace (`https://ontology.dkg.io/ghcode#`). These extend the existing ontology.
+
+```turtle
+# --- Agent Session ---
+ghcode:AgentSession a rdfs:Class ;
+  rdfs:label "Agent Session" ;
+  rdfs:comment "A bounded work session by a coding agent." .
+
+ghcode:sessionId       a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:agentName       a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:agentType       a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+  # e.g., "claude-code", "cursor", "openclaw", "human"
+ghcode:peerId          a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:startedAt       a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:dateTime .
+ghcode:endedAt         a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:dateTime .
+ghcode:sessionStatus   a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+  # "active" | "completed" | "abandoned"
+ghcode:summary         a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:goal            a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:modifiedFile    a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range ghcode:File .
+ghcode:relatedPR       a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range ghcode:PullRequest .
+ghcode:relatedIssue    a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range ghcode:Issue .
+ghcode:estimatedCost   a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range xsd:string .
+ghcode:inRepo          a rdf:Property ; rdfs:domain ghcode:AgentSession ; rdfs:range ghcode:Repository .
+
+# --- Code Claim ---
+ghcode:CodeClaim a rdfs:Class ;
+  rdfs:label "Code Claim" ;
+  rdfs:comment "An agent's advisory claim on a file or region." .
+
+ghcode:claimId         a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:string .
+ghcode:claimedFile     a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range ghcode:File .
+ghcode:claimedPath     a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:string .
+ghcode:claimedBy       a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:string .
+  # Agent name (not URI — agents may not have persistent URIs)
+ghcode:claimSession    a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range ghcode:AgentSession .
+ghcode:claimStatus     a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:string .
+  # "active" | "released" | "expired"
+ghcode:claimedAt       a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:dateTime .
+ghcode:releasedAt      a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:dateTime .
+ghcode:claimReason     a rdf:Property ; rdfs:domain ghcode:CodeClaim ; rdfs:range xsd:string .
+
+# --- Decision ---
+ghcode:Decision a rdfs:Class ;
+  rdfs:label "Architectural Decision" ;
+  rdfs:comment "A recorded technical decision with rationale." .
+
+ghcode:decisionId      a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+ghcode:decisionSummary a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+ghcode:rationale       a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+ghcode:alternatives    a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+  # Semicolon-separated list of alternatives considered
+ghcode:madeBy          a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+ghcode:madeAt          a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:dateTime .
+ghcode:affectsFile     a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range ghcode:File .
+ghcode:affectsEntity   a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range rdfs:Resource .
+ghcode:inSession       a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range ghcode:AgentSession .
+ghcode:decisionStatus  a rdf:Property ; rdfs:domain ghcode:Decision ; rdfs:range xsd:string .
+  # "proposed" | "accepted" | "superseded" | "reverted"
+
+# --- Annotation ---
+ghcode:Annotation a rdfs:Class ;
+  rdfs:label "Code Annotation" ;
+  rdfs:comment "An agent's annotation on a code entity." .
+
+ghcode:annotationId    a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range xsd:string .
+ghcode:annotates       a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range rdfs:Resource .
+ghcode:annotationText  a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range xsd:string .
+ghcode:annotationType  a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range xsd:string .
+  # "finding" | "suggestion" | "warning" | "note" | "review-comment"
+ghcode:annotatedBy     a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range xsd:string .
+ghcode:annotatedAt     a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range xsd:dateTime .
+ghcode:inSession       a rdf:Property ; rdfs:domain ghcode:Annotation ; rdfs:range ghcode:AgentSession .
+```
+
+### 18.3 URI Minting for Agent Entities
+
+New URI helper functions in `rdf/uri.ts`:
+
+```typescript
+export function agentSessionUri(repoOwner: string, repoName: string, sessionId: string): string {
+  return `urn:github:${repoOwner}/${repoName}/session/${sessionId}`;
+}
+
+export function codeClaimUri(repoOwner: string, repoName: string, claimId: string): string {
+  return `urn:github:${repoOwner}/${repoName}/claim/${claimId}`;
+}
+
+export function decisionUri(repoOwner: string, repoName: string, decisionId: string): string {
+  return `urn:github:${repoOwner}/${repoName}/decision/${decisionId}`;
+}
+
+export function annotationUri(repoOwner: string, repoName: string, annotationId: string): string {
+  return `urn:github:${repoOwner}/${repoName}/annotation/${annotationId}`;
+}
+```
+
+### 18.4 Agent Session Lifecycle
+
+```
+Agent connects to repo
+  │
+  ├─ POST /sessions                         ← Start session
+  │   Returns: { sessionId, startedAt }
+  │
+  ├─ POST /claims                           ← Claim files (optional)
+  │   Returns: { claimId } or { conflict }
+  │
+  ├─ [Agent does work...]
+  │
+  ├─ POST /sessions/:id/heartbeat           ← Keep session alive (every 60s)
+  │   Returns: { ok }
+  │
+  ├─ POST /decisions                         ← Record decisions (as needed)
+  │   Returns: { decisionId }
+  │
+  ├─ POST /annotations                       ← Annotate entities (as needed)
+  │   Returns: { annotationId }
+  │
+  ├─ POST /sessions/:id/files               ← Report modified files
+  │   Returns: { ok }
+  │
+  └─ POST /sessions/:id/end                 ← End session with summary
+      Returns: { ok, duration, filesModified, decisionsRecorded }
+```
+
+**Heartbeat**: Sessions without a heartbeat for 5 minutes are marked `abandoned`. This handles agents that crash or disconnect without ending their session. Abandoned sessions release all associated file claims.
+
+**Session auto-cleanup**: A background timer in the coordinator checks for stale sessions every 2 minutes.
+
+### 18.5 API Endpoints — Agent Activity
+
+All endpoints under `/api/apps/github-collab`. Repo context is provided in the request body or URL path.
+
+#### `POST /sessions`
+
+Start a new agent session.
+
+**Request:**
+```json
+{
+  "repo": "owner/repo",
+  "agent": "claude-code-1",
+  "agentType": "claude-code",
+  "goal": "Implement auth middleware for PR #42",
+  "relatedPR": 42,
+  "relatedIssue": 38
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "sessionId": "sess-a1b2c3d4",
+  "startedAt": "2026-03-25T14:30:00.000Z",
+  "sessionUri": "urn:github:owner/repo/session/sess-a1b2c3d4"
+}
+```
+
+**Backend behavior:**
+1. Generate session ID: `sess-${randomUUID().slice(0,8)}`
+2. Create RDF quads for the session entity
+3. Write to workspace via `coordinator.writeToWorkspace`
+4. Store session in coordinator's in-memory map for heartbeat tracking
+5. If shared mode: broadcast `session:started` GossipSub message
+6. Return session ID to caller
+
+**RDF produced:**
+```turtle
+<urn:github:owner/repo/session/sess-a1b2c3d4>
+  a ghcode:AgentSession ;
+  ghcode:sessionId "sess-a1b2c3d4" ;
+  ghcode:agentName "claude-code-1" ;
+  ghcode:agentType "claude-code" ;
+  ghcode:peerId "12D3KooW..." ;
+  ghcode:startedAt "2026-03-25T14:30:00.000Z"^^xsd:dateTime ;
+  ghcode:sessionStatus "active" ;
+  ghcode:goal "Implement auth middleware for PR #42" ;
+  ghcode:relatedPR <urn:github:owner/repo/pr/42> ;
+  ghcode:relatedIssue <urn:github:owner/repo/issue/38> ;
+  ghcode:inRepo <urn:github:owner/repo> .
+```
+
+#### `POST /sessions/:id/heartbeat`
+
+Keep a session alive. Called by the agent every 60 seconds.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "sessionAge": 300,
+  "activeClaims": 2
+}
+```
+
+**Backend behavior:**
+1. Update the session's last heartbeat timestamp in memory
+2. Return session age in seconds and number of active claims
+
+#### `POST /sessions/:id/files`
+
+Report files modified during this session (can be called multiple times, additive).
+
+**Request:**
+```json
+{
+  "files": [
+    "src/auth/handler.ts",
+    "src/auth/middleware.ts",
+    "test/auth.test.ts"
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "totalFiles": 3
+}
+```
+
+**Backend behavior:**
+1. For each file path, create a `ghcode:modifiedFile` triple linking the session to the file URI
+2. Write quads to workspace
+3. Check for claim conflicts (files claimed by other agents) and include warnings in response:
+```json
+{
+  "ok": true,
+  "totalFiles": 3,
+  "warnings": [
+    { "file": "src/auth/handler.ts", "claimedBy": "cursor-agent-1", "since": "2026-03-25T14:28:00Z" }
+  ]
+}
+```
+
+#### `POST /sessions/:id/end`
+
+End a session with a summary of work done.
+
+**Request:**
+```json
+{
+  "summary": "Implemented JWT auth middleware with refresh token support. Added 3 test cases.",
+  "filesModified": ["src/auth/handler.ts", "src/auth/middleware.ts", "test/auth.test.ts"],
+  "estimatedCost": "$0.45"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "sessionId": "sess-a1b2c3d4",
+  "duration": 1800,
+  "filesModified": 3,
+  "decisionsRecorded": 2,
+  "claimsReleased": 2
+}
+```
+
+**Backend behavior:**
+1. Update session status to `completed`
+2. Write `ghcode:endedAt`, `ghcode:summary`, `ghcode:sessionStatus "completed"` quads
+3. Release all file claims associated with this session
+4. If shared mode: broadcast `session:ended` GossipSub message
+5. Remove session from heartbeat tracking map
+
+#### `POST /claims`
+
+Claim a file or set of files for exclusive work.
+
+**Request:**
+```json
+{
+  "repo": "owner/repo",
+  "files": ["src/auth/handler.ts", "src/auth/middleware.ts"],
+  "agent": "claude-code-1",
+  "sessionId": "sess-a1b2c3d4",
+  "reason": "Refactoring auth flow"
+}
+```
+
+**Response (success — no conflicts):**
+```json
+{
+  "ok": true,
+  "claims": [
+    { "claimId": "clm-x1y2z3", "file": "src/auth/handler.ts", "status": "active" },
+    { "claimId": "clm-x4y5z6", "file": "src/auth/middleware.ts", "status": "active" }
+  ]
+}
+```
+
+**Response (conflict — file already claimed):**
+```json
+{
+  "ok": true,
+  "claims": [
+    { "claimId": "clm-x1y2z3", "file": "src/auth/handler.ts", "status": "active" },
+    {
+      "file": "src/auth/middleware.ts",
+      "status": "conflict",
+      "existingClaim": {
+        "claimId": "clm-prev-1",
+        "claimedBy": "cursor-agent-1",
+        "since": "2026-03-25T14:28:00Z",
+        "reason": "Adding error handling"
+      }
+    }
+  ]
+}
+```
+
+**Conflict policy**: Claims are advisory. When a conflict is detected:
+- The new claim is **not** created for the conflicting file
+- The response includes the existing claim details
+- The agent can decide to: (a) wait, (b) proceed anyway without a claim, (c) negotiate via an agent thread
+- The UI shows a conflict indicator on the file in the Claims table
+
+**Backend behavior:**
+1. For each file, check if an active claim exists from a different agent
+2. If no conflict: create claim, write quads, return claim ID
+3. If conflict: return conflict details, do not create claim
+4. Broadcast `claim:created` GossipSub message for successful claims
+
+**RDF produced (per claim):**
+```turtle
+<urn:github:owner/repo/claim/clm-x1y2z3>
+  a ghcode:CodeClaim ;
+  ghcode:claimId "clm-x1y2z3" ;
+  ghcode:claimedFile <urn:github:owner/repo/file/src%2Fauth%2Fhandler.ts> ;
+  ghcode:claimedPath "src/auth/handler.ts" ;
+  ghcode:claimedBy "claude-code-1" ;
+  ghcode:claimSession <urn:github:owner/repo/session/sess-a1b2c3d4> ;
+  ghcode:claimStatus "active" ;
+  ghcode:claimedAt "2026-03-25T14:30:05Z"^^xsd:dateTime ;
+  ghcode:claimReason "Refactoring auth flow" ;
+  ghcode:inRepo <urn:github:owner/repo> .
+```
+
+#### `DELETE /claims/:claimId`
+
+Release a specific file claim.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "claimId": "clm-x1y2z3",
+  "releasedAt": "2026-03-25T15:30:00Z"
+}
+```
+
+**Backend behavior:**
+1. Update claim status to `released`, write `ghcode:releasedAt` quad
+2. Broadcast `claim:released` GossipSub message
+
+#### `GET /claims`
+
+List active file claims for a repo.
+
+**Query params:** `?repo=owner/repo&agent=claude-code-1` (agent filter optional)
+
+**Response:**
+```json
+{
+  "claims": [
+    {
+      "claimId": "clm-x1y2z3",
+      "file": "src/auth/handler.ts",
+      "agent": "claude-code-1",
+      "sessionId": "sess-a1b2c3d4",
+      "since": "2026-03-25T14:30:05Z",
+      "reason": "Refactoring auth flow"
+    }
+  ]
+}
+```
+
+**Data source:** SPARQL query on workspace:
+```sparql
+SELECT ?claimId ?path ?agent ?sessionId ?since ?reason WHERE {
+  ?claim a ghcode:CodeClaim ;
+         ghcode:claimId ?claimId ;
+         ghcode:claimedPath ?path ;
+         ghcode:claimedBy ?agent ;
+         ghcode:claimStatus "active" ;
+         ghcode:claimedAt ?since ;
+         ghcode:inRepo <urn:github:{owner}/{repo}> .
+  OPTIONAL { ?claim ghcode:claimSession ?sess . ?sess ghcode:sessionId ?sessionId }
+  OPTIONAL { ?claim ghcode:claimReason ?reason }
+}
+ORDER BY ?path
+```
+
+#### `POST /decisions`
+
+Record an architectural decision.
+
+**Request:**
+```json
+{
+  "repo": "owner/repo",
+  "summary": "Use JWT with refresh tokens instead of session cookies",
+  "rationale": "Stateless auth scales better with our microservices architecture. Session cookies would require a shared session store.",
+  "alternatives": "Session cookies with Redis; OAuth2 with external provider",
+  "agent": "claude-code-1",
+  "sessionId": "sess-a1b2c3d4",
+  "affectedFiles": ["src/auth/handler.ts", "src/auth/middleware.ts"],
+  "affectedEntities": ["urn:github:owner/repo/file/src%2Fauth%2Fhandler.ts"],
+  "status": "accepted"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "decisionId": "dec-m1n2o3p4",
+  "decisionUri": "urn:github:owner/repo/decision/dec-m1n2o3p4"
+}
+```
+
+**RDF produced:**
+```turtle
+<urn:github:owner/repo/decision/dec-m1n2o3p4>
+  a ghcode:Decision ;
+  ghcode:decisionId "dec-m1n2o3p4" ;
+  ghcode:decisionSummary "Use JWT with refresh tokens instead of session cookies" ;
+  ghcode:rationale "Stateless auth scales better..." ;
+  ghcode:alternatives "Session cookies with Redis; OAuth2 with external provider" ;
+  ghcode:madeBy "claude-code-1" ;
+  ghcode:madeAt "2026-03-25T14:35:00Z"^^xsd:dateTime ;
+  ghcode:affectsFile <urn:github:owner/repo/file/src%2Fauth%2Fhandler.ts> ;
+  ghcode:affectsFile <urn:github:owner/repo/file/src%2Fauth%2Fmiddleware.ts> ;
+  ghcode:inSession <urn:github:owner/repo/session/sess-a1b2c3d4> ;
+  ghcode:decisionStatus "accepted" ;
+  ghcode:inRepo <urn:github:owner/repo> .
+```
+
+#### `POST /annotations`
+
+Annotate a code entity (file, function, class).
+
+**Request:**
+```json
+{
+  "repo": "owner/repo",
+  "entity": "urn:github:owner/repo/file/src%2Fauth%2Fhandler.ts",
+  "text": "Missing error handling in login flow — if JWT verification throws, the request hangs",
+  "type": "finding",
+  "agent": "claude-code-1",
+  "sessionId": "sess-a1b2c3d4"
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "annotationId": "ann-q1r2s3t4"
+}
+```
+
+#### `GET /sessions`
+
+List agent sessions for a repo.
+
+**Query params:** `?repo=owner/repo&status=active&agent=claude-code-1&limit=20`
+
+**Response:**
+```json
+{
+  "sessions": [
+    {
+      "sessionId": "sess-a1b2c3d4",
+      "agent": "claude-code-1",
+      "agentType": "claude-code",
+      "status": "active",
+      "goal": "Implement auth middleware for PR #42",
+      "startedAt": "2026-03-25T14:30:00Z",
+      "endedAt": null,
+      "duration": null,
+      "filesModified": ["src/auth/handler.ts"],
+      "relatedPR": 42,
+      "relatedIssue": 38,
+      "claimCount": 2,
+      "decisionCount": 1
+    }
+  ]
+}
+```
+
+**Data source:** SPARQL query:
+```sparql
+SELECT ?sessionId ?agent ?agentType ?status ?goal ?startedAt ?endedAt WHERE {
+  ?s a ghcode:AgentSession ;
+     ghcode:sessionId ?sessionId ;
+     ghcode:agentName ?agent ;
+     ghcode:sessionStatus ?status ;
+     ghcode:startedAt ?startedAt ;
+     ghcode:inRepo <urn:github:{owner}/{repo}> .
+  OPTIONAL { ?s ghcode:agentType ?agentType }
+  OPTIONAL { ?s ghcode:goal ?goal }
+  OPTIONAL { ?s ghcode:endedAt ?endedAt }
+  FILTER(?status = "active")
+}
+ORDER BY DESC(?startedAt)
+LIMIT 20
+```
+
+#### `GET /decisions`
+
+List architectural decisions for a repo.
+
+**Query params:** `?repo=owner/repo&agent=claude-code-1&limit=20`
+
+**Response:**
+```json
+{
+  "decisions": [
+    {
+      "decisionId": "dec-m1n2o3p4",
+      "summary": "Use JWT with refresh tokens instead of session cookies",
+      "rationale": "Stateless auth scales better...",
+      "alternatives": "Session cookies with Redis; OAuth2 with external provider",
+      "agent": "claude-code-1",
+      "madeAt": "2026-03-25T14:35:00Z",
+      "status": "accepted",
+      "affectedFiles": ["src/auth/handler.ts", "src/auth/middleware.ts"],
+      "sessionId": "sess-a1b2c3d4"
+    }
+  ]
+}
+```
+
+#### `GET /activity`
+
+Unified activity feed combining sessions, claims, decisions, and annotations.
+
+**Query params:** `?repo=owner/repo&since=2026-03-25T00:00:00Z&limit=50`
+
+**Response:**
+```json
+{
+  "activities": [
+    {
+      "type": "session:started",
+      "agent": "claude-code-1",
+      "timestamp": "2026-03-25T14:30:00Z",
+      "detail": "Started session: Implement auth middleware for PR #42",
+      "sessionId": "sess-a1b2c3d4",
+      "entityUri": "urn:github:owner/repo/session/sess-a1b2c3d4"
+    },
+    {
+      "type": "claim:created",
+      "agent": "claude-code-1",
+      "timestamp": "2026-03-25T14:30:05Z",
+      "detail": "Claimed src/auth/handler.ts",
+      "entityUri": "urn:github:owner/repo/claim/clm-x1y2z3"
+    },
+    {
+      "type": "decision:recorded",
+      "agent": "claude-code-1",
+      "timestamp": "2026-03-25T14:35:00Z",
+      "detail": "Decision: Use JWT with refresh tokens instead of session cookies",
+      "entityUri": "urn:github:owner/repo/decision/dec-m1n2o3p4"
+    },
+    {
+      "type": "session:ended",
+      "agent": "claude-code-1",
+      "timestamp": "2026-03-25T15:00:00Z",
+      "detail": "Completed session (30 min, 3 files modified)",
+      "sessionId": "sess-a1b2c3d4"
+    }
+  ]
+}
+```
+
+**Data source:** Union SPARQL query across all activity types:
+```sparql
+SELECT ?type ?agent ?ts ?detail ?uri WHERE {
+  {
+    ?s a ghcode:AgentSession ; ghcode:agentName ?agent ; ghcode:startedAt ?ts ;
+       ghcode:goal ?goal ; ghcode:inRepo <urn:github:{owner}/{repo}> .
+    BIND("session:started" AS ?type) BIND(?s AS ?uri)
+    BIND(CONCAT("Started session: ", ?goal) AS ?detail)
+  } UNION {
+    ?s a ghcode:AgentSession ; ghcode:agentName ?agent ; ghcode:endedAt ?ts ;
+       ghcode:summary ?sum ; ghcode:inRepo <urn:github:{owner}/{repo}> .
+    BIND("session:ended" AS ?type) BIND(?s AS ?uri)
+    BIND(CONCAT("Completed session: ", ?sum) AS ?detail)
+  } UNION {
+    ?c a ghcode:CodeClaim ; ghcode:claimedBy ?agent ; ghcode:claimedAt ?ts ;
+       ghcode:claimedPath ?path ; ghcode:inRepo <urn:github:{owner}/{repo}> .
+    BIND("claim:created" AS ?type) BIND(?c AS ?uri)
+    BIND(CONCAT("Claimed ", ?path) AS ?detail)
+  } UNION {
+    ?d a ghcode:Decision ; ghcode:madeBy ?agent ; ghcode:madeAt ?ts ;
+       ghcode:decisionSummary ?sum ; ghcode:inRepo <urn:github:{owner}/{repo}> .
+    BIND("decision:recorded" AS ?type) BIND(?d AS ?uri)
+    BIND(CONCAT("Decision: ", ?sum) AS ?detail)
+  }
+  FILTER(?ts > "{since}"^^xsd:dateTime)
+}
+ORDER BY DESC(?ts)
+LIMIT {limit}
+```
+
+### 18.6 GossipSub Messages — Agent Activity
+
+New message types added to `protocol.ts`:
+
+```typescript
+export type MessageType =
+  | /* existing types */
+  | 'session:started'     // Agent started a work session
+  | 'session:ended'       // Agent ended a work session
+  | 'session:heartbeat'   // Agent is still active
+  | 'claim:created'       // Agent claimed a file
+  | 'claim:released'      // Agent released a claim
+  | 'claim:conflict'      // Claim conflict detected
+  | 'decision:recorded';  // Agent recorded a decision
+
+export interface SessionStartedMessage extends BaseMessage {
+  type: 'session:started';
+  repo: string;
+  sessionId: string;
+  agent: string;
+  agentType: string;
+  goal?: string;
+}
+
+export interface SessionEndedMessage extends BaseMessage {
+  type: 'session:ended';
+  repo: string;
+  sessionId: string;
+  agent: string;
+  summary?: string;
+  duration: number;        // seconds
+  filesModified: number;
+}
+
+export interface ClaimCreatedMessage extends BaseMessage {
+  type: 'claim:created';
+  repo: string;
+  claimId: string;
+  file: string;
+  agent: string;
+}
+
+export interface ClaimConflictMessage extends BaseMessage {
+  type: 'claim:conflict';
+  repo: string;
+  file: string;
+  claimingAgent: string;
+  existingAgent: string;
+}
+
+export interface DecisionRecordedMessage extends BaseMessage {
+  type: 'decision:recorded';
+  repo: string;
+  decisionId: string;
+  summary: string;
+  agent: string;
+}
+```
+
+### 18.7 Agent Activity — UI: "Agent Activity" Tab
+
+The existing "Peers & Agents" tab (Section 3.6, 5.6) is extended with an **Agent Activity** sub-view. This is a new sub-tab alongside the existing collaboration features.
+
+**Tab structure**:
+```
+Collaboration
+├── Peers & Invitations    (existing — Section 16)
+├── Agent Activity         (NEW — this section)
+└── Agent Activity Graph   (NEW — graph visualization)
+```
+
+#### 18.7.1 Agent Activity Tab — List/Timeline View
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  AGENT ACTIVITY                                    [Filters]  │
+│                                                              │
+│  ACTIVE SESSIONS (2)                                         │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  ● claude-code-1                          Active 25m  │    │
+│  │    Goal: Implement auth middleware for PR #42         │    │
+│  │    Files: src/auth/handler.ts (+2 more)               │    │
+│  │    Claims: 2 files claimed                            │    │
+│  │    Decisions: 1 recorded                              │    │
+│  │                                                      │    │
+│  │  ● cursor-agent-1                         Active 8m   │    │
+│  │    Goal: Fix login timeout (Issue #38)                │    │
+│  │    Files: src/auth/session.ts                         │    │
+│  │    Claims: 1 file claimed                             │    │
+│  └──────────────────────────────────────────────────────┘    │
+│                                                              │
+│  FILE CLAIMS                                                 │
+│  ┌─────────────────────┬──────────────┬─────────┬────────┐  │
+│  │ File                │ Agent        │ Since   │ Reason │  │
+│  ├─────────────────────┼──────────────┼─────────┼────────┤  │
+│  │ src/auth/handler.ts │ claude-code-1│ 25m ago │ Refact │  │
+│  │ src/auth/middle...  │ claude-code-1│ 25m ago │ Refact │  │
+│  │ src/auth/session.ts │ cursor-agt-1 │ 8m ago  │ Fix    │  │
+│  └─────────────────────┴──────────────┴─────────┴────────┘  │
+│                                                              │
+│  DECISIONS                                                   │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  dec-m1n2o3p4  25 min ago  claude-code-1              │    │
+│  │  "Use JWT with refresh tokens instead of session      │    │
+│  │   cookies"                                            │    │
+│  │  Rationale: Stateless auth scales better...           │    │
+│  │  Affects: handler.ts, middleware.ts                    │    │
+│  │  Status: accepted                                     │    │
+│  └──────────────────────────────────────────────────────┘    │
+│                                                              │
+│  TIMELINE                                                    │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  14:35  claude-code-1  Decision: Use JWT with...      │    │
+│  │  14:30  claude-code-1  Claimed src/auth/handler.ts    │    │
+│  │  14:30  claude-code-1  Started session (PR #42)       │    │
+│  │  14:22  cursor-agent-1 Claimed src/auth/session.ts    │    │
+│  │  14:22  cursor-agent-1 Started session (Issue #38)    │    │
+│  │  14:00  claude-code-1  Completed session (45 min)     │    │
+│  │         "Reviewed PR #40 and approved"                │    │
+│  │  ...                                         [Load more] │
+│  └──────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Data sources:**
+| Section | Endpoint | Poll Interval |
+|---------|----------|---------------|
+| Active Sessions | `GET /sessions?repo=X&status=active` | 10 seconds |
+| File Claims | `GET /claims?repo=X` | 15 seconds |
+| Decisions | `GET /decisions?repo=X&limit=5` | 30 seconds |
+| Timeline | `GET /activity?repo=X&limit=50` | 10 seconds |
+
+**Filters** (top-right dropdown):
+- Agent: All / specific agent name
+- Time range: Last hour / Last 24h / Last 7 days / All time
+- Activity type: All / Sessions / Claims / Decisions
+
+**Interactions**:
+- Click a session → expand to show full details (files, decisions, annotations)
+- Click a file claim → navigate to that file in the Graph Explorer
+- Click a decision → expand to show rationale and alternatives
+- Click a timeline entry → navigate to the related entity
+
+#### 18.7.2 Agent Activity Graph View
+
+Uses the `agentActivityView` ViewConfig already defined in Section 8.5. The SPARQL CONSTRUCT query that populates this view:
+
+```sparql
+CONSTRUCT {
+  ?session a ghcode:AgentSession ;
+           ghcode:agentName ?agent ;
+           ghcode:sessionStatus ?status ;
+           ghcode:startedAt ?started ;
+           ghcode:goal ?goal .
+  ?session ghcode:modifiedFile ?file .
+  ?file ghcode:path ?filePath .
+  ?claim ghcode:claimedFile ?file ;
+         ghcode:claimedBy ?claimAgent .
+  ?decision a ghcode:Decision ;
+            ghcode:decisionSummary ?decSum ;
+            ghcode:madeBy ?decAgent .
+  ?decision ghcode:affectsFile ?decFile .
+  ?session ghcode:relatedPR ?pr .
+  ?pr ghcode:prNumber ?prNum ;
+      ghcode:title ?prTitle .
+}
+WHERE {
+  {
+    ?session a ghcode:AgentSession ;
+             ghcode:agentName ?agent ;
+             ghcode:sessionStatus ?status ;
+             ghcode:startedAt ?started ;
+             ghcode:inRepo <urn:github:{owner}/{repo}> .
+    OPTIONAL { ?session ghcode:goal ?goal }
+    OPTIONAL { ?session ghcode:modifiedFile ?file . ?file ghcode:path ?filePath }
+    OPTIONAL { ?session ghcode:relatedPR ?pr .
+               ?pr ghcode:prNumber ?prNum .
+               OPTIONAL { ?pr ghcode:title ?prTitle } }
+  } UNION {
+    ?claim a ghcode:CodeClaim ;
+           ghcode:claimedFile ?file ;
+           ghcode:claimedBy ?claimAgent ;
+           ghcode:claimStatus "active" ;
+           ghcode:inRepo <urn:github:{owner}/{repo}> .
+  } UNION {
+    ?decision a ghcode:Decision ;
+              ghcode:decisionSummary ?decSum ;
+              ghcode:madeBy ?decAgent ;
+              ghcode:inRepo <urn:github:{owner}/{repo}> .
+    OPTIONAL { ?decision ghcode:affectsFile ?decFile }
+  }
+}
+```
+
+**Visual layout**: The graph shows agents as large green hexagons at the center, with sessions radiating outward, connected to files (blue circles), PRs (green hexagons), and decisions (amber hexagons). Claims are shown as edges between agents and files with a distinctive dashed style. The temporal playback feature (Section 8.5) allows scrubbing through time to see how agent activity evolved.
+
+#### 18.7.3 How Activity Enriches Existing Graph Views
+
+Agent activity data creates new edges in the knowledge graph that enhance existing views:
+
+**Code Structure view** (Section 8.1):
+- Files with active claims show a colored border matching the claiming agent
+- Tooltip includes: "Claimed by claude-code-1 (25 min ago)"
+- Files modified in recent sessions show a subtle glow effect
+
+**PR Impact view** (Section 8.3):
+- Agent sessions linked to a PR appear as satellite nodes
+- Decisions linked to the PR show as amber nodes with rationale in tooltip
+- Annotations on affected files appear as small note icons
+
+**Dependencies view** (Section 8.2):
+- No direct enhancement — agent activity is orthogonal to dependency structure
+
+### 18.8 Component Hierarchy — Agent Activity
+
+```
+<CollaborationPage>
+├── <CollaborationSubTabs>           # [Peers & Invitations, Agent Activity, Activity Graph]
+│
+├── <AgentActivityTab>               # List/timeline view
+│   ├── <ActivityFilters>            # Agent, time range, type dropdowns
+│   ├── <ActiveSessionsList>         # Currently active sessions
+│   │   └── <ActiveSessionCard>      # Expandable session card
+│   │       ├── <SessionHeader>      # Agent name, status badge, duration
+│   │       ├── <SessionGoal>        # Goal text
+│   │       ├── <SessionFiles>       # Modified files list
+│   │       ├── <SessionClaims>      # Claim count with expand
+│   │       └── <SessionDecisions>   # Decision count with expand
+│   ├── <FileClaimsTable>            # Active file claims
+│   │   └── <FileClaimRow>           # File, agent, since, reason
+│   ├── <DecisionsList>              # Recent decisions
+│   │   └── <DecisionCard>           # Expandable decision with rationale
+│   └── <ActivityTimeline>           # Chronological feed
+│       └── <TimelineEntry>          # Timestamp, agent, action, detail
+│
+├── <AgentActivityGraphTab>          # Graph visualization
+│   ├── <GraphCanvas>                # RdfGraph with agentActivityView config
+│   └── <TemporalControls>           # Play/pause, speed, time range
+```
+
+---
+
+## 19. Collaborator Write Access (2026-03-25)
+
+This section defines what collaborator agents (who accepted a paranet invitation) can write to the shared knowledge graph, and how those writes are processed.
+
+### 19.1 Write Permission Model
+
+| Entity Type | Owner Node | Collaborator Node |
+|-------------|-----------|-------------------|
+| Agent sessions (own) | Yes | Yes |
+| Agent sessions (others) | No | No |
+| Code claims (own) | Yes | Yes |
+| Code claims (others) | Release only | No |
+| Decisions | Yes | Yes |
+| Annotations | Yes | Yes |
+| GitHub sync (trigger) | Yes | No |
+| PR review submission | Yes | Yes |
+| Enshrinement (trigger) | Yes | No |
+| Custom annotations | Yes | Yes |
+
+**Key constraint**: Collaborators cannot trigger GitHub sync (they don't have the GitHub token) or enshrinement (that's the owner's prerogative). They can record their own activity, make claims, record decisions, and submit reviews.
+
+**Identity**: Each write is tagged with the writer's `peerId` (from their DKG node). The peerId is non-forgeable — it's derived from the node's libp2p keypair. The `agentName` is self-reported and used for display only.
+
+### 19.2 Write Flow — How Writes Become RDF
+
+```
+Agent calls POST /sessions (or /claims, /decisions, /annotations)
+  │
+  ├─ API handler validates request body
+  │
+  ├─ Coordinator generates entity ID and mints URI
+  │
+  ├─ Coordinator creates Quad[] using rdf/uri.ts helpers
+  │   (tripleUri, tripleStr, tripleDateTime, etc.)
+  │
+  ├─ coordinator.writeToWorkspace(paranetId, quads)
+  │   │
+  │   ├─ Writes quads to local triple store (workspace)
+  │   │
+  │   └─ If shared mode:
+  │       ├─ GossipSub broadcast (type-specific message)
+  │       └─ Quads are available to peers querying the workspace
+  │
+  └─ Return entity ID + URI to caller
+```
+
+### 19.3 Collaborator API Endpoints
+
+Collaborators use the **exact same endpoints** as the owner node. The endpoints are repo-scoped, and the coordinator determines write permissions based on the node's role for that repo.
+
+**Permitted for collaborators** (same request/response schemas as Section 18.5):
+```
+POST   /sessions                    ← Start own session
+POST   /sessions/:id/heartbeat     ← Keep session alive
+POST   /sessions/:id/files         ← Report files modified
+POST   /sessions/:id/end           ← End session
+POST   /claims                     ← Claim files
+DELETE /claims/:claimId            ← Release own claims
+POST   /decisions                  ← Record decisions
+POST   /annotations                ← Annotate entities
+GET    /sessions                   ← Read all sessions
+GET    /claims                     ← Read all claims
+GET    /decisions                  ← Read all decisions
+GET    /activity                   ← Read activity feed
+```
+
+**Denied for collaborators** (return 403):
+```
+POST   /sync                       ← Requires GitHub token
+POST   /config/repo                ← Repo management is owner-only
+DELETE /config/repo                ← Repo removal is owner-only
+POST   /convert-to-shared          ← Conversion is owner-only
+```
+
+**Role detection**: The coordinator checks `repoConfig.role` (set during invitation acceptance):
+- `role: 'owner'` — full access
+- `role: 'collaborator'` — write own activity, read everything, no sync/config
+
+### 19.4 Conflict Prevention — File Claims
+
+The file claim system is the primary mechanism for preventing conflicting work between agents.
+
+#### 19.4.1 Claim Resolution Rules
+
+1. **First claim wins**: The first agent to claim a file gets the active claim. Subsequent claims for the same file return a conflict response.
+
+2. **Claims are advisory**: A conflict response does not prevent the agent from modifying the file. It surfaces the conflict so agents can decide how to proceed.
+
+3. **Claims are scoped to sessions**: When a session ends, all its claims are automatically released.
+
+4. **Claims expire with heartbeats**: If an agent's session heartbeat lapses (5 minutes without heartbeat), the session is marked abandoned and its claims are released.
+
+5. **No CAS (compare-and-swap)**: Workspace writes are append-only in the DKG model. There is no atomic compare-and-swap for RDF quads. Instead, the coordinator maintains an in-memory claim map that is the source of truth for conflict detection.
+
+#### 19.4.2 Claim Conflict Handling
+
+When a conflict is detected:
+
+```
+Agent A claims file X (succeeds → active)
+  │
+Agent B claims file X (conflict detected)
+  │
+  ├─ Response: { status: "conflict", existingClaim: { claimedBy: "Agent A", ... } }
+  │
+  ├─ GossipSub: claim:conflict message broadcast
+  │   (all peers see the conflict in their activity feed)
+  │
+  └─ Agent B can:
+      ├─ Wait for Agent A to release (poll GET /claims)
+      ├─ Proceed without a claim (risky — changes may conflict)
+      └─ Send a message via agent thread (future: POST /threads)
+```
+
+#### 19.4.3 Claim Conflict in the UI
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  FILE CLAIMS                                              │
+│                                                          │
+│  ┌──────────────────┬──────────────┬─────────┬────────┐  │
+│  │ File             │ Agent        │ Since   │ Status │  │
+│  ├──────────────────┼──────────────┼─────────┼────────┤  │
+│  │ src/auth/handler │ claude-code-1│ 25m ago │ Active │  │
+│  │   ⚠ cursor-agt-1 attempted claim 8m ago            │  │
+│  │ src/auth/session │ cursor-agt-1 │ 8m ago  │ Active │  │
+│  └──────────────────┴──────────────┴─────────┴────────┘  │
+└──────────────────────────────────────────────────────────┘
+```
+
+Conflicted files show an amber warning icon with the name of the agent that attempted the conflicting claim. This surfaces potential coordination needs to the human operator.
+
+### 19.5 Write Propagation — GossipSub
+
+When a collaborator writes to their local workspace, the data must propagate to other peers:
+
+1. **Local write**: Quads are written to the local triple store via `writeToWorkspace`
+2. **GossipSub broadcast**: A typed message (e.g., `session:started`) is broadcast on the paranet's app topic
+3. **Peer handling**: Other nodes receive the GossipSub message and:
+   - Update their in-memory state (claim maps, session tracking)
+   - The quads themselves are available via workspace queries (the DKG workspace sync handles quad propagation)
+4. **Eventual consistency**: There is no global lock or consensus for workspace writes. Writes are eventually consistent across peers. The claim map is the only source of conflict detection, and it is maintained per-node from GossipSub messages.
+
+### 19.6 Security Considerations
+
+**Peer identity**: All writes are tagged with the writer's `peerId`, which is derived from their libp2p keypair. This cannot be spoofed without the private key.
+
+**Agent name spoofing**: The `agentName` field is self-reported and could be spoofed. The UI should display the `peerId` alongside the agent name for verification when needed.
+
+**Write validation**: The coordinator validates:
+- Required fields are present
+- Entity URIs reference the correct repo (no cross-repo writes)
+- The writer's role permits the operation
+- File paths are sanitized (no path traversal)
+
+**No delete**: Collaborators cannot delete quads from the workspace. The workspace is append-only. "Releasing" a claim writes a new `claimStatus: released` quad rather than deleting the original.
+
+### 19.7 UI API Client Additions — Collaborator Writes
+
+These functions are added to `ui/src/api.ts`:
+
+```typescript
+// --- Agent Sessions ---
+
+export function startSession(repo: string, agent: string, opts?: {
+  agentType?: string; goal?: string; relatedPR?: number; relatedIssue?: number;
+}) {
+  return apiFetch('/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ repo, agent, ...opts }),
+  });
+}
+
+export function endSession(sessionId: string, summary: string, filesModified?: string[]) {
+  return apiFetch(`/sessions/${sessionId}/end`, {
+    method: 'POST',
+    body: JSON.stringify({ summary, filesModified }),
+  });
+}
+
+export function heartbeatSession(sessionId: string) {
+  return apiFetch(`/sessions/${sessionId}/heartbeat`, { method: 'POST' });
+}
+
+export function reportSessionFiles(sessionId: string, files: string[]) {
+  return apiFetch(`/sessions/${sessionId}/files`, {
+    method: 'POST',
+    body: JSON.stringify({ files }),
+  });
+}
+
+export function fetchSessions(repo: string, opts?: {
+  status?: 'active' | 'completed' | 'abandoned'; agent?: string; limit?: number;
+}) {
+  const params = new URLSearchParams({ repo });
+  if (opts?.status) params.set('status', opts.status);
+  if (opts?.agent) params.set('agent', opts.agent);
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  return apiFetch(`/sessions?${params}`);
+}
+
+// --- Claims ---
+
+export function createClaims(repo: string, files: string[], agent: string, sessionId: string, reason?: string) {
+  return apiFetch('/claims', {
+    method: 'POST',
+    body: JSON.stringify({ repo, files, agent, sessionId, reason }),
+  });
+}
+
+export function releaseClaim(claimId: string) {
+  return apiFetch(`/claims/${claimId}`, { method: 'DELETE' });
+}
+
+export function fetchClaims(repo: string, agent?: string) {
+  const params = new URLSearchParams({ repo });
+  if (agent) params.set('agent', agent);
+  return apiFetch(`/claims?${params}`);
+}
+
+// --- Decisions ---
+
+export function recordDecision(repo: string, opts: {
+  summary: string; rationale: string; alternatives?: string;
+  agent: string; sessionId?: string; affectedFiles?: string[];
+  status?: string;
+}) {
+  return apiFetch('/decisions', {
+    method: 'POST',
+    body: JSON.stringify({ repo, ...opts }),
+  });
+}
+
+export function fetchDecisions(repo: string, opts?: { agent?: string; limit?: number }) {
+  const params = new URLSearchParams({ repo });
+  if (opts?.agent) params.set('agent', opts.agent);
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  return apiFetch(`/decisions?${params}`);
+}
+
+// --- Annotations ---
+
+export function createAnnotation(repo: string, opts: {
+  entity: string; text: string; type: string; agent: string; sessionId?: string;
+}) {
+  return apiFetch('/annotations', {
+    method: 'POST',
+    body: JSON.stringify({ repo, ...opts }),
+  });
+}
+
+// --- Activity Feed ---
+
+export function fetchActivity(repo: string, opts?: { since?: string; limit?: number }) {
+  const params = new URLSearchParams({ repo });
+  if (opts?.since) params.set('since', opts.since);
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  return apiFetch(`/activity?${params}`);
+}
+```
