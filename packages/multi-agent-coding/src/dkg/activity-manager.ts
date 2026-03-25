@@ -250,9 +250,9 @@ export class ActivityManager {
   }
 
   getActiveClaims(repoKey?: string): CodeClaim[] {
-    // repoKey filter is for future multi-repo support; currently returns all
-    void repoKey;
-    return [...this.claims.values()];
+    const all = [...this.claims.values()];
+    if (repoKey) return all.filter(c => c.repoKey === repoKey);
+    return all;
   }
 
   // --- Decisions ---
@@ -277,8 +277,10 @@ export class ActivityManager {
     return decision;
   }
 
-  getDecisions(_repoKey?: string): Decision[] {
-    return [...this.decisions];
+  getDecisions(repoKey?: string): Decision[] {
+    const all = [...this.decisions];
+    if (repoKey) return all.filter(d => d.repoKey === repoKey);
+    return all;
   }
 
   // --- Annotations ---

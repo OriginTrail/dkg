@@ -397,7 +397,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         const hbMatch = subpath.match(/^\/sessions\/([^/]+)\/heartbeat$/);
         if (hbMatch && req.method === 'POST') {
           if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-          const session = coordinator.heartbeatAgentSession(hbMatch[1]);
+          const session = await coordinator.heartbeatAgentSession(hbMatch[1]);
           const sessionAge = Math.floor((Date.now() - session.startedAt) / 1000);
           const activeClaims = coordinator.getActiveClaims().filter(c => c.sessionId === hbMatch[1]).length;
           return json(res, 200, { ok: true, sessionAge, activeClaims });
@@ -480,7 +480,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         const claimDeleteMatch = subpath.match(/^\/claims\/([^/]+)$/);
         if (claimDeleteMatch && req.method === 'DELETE') {
           if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
-          const released = coordinator.releaseClaim(claimDeleteMatch[1]);
+          const released = await coordinator.releaseClaim(claimDeleteMatch[1]);
           if (!released) return json(res, 404, { error: 'Claim not found' });
           return json(res, 200, { ok: true, claimId: claimDeleteMatch[1], releasedAt: new Date().toISOString() });
         }

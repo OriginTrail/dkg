@@ -262,7 +262,8 @@ export class SyncEngine {
       scopes.push('issues');
       const since = this.highWaterMarks.get(`${repoKey}:issues`);
       const sinceParam = since ? `&since=${since}` : '';
-      const issues = await client.fetchAllPages(`/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc${sinceParam}`);
+      const allIssues = await client.fetchAllPages(`/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc${sinceParam}`);
+      const issues = allIssues.filter((issue: any) => !issue.pull_request);
       const quads: Quad[] = [];
       for (const issue of issues) {
         quads.push(...transformIssue(issue, owner, repo, graph));
@@ -390,7 +391,8 @@ export class SyncEngine {
       // Issues
       if (scopes.includes('issues')) {
         job.progress.issues = { total: 0, synced: 0 };
-        const issues = await client.fetchAllPages(`/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc`);
+        const allIssues = await client.fetchAllPages(`/repos/${owner}/${repo}/issues?state=all&sort=updated&direction=desc`);
+        const issues = allIssues.filter((i: any) => !i.pull_request);
         job.progress.issues.total = issues.length;
 
         for (const issue of issues) {

@@ -188,6 +188,10 @@ export class GitHubCollabCoordinator {
         if (saved.privacyLevel === 'shared') {
           this.subscribeToParanet(saved.paranetId);
         }
+        // Restart polling for repos that have a token
+        if (saved.githubToken) {
+          this.syncEngine.startPolling(repoKey);
+        }
         this.log(`Restored repo ${repoKey} (${saved.privacyLevel})`);
       }
     } catch (err: any) {
@@ -1000,8 +1004,25 @@ export class GitHubCollabCoordinator {
     return session;
   }
 
-  heartbeatAgentSession(sessionId: string): AgentSession {
-    return this.activity.heartbeatSession(sessionId);
+  async heartbeatAgentSession(sessionId: string): Promise<AgentSession> {
+    const session = this.activity.heartbeatSession(sessionId);
+
+    // Broadcast heartbeat for shared repos so remote peers don't age out the session
+    if (session.repoKey) {
+      const config = this.repos.get(session.repoKey);
+      if (config?.privacyLevel === 'shared') {
+        await this.broadcastMessage(config.paranetId, {
+          app: APP_ID,
+          type: 'session:heartbeat',
+          peerId: this.myPeerId,
+          timestamp: Date.now(),
+          repo: session.repoKey,
+          sessionId,
+        });
+      }
+    }
+
+    return session;
   }
 
   async addSessionFiles(
@@ -1116,8 +1137,27 @@ export class GitHubCollabCoordinator {
     return result;
   }
 
-  releaseClaim(claimId: string): CodeClaim | undefined {
-    return this.activity.releaseClaim(claimId);
+  async releaseClaim(claimId: string): Promise<CodeClaim | undefined> {
+    const claim = this.activity.releaseClaim(claimId);
+    if (!claim) return undefined;
+
+    // Broadcast release for shared repos so remote peers clean up mirrored claims
+    if (claim.repoKey) {
+      const config = this.repos.get(claim.repoKey);
+      if (config?.privacyLevel === 'shared') {
+        await this.broadcastMessage(config.paranetId, {
+          app: APP_ID,
+          type: 'claim:released',
+          peerId: this.myPeerId,
+          timestamp: Date.now(),
+          repo: claim.repoKey,
+          claimId: claim.claimId,
+          file: claim.filePath,
+        });
+      }
+    }
+
+    return claim;
   }
 
   getActiveClaims(repoKey?: string): CodeClaim[] {
