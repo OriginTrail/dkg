@@ -22,6 +22,7 @@ export function GraphCanvas({ repo, branch }: GraphCanvasProps) {
   const [triples, setTriples] = useState<Array<{ subject: string; predicate: string; object: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const currentView = ALL_VIEWS[viewKey];
 
@@ -39,14 +40,20 @@ export function GraphCanvas({ repo, branch }: GraphCanvasProps) {
       }
       const result = await executeQuery(sparql, repo || undefined);
       const data = result?.result;
-      if (data?.triples) {
+      if (data?.quads && data.quads.length > 0) {
+        // CONSTRUCT returns quads (with graph field)
+        setTriples(data.quads.map((q: any) => ({ subject: q.subject, predicate: q.predicate, object: q.object })));
+      } else if (data?.triples && data.triples.length > 0) {
         setTriples(data.triples);
-      } else if (data?.bindings) {
+      } else if (data?.bindings && data.bindings.length > 0) {
         // Convert bindings to triples if needed
         const rows = data.bindings
           .filter((b: any) => b.s && b.p && b.o)
           .map((b: any) => ({ subject: b.s, predicate: b.p, object: b.o }));
         setTriples(rows);
+      } else {
+        setTriples([]);
+        setError('No data returned. The query may not match any entities in the workspace.');
       }
     } catch (e: any) {
       setError(e.message);
@@ -54,6 +61,14 @@ export function GraphCanvas({ repo, branch }: GraphCanvasProps) {
       setLoading(false);
     }
   }, [repo, branch]);
+
+  // Auto-load PR Impact view when repo becomes available
+  React.useEffect(() => {
+    if (repo && !hasLoaded && currentView) {
+      setHasLoaded(true);
+      loadGraph(currentView);
+    }
+  }, [repo, hasLoaded, currentView, loadGraph]);
 
   const handleViewChange = (key: string) => {
     setViewKey(key);
