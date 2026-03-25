@@ -12,6 +12,7 @@ export function makeMockAgent(peerId = 'test-peer-1') {
   const conditionalWrites: any[] = [];
   const enshrined: any[] = [];
   const contextGraphs: any[] = [];
+  const queryCalls: Array<{ sparql: string; opts: any }> = [];
   const subscriptions = new Set<string>();
   const messageHandlers = new Map<string, Function[]>();
 
@@ -63,7 +64,10 @@ export function makeMockAgent(peerId = 'test-peer-1') {
       vs: new Uint8Array(32),
     }),
 
-    query: async (_sparql?: string, _paranetId?: string) => ({ bindings: [] }),
+    query: async (sparql: string, opts?: any) => {
+      queryCalls.push({ sparql, opts });
+      return { bindings: [] };
+    },
 
     // --- tracking arrays for test assertions ---
     _published: published,
@@ -73,6 +77,7 @@ export function makeMockAgent(peerId = 'test-peer-1') {
     _contextGraphs: contextGraphs,
     _subscriptions: subscriptions,
     _messageHandlers: messageHandlers,
+    _queryCalls: queryCalls,
 
     /** Simulate an incoming gossip message. */
     _injectMessage(topic: string, data: Uint8Array, from: string) {

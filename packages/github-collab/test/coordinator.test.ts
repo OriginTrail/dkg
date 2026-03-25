@@ -270,6 +270,29 @@ describe('GitHubCollabCoordinator', () => {
       // The mock query just returns { bindings: [] }, but the call still goes through
       await coordinator.query('SELECT ?s WHERE { ?s ?p ?o }', 'octocat/Hello-World');
     });
+
+    it('uses graphSuffix instead of includeWorkspace when paranetId is set', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      await coordinator.query('SELECT * WHERE { ?s ?p ?o }', 'octocat/Hello-World', true);
+      const lastCall = agent._queryCalls[agent._queryCalls.length - 1];
+      expect(lastCall.opts.graphSuffix).toBe('_workspace');
+      expect(lastCall.opts.includeWorkspace).toBeUndefined();
+    });
+
+    it('falls back to includeWorkspace when no paranetId is set', async () => {
+      await coordinator.query('SELECT * WHERE { ?s ?p ?o }', undefined, true);
+      const lastCall = agent._queryCalls[agent._queryCalls.length - 1];
+      expect(lastCall.opts.includeWorkspace).toBe(true);
+      expect(lastCall.opts.graphSuffix).toBeUndefined();
+    });
+
+    it('omits both workspace flags when includeWorkspace is false', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      await coordinator.query('SELECT * WHERE { ?s ?p ?o }', 'octocat/Hello-World', false);
+      const lastCall = agent._queryCalls[agent._queryCalls.length - 1];
+      expect(lastCall.opts.graphSuffix).toBeUndefined();
+      expect(lastCall.opts.includeWorkspace).toBeUndefined();
+    });
   });
 
   // =========================================================================
