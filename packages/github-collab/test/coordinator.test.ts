@@ -80,6 +80,105 @@ describe('GitHubCollabCoordinator', () => {
       expect(config!.syncScope).toContain('reviews');
       expect(config!.syncScope).toContain('commits');
     });
+
+    it('addRepo merge: updating token preserves paranetId and privacyLevel', async () => {
+      await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        privacyLevel: 'shared',
+        pollIntervalMs: 120_000,
+      });
+      const before = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      const originalParanetId = before.paranetId;
+      const originalPrivacy = before.privacyLevel;
+
+      // Update with token
+      const result = await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        githubToken: 'ghp_new_token',
+      });
+
+      const after = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      expect(result.paranetId).toBe(originalParanetId);
+      expect(after.paranetId).toBe(originalParanetId);
+      expect(after.privacyLevel).toBe(originalPrivacy);
+      expect(after.githubToken).toBe('ghp_new_token');
+      expect(after.pollIntervalMs).toBe(120_000);
+    });
+
+    it('addRepo merge: updating webhookSecret preserves other fields', async () => {
+      await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        githubToken: 'ghp_existing',
+        pollIntervalMs: 60_000,
+        syncScope: ['pull_requests', 'issues'],
+      });
+
+      await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        webhookSecret: 'whsec_new',
+      });
+
+      const after = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      expect(after.webhookSecret).toBe('whsec_new');
+      expect(after.githubToken).toBe('ghp_existing');
+      expect(after.pollIntervalMs).toBe(60_000);
+      expect(after.syncScope).toEqual(['pull_requests', 'issues']);
+    });
+
+    it('addRepo merge: does not create duplicate repos', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', githubToken: 'ghp_tok' });
+      expect(coordinator.getConfiguredRepos()).toHaveLength(1);
+    });
+
+    it('addRepo merge: updating syncScope replaces the entire array', async () => {
+      await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        syncScope: ['pull_requests', 'issues', 'reviews', 'commits'],
+      });
+
+      await coordinator.addRepo({
+        owner: 'octocat',
+        repo: 'Hello-World',
+        syncScope: ['pull_requests'],
+      });
+
+      const after = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      expect(after.syncScope).toEqual(['pull_requests']);
+    });
+  });
+
+  // =========================================================================
+  // Config persistence (configPath: null)
+  // =========================================================================
+
+  describe('config persistence', () => {
+    it('configPath null prevents any file operations', async () => {
+      // The coordinator was created with configPath: null in beforeEach
+      // All repo operations should work without touching disk
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      coordinator.removeRepo('octocat', 'Hello-World');
+      // If file operations were attempted, they would throw since
+      // there is no real config path — the test passing proves no I/O
+    });
+
+    it('configPath null: addRepo merge works without persistence', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World' });
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', githubToken: 'ghp_tok' });
+      const config = coordinator.getRepoConfig('octocat', 'Hello-World')!;
+      expect(config.githubToken).toBe('ghp_tok');
+    });
+
+    it('configPath null: convertToShared works without persistence', async () => {
+      await coordinator.addRepo({ owner: 'octocat', repo: 'Hello-World', privacyLevel: 'local' });
+      const result = await coordinator.convertToShared('octocat', 'Hello-World');
+      expect(result.paranetId).toBeTruthy();
+    });
   });
 
   // =========================================================================

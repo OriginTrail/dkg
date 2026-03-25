@@ -758,3 +758,62 @@ describe('edge cases', () => {
     expect(transformCommit({ sha: '' }, OWNER, REPO, GRAPH)).toEqual([]);
   });
 });
+
+// =========================================================================
+// bv() — N-Triples binding value parser (from ui/src/api.ts)
+// =========================================================================
+
+// bv() is a pure function, safe to import in Node.js
+import { bv } from '../ui/src/api.js';
+
+describe('bv() — N-Triples binding value parser', () => {
+  it('returns empty string for null/undefined', () => {
+    expect(bv(null)).toBe('');
+    expect(bv(undefined)).toBe('');
+  });
+
+  it('returns empty string for empty string', () => {
+    expect(bv('')).toBe('');
+  });
+
+  it('strips typed literal suffix', () => {
+    expect(bv('"42"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe('42');
+    expect(bv('"true"^^<http://www.w3.org/2001/XMLSchema#boolean>')).toBe('true');
+    expect(bv('"2024-01-15"^^<http://www.w3.org/2001/XMLSchema#date>')).toBe('2024-01-15');
+  });
+
+  it('strips language tag', () => {
+    expect(bv('"hello"@en')).toBe('hello');
+    expect(bv('"bonjour"@fr')).toBe('bonjour');
+  });
+
+  it('strips plain quotes', () => {
+    expect(bv('"plain value"')).toBe('plain value');
+  });
+
+  it('passes through bare URIs unchanged', () => {
+    expect(bv('urn:github:octocat/Hello-World')).toBe('urn:github:octocat/Hello-World');
+    expect(bv('http://example.com')).toBe('http://example.com');
+  });
+
+  it('passes through already-clean strings', () => {
+    expect(bv('just a string')).toBe('just a string');
+  });
+
+  it('unescapes escaped quotes in typed literals', () => {
+    expect(bv('"value with \\"quotes\\""^^<http://www.w3.org/2001/XMLSchema#string>')).toBe('value with "quotes"');
+  });
+
+  it('unescapes newlines in typed literals', () => {
+    expect(bv('"line1\\nline2"^^<http://www.w3.org/2001/XMLSchema#string>')).toBe('line1\nline2');
+  });
+
+  it('unescapes backslashes in typed literals', () => {
+    expect(bv('"path\\\\to\\\\file"^^<http://www.w3.org/2001/XMLSchema#string>')).toBe('path\\to\\file');
+  });
+
+  it('handles typed literal without type (just quoted)', () => {
+    // The regex makes ^^<type> optional, so plain "value" also matches
+    expect(bv('"hello world"')).toBe('hello world');
+  });
+});
