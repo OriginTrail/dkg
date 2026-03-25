@@ -947,7 +947,8 @@ export class GitHubCollabCoordinator {
     session.repoKey = repoKey;
 
     // Write RDF to workspace
-    const quads = this.activity.generateSessionQuads(session, config.owner, config.repo, config.paranetId);
+    const graph = `did:dkg:paranet:${config.paranetId}`;
+    const quads = this.activity.generateSessionQuads(session, config.owner, config.repo, graph);
     await this.writeToWorkspace(config.paranetId, quads);
 
     // Broadcast if shared
@@ -990,7 +991,8 @@ export class GitHubCollabCoordinator {
 
     // Write final session RDF
     if (config) {
-      const quads = this.activity.generateSessionQuads(result.session, config.owner, config.repo, config.paranetId);
+      const graph = `did:dkg:paranet:${config.paranetId}`;
+      const quads = this.activity.generateSessionQuads(result.session, config.owner, config.repo, graph);
       await this.writeToWorkspace(config.paranetId, quads);
 
       if (config.privacyLevel === 'shared') {
@@ -1026,7 +1028,8 @@ export class GitHubCollabCoordinator {
 
     // Write RDF for successful claims
     for (const claim of result.claimed) {
-      const quads = this.activity.generateClaimQuads(claim, config.owner, config.repo, config.paranetId);
+      const graph = `did:dkg:paranet:${config.paranetId}`;
+      const quads = this.activity.generateClaimQuads(claim, config.owner, config.repo, graph);
       await this.writeToWorkspace(config.paranetId, quads);
 
       if (config.privacyLevel === 'shared') {
@@ -1092,7 +1095,8 @@ export class GitHubCollabCoordinator {
     decision.repoKey = repoKey;
 
     // Write RDF
-    const quads = this.activity.generateDecisionQuads(decision, config.owner, config.repo, config.paranetId);
+    const graph = `did:dkg:paranet:${config.paranetId}`;
+    const quads = this.activity.generateDecisionQuads(decision, config.owner, config.repo, graph);
     await this.writeToWorkspace(config.paranetId, quads);
 
     if (config.privacyLevel === 'shared') {
@@ -1130,7 +1134,8 @@ export class GitHubCollabCoordinator {
     });
 
     // Write RDF
-    const quads = this.activity.generateAnnotationQuads(annotation, config.owner, config.repo, config.paranetId);
+    const graph = `did:dkg:paranet:${config.paranetId}`;
+    const quads = this.activity.generateAnnotationQuads(annotation, config.owner, config.repo, graph);
     await this.writeToWorkspace(config.paranetId, quads);
 
     // Broadcast if shared

@@ -17,11 +17,17 @@ The Multi-agent Coding app maintains a **knowledge graph** of a GitHub repositor
 
 **Base URL:** `http://localhost:<PORT>/api/apps/github-collab`
 
-The port is configured by the DKG node operator (default: 8900). All endpoints accept and return JSON. No authentication token is required for local nodes.
+The port is configured by the DKG node operator (default: 9200). All endpoints accept and return JSON.
+
+**Authentication:** Read the auth token from `~/.dkg/auth.token` (skip the first comment line):
+```bash
+AUTH_TOKEN=$(grep -v '^#' ~/.dkg/auth.token | head -1)
+```
 
 **Headers:**
 ```
 Content-Type: application/json
+Authorization: Bearer <AUTH_TOKEN>
 ```
 
 ## Agent Lifecycle
