@@ -29,17 +29,19 @@
     "@origintrail-official/dkg-graph-viz": "workspace:*"
   },
   "devDependencies": {
-    "cross-env": "^10.1.0",
     "@types/node": "^22",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4",
+    "cross-env": "^10.1.0",
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",
+    "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.7",
     "vite": "^6",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "web-tree-sitter": "^0.22.6"
   },
   "publishConfig": {
     "access": "public"

@@ -1,13 +1,17 @@
 /**
- * Code Sync — fetches and indexes repository file trees from GitHub.
+ * Code Sync — fetches and indexes repository file trees and code entities from GitHub.
  *
- * Phase A: Uses the recursive git tree API to index all files and directories
- * in a single API call, producing RDF quads via the code transformer.
+ * Phase A: Uses the recursive git tree API to index all files and directories.
+ * Phase B: Fetches file contents, parses code entities via parser registry.
+ * Phase C: Extracts cross-file relationships (imports, inheritance).
  */
 
 import { GitHubClient } from './client.js';
-import { transformFileTree, type GitTreeEntry } from '../rdf/code-transformer.js';
+import { transformFileTree, transformCodeEntities, transformRelationships, type GitTreeEntry } from '../rdf/code-transformer.js';
 import type { Quad } from '../rdf/uri.js';
+import type { ParseResult } from '../code/parser.js';
+import { getParser, isParseable } from '../code/parser-registry.js';
+import { buildFileIndex, extractRelationships } from '../code/relationship-extractor.js';
 
 /** Default file extensions to include. */
 const DEFAULT_INCLUDE_EXTENSIONS = new Set([
@@ -75,6 +79,20 @@ export interface CodeSyncResult {
   directoryCount: number;
 }
 
+export interface CodeEntitySyncResult {
+  quads: Quad[];
+  parsedFiles: number;
+  totalEntities: number;
+  totalImports: number;
+  relationships: number;
+}
+
+export interface CodeSyncProgress {
+  phase: 'tree' | 'parsing' | 'relationships';
+  current: number;
+  total: number;
+}
+
 export class CodeSync {
   private readonly client: GitHubClient;
 
@@ -108,6 +126,94 @@ export class CodeSync {
     const directoryCount = filtered.filter(e => e.type === 'tree').length;
 
     return { quads, treeSha, fileCount, directoryCount };
+  }
+
+  /**
+   * Phase B+C: Fetch file contents, parse code entities, and extract relationships.
+   *
+   * Fetches blobs in batches with concurrency control, parses via the language
+   * parser registry, and resolves cross-file relationships.
+   */
+  async syncCodeEntities(
+    owner: string,
+    repo: string,
+    branch: string,
+    graph: string,
+    options: CodeSyncOptions = {},
+    onProgress?: (progress: CodeSyncProgress) => void,
+  ): Promise<CodeEntitySyncResult> {
+    const maxSize = options.maxFileSize ?? 100_000;
+
+    // 1. Get tree
+    onProgress?.({ phase: 'tree', current: 0, total: 1 });
+    const { treeSha } = await this.client.getCommitSha(owner, repo, branch);
+    const treeData = await this.client.getTree(owner, repo, treeSha, true);
+    const allEntries: GitTreeEntry[] = treeData.tree ?? [];
+    const filtered = this.filterEntries(allEntries, maxSize, options);
+    onProgress?.({ phase: 'tree', current: 1, total: 1 });
+
+    // 2. Filter to parseable files only
+    const parseableFiles = filtered.filter(e => e.type === 'blob' && isParseable(e.path));
+
+    // 3. Fetch and parse blobs in batches
+    const BATCH_SIZE = 20;
+    const BATCH_DELAY_MS = 50;
+    const parsedFiles = new Map<string, ParseResult>();
+    const quads: Quad[] = [];
+    let totalEntities = 0;
+    let totalImports = 0;
+
+    for (let i = 0; i < parseableFiles.length; i += BATCH_SIZE) {
+      const batch = parseableFiles.slice(i, i + BATCH_SIZE);
+      onProgress?.({ phase: 'parsing', current: i, total: parseableFiles.length });
+
+      const results = await Promise.all(
+        batch.map(async (entry) => {
+          try {
+            const blob = await this.client.getBlob(owner, repo, entry.sha);
+            const source = Buffer.from(blob.content, 'base64').toString('utf-8');
+            const parser = getParser(entry.path);
+            if (!parser) return null;
+            const result = await parser.parse(source, entry.path);
+            return { path: entry.path, result };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      for (const r of results) {
+        if (!r) continue;
+        parsedFiles.set(r.path, r.result);
+        const entityQuads = transformCodeEntities(r.result, r.path, owner, repo, graph);
+        quads.push(...entityQuads);
+        totalEntities += r.result.entities.length;
+        totalImports += r.result.imports.length;
+      }
+
+      // Delay between batches to be respectful of rate limits
+      if (i + BATCH_SIZE < parseableFiles.length) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+      }
+    }
+
+    onProgress?.({ phase: 'parsing', current: parseableFiles.length, total: parseableFiles.length });
+
+    // 4. Phase C: Extract relationships
+    onProgress?.({ phase: 'relationships', current: 0, total: 1 });
+    const fileIndex = buildFileIndex(parsedFiles);
+    const relationships = extractRelationships(fileIndex, owner, repo);
+    const relQuads = transformRelationships(relationships, graph);
+    quads.push(...relQuads);
+    onProgress?.({ phase: 'relationships', current: 1, total: 1 });
+
+    return {
+      quads,
+      parsedFiles: parsedFiles.size,
+      totalEntities,
+      totalImports,
+      relationships: relationships.length,
+    };
   }
 
   private filterEntries(

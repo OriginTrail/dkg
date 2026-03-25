@@ -28,12 +28,22 @@ export {
 export type { Quad } from './rdf/uri.js';
 
 // Code transformer
-export { transformFileTree, detectLanguage } from './rdf/code-transformer.js';
-export type { GitTreeEntry } from './rdf/code-transformer.js';
+export { transformFileTree, transformCodeEntities, transformRelationships, detectLanguage } from './rdf/code-transformer.js';
+export type { GitTreeEntry, ResolvedRelationship } from './rdf/code-transformer.js';
 
 // Code sync
 export { CodeSync } from './github/code-sync.js';
-export type { CodeSyncOptions, CodeSyncResult } from './github/code-sync.js';
+export type { CodeSyncOptions, CodeSyncResult, CodeEntitySyncResult, CodeSyncProgress } from './github/code-sync.js';
+
+// Code parsers
+export { TypeScriptParser } from './code/typescript-parser.js';
+export { TreeSitterParser } from './code/tree-sitter-parser.js';
+export { getParser, isParseable, PARSEABLE_EXTENSIONS } from './code/parser-registry.js';
+export type { LanguageParser, ParseResult, ParsedEntity, ParsedImport, ParsedExport } from './code/parser.js';
+
+// Relationship extractor
+export { buildFileIndex, extractRelationships } from './code/relationship-extractor.js';
+export type { ParsedFileIndex } from './code/relationship-extractor.js';
 
 // GitHub client
 export { GitHubClient, GitHubApiError } from './github/client.js';

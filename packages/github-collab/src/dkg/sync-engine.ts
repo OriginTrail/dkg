@@ -406,17 +406,41 @@ export class SyncEngine {
         }
       }
 
-      // Code Structure
+      // Code Structure (Phase A: tree, Phase B: parse, Phase C: relationships)
       if (scopes.includes('code_structure')) {
         job.progress.codeStructure = { total: 0, synced: 0 };
         const codeSync = new CodeSync(client);
         const defaultBranch = (await client.getRepository(owner, repo)).default_branch ?? 'main';
-        const result = await codeSync.syncFileTree(owner, repo, defaultBranch, graph);
-        job.progress.codeStructure.total = result.fileCount;
-        if (result.quads.length > 0) {
-          await this.writeQuads(paranetId, result.quads);
+
+        // Phase A: File tree
+        const treeResult = await codeSync.syncFileTree(owner, repo, defaultBranch, graph);
+        job.progress.codeStructure.total = treeResult.fileCount;
+        if (treeResult.quads.length > 0) {
+          await this.writeQuads(paranetId, treeResult.quads);
         }
-        job.progress.codeStructure.synced = result.fileCount;
+        job.progress.codeStructure.synced = treeResult.fileCount;
+
+        // Phase B+C: Parse code entities and extract relationships
+        job.progress.codeEntities = { total: 0, synced: 0 };
+        try {
+          const entityResult = await codeSync.syncCodeEntities(
+            owner, repo, defaultBranch, graph, {},
+            (progress) => {
+              if (progress.phase === 'parsing') {
+                job.progress.codeEntities.total = progress.total;
+                job.progress.codeEntities.synced = progress.current;
+              }
+            },
+          );
+          job.progress.codeEntities.total = entityResult.parsedFiles;
+          job.progress.codeEntities.synced = entityResult.parsedFiles;
+          if (entityResult.quads.length > 0) {
+            await this.writeQuads(paranetId, entityResult.quads);
+          }
+        } catch (err: any) {
+          // Phase B+C failure should not fail the whole sync
+          job.errors.push(`Code parsing: ${err.message}`);
+        }
       }
 
       job.status = 'completed';
