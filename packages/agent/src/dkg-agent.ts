@@ -1540,7 +1540,13 @@ export class DKGAgent {
    */
   private getParanetDefaultVisibility(paranetId: string): Visibility | undefined {
     const sub = this.subscribedParanets.get(paranetId);
-    if (!sub) return undefined;
+
+    // If the subscription entry is entirely absent, kick off a store lookup
+    // that may discover a non-public paranet from its _meta graph (e.g. after restart).
+    if (!sub) {
+      this._ensurePolicyLookup(paranetId);
+      return undefined;
+    }
 
     // If accessPolicy is already populated, use it directly
     if (sub.accessPolicy) {
@@ -1555,15 +1561,29 @@ export class DKGAgent {
     // Store-backed fallback: query once and cache the result.
     // This is a synchronous method, so we kick off an async rehydration and
     // return undefined for this call. The next call will see the cached value.
-    // We mark the lookup in-progress with a sentinel to avoid repeated queries.
-    if ((sub as any)._policyLookupPending) return undefined;
-    (sub as any)._policyLookupPending = true;
+    this._ensurePolicyLookup(paranetId, sub);
+
+    return undefined;
+  }
+
+  /**
+   * Fire-and-forget store lookup for a paranet's access policy.
+   * When `sub` is provided, populates its fields; when absent, creates a new
+   * subscription entry if the store contains a non-public definition in `_meta`.
+   */
+  private _ensurePolicyLookup(paranetId: string, sub?: ParanetSub): void {
+    // Use a sentinel on the subscription (or a module-level set for absent entries)
+    // to avoid repeated queries for the same paranet.
+    const sentinel = sub ?? (this as any);
+    const key = sub ? '_policyLookupPending' : `_policyLookup:${paranetId}`;
+    if ((sentinel as any)[key]) return;
+    (sentinel as any)[key] = true;
 
     const pUri = `did:dkg:paranet:${paranetId}`;
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const metaGraph = paranetMetaGraphUri(paranetId);
     this.store.query(`
-      SELECT ?policy ?peer WHERE {
+      SELECT ?policy ?peer ?name WHERE {
         {
           GRAPH <${ontologyGraph}> {
             <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
@@ -1584,28 +1604,55 @@ export class DKGAgent {
             }
           }
         }
+        OPTIONAL {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name .
+            }
+          }
+        }
       }
     `).then((result) => {
-      delete (sub as any)._policyLookupPending;
+      delete (sentinel as any)[key];
       if (result.type !== 'bindings' || result.bindings.length === 0) return;
       const rows = result.bindings as Record<string, string>[];
       const policy = rows[0]['policy'] ? stripLiteral(rows[0]['policy']) : undefined;
-      if (policy) {
-        sub.accessPolicy = policy as AccessPolicy;
-        const peers: string[] = [];
-        for (const r of rows) {
-          if (r['peer']) {
-            const p = stripLiteral(r['peer']);
-            if (p && !peers.includes(p)) peers.push(p);
-          }
+      if (!policy) return;
+
+      const peers: string[] = [];
+      for (const r of rows) {
+        if (r['peer']) {
+          const p = stripLiteral(r['peer']);
+          if (p && !peers.includes(p)) peers.push(p);
         }
+      }
+      const name = rows[0]['name'] ? stripLiteral(rows[0]['name']) : undefined;
+
+      if (sub) {
+        // Update existing subscription entry
+        sub.accessPolicy = policy as AccessPolicy;
         if (peers.length > 0) sub.allowedPeers = peers;
+      } else {
+        // Create a new subscription entry for a non-public paranet found in _meta
+        const existing = this.subscribedParanets.get(paranetId);
+        if (!existing) {
+          this.subscribedParanets.set(paranetId, {
+            name: name ?? paranetId,
+            subscribed: true,
+            synced: true,
+            accessPolicy: policy as AccessPolicy,
+            allowedPeers: peers.length > 0 ? peers : undefined,
+          });
+          this.subscribeToParanet(paranetId, { trackSyncScope: false });
+        }
       }
     }).catch(() => {
-      delete (sub as any)._policyLookupPending;
+      delete (sentinel as any)[key];
     });
-
-    return undefined;
   }
 
   /**
@@ -2570,9 +2617,13 @@ export class DKGAgent {
 
     // Rehydrate access policy for paranets already in the subscription registry
     // whose accessPolicy/allowedPeers are missing (e.g. after restart).
+    // Also rehydrate when accessPolicy is 'allowList' but allowedPeers is absent
+    // (e.g. chain-discovered entries that set the policy but couldn't get peers).
     // Check both the ontology graph (public) and the paranet's own _meta graph (non-public).
     for (const [id, sub] of this.subscribedParanets) {
-      if (sub.accessPolicy !== undefined) continue; // already populated
+      const needsRehydration = sub.accessPolicy === undefined
+        || (sub.accessPolicy === 'allowList' && (!sub.allowedPeers || sub.allowedPeers.length === 0));
+      if (!needsRehydration) continue;
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
       const pUri = `did:dkg:paranet:${id}`;
@@ -2621,7 +2672,91 @@ export class DKGAgent {
       }
     }
 
+    // Rebuild subscriptions for non-public paranets whose definitions live in
+    // their own _meta graphs (not in the shared ontology graph). After restart,
+    // these entries would be entirely absent from subscribedParanets.
+    discovered += await this.rebuildNonPublicParanets(ctx);
+
     return discovered;
+  }
+
+  /**
+   * Scan all paranet `_meta` graphs in the store for `dkg:accessPolicy` triples
+   * and rebuild subscription entries for non-public paranets that are missing
+   * from `subscribedParanets`. This catches ownerOnly and allowList paranets
+   * created by this node that were persisted in `_meta` graphs (per 328a401)
+   * and would otherwise be invisible after a restart.
+   */
+  private async rebuildNonPublicParanets(ctx: OperationContext): Promise<number> {
+    // Query across ALL graphs for accessPolicy triples whose subject matches
+    // the paranet URI pattern. The GRAPH variable lets us identify which _meta
+    // graph each triple came from.
+    const prefix = 'did:dkg:paranet:';
+    const metaSuffix = '/_meta';
+    const result = await this.store.query(`
+      SELECT ?g ?paranet ?name ?policy ?peer WHERE {
+        GRAPH ?g {
+          ?paranet <http://dkg.io/ontology/accessPolicy> ?policy .
+          OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/allowedPeer> ?peer }
+        }
+        FILTER(STRENDS(STR(?g), "/_meta"))
+      }
+    `);
+
+    if (result.type !== 'bindings') return 0;
+
+    // Group by paranet URI
+    const grouped = new Map<string, { name?: string; policy?: string; peers: string[] }>();
+    for (const row of result.bindings as Record<string, string>[]) {
+      const uri = row['paranet'] ?? '';
+      if (!uri.startsWith(prefix)) continue;
+      if (!grouped.has(uri)) {
+        grouped.set(uri, {
+          name: row['name'] ? stripLiteral(row['name']) : undefined,
+          policy: row['policy'] ? stripLiteral(row['policy']) : undefined,
+          peers: [],
+        });
+      }
+      const entry = grouped.get(uri)!;
+      if (row['peer']) {
+        const peer = stripLiteral(row['peer']);
+        if (peer && !entry.peers.includes(peer)) entry.peers.push(peer);
+      }
+    }
+
+    let rebuilt = 0;
+    for (const [uri, info] of grouped) {
+      const id = uri.slice(prefix.length);
+      if (!id || id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+      if (!info.policy || info.policy === 'public') continue;
+
+      const existing = this.subscribedParanets.get(id);
+      if (existing?.subscribed && existing?.synced) continue;
+
+      const name = info.name ?? id;
+      this.subscribedParanets.set(id, {
+        name,
+        subscribed: true,
+        synced: true,
+        onChainId: existing?.onChainId,
+        accessPolicy: info.policy as AccessPolicy,
+        allowedPeers: info.peers.length > 0 ? info.peers : undefined,
+      });
+
+      if (!existing?.subscribed) {
+        this.subscribeToParanet(id, { trackSyncScope: false });
+      }
+
+      this.log.info(ctx, `Rebuilt non-public paranet "${name}" (${id}) from _meta graph — policy=${info.policy}` +
+        (info.peers.length > 0 ? `, ${info.peers.length} peer(s)` : ''));
+      rebuilt++;
+    }
+
+    if (rebuilt > 0) {
+      this.log.info(ctx, `Rebuilt ${rebuilt} non-public paranet(s) from _meta graphs`);
+    }
+    return rebuilt;
   }
 
   /**

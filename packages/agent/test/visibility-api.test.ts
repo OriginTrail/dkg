@@ -11,6 +11,7 @@
 import { describe, it, expect, afterAll, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { paranetMetaGraphUri } from '@origintrail-official/dkg-core';
 
 const PARANET_BASE = 'vis-api-test';
 const ENTITY_BASE = 'urn:vis-api:entity';
@@ -221,10 +222,10 @@ describe('createParanet — Visibility API', () => {
     });
 
     const DKG_NS = 'http://dkg.io/ontology/';
-    const ontologyGraph = 'did:dkg:paranet:ontology';
+    const metaGraph = paranetMetaGraphUri(paranet);
     const paranetUri = `did:dkg:paranet:${paranet}`;
     const result = await agent.query(
-      `SELECT ?policy WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_NS}accessPolicy> ?policy } }`,
+      `SELECT ?policy WHERE { GRAPH <${metaGraph}> { <${paranetUri}> <${DKG_NS}accessPolicy> ?policy } }`,
     );
     expect(result.bindings.length).toBe(1);
     expect(result.bindings[0]['policy']).toBe('"ownerOnly"');
@@ -239,17 +240,17 @@ describe('createParanet — Visibility API', () => {
     });
 
     const DKG_NS = 'http://dkg.io/ontology/';
-    const ontologyGraph = 'did:dkg:paranet:ontology';
+    const metaGraph = paranetMetaGraphUri(paranet);
     const paranetUri = `did:dkg:paranet:${paranet}`;
 
     const policyResult = await agent.query(
-      `SELECT ?policy WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_NS}accessPolicy> ?policy } }`,
+      `SELECT ?policy WHERE { GRAPH <${metaGraph}> { <${paranetUri}> <${DKG_NS}accessPolicy> ?policy } }`,
     );
     expect(policyResult.bindings.length).toBe(1);
     expect(policyResult.bindings[0]['policy']).toBe('"allowList"');
 
     const peerResult = await agent.query(
-      `SELECT ?peer WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_NS}allowedPeer> ?peer } }`,
+      `SELECT ?peer WHERE { GRAPH <${metaGraph}> { <${paranetUri}> <${DKG_NS}allowedPeer> ?peer } }`,
     );
     expect(peerResult.bindings.length).toBe(2);
   }, 10000);
