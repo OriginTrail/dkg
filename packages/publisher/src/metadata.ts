@@ -237,6 +237,10 @@ export interface WorkspaceMetadata {
   rootEntities: string[];
   publisherPeerId: string;
   timestamp: Date;
+  /** Access policy for this workspace write. Omitted means public (backward-compatible). */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Peer IDs permitted to read this write when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 /**
@@ -270,6 +274,22 @@ export function generateWorkspaceMetadata(
     quads.push(
       mq(subject, `${DKG}rootEntity`, rootEntity, workspaceMetaGraph),
     );
+  }
+
+  // Emit access policy metadata when present (omit for 'public' to keep
+  // backward compatibility — absence is treated as public by consumers).
+  if (meta.accessPolicy && meta.accessPolicy !== 'public') {
+    quads.push(
+      mq(subject, `${DKG}accessPolicy`, lit(meta.accessPolicy), workspaceMetaGraph),
+    );
+  }
+
+  if (meta.allowedPeers?.length) {
+    for (const peerId of meta.allowedPeers) {
+      quads.push(
+        mq(subject, `${DKG}allowedPeer`, lit(peerId), workspaceMetaGraph),
+      );
+    }
   }
 
   return quads;

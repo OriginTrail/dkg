@@ -124,7 +124,7 @@ export class WorkspaceHandler {
       if (request.operationId) {
         ctx = createOperationContext('workspace', request.operationId);
       }
-      const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs, casConditions } = request;
+      const { paranetId, nquads, manifest, publisherPeerId, workspaceOperationId, timestampMs, casConditions, accessPolicy, allowedPeers } = request;
       this.log.info(ctx, `Workspace write from ${fromPeerId} for paranet ${paranetId} op=${workspaceOperationId}`);
 
       if (publisherPeerId !== fromPeerId) {
@@ -200,6 +200,11 @@ export class WorkspaceHandler {
         await this.store.insert(normalized);
 
         const rootEntities = manifestForValidation.map((m) => m.rootEntity);
+        // Validate accessPolicy from the wire — only accept known values
+        const validPolicies = ['public', 'ownerOnly', 'allowList'] as const;
+        const decodedPolicy = accessPolicy && validPolicies.includes(accessPolicy as typeof validPolicies[number])
+          ? (accessPolicy as 'public' | 'ownerOnly' | 'allowList')
+          : undefined;
         const metaQuads = generateWorkspaceMetadata(
           {
             workspaceOperationId,
@@ -207,6 +212,8 @@ export class WorkspaceHandler {
             rootEntities,
             publisherPeerId,
             timestamp: new Date(Number(timestampMs)),
+            accessPolicy: decodedPolicy,
+            allowedPeers: allowedPeers?.length ? allowedPeers : undefined,
           },
           workspaceMetaGraph,
         );

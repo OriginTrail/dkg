@@ -24,6 +24,8 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('timestampMs', 6, 'uint64'))
   .add(new Field('operationId', 7, 'string'))
   .add(new Field('casConditions', 8, 'WorkspaceCASCondition', 'repeated'))
+  .add(new Field('accessPolicy', 9, 'string'))
+  .add(new Field('allowedPeers', 10, 'string', 'repeated'))
   .add(WorkspaceManifestEntrySchema)
   .add(WorkspaceCASConditionSchema);
 
@@ -53,6 +55,10 @@ export interface WorkspacePublishRequestMsg {
   operationId?: string;
   /** CAS conditions that receiving peers must enforce before applying this write. */
   casConditions?: WorkspaceCASConditionMsg[];
+  /** Access policy for this workspace write: 'public' | 'ownerOnly' | 'allowList'. */
+  accessPolicy?: string;
+  /** Peer IDs permitted to read this write when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

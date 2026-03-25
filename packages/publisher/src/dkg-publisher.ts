@@ -44,6 +44,10 @@ export interface DKGPublisherConfig {
 export interface WriteToWorkspaceOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
+  /** Access policy for this workspace write. Default: 'public'. */
+  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Peer IDs permitted to read when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 export interface WriteToWorkspaceResult {
@@ -249,6 +253,8 @@ export class DKGPublisher implements Publisher {
       timestampMs: Date.now(),
       operationId: ctx.operationId,
       casConditions,
+      accessPolicy: options.accessPolicy,
+      allowedPeers: options.allowedPeers,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -279,6 +285,8 @@ export class DKGPublisher implements Publisher {
         rootEntities,
         publisherPeerId: options.publisherPeerId,
         timestamp: new Date(),
+        accessPolicy: options.accessPolicy,
+        allowedPeers: options.allowedPeers,
       },
       workspaceMetaGraph,
     );
