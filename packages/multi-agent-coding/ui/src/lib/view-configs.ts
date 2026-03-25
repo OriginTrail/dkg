@@ -182,19 +182,31 @@ export const CODE_STRUCTURE_VIEW: ViewConfig = {
     [`${GH}TypeAlias`]: { color: '#a78bfa', shape: 'circle', sizeMultiplier: 0.3 },
     [`${GH}Enum`]: { color: '#fb923c', shape: 'hexagon', sizeMultiplier: 0.5 },
     [`${GH}File`]: { color: COLORS.file, shape: 'circle', sizeMultiplier: 0.25 },
+    [`${GH}Directory`]: { color: COLORS.directory, shape: 'hexagon', sizeMultiplier: 0.35 },
   },
   circleTypes: ['Function', 'Method', 'TypeAlias', 'File'],
   tooltip: {
     titleProperties: ['name', 'signature', 'path'],
     titleMaxLength: 50,
   },
-  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+  defaultSparql: `CONSTRUCT {
+  ?s ?p ?o .
+  ?file a <${GH}File> ; <${GH}path> ?fpath .
+  ?s <${GH}definedIn> ?file .
+  ?dir a <${GH}Directory> ; <${GH}path> ?dpath .
+  ?file <${GH}containedIn> ?dir .
+}
 WHERE {
   ?s a ?type ; ?p ?o .
   FILTER(?type IN (
     <${GH}Class>, <${GH}Function>, <${GH}Interface>,
     <${GH}Method>, <${GH}TypeAlias>, <${GH}Enum>
   ))
+  OPTIONAL {
+    ?s <${GH}definedIn> ?file .
+    ?file a <${GH}File> ; <${GH}path> ?fpath .
+    OPTIONAL { ?file <${GH}containedIn> ?dir . ?dir a <${GH}Directory> ; <${GH}path> ?dpath }
+  }
 } LIMIT 500`,
 };
 
