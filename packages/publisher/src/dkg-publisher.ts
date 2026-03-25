@@ -173,6 +173,25 @@ export class DKGPublisher implements Publisher {
     options: WriteToWorkspaceOptions & { conditions?: CASCondition[] },
   ): Promise<WriteToWorkspaceResult> {
     const ctx = options.operationCtx ?? createOperationContext('workspace');
+
+    // Validate access policy metadata (same invariants as publish())
+    const VALID_POLICIES = new Set<string | undefined>(['public', 'ownerOnly', 'allowList', undefined]);
+    if (!VALID_POLICIES.has(options.accessPolicy)) {
+      throw new Error(
+        `Workspace write rejected: invalid accessPolicy "${String(options.accessPolicy)}" (must be "public", "ownerOnly", or "allowList")`,
+      );
+    }
+    if (options.accessPolicy === 'allowList') {
+      if (!options.allowedPeers || options.allowedPeers.length === 0) {
+        throw new Error('Workspace write rejected: accessPolicy "allowList" requires non-empty "allowedPeers"');
+      }
+    }
+    if (options.accessPolicy !== 'allowList' && options.allowedPeers && options.allowedPeers.length > 0) {
+      // ownerOnly with allowedPeers is contradictory — strip silently (matches publish() intent)
+      this.log.warn(ctx, `Ignoring allowedPeers for accessPolicy "${options.accessPolicy ?? 'public'}" — only valid with "allowList"`);
+      options = { ...options, allowedPeers: undefined };
+    }
+
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}`);
 
     await this.graphManager.ensureParanet(paranetId);

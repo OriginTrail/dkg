@@ -39,15 +39,13 @@ describe('writeToWorkspace — Visibility API', () => {
     await agent.start();
     await sleep(500);
 
-    // Patch the gossip.publish to track broadcast calls
-    gossipSpy = vi.fn().mockResolvedValue(undefined);
-    const origGossip = (agent as any).gossip;
-    (agent as any).gossip = { ...origGossip, publish: gossipSpy };
+    // Spy on gossip.publish to track broadcast calls (vi.spyOn preserves prototype methods)
+    gossipSpy = vi.spyOn((agent as any).gossip, 'publish').mockResolvedValue(undefined);
   }, 10000);
 
-  it('writeToWorkspace with no options → broadcasts (public default, backward compat)', async () => {
+  it('writeToWorkspace with no options on public paranet → broadcasts (public default, backward compat)', async () => {
     const paranet = nextParanet();
-    await agent.createParanet({ id: paranet, name: 'Test', visibility: 'private' });
+    await agent.createParanet({ id: paranet, name: 'Test', visibility: 'public' });
 
     gossipSpy.mockClear();
     const entity = nextEntity();
@@ -56,6 +54,19 @@ describe('writeToWorkspace — Visibility API', () => {
     ]);
 
     expect(gossipSpy).toHaveBeenCalledTimes(1);
+  }, 10000);
+
+  it('writeToWorkspace with no options on private paranet → inherits private (no broadcast)', async () => {
+    const paranet = nextParanet();
+    await agent.createParanet({ id: paranet, name: 'Test', visibility: 'private' });
+
+    gossipSpy.mockClear();
+    const entity = nextEntity();
+    await agent.writeToWorkspace(paranet, [
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Inherited Private"', graph: '' },
+    ]);
+
+    expect(gossipSpy).not.toHaveBeenCalled();
   }, 10000);
 
   it('writeToWorkspace with visibility: "public" → broadcasts', async () => {
@@ -258,5 +269,85 @@ describe('createParanet — Visibility API', () => {
     );
     // Default is public, and public doesn't store accessPolicy triple
     expect(result.bindings.length).toBe(0);
+  }, 10000);
+
+  it('createParanet with allowList → registers on chain but does NOT broadcast definition', async () => {
+    const paranet = nextParanet();
+    // Spy on gossip.publish (vi.spyOn preserves prototype methods like subscribe)
+    const publishSpy = vi.spyOn((agent as any).gossip, 'publish').mockResolvedValue(undefined);
+    publishSpy.mockClear();
+
+    await agent.createParanet({
+      id: paranet,
+      name: 'Allow List No Broadcast',
+      visibility: { peers: ['peerA'] },
+    });
+
+    // The definition should NOT be broadcast on the ontology topic
+    // (allowList paranets are discoverable only via direct sharing)
+    expect(publishSpy).not.toHaveBeenCalled();
+
+    // But the paranet should exist locally
+    const exists = await agent.paranetExists(paranet);
+    expect(exists).toBe(true);
+
+    publishSpy.mockRestore();
+  }, 10000);
+});
+
+describe('Paranet visibility inheritance', () => {
+  let agent: DKGAgent;
+  let gossipSpy: ReturnType<typeof vi.fn>;
+
+  afterAll(async () => {
+    try { await agent?.stop(); } catch { /* */ }
+  });
+
+  it('creates agent and patches gossip', async () => {
+    agent = await DKGAgent.create({
+      name: 'InheritVisTest',
+      listenPort: 0,
+      chainAdapter: new MockChainAdapter('mock:31337'),
+    });
+    await agent.start();
+    await sleep(500);
+
+    gossipSpy = vi.spyOn((agent as any).gossip, 'publish').mockResolvedValue(undefined);
+  }, 10000);
+
+  it('writeToWorkspace inherits allowList visibility from paranet when no opts given', async () => {
+    const paranet = nextParanet();
+    await agent.createParanet({
+      id: paranet,
+      name: 'AllowList Paranet',
+      visibility: { peers: ['peerX'] },
+    });
+
+    gossipSpy.mockClear();
+    const entity = nextEntity();
+    await agent.writeToWorkspace(paranet, [
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Inherited AllowList"', graph: '' },
+    ]);
+
+    // allowList → no gossip broadcast (targeted push only)
+    expect(gossipSpy).not.toHaveBeenCalled();
+  }, 10000);
+
+  it('explicit visibility overrides paranet default', async () => {
+    const paranet = nextParanet();
+    await agent.createParanet({
+      id: paranet,
+      name: 'Private Paranet Override',
+      visibility: 'private',
+    });
+
+    gossipSpy.mockClear();
+    const entity = nextEntity();
+    await agent.writeToWorkspace(paranet, [
+      { subject: entity, predicate: 'http://schema.org/name', object: '"Override to Public"', graph: '' },
+    ], { visibility: 'public' });
+
+    // Explicit public overrides inherited private
+    expect(gossipSpy).toHaveBeenCalledTimes(1);
   }, 10000);
 });

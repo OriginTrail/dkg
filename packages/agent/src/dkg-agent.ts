@@ -75,6 +75,10 @@ export interface ParanetSub {
   synced: boolean;
   /** On-chain paranet ID (keccak256 hash), if known. */
   onChainId?: string;
+  /** Access policy stored at paranet creation time. Absent means public (default). */
+  accessPolicy?: AccessPolicy;
+  /** Allowed peer IDs when accessPolicy is 'allowList'. */
+  allowedPeers?: string[];
 }
 
 export interface DKGAgentConfig {
@@ -1308,7 +1312,9 @@ export class DKGAgent {
         );
       }
     }
-    const resolved = resolveVisibility(opts?.visibility, {
+    // Inherit paranet default visibility when no explicit visibility/accessPolicy is given
+    const explicitVisibility = opts?.visibility ?? (opts?.accessPolicy ? undefined : this.getParanetDefaultVisibility(paranetId));
+    const resolved = resolveVisibility(explicitVisibility, {
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
     });
@@ -1406,10 +1412,11 @@ export class DKGAgent {
       operationCtx?: OperationContext;
     },
   ): Promise<{ workspaceOperationId: string }> {
-    // Preserve backward compatibility: when neither visibility nor localOnly is
-    // specified, default to public/broadcast (matching pre-migration behavior).
-    // Only go private when the caller explicitly requests it.
-    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : 'public');
+    // Inherit paranet default visibility when neither visibility nor localOnly is
+    // specified. Falls back to 'public' (broadcast) when no paranet-level policy
+    // exists — preserving pre-migration behavior for existing callers.
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : (paranetDefault ?? 'public'));
     const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId} (visibility=${typeof effectiveVisibility === 'object' ? 'peers' : effectiveVisibility ?? 'default'})`);
@@ -1456,8 +1463,9 @@ export class DKGAgent {
       operationCtx?: OperationContext;
     },
   ): Promise<{ workspaceOperationId: string }> {
-    // Same backward-compat default as writeToWorkspace
-    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : 'public');
+    // Inherit paranet default visibility (same logic as writeToWorkspace)
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    const effectiveVisibility = opts?.visibility ?? (opts?.localOnly != null ? undefined : (paranetDefault ?? 'public'));
     const resolved = resolveVisibility(effectiveVisibility, { localOnly: opts?.localOnly });
     const ctx = opts?.operationCtx ?? createOperationContext('workspace');
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
@@ -1517,6 +1525,22 @@ export class DKGAgent {
   }
 
   /**
+   * Look up the paranet's stored access policy from the in-memory subscribedParanets map.
+   * Returns undefined when no policy is stored (i.e. the paranet is public or pre-dates the
+   * privacy model). Callers use this to inherit the paranet's default when the user omits
+   * an explicit visibility parameter on a write/publish operation.
+   */
+  private getParanetDefaultVisibility(paranetId: string): Visibility | undefined {
+    const sub = this.subscribedParanets.get(paranetId);
+    if (!sub?.accessPolicy || sub.accessPolicy === 'public') return undefined;
+    if (sub.accessPolicy === 'ownerOnly') return 'private';
+    if (sub.accessPolicy === 'allowList' && sub.allowedPeers && sub.allowedPeers.length > 0) {
+      return { peers: sub.allowedPeers };
+    }
+    return undefined;
+  }
+
+  /**
    * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * workspace state can promote it to canonical without re-downloading the full payload.
@@ -1538,7 +1562,17 @@ export class DKGAgent {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
 
-    // Default to public for enshrinement — this is the deliberate "make permanent" action
+    // Default to public for enshrinement — this is the deliberate "make permanent" action.
+    // Warn if the paranet has a more restrictive policy and the caller is not explicitly
+    // setting visibility, so they don't accidentally widen access.
+    const paranetDefault = this.getParanetDefaultVisibility(paranetId);
+    if (!options?.visibility && paranetDefault) {
+      const policyLabel = typeof paranetDefault === 'string' ? paranetDefault : 'peers';
+      this.log.warn(ctx,
+        `Enshrining with default visibility "public" but paranet "${paranetId}" has access policy "${policyLabel}". ` +
+        `Pass visibility explicitly to suppress this warning.`,
+      );
+    }
     const resolved = resolveVisibility(options?.visibility ?? 'public');
 
     const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
@@ -1897,7 +1931,12 @@ export class DKGAgent {
     const now = new Date().toISOString();
 
     const resolved = resolveVisibility(opts.visibility, { private: opts.private });
-    const isPrivate = resolved.accessPolicy === 'ownerOnly' && !resolved.broadcast;
+    // ownerOnly: fully local — no chain, no gossip, no subscription
+    const skipChain = resolved.accessPolicy === 'ownerOnly';
+    // Only public paranets broadcast their definition on the ontology topic;
+    // allowList paranets are registered on-chain for governance but their
+    // definition is NOT broadcast — allowed peers discover it directly.
+    const skipDefinitionBroadcast = resolved.accessPolicy !== 'public';
 
     const exists = await this.paranetExists(opts.id);
     if (exists) {
@@ -1905,9 +1944,10 @@ export class DKGAgent {
     }
 
     // Register on chain if a real chain adapter is configured.
-    // Private paranets skip on-chain registration and gossip entirely.
+    // ownerOnly paranets skip on-chain registration and gossip entirely.
+    // allowList paranets register on-chain (for governance/incentives).
     let onChainId: string | undefined;
-    if (isPrivate) {
+    if (skipChain) {
       this.log.info(ctx, `Creating private paranet "${opts.id}" (local-only, no chain, no gossip)`);
     } else if (this.chain.chainId !== 'none') {
       try {
@@ -1995,15 +2035,23 @@ export class DKGAgent {
 
     this.subscribedParanets.set(opts.id, {
       name: opts.name,
-      subscribed: !isPrivate,
+      subscribed: !skipChain,
       synced: true,
       onChainId: onChainId,
+      accessPolicy: resolved.accessPolicy !== 'public' ? resolved.accessPolicy : undefined,
+      allowedPeers: resolved.allowedPeers.length > 0 ? resolved.allowedPeers : undefined,
     });
 
-    if (!isPrivate) {
-      // Auto-subscribe to the new paranet's GossipSub topic
+    // ownerOnly: fully isolated — no gossip topics, no broadcast
+    // allowList: subscribe to paranet-specific topics (so allowed peers can gossip
+    //            within the paranet), but do NOT broadcast definition publicly
+    // public: full gossip subscription + public definition broadcast
+    if (!skipChain) {
+      // Subscribe to paranet-specific GossipSub topics (publish, workspace, app, etc.)
       this.subscribeToParanet(opts.id);
+    }
 
+    if (!skipDefinitionBroadcast) {
       // Broadcast via the ontology paranet so other nodes learn about it
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const nquads = quads.map(q => {

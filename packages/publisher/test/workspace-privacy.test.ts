@@ -127,6 +127,56 @@ describe('Workspace writeToWorkspace — access policy propagation', () => {
     expect(decoded.accessPolicy).toBe('allowList');
     expect(decoded.allowedPeers).toEqual(['peerX']);
   });
+
+  it('rejects allowList with empty allowedPeers', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"No Peers"')];
+    await expect(
+      publisher.writeToWorkspace(PARANET, quads, {
+        publisherPeerId: '12D3KooWTest',
+        accessPolicy: 'allowList',
+        allowedPeers: [],
+      }),
+    ).rejects.toThrow(/allowList.*requires non-empty.*allowedPeers/);
+  });
+
+  it('rejects allowList with undefined allowedPeers', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"No Peers 2"')];
+    await expect(
+      publisher.writeToWorkspace(PARANET, quads, {
+        publisherPeerId: '12D3KooWTest',
+        accessPolicy: 'allowList',
+      }),
+    ).rejects.toThrow(/allowList.*requires non-empty.*allowedPeers/);
+  });
+
+  it('strips allowedPeers when accessPolicy is ownerOnly (contradictory)', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Owner Only With Peers"')];
+    const { workspaceOperationId } = await publisher.writeToWorkspace(PARANET, quads, {
+      publisherPeerId: '12D3KooWTest',
+      accessPolicy: 'ownerOnly',
+      allowedPeers: ['peerShouldBeIgnored'],
+    });
+    expect(workspaceOperationId).toBeTruthy();
+
+    // Verify allowedPeers were NOT stored in metadata
+    const result = await store.query(
+      `SELECT ?peer WHERE { GRAPH <${WORKSPACE_META_GRAPH}> { ?op <${DKG_NS}allowedPeer> ?peer } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBe(0);
+    }
+  });
+
+  it('rejects invalid accessPolicy value', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"Bad Policy"')];
+    await expect(
+      publisher.writeToWorkspace(PARANET, quads, {
+        publisherPeerId: '12D3KooWTest',
+        accessPolicy: 'banana' as any,
+      }),
+    ).rejects.toThrow(/invalid accessPolicy/);
+  });
 });
 
 describe('WorkspaceHandler — access policy from gossip message', () => {
@@ -205,26 +255,14 @@ describe('WorkspaceHandler — access policy from gossip message', () => {
     }
   });
 
-  it('handler ignores invalid access policy from gossip', async () => {
+  it('writeToWorkspace rejects invalid access policy', async () => {
     const quads = [q('urn:gossip:entity3', 'http://schema.org/name', '"Invalid Policy"')];
-    const { message } = await publisher.writeToWorkspace('gossip-paranet-3', quads, {
-      publisherPeerId: '12D3KooWSender',
-      accessPolicy: 'invalidPolicy' as any,
-    });
-
-    const receiverStore = new OxigraphStore();
-    const receiverHandler = new WorkspaceHandler(receiverStore, new TypedEventBus());
-    await receiverHandler.handle(message, '12D3KooWSender');
-
-    const WS_META = 'did:dkg:paranet:gossip-paranet-3/_workspace_meta';
-    const result = await receiverStore.query(
-      `SELECT ?policy WHERE { GRAPH <${WS_META}> { ?op <${DKG_NS}accessPolicy> ?policy } }`,
-    );
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      // Invalid policy should be dropped (not stored)
-      expect(result.bindings.length).toBe(0);
-    }
+    await expect(
+      publisher.writeToWorkspace('gossip-paranet-3', quads, {
+        publisherPeerId: '12D3KooWSender',
+        accessPolicy: 'invalidPolicy' as any,
+      }),
+    ).rejects.toThrow(/invalid accessPolicy/);
   });
 });
 
