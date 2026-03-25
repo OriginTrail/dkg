@@ -71,6 +71,18 @@ export class SyncEngine {
     this.onSyncComplete = onSyncComplete;
   }
 
+  /**
+   * Write quads in batches to avoid workspace message size limits (512KB).
+   * Splits into chunks of ~200 quads each (~50-100KB per batch).
+   */
+  private async writeQuadsBatched(paranetId: string, quads: Quad[]): Promise<void> {
+    const BATCH_SIZE = 200;
+    for (let i = 0; i < quads.length; i += BATCH_SIZE) {
+      const batch = quads.slice(i, i + BATCH_SIZE);
+      await this.writeQuads(paranetId, batch);
+    }
+  }
+
   // --- Configuration ---
 
   addRepo(config: RepoSyncConfig): void {
@@ -416,7 +428,7 @@ export class SyncEngine {
         const treeResult = await codeSync.syncFileTree(owner, repo, defaultBranch, graph);
         job.progress.codeStructure.total = treeResult.fileCount;
         if (treeResult.quads.length > 0) {
-          await this.writeQuads(paranetId, treeResult.quads);
+          await this.writeQuadsBatched(paranetId, treeResult.quads);
         }
         job.progress.codeStructure.synced = treeResult.fileCount;
 
@@ -436,7 +448,7 @@ export class SyncEngine {
           job.progress.codeEntities.total = entityResult.parsedFiles;
           job.progress.codeEntities.synced = entityResult.parsedFiles;
           if (entityResult.quads.length > 0) {
-            await this.writeQuads(paranetId, entityResult.quads);
+            await this.writeQuadsBatched(paranetId, entityResult.quads);
           }
         } catch (err: any) {
           // Phase B+C failure should not fail the whole sync
