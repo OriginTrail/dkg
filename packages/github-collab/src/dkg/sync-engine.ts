@@ -431,6 +431,7 @@ export class SyncEngine {
                 job.progress.codeEntities.synced = progress.current;
               }
             },
+            treeResult.treeSha, // reuse tree SHA from Phase A to avoid duplicate API call
           );
           job.progress.codeEntities.total = entityResult.parsedFiles;
           job.progress.codeEntities.synced = entityResult.parsedFiles;
