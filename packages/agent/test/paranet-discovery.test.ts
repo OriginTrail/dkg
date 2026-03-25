@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent, type ParanetSub } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri } from '@origintrail-official/dkg-core';
+import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetMetaGraphUri } from '@origintrail-official/dkg-core';
 import { MockChainAdapter, type ParanetOnChain } from '@origintrail-official/dkg-chain';
 
 class MockChainWithParanets extends MockChainAdapter {
@@ -433,5 +433,235 @@ describe('hash-vs-name duplication regression', () => {
     // No ghost 0x entries
     const ghosts = paranets.filter(p => p.id.startsWith('0x'));
     expect(ghosts.length).toBe(0);
+  }, 15000);
+});
+
+describe('access policy rehydration on restart (BUG 1)', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('discoverParanetsFromStore rehydrates accessPolicy and allowedPeers for existing subscriptions', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    // Simulate a paranet that was created with allowList policy.
+    // After restart, the in-memory subscribedParanets won't have accessPolicy.
+    // Insert the definition into the paranet's _meta graph (as createParanet now does for non-public).
+    const paranetId = 'private-rehydrate';
+    const paranetUri = paranetDataGraphUri(paranetId);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    await store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: metaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Private Rehydrate"', graph: metaGraph },
+      { subject: paranetUri, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"allowList"', graph: metaGraph },
+      { subject: paranetUri, predicate: 'http://dkg.io/ontology/allowedPeer', object: '"peer-A"', graph: metaGraph },
+      { subject: paranetUri, predicate: 'http://dkg.io/ontology/allowedPeer', object: '"peer-B"', graph: metaGraph },
+    ]);
+
+    // Simulate a pre-existing subscription without accessPolicy (as after restart)
+    (agent as any).subscribedParanets.set(paranetId, {
+      name: 'Private Rehydrate',
+      subscribed: true,
+      synced: true,
+    });
+
+    // discoverParanetsFromStore should rehydrate the accessPolicy from the _meta graph
+    await agent.discoverParanetsFromStore();
+
+    const sub = agent.getSubscribedParanets().get(paranetId);
+    expect(sub).toBeDefined();
+    expect(sub!.accessPolicy).toBe('allowList');
+    expect(sub!.allowedPeers).toBeDefined();
+    expect(sub!.allowedPeers!.sort()).toEqual(['peer-A', 'peer-B']);
+  }, 15000);
+
+  it('discoverParanetsFromStore does NOT auto-discover non-public paranets from ontology graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    // Insert a non-public paranet definition into the shared ontology graph
+    // (simulating legacy data or a leak). It should NOT be auto-discovered.
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = paranetDataGraphUri('leaked-private');
+    await store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Leaked Private"', graph: ontologyGraph },
+      { subject: paranetUri, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"allowList"', graph: ontologyGraph },
+    ]);
+
+    const discovered = await agent.discoverParanetsFromStore();
+    expect(discovered).toBe(0);
+
+    const sub = agent.getSubscribedParanets().get('leaked-private');
+    expect(sub).toBeUndefined();
+  }, 15000);
+
+  it('discoverParanetsFromChain maps on-chain accessPolicy=1 to allowList', async () => {
+    const chain = new MockChainWithParanets([
+      {
+        paranetId: '0xdeadbeef00000000000000000000000000000000000000000000000000000099',
+        name: 'permissioned-chain',
+        creator: '0x1234',
+        accessPolicy: 1,
+        blockNumber: 200,
+        metadataRevealed: true,
+      },
+    ]);
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    const discovered = await agent.discoverParanetsFromChain();
+    expect(discovered).toBe(1);
+
+    const sub = agent.getSubscribedParanets().get('permissioned-chain');
+    expect(sub).toBeDefined();
+    expect(sub!.accessPolicy).toBe('allowList');
+  }, 15000);
+});
+
+describe('non-public paranet definition isolation (BUG 2)', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('createParanet with allowList stores definition in _meta graph, not ontology graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await agent.createParanet({
+      id: 'allow-list-paranet',
+      name: 'Allow List Paranet',
+      visibility: { peers: ['peer-1', 'peer-2'] },
+    });
+
+    // Definition should NOT be in the shared ontology graph
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = paranetDataGraphUri('allow-list-paranet');
+    const ontologyResult = await store.query(`
+      SELECT ?p WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}>
+        }
+      } LIMIT 1
+    `);
+    expect(ontologyResult.type).toBe('bindings');
+    if (ontologyResult.type === 'bindings') {
+      expect(ontologyResult.bindings.length).toBe(0);
+    }
+
+    // Definition SHOULD be in the paranet's _meta graph
+    const metaGraph = paranetMetaGraphUri('allow-list-paranet');
+    const metaResult = await store.query(`
+      SELECT ?name WHERE {
+        GRAPH <${metaGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name .
+        }
+      }
+    `);
+    expect(metaResult.type).toBe('bindings');
+    if (metaResult.type === 'bindings') {
+      expect(metaResult.bindings.length).toBe(1);
+    }
+
+    // Access policy triples should also be in _meta graph
+    const policyResult = await store.query(`
+      SELECT ?policy ?peer WHERE {
+        GRAPH <${metaGraph}> {
+          <${paranetUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          OPTIONAL { <${paranetUri}> <http://dkg.io/ontology/allowedPeer> ?peer }
+        }
+      }
+    `);
+    expect(policyResult.type).toBe('bindings');
+    if (policyResult.type === 'bindings') {
+      expect(policyResult.bindings.length).toBeGreaterThanOrEqual(1);
+    }
+  }, 15000);
+
+  it('createParanet with public visibility stores definition in ontology graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await agent.createParanet({
+      id: 'public-paranet',
+      name: 'Public Paranet',
+    });
+
+    // Definition SHOULD be in the shared ontology graph
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = paranetDataGraphUri('public-paranet');
+    const ontologyResult = await store.query(`
+      SELECT ?p WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}>
+        }
+      } LIMIT 1
+    `);
+    expect(ontologyResult.type).toBe('bindings');
+    if (ontologyResult.type === 'bindings') {
+      expect(ontologyResult.bindings.length).toBe(1);
+    }
+  }, 15000);
+
+  it('createParanet with ownerOnly stores definition in _meta graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await agent.createParanet({
+      id: 'owner-only-paranet',
+      name: 'Owner Only',
+      visibility: 'private',
+    });
+
+    // Should NOT be in ontology graph
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = paranetDataGraphUri('owner-only-paranet');
+    const ontologyResult = await store.query(`
+      SELECT ?p WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}>
+        }
+      } LIMIT 1
+    `);
+    expect(ontologyResult.type).toBe('bindings');
+    if (ontologyResult.type === 'bindings') {
+      expect(ontologyResult.bindings.length).toBe(0);
+    }
+
+    // Should be in _meta graph
+    const metaGraph = paranetMetaGraphUri('owner-only-paranet');
+    const metaResult = await store.query(`
+      SELECT ?p WHERE {
+        GRAPH <${metaGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}>
+        }
+      } LIMIT 1
+    `);
+    expect(metaResult.type).toBe('bindings');
+    if (metaResult.type === 'bindings') {
+      expect(metaResult.bindings.length).toBe(1);
+    }
+
+    // paranetExists should still find it (uses GRAPH ?g)
+    const exists = await agent.paranetExists('owner-only-paranet');
+    expect(exists).toBe(true);
   }, 15000);
 });

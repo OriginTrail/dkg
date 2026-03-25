@@ -1312,6 +1312,11 @@ export class DKGAgent {
         );
       }
     }
+    // NOTE: The inherited accessPolicy controls who can access `privateQuads` only.
+    // Public quads (the `quads` parameter) are always stored in the public data graph
+    // and served to any peer — regardless of accessPolicy. If ALL data should be
+    // access-controlled, the caller must put it in `privateQuads`.
+    //
     // Inherit paranet default visibility when no explicit visibility/accessPolicy is given
     const explicitVisibility = opts?.visibility ?? (opts?.accessPolicy ? undefined : this.getParanetDefaultVisibility(paranetId));
     const resolved = resolveVisibility(explicitVisibility, {
@@ -1529,14 +1534,77 @@ export class DKGAgent {
    * Returns undefined when no policy is stored (i.e. the paranet is public or pre-dates the
    * privacy model). Callers use this to inherit the paranet's default when the user omits
    * an explicit visibility parameter on a write/publish operation.
+   *
+   * If the in-memory map has no accessPolicy, falls back to a one-time store query
+   * (checking both the ontology graph and the paranet's _meta graph) and caches the result.
    */
   private getParanetDefaultVisibility(paranetId: string): Visibility | undefined {
     const sub = this.subscribedParanets.get(paranetId);
-    if (!sub?.accessPolicy || sub.accessPolicy === 'public') return undefined;
-    if (sub.accessPolicy === 'ownerOnly') return 'private';
-    if (sub.accessPolicy === 'allowList' && sub.allowedPeers && sub.allowedPeers.length > 0) {
-      return { peers: sub.allowedPeers };
+    if (!sub) return undefined;
+
+    // If accessPolicy is already populated, use it directly
+    if (sub.accessPolicy) {
+      if (sub.accessPolicy === 'public') return undefined;
+      if (sub.accessPolicy === 'ownerOnly') return 'private';
+      if (sub.accessPolicy === 'allowList' && sub.allowedPeers && sub.allowedPeers.length > 0) {
+        return { peers: sub.allowedPeers };
+      }
+      return undefined;
     }
+
+    // Store-backed fallback: query once and cache the result.
+    // This is a synchronous method, so we kick off an async rehydration and
+    // return undefined for this call. The next call will see the cached value.
+    // We mark the lookup in-progress with a sentinel to avoid repeated queries.
+    if ((sub as any)._policyLookupPending) return undefined;
+    (sub as any)._policyLookupPending = true;
+
+    const pUri = `did:dkg:paranet:${paranetId}`;
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const metaGraph = paranetMetaGraphUri(paranetId);
+    this.store.query(`
+      SELECT ?policy ?peer WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          }
+        } UNION {
+          GRAPH <${metaGraph}> {
+            <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          }
+        }
+        OPTIONAL {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+            }
+          }
+        }
+      }
+    `).then((result) => {
+      delete (sub as any)._policyLookupPending;
+      if (result.type !== 'bindings' || result.bindings.length === 0) return;
+      const rows = result.bindings as Record<string, string>[];
+      const policy = rows[0]['policy'] ? stripLiteral(rows[0]['policy']) : undefined;
+      if (policy) {
+        sub.accessPolicy = policy as AccessPolicy;
+        const peers: string[] = [];
+        for (const r of rows) {
+          if (r['peer']) {
+            const p = stripLiteral(r['peer']);
+            if (p && !peers.includes(p)) peers.push(p);
+          }
+        }
+        if (peers.length > 0) sub.allowedPeers = peers;
+      }
+    }).catch(() => {
+      delete (sub as any)._policyLookupPending;
+    });
+
     return undefined;
   }
 
@@ -1970,13 +2038,18 @@ export class DKGAgent {
       }
     }
 
+    // Non-public paranets store their definition in the paranet's own _meta graph
+    // instead of the shared ontology graph, so that ontology sync doesn't leak their
+    // existence to other peers. Public paranets use the shared ontology graph as before.
+    const defGraph = skipDefinitionBroadcast ? paranetMetaGraphUri(opts.id) : ontologyGraph;
+
     const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
     ];
 
     if (onChainId) {
@@ -1984,7 +2057,7 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
         object: `"${onChainId}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
 
@@ -1993,7 +2066,7 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
 
@@ -2004,7 +2077,7 @@ export class DKGAgent {
         subject: paranetUri,
         predicate: 'http://dkg.io/ontology/accessPolicy',
         object: `"${resolved.accessPolicy}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
     if (resolved.allowedPeers.length > 0) {
@@ -2013,7 +2086,7 @@ export class DKGAgent {
           subject: paranetUri,
           predicate: 'http://dkg.io/ontology/allowedPeer',
           object: `"${peer}"`,
-          graph: ontologyGraph,
+          graph: defGraph,
         });
       }
     }
@@ -2021,10 +2094,10 @@ export class DKGAgent {
     // Provenance activity
     const activityUri = `did:dkg:activity:create-paranet:${opts.id}:${Date.now()}`;
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: defGraph },
     );
 
     // Insert the definition triples
@@ -2423,33 +2496,64 @@ export class DKGAgent {
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
+    // Only discover public paranets from the shared ontology graph.
+    // Non-public paranets store their definition in their own _meta graph
+    // and are NOT auto-discovered — they only appear if this node created them
+    // or was explicitly told about them.
+    // Also query accessPolicy and allowedPeer so we can rehydrate privacy
+    // settings on restart (a paranet may have multiple allowedPeer rows).
     const result = await this.store.query(`
-      SELECT ?paranet ?name WHERE {
+      SELECT ?paranet ?name ?policy ?peer WHERE {
         GRAPH <${ontologyGraph}> {
           ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
           OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/accessPolicy> ?policy }
+          OPTIONAL { ?paranet <http://dkg.io/ontology/allowedPeer> ?peer }
         }
       }
     `);
 
     if (result.type !== 'bindings') return 0;
 
+    // Group rows by paranet URI to collect multiple allowedPeer values
+    const grouped = new Map<string, { name?: string; policy?: string; peers: string[] }>();
     for (const row of result.bindings as Record<string, string>[]) {
       const uri = row['paranet'] ?? '';
+      if (!grouped.has(uri)) {
+        grouped.set(uri, {
+          name: row['name'] ? stripLiteral(row['name']) : undefined,
+          policy: row['policy'] ? stripLiteral(row['policy']) : undefined,
+          peers: [],
+        });
+      }
+      const entry = grouped.get(uri)!;
+      if (row['peer']) {
+        const peer = stripLiteral(row['peer']);
+        if (peer && !entry.peers.includes(peer)) entry.peers.push(peer);
+      }
+    }
+
+    for (const [uri, info] of grouped) {
       const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
       if (!id) continue;
 
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
+      // Skip non-public paranets that leaked into the ontology graph (legacy data).
+      // They should not be auto-discovered by other peers.
+      if (info.policy && info.policy !== 'public') continue;
+
       const existing = this.subscribedParanets.get(id);
       if (existing?.subscribed && existing?.synced) continue;
 
-      const name = row['name'] ? stripLiteral(row['name']) : id;
+      const name = info.name ?? id;
       this.subscribedParanets.set(id, {
         name,
         subscribed: true,
         synced: true,
         onChainId: existing?.onChainId,
+        accessPolicy: info.policy as AccessPolicy | undefined,
+        allowedPeers: info.peers.length > 0 ? info.peers : undefined,
       });
 
       if (!existing?.subscribed) {
@@ -2463,6 +2567,60 @@ export class DKGAgent {
     if (discovered > 0) {
       this.log.info(ctx, `Auto-subscribed to ${discovered} new paranet(s) from store`);
     }
+
+    // Rehydrate access policy for paranets already in the subscription registry
+    // whose accessPolicy/allowedPeers are missing (e.g. after restart).
+    // Check both the ontology graph (public) and the paranet's own _meta graph (non-public).
+    for (const [id, sub] of this.subscribedParanets) {
+      if (sub.accessPolicy !== undefined) continue; // already populated
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+      const pUri = `did:dkg:paranet:${id}`;
+      const metaGraph = paranetMetaGraphUri(id);
+      const policyResult = await this.store.query(`
+        SELECT ?policy ?peer WHERE {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+            }
+          } UNION {
+            GRAPH <${metaGraph}> {
+              <${pUri}> <http://dkg.io/ontology/accessPolicy> ?policy .
+            }
+          }
+          OPTIONAL {
+            {
+              GRAPH <${ontologyGraph}> {
+                <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+              }
+            } UNION {
+              GRAPH <${metaGraph}> {
+                <${pUri}> <http://dkg.io/ontology/allowedPeer> ?peer .
+              }
+            }
+          }
+        }
+      `);
+
+      if (policyResult.type === 'bindings' && policyResult.bindings.length > 0) {
+        const rows = policyResult.bindings as Record<string, string>[];
+        const policy = rows[0]['policy'] ? stripLiteral(rows[0]['policy']) : undefined;
+        const peers: string[] = [];
+        for (const r of rows) {
+          if (r['peer']) {
+            const p = stripLiteral(r['peer']);
+            if (p && !peers.includes(p)) peers.push(p);
+          }
+        }
+        if (policy) {
+          sub.accessPolicy = policy as AccessPolicy;
+          if (peers.length > 0) sub.allowedPeers = peers;
+          this.log.info(ctx, `Rehydrated access policy for paranet "${id}": ${policy}` +
+            (peers.length > 0 ? ` (${peers.length} allowed peer(s))` : ''));
+        }
+      }
+    }
+
     return discovered;
   }
 
@@ -2506,14 +2664,19 @@ export class DKGAgent {
         continue;
       }
 
+      // Map on-chain accessPolicy number: 0 = public (undefined), 1 = permissioned (allowList).
+      // Allowed peers are not available on-chain, only from the store.
+      const chainPolicy: AccessPolicy | undefined = p.accessPolicy === 1 ? 'allowList' : undefined;
       this.subscribedParanets.set(p.name, {
         name: p.name,
         subscribed: true,
         synced: false,
         onChainId: p.paranetId,
+        accessPolicy: chainPolicy,
       });
       this.subscribeToParanet(p.name, { trackSyncScope: false });
-      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)` +
+        (chainPolicy ? `, accessPolicy=${chainPolicy}` : ''));
       discovered++;
     }
 
