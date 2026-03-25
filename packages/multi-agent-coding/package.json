@@ -26,7 +26,10 @@
     "@origintrail-official/dkg-storage": "workspace:*"
   },
   "dependencies": {
-    "@origintrail-official/dkg-graph-viz": "workspace:*"
+    "@origintrail-official/dkg-graph-viz": "workspace:*",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^5.7",
+    "web-tree-sitter": "^0.22.6"
   },
   "devDependencies": {
     "@types/node": "^22",
@@ -37,11 +40,8 @@
     "react": "^19",
     "react-dom": "^19",
     "react-router-dom": "^7",
-    "tree-sitter-wasms": "^0.1.13",
-    "typescript": "^5.7",
     "vite": "^6",
-    "vitest": "^4.0.18",
-    "web-tree-sitter": "^0.22.6"
+    "vitest": "^4.0.18"
   },
   "publishConfig": {
     "access": "public"

@@ -39,6 +39,7 @@ export interface AgentSession {
 export interface CodeClaim {
   claimId: string;
   filePath: string;
+  repoKey?: string;
   peerId: string;
   agentName: string;
   sessionId: string;
@@ -94,7 +95,7 @@ const HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
 export class ActivityManager {
   private readonly sessions = new Map<string, AgentSession>();
   private readonly claims = new Map<string, CodeClaim>();
-  /** file path → claimId for fast conflict lookup */
+  /** "repoKey:filePath" → claimId for fast conflict lookup */
   private readonly fileClaimIndex = new Map<string, string>();
   private readonly decisions: Decision[] = [];
   private readonly annotations: Annotation[] = [];
@@ -102,6 +103,11 @@ export class ActivityManager {
 
   constructor(log?: (msg: string) => void) {
     this.log = log ?? ((msg: string) => console.log(`[activity] ${msg}`));
+  }
+
+  /** Composite key for fileClaimIndex to avoid cross-repo conflicts. */
+  private claimKey(repoKey: string | undefined, filePath: string): string {
+    return repoKey ? `${repoKey}:${filePath}` : filePath;
   }
 
   // --- Sessions ---
@@ -141,9 +147,11 @@ export class ActivityManager {
   addModifiedFiles(
     sessionId: string,
     files: string[],
+    repoKey?: string,
   ): { session: AgentSession; warnings: Array<{ file: string; claimedBy: string; since: string }> } {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
+    const rk = repoKey ?? session.repoKey;
 
     const warnings: Array<{ file: string; claimedBy: string; since: string }> = [];
     for (const file of files) {
@@ -151,7 +159,7 @@ export class ActivityManager {
         session.modifiedFiles.push(file);
       }
       // Check for claim conflicts
-      const existingClaimId = this.fileClaimIndex.get(file);
+      const existingClaimId = this.fileClaimIndex.get(this.claimKey(rk, file));
       if (existingClaimId) {
         const existing = this.claims.get(existingClaimId);
         if (existing && existing.sessionId !== sessionId) {
@@ -191,13 +199,15 @@ export class ActivityManager {
     sessionId: string,
     agentName: string,
     peerId: string,
+    repoKey?: string,
   ): ClaimResult {
     const claimed: CodeClaim[] = [];
     const conflicts: Array<{ file: string; existingClaim: CodeClaim }> = [];
     const now = Date.now();
 
     for (const filePath of filePaths) {
-      const existingClaimId = this.fileClaimIndex.get(filePath);
+      const key = this.claimKey(repoKey, filePath);
+      const existingClaimId = this.fileClaimIndex.get(key);
       if (existingClaimId) {
         const existing = this.claims.get(existingClaimId);
         if (existing && existing.sessionId !== sessionId) {
@@ -210,13 +220,14 @@ export class ActivityManager {
       const claim: CodeClaim = {
         claimId,
         filePath,
+        repoKey,
         peerId,
         agentName,
         sessionId,
         claimedAt: now,
       };
       this.claims.set(claimId, claim);
-      this.fileClaimIndex.set(filePath, claimId);
+      this.fileClaimIndex.set(key, claimId);
       claimed.push(claim);
     }
 
@@ -227,8 +238,9 @@ export class ActivityManager {
     const claim = this.claims.get(claimId);
     if (!claim) return undefined;
     this.claims.delete(claimId);
-    if (this.fileClaimIndex.get(claim.filePath) === claimId) {
-      this.fileClaimIndex.delete(claim.filePath);
+    const key = this.claimKey(claim.repoKey, claim.filePath);
+    if (this.fileClaimIndex.get(key) === claimId) {
+      this.fileClaimIndex.delete(key);
     }
     return claim;
   }
@@ -332,11 +344,13 @@ export class ActivityManager {
     peerId: string,
     agentName: string,
     sessionId: string,
+    repoKey?: string,
   ): void {
     if (this.claims.has(claimId)) return; // already mirrored
     const claim: CodeClaim = {
       claimId,
       filePath,
+      repoKey,
       peerId,
       agentName,
       sessionId,
@@ -344,15 +358,16 @@ export class ActivityManager {
       remote: true,
     };
     this.claims.set(claimId, claim);
-    this.fileClaimIndex.set(filePath, claimId);
+    this.fileClaimIndex.set(this.claimKey(repoKey, filePath), claimId);
   }
 
   mirrorRemoteClaimRelease(claimId: string): void {
     const claim = this.claims.get(claimId);
     if (!claim) return;
     this.claims.delete(claimId);
-    if (this.fileClaimIndex.get(claim.filePath) === claimId) {
-      this.fileClaimIndex.delete(claim.filePath);
+    const key = this.claimKey(claim.repoKey, claim.filePath);
+    if (this.fileClaimIndex.get(key) === claimId) {
+      this.fileClaimIndex.delete(key);
     }
   }
 
@@ -538,8 +553,9 @@ export class ActivityManager {
     for (const [claimId, claim] of this.claims) {
       if (claim.sessionId === sessionId) {
         this.claims.delete(claimId);
-        if (this.fileClaimIndex.get(claim.filePath) === claimId) {
-          this.fileClaimIndex.delete(claim.filePath);
+        const key = this.claimKey(claim.repoKey, claim.filePath);
+        if (this.fileClaimIndex.get(key) === claimId) {
+          this.fileClaimIndex.delete(key);
         }
         released.push(claimId);
       }

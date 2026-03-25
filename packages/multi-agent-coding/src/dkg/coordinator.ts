@@ -531,12 +531,14 @@ export class GitHubCollabCoordinator {
     const session = this.reviewSessions.get(sessionId);
     if (!session) throw new Error(`Review session ${sessionId} not found`);
 
-    // Record the review
-    session.reviews.push({
-      peerId: this.myPeerId,
-      decision,
-      timestamp: Date.now(),
-    });
+    // Replace existing review from this peer, or append
+    const existingIdx = session.reviews.findIndex(r => r.peerId === this.myPeerId);
+    const reviewEntry = { peerId: this.myPeerId, decision, timestamp: Date.now() };
+    if (existingIdx >= 0) {
+      session.reviews[existingIdx] = reviewEntry;
+    } else {
+      session.reviews.push(reviewEntry);
+    }
 
     // Check for consensus
     const approvals = session.reviews.filter(r => r.decision === 'approve').length;
@@ -630,6 +632,21 @@ export class GitHubCollabCoordinator {
     if (invitation.status !== 'pending') throw new Error(`Invitation ${invitationId} already ${invitation.status}`);
 
     invitation.status = 'accepted';
+
+    // Register a minimal repo config so the collaborator can participate
+    if (!this.repos.has(invitation.repoKey)) {
+      const [owner, repo] = invitation.repoKey.split('/');
+      const repoConfig: RepoConfig = {
+        owner,
+        repo,
+        pollIntervalMs: 300_000,
+        syncScope: [],
+        paranetId: invitation.paranetId,
+        privacyLevel: 'shared',
+      };
+      this.repos.set(invitation.repoKey, repoConfig);
+      this.saveToDisk();
+    }
 
     // Subscribe to the paranet
     this.subscribeToParanet(invitation.paranetId);
@@ -732,19 +749,23 @@ export class GitHubCollabCoordinator {
       case 'review:submitted': {
         const session = this.reviewSessions.get(msg.sessionId);
         if (session) {
-          const alreadyReviewed = session.reviews.some(r => r.peerId === msg.peerId);
-          if (!alreadyReviewed) {
-            session.reviews.push({
-              peerId: msg.peerId,
-              decision: msg.decision,
-              timestamp: msg.timestamp,
-            });
-            const approvals = session.reviews.filter(r => r.decision === 'approve').length;
-            if (approvals >= session.requiredApprovals) {
-              session.status = 'approved';
-            }
-            this.log(`Received review from ${msg.peerId} for session ${msg.sessionId}: ${msg.decision}`);
+          // Replace existing review from this peer, or append
+          const existingIdx = session.reviews.findIndex(r => r.peerId === msg.peerId);
+          const reviewEntry = { peerId: msg.peerId, decision: msg.decision, timestamp: msg.timestamp };
+          if (existingIdx >= 0) {
+            session.reviews[existingIdx] = reviewEntry;
+          } else {
+            session.reviews.push(reviewEntry);
           }
+          // Recompute consensus status
+          const approvals = session.reviews.filter(r => r.decision === 'approve').length;
+          const rejections = session.reviews.filter(r => r.decision === 'request_changes').length;
+          if (approvals >= session.requiredApprovals) {
+            session.status = 'approved';
+          } else if (rejections > 0) {
+            session.status = 'changes_requested';
+          }
+          this.log(`Received review from ${msg.peerId} for session ${msg.sessionId}: ${msg.decision}`);
         }
         break;
       }
@@ -862,7 +883,7 @@ export class GitHubCollabCoordinator {
       }
 
       case 'claim:created': {
-        this.activity.mirrorRemoteClaim(msg.claimId, msg.file, msg.peerId, msg.agent, msg.sessionId ?? '');
+        this.activity.mirrorRemoteClaim(msg.claimId, msg.file, msg.peerId, msg.agent, msg.sessionId ?? '', msg.repo);
         break;
       }
 
@@ -977,7 +998,7 @@ export class GitHubCollabCoordinator {
     files: string[],
     repoKey: string,
   ): Promise<{ totalFiles: number; warnings: Array<{ file: string; claimedBy: string; since: string }> }> {
-    const result = this.activity.addModifiedFiles(sessionId, files);
+    const result = this.activity.addModifiedFiles(sessionId, files, repoKey);
     return { totalFiles: result.session.modifiedFiles.length, warnings: result.warnings };
   }
 
@@ -987,6 +1008,9 @@ export class GitHubCollabCoordinator {
     summary?: string,
   ): Promise<{ session: AgentSession; releasedClaims: string[] }> {
     const config = this.repos.get(repoKey);
+    // Snapshot claims before they are released by endSession
+    const claimsBeforeEnd = this.activity.getActiveClaims(repoKey)
+      .filter(c => c.sessionId === sessionId);
     const result = this.activity.endSession(sessionId, summary);
 
     // Write final session RDF
@@ -996,6 +1020,21 @@ export class GitHubCollabCoordinator {
       await this.writeToWorkspace(config.paranetId, quads);
 
       if (config.privacyLevel === 'shared') {
+        // Broadcast claim:released for each released claim so remote peers clean up
+        for (const claim of claimsBeforeEnd) {
+          if (result.releasedClaims.includes(claim.claimId)) {
+            await this.broadcastMessage(config.paranetId, {
+              app: APP_ID,
+              type: 'claim:released',
+              peerId: this.myPeerId,
+              timestamp: Date.now(),
+              repo: repoKey,
+              claimId: claim.claimId,
+              file: claim.filePath,
+            });
+          }
+        }
+
         const durationSec = Math.floor((Date.now() - result.session.startedAt) / 1000);
         await this.broadcastMessage(config.paranetId, {
           app: APP_ID,
@@ -1024,7 +1063,7 @@ export class GitHubCollabCoordinator {
     const config = this.repos.get(repoKey);
     if (!config) throw new Error(`Repository ${repoKey} is not configured`);
 
-    const result = this.activity.claimFiles(filePaths, sessionId, agentName, this.myPeerId);
+    const result = this.activity.claimFiles(filePaths, sessionId, agentName, this.myPeerId, repoKey);
 
     // Write RDF for successful claims
     for (const claim of result.claimed) {
