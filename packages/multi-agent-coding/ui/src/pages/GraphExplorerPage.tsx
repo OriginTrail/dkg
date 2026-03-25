@@ -263,9 +263,6 @@ export function GraphExplorerPage() {
                       limit ({graphLoading ? 'Loading...' : `${tripleCount} loaded`})
                     </span>
                   </div>
-                  <div className="graph-toolbar-pill" style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                    Search (coming soon)
-                  </div>
                   <button
                     className="graph-toolbar-pill graph-toolbar-toggle"
                     onClick={() => setShowFilters(prev => !prev)}

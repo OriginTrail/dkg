@@ -284,7 +284,6 @@ WHERE {
 };
 
 export const ALL_VIEWS: Record<string, ViewConfig> = {
-  'everything': EVERYTHING_VIEW,
   'pr-impact': PR_IMPACT_VIEW,
   'repo-overview': REPO_OVERVIEW_VIEW,
   'code-structure': CODE_STRUCTURE_VIEW,

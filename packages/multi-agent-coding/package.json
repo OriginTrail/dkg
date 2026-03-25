@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "dkgApp": {
     "id": "github-collab",
-    "label": "Multi-agent Coding",
+    "label": "\uD83E\uDD16 Multi-agent Coding",
     "apiHandler": "./dist/api/handler.js",
     "staticDir": "./dist-ui"
   },
