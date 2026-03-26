@@ -1,8 +1,15 @@
 import fs from 'fs';
-import { Client } from 'pg';
+import mysql from 'mysql2/promise';
 import 'dotenv/config';
 
 const files = process.argv.slice(2);
+
+const requiredEnvVars = ['RAGAS_DB_HOST', 'RAGAS_DB_PASSWORD', 'RAGAS_DB_NAME'];
+const missingEnvVars = requiredEnvVars.filter(v => !process.env[v]);
+if (missingEnvVars.length > 0) {
+    console.error(`Missing required env vars: ${missingEnvVars.join(', ')}`);
+    process.exit(1);
+}
 
 const MAINNET_PORTS = [':8453', ':100', ':2043'];
 
@@ -37,27 +44,20 @@ for (const file of files) {
     }
 
     const tableName = isMainnet ? 'error_messages_v9_mainnet' : 'error_messages_v9_testnet';
-    const dbHost = isMainnet
-        ? process.env.DB_HOST_PUBLISH_MAINNET
-        : process.env.DB_HOST_PUBLISH_TESTNET;
-
     console.log(`Network: ${isMainnet ? 'mainnet' : 'testnet'} | Table: ${tableName}`);
 
     const detailedErrors = errors.detailed || errors;
 
-    const db = new Client({
-        host: dbHost,
-        user: process.env.DB_USER_PUBLISH,
-        password: process.env.DB_PASSWORD_PUBLISH,
-        database: process.env.DB_NAME_PUBLISH,
-        port: 5432,
-        ssl: { rejectUnauthorized: false },
-    });
-
+    let db;
     try {
-        await db.connect();
+        db = await mysql.createConnection({
+            host: process.env.RAGAS_DB_HOST,
+            user: process.env.RAGAS_DB_USER || process.env.RAGAS_DB_NAME || 'root',
+            password: process.env.RAGAS_DB_PASSWORD,
+            database: process.env.RAGAS_DB_NAME,
+            port: 3306,
+        });
         console.log(`Connected to DB (${isMainnet ? 'mainnet' : 'testnet'})`);
-        await db.query('BEGIN');
     } catch (err) {
         console.error('Failed to connect to DB:', err.message);
         continue;
@@ -115,11 +115,13 @@ for (const file of files) {
                 publish_error, query_error,
                 publisher_get_error, non_publisher_get_error,
                 time_stamp
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `;
 
+        const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').split('.')[0];
+
         try {
-            await db.query(insertQuery, [
+            await db.execute(insertQuery, [
                 nodeName,
                 blockchainId,
                 kaLabel,
@@ -127,20 +129,13 @@ for (const file of files) {
                 errorFields.query_error,
                 errorFields.publisher_get_error,
                 errorFields.non_publisher_get_error,
-                new Date().toISOString(),
+                timestamp,
             ]);
             insertedCount++;
             console.log(`Inserted ${kaLabel} (attempt ${insertedCount}) for ${nodeName}`);
         } catch (err) {
             console.error(`Failed to insert KA ${kaLabel}: ${err.message}`);
         }
-    }
-
-    try {
-        await db.query('COMMIT');
-    } catch (err) {
-        console.error('Failed to commit transaction:', err.message);
-        await db.query('ROLLBACK');
     }
 
     try {
