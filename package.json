@@ -21,7 +21,22 @@
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",
     "mcp": "node packages/mcp-server/dist/index.js",
-    "index": "node packages/cli/dist/cli.js index"
+    "index": "node packages/cli/dist/cli.js index",
+    "test:v9:base:testnet": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:84532 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:base:testnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:84532 TEST_KA_BATCHES=3 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:base:testnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:84532 TEST_KA_BATCHES=20 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:base:mainnet": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:8453 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:base:mainnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:8453 TEST_KA_BATCHES=3 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:base:mainnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v9:base:8453 TEST_KA_BATCHES=20 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:testnet": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:10200 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:testnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:10200 TEST_KA_BATCHES=3 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:testnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:10200 TEST_KA_BATCHES=20 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:mainnet": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:100 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:mainnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:100 TEST_KA_BATCHES=3 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:gnosis:mainnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:100 TEST_KA_BATCHES=20 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v9:insert-summary": "cd tests/publish && node scripts/insert_summary_to_db.js summary_*.json",
+    "test:v9:insert-errors": "cd tests/publish && node scripts/insert_errors_to_db.js errors_*.json",
+    "test:v9:print-errors": "cd tests/publish && node scripts/print_aggregated_errors.js errors_*.json"
   },
   "devDependencies": {
     "@types/node": "^22",

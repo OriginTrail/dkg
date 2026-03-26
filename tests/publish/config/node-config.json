@@ -1,0 +1,8 @@
+{
+  "name": "v9-test-node",
+  "nodeRole": "edge",
+  "apiPort": 9200,
+  "auth": {
+    "enabled": false
+  }
+}

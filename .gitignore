@@ -1,4 +1,5 @@
 .DS_Store
+.cursor/rules/
 node_modules/
 dist/
 dist-ui/
@@ -7,6 +8,10 @@ dist-ui/
 coverage/
 .env
 .env.*
+
+# Test output files
+tests/publish/summary_*.json
+tests/publish/errors_*.json
 .dkg/
 data/
 
