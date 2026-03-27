@@ -3092,7 +3092,7 @@ CONSTRUCT {
            ghcode:startedAt ?started ;
            ghcode:goal ?goal .
   ?session ghcode:modifiedFile ?file .
-  ?file ghcode:path ?filePath .
+  ?file ghcode:filePath ?filePath .
   ?claim ghcode:claimedFile ?file ;
          ghcode:claimedBy ?claimAgent .
   ?decision a ghcode:Decision ;
@@ -3111,7 +3111,7 @@ WHERE {
              ghcode:startedAt ?started ;
              ghcode:inRepo <urn:github:{owner}/{repo}> .
     OPTIONAL { ?session ghcode:goal ?goal }
-    OPTIONAL { ?session ghcode:modifiedFile ?file . ?file ghcode:path ?filePath }
+    OPTIONAL { ?session ghcode:modifiedFile ?file . ?file ghcode:filePath ?filePath }
     OPTIONAL { ?session ghcode:relatedPR ?pr .
                ?pr ghcode:prNumber ?prNum .
                OPTIONAL { ?pr ghcode:title ?prTitle } }

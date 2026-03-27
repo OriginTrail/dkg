@@ -120,7 +120,7 @@ Use SPARQL to understand the codebase before exploring files directly — it cos
 ```
 POST /query
 {
-  "sparql": "SELECT ?class ?name ?path WHERE { ?class a <https://ontology.dkg.io/ghcode#Class> ; <https://ontology.dkg.io/ghcode#name> ?name ; <https://ontology.dkg.io/ghcode#definedIn> ?file . ?file <https://ontology.dkg.io/ghcode#path> ?path } LIMIT 20",
+  "sparql": "SELECT ?class ?name ?path WHERE { ?class a <https://ontology.dkg.io/ghcode#Class> ; <https://ontology.dkg.io/ghcode#name> ?name ; <https://ontology.dkg.io/ghcode#definedIn> ?file . ?file <https://ontology.dkg.io/ghcode#filePath> ?path } LIMIT 20",
   "repo": "owner/repo",
   "includeWorkspace": true
 }
@@ -130,9 +130,9 @@ POST /query
 
 | What | Query |
 |------|-------|
-| All files | `SELECT ?path WHERE { ?f a <ghcode:File> ; <ghcode:path> ?path } ORDER BY ?path` |
-| Classes + files | `SELECT ?name ?path WHERE { ?c a <ghcode:Class> ; <ghcode:name> ?name ; <ghcode:definedIn> ?f . ?f <ghcode:path> ?path }` |
-| Functions in a file | `SELECT ?name WHERE { ?fn a <ghcode:Function> ; <ghcode:name> ?name ; <ghcode:definedIn> ?f . ?f <ghcode:path> ?p . FILTER(CONTAINS(?p, "auth")) }` |
+| All files | `SELECT ?path WHERE { ?f a <ghcode:File> ; <ghcode:filePath> ?path } ORDER BY ?path` |
+| Classes + files | `SELECT ?name ?path WHERE { ?c a <ghcode:Class> ; <ghcode:name> ?name ; <ghcode:definedIn> ?f . ?f <ghcode:filePath> ?path }` |
+| Functions in a file | `SELECT ?name WHERE { ?fn a <ghcode:Function> ; <ghcode:name> ?name ; <ghcode:definedIn> ?f . ?f <ghcode:filePath> ?p . FILTER(CONTAINS(?p, "auth")) }` |
 | Open PRs | `SELECT ?num ?title WHERE { ?pr a <ghcode:PullRequest> ; <ghcode:prNumber> ?num ; <ghcode:title> ?title ; <ghcode:state> "open" }` |
 | Active sessions | `SELECT ?agent ?goal WHERE { ?s a <ghcode:AgentSession> ; <ghcode:agentName> ?agent ; <ghcode:sessionStatus> "active" . OPTIONAL { ?s <ghcode:goal> ?goal } }` |
 | Recent decisions | `SELECT ?summary ?agent WHERE { ?d a <ghcode:Decision> ; <ghcode:decisionSummary> ?summary ; <ghcode:madeBy> ?agent } LIMIT 10` |

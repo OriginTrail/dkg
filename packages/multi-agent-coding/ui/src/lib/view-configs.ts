@@ -163,15 +163,25 @@ export const AGENT_ACTIVITY_VIEW: ViewConfig = {
     titleProperties: ['agentName', 'goal', 'decisionSummary', 'name'],
     titleMaxLength: 60,
   },
-  defaultSparql: `CONSTRUCT { ?s ?p ?o }
+  defaultSparql: `CONSTRUCT { ?s ?p ?o . ?file a <${GH}File> ; <${GH}filePath> ?fp . }
 WHERE {
-  ?s a ?type ; ?p ?o .
-  FILTER(?type IN (
-    <${GH}AgentSession>, <${GH}Decision>,
-    <${GH}ClaimedRegion>, <${GH}Annotation>,
-    <${GH}Agent>
-  ))
-} LIMIT 300`,
+  {
+    ?s a ?type ; ?p ?o .
+    FILTER(?type IN (
+      <${GH}AgentSession>, <${GH}Decision>,
+      <${GH}ClaimedRegion>, <${GH}Annotation>,
+      <${GH}Agent>
+    ))
+  }
+  UNION
+  {
+    ?ref ?linkProp ?file .
+    ?ref a ?refType .
+    FILTER(?refType IN (<${GH}Decision>, <${GH}ClaimedRegion>, <${GH}AgentSession>))
+    FILTER(?linkProp IN (<${GH}affectsFile>, <${GH}claimedFile>, <${GH}modifiedFile>))
+    ?file a <${GH}File> ; <${GH}filePath> ?fp .
+  }
+} LIMIT 500`,
 };
 
 export const CODE_STRUCTURE_VIEW: ViewConfig = {
@@ -195,9 +205,9 @@ export const CODE_STRUCTURE_VIEW: ViewConfig = {
   },
   defaultSparql: `CONSTRUCT {
   ?s ?p ?o .
-  ?file a <${GH}File> ; <${GH}path> ?fpath .
+  ?file a <${GH}File> ; <${GH}filePath> ?fpath .
   ?s <${GH}definedIn> ?file .
-  ?dir a <${GH}Directory> ; <${GH}path> ?dpath .
+  ?dir a <${GH}Directory> ; <${GH}dirPath> ?dpath .
   ?file <${GH}containedIn> ?dir .
 }
 WHERE {
@@ -208,8 +218,8 @@ WHERE {
   ))
   OPTIONAL {
     ?s <${GH}definedIn> ?file .
-    ?file a <${GH}File> ; <${GH}path> ?fpath .
-    OPTIONAL { ?file <${GH}containedIn> ?dir . ?dir a <${GH}Directory> ; <${GH}path> ?dpath }
+    ?file a <${GH}File> ; <${GH}filePath> ?fpath .
+    OPTIONAL { ?file <${GH}containedIn> ?dir . ?dir a <${GH}Directory> ; <${GH}dirPath> ?dpath }
   }
 } LIMIT 500`,
 };

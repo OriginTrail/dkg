@@ -1386,8 +1386,8 @@ ghcode:ClaimedRegion a rdfs:Class ;
 
 ghcode:claimedFile a rdf:Property ;
   rdfs:domain ghcode:ClaimedRegion ;
-  rdfs:range xsd:string ;
-  rdfs:comment "File path being claimed." .
+  rdfs:range ghcode:File ;
+  rdfs:comment "File being claimed." .
 
 ghcode:claimedByAgent a rdf:Property ;
   rdfs:domain ghcode:ClaimedRegion ;
@@ -1514,3 +1514,18 @@ ghcode:previousState a rdf:Property ;
 ghcode:atCommit a rdf:Property ;
   rdfs:range ghcode:Commit ;
   rdfs:comment "Commit at which this snapshot/state was captured." .
+
+ghcode:affectsFile a rdf:Property ;
+  rdfs:domain ghcode:Decision ;
+  rdfs:range ghcode:File ;
+  rdfs:comment "File affected by this decision." .
+
+ghcode:modifiedFile a rdf:Property ;
+  rdfs:domain ghcode:AgentSession ;
+  rdfs:range ghcode:File ;
+  rdfs:comment "File modified during this session." .
+
+ghcode:annotates a rdf:Property ;
+  rdfs:domain ghcode:Annotation ;
+  rdfs:range rdfs:Resource ;
+  rdfs:comment "Entity targeted by this annotation (file, class, function, etc.)." .
