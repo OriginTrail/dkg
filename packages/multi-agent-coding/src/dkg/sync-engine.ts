@@ -399,6 +399,11 @@ export class SyncEngine {
             } catch { /* skip on error */ }
           }
 
+          // TODO: PR review comments (inline code comments) are not yet synced
+          // during full sync. Fetching them requires a per-PR API call to
+          // GET /repos/{owner}/{repo}/pulls/{number}/comments which is expensive
+          // at scale. Add when incremental sync makes this feasible.
+
           if (quads.length > 0) {
             await this.writeQuads(paranetId, quads);
             totalQuadsWritten += quads.length;

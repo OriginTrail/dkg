@@ -188,10 +188,8 @@ export class GitHubCollabCoordinator {
         if (saved.privacyLevel === 'shared') {
           this.subscribeToParanet(saved.paranetId);
         }
-        // Restart polling for repos that have a token
-        if (saved.githubToken) {
-          this.syncEngine.startPolling(repoKey);
-        }
+        // Restart polling for all repos (works for public repos without a token too)
+        this.syncEngine.startPolling(repoKey);
         this.log(`Restored repo ${repoKey} (${saved.privacyLevel})`);
       }
     } catch (err: any) {
@@ -619,6 +617,10 @@ export class GitHubCollabCoordinator {
 
     this.sentInvitations.set(invitationId, invitation);
 
+    // NOTE: This broadcasts on the repo paranet topic, which the invitee may not
+    // yet be subscribed to. For MVP the invitee must learn the paranet ID
+    // out-of-band and subscribe manually. A proper fix would use direct P2P
+    // messaging (not GossipSub) to deliver the invitation.
     await this.broadcastMessage(config.paranetId, {
       app: APP_ID,
       type: 'invite:sent',
@@ -874,7 +876,11 @@ export class GitHubCollabCoordinator {
         const peer = this.peers.get(msg.peerId) ?? { peerId: msg.peerId, connected: true, lastSeen: msg.timestamp, repos: [] };
         peer.connected = true;
         peer.lastSeen = msg.timestamp;
-        peer.repos = msg.repos ?? peer.repos;
+        // Merge repos from ping instead of replacing, since each ping may carry only one repo
+        if (msg.repos) {
+          const repoSet = new Set([...peer.repos, ...msg.repos]);
+          peer.repos = [...repoSet];
+        }
         this.peers.set(msg.peerId, peer);
         break;
       }
@@ -1043,12 +1049,14 @@ export class GitHubCollabCoordinator {
 
   async endAgentSession(
     sessionId: string,
-    repoKey: string,
+    repoKey?: string,
     summary?: string,
   ): Promise<{ session: AgentSession; releasedClaims: string[] }> {
-    const config = this.repos.get(repoKey);
+    // If repoKey is not provided, look it up from the session
+    const effectiveRepoKey = repoKey ?? this.activity.getSession(sessionId)?.repoKey;
+    const config = effectiveRepoKey ? this.repos.get(effectiveRepoKey) : undefined;
     // Snapshot claims before they are released by endSession
-    const claimsBeforeEnd = this.activity.getActiveClaims(repoKey)
+    const claimsBeforeEnd = this.activity.getActiveClaims(effectiveRepoKey)
       .filter(c => c.sessionId === sessionId);
     const result = this.activity.endSession(sessionId, summary);
 
@@ -1067,7 +1075,7 @@ export class GitHubCollabCoordinator {
               type: 'claim:released',
               peerId: this.myPeerId,
               timestamp: Date.now(),
-              repo: repoKey,
+              repo: effectiveRepoKey!,
               claimId: claim.claimId,
               file: claim.filePath,
             });
@@ -1080,7 +1088,7 @@ export class GitHubCollabCoordinator {
           type: 'session:ended',
           peerId: this.myPeerId,
           timestamp: Date.now(),
-          repo: repoKey,
+          repo: effectiveRepoKey!,
           sessionId,
           agent: result.session.agentName,
           summary,

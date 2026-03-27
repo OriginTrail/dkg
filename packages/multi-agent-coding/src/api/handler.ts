@@ -49,7 +49,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       });
       res.end();
       return true;
@@ -421,7 +421,7 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         if (endMatch && req.method === 'POST') {
           if (!coordinator) return json(res, 503, { error: 'DKG agent not available' });
           const body = JSON.parse((await readBody(req)).toString());
-          const repoKeyParam = body.repoKey ?? '';
+          const repoKeyParam = body.repoKey || undefined;
           const result = await coordinator.endAgentSession(endMatch[1], repoKeyParam, body.summary);
           const duration = Math.floor((Date.now() - result.session.startedAt) / 1000);
           return json(res, 200, {
