@@ -381,13 +381,11 @@ export class SyncEngine {
           if (since && pr.updated_at && pr.updated_at < since) continue;
           const quads = transformPullRequest(pr, owner, repo, graph);
 
-          // Fetch files for each PR
-          if (scopes.includes('reviews') || scopes.includes('commits')) {
-            try {
-              const files = await client.getPullRequestFiles(owner, repo, pr.number);
-              quads.push(...transformPullRequestFiles(files, owner, repo, pr.number, graph));
-            } catch { /* skip on error */ }
-          }
+          // Fetch files for each PR (always when pull_requests scope is enabled)
+          try {
+            const files = await client.getPullRequestFiles(owner, repo, pr.number);
+            quads.push(...transformPullRequestFiles(files, owner, repo, pr.number, graph));
+          } catch { /* skip on error */ }
 
           // Fetch reviews
           if (scopes.includes('reviews')) {

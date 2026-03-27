@@ -36,7 +36,6 @@ const GRAPH_OPTIONS: RdfGraphVizConfig = {
 
 interface GraphCanvasProps {
   repo?: string;
-  branch?: string;
   limit?: number;
   searchText?: string;
   onNodeClick?: (nodeId: string) => void;
@@ -45,7 +44,7 @@ interface GraphCanvasProps {
   toolbar?: React.ReactNode;
 }
 
-export function GraphCanvas({ repo, branch, limit = 500, searchText, onNodeClick, onTripleCount, toolbar }: GraphCanvasProps) {
+export function GraphCanvas({ repo, limit = 500, searchText, onNodeClick, onTripleCount, toolbar }: GraphCanvasProps) {
   const [viewKey, setViewKey] = useState('pr-impact');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +80,7 @@ export function GraphCanvas({ repo, branch, limit = 500, searchText, onNodeClick
           .filter((b: any) => b.s && b.p && b.o)
           .map((b: any) => ({ subject: b.s, predicate: b.p, object: b.o }));
       }
-      triplesCache.current[key] = parsed;
+      triplesCache.current[`${repo ?? ''}:${key}`] = parsed;
       setTriples(parsed);
       onTripleCount?.(parsed.length);
       if (parsed.length === 0) {
@@ -94,6 +93,13 @@ export function GraphCanvas({ repo, branch, limit = 500, searchText, onNodeClick
     }
   }, [repo, limit, onTripleCount]);
 
+  // Reset loaded state when repo changes so new data is fetched
+  React.useEffect(() => {
+    setHasLoaded(false);
+    triplesCache.current = {};
+    setTriples([]);
+  }, [repo]);
+
   // Auto-load PR Impact view when repo becomes available
   React.useEffect(() => {
     if (repo && !hasLoaded && currentView) {
@@ -105,7 +111,7 @@ export function GraphCanvas({ repo, branch, limit = 500, searchText, onNodeClick
   const handleViewChange = (key: string) => {
     setViewKey(key);
     // Restore cached triples if available, otherwise fetch fresh
-    const cached = triplesCache.current[key];
+    const cached = triplesCache.current[`${repo ?? ''}:${key}`];
     if (cached && cached.length > 0) {
       setTriples(cached);
       setError(null);

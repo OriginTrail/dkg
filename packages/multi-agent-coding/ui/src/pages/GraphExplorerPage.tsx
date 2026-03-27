@@ -237,7 +237,6 @@ export function GraphExplorerPage() {
           <div className="graph-explorer-main">
             <GraphCanvas
               repo={scopedRepo}
-              branch={selectedBranch || undefined}
               limit={graphLimit}
               searchText={searchText}
               onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
