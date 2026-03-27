@@ -360,18 +360,15 @@ export class GitHubCollabCoordinator {
     this.log(`Converted ${repoKey} to shared mode → paranet ${newParanetId}`);
     this.saveToDisk();
 
-    // Auto-trigger full sync to migrate data into the new shared paranet
+    // Auto-trigger full sync to migrate data into the new shared paranet.
+    // Sync engine supports anonymous access for public repos, so don't gate on token.
     let syncJobId: string | undefined;
-    if (config.githubToken) {
-      try {
-        const job = await this.syncEngine.startFullSync(owner, repo);
-        syncJobId = job.jobId;
-        this.log(`Migration sync started for ${repoKey}: job ${syncJobId}`);
-      } catch (err: any) {
-        this.log(`Migration sync failed to start for ${repoKey}: ${err.message}`);
-      }
-    } else {
-      this.log(`No GitHub token for ${repoKey} — re-sync requires a GitHub token. Add one in Settings.`);
+    try {
+      const job = await this.syncEngine.startFullSync(owner, repo);
+      syncJobId = job.jobId;
+      this.log(`Migration sync started for ${repoKey}: job ${syncJobId}`);
+    } catch (err: any) {
+      this.log(`Migration sync failed to start for ${repoKey}: ${err.message}`);
     }
 
     return { paranetId: newParanetId, syncJobId };

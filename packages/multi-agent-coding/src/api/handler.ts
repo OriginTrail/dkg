@@ -205,9 +205,13 @@ export default function createHandler(agent?: any, config?: any): AppRequestHand
         if (!body.owner || !body.repo || !body.prNumber) {
           return json(res, 400, { error: 'Missing owner, repo, or prNumber' });
         }
+        const reviewers: string[] = body.reviewers ?? [];
+        if (reviewers.length === 0) {
+          return json(res, 400, { error: 'At least one reviewer is required' });
+        }
         const session = await coordinator.createReviewSession(
           body.owner, body.repo, body.prNumber,
-          body.reviewers ?? [], body.requiredApprovals ?? 1,
+          reviewers, body.requiredApprovals ?? 1,
         );
         return json(res, 200, { ok: true, ...session });
       }

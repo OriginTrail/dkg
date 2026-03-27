@@ -62,6 +62,11 @@ export class StyleEngine {
     this._config.defaultEdgeColor = palette.edgeColor;
   }
 
+  /** Clear all class colors (used when switching views to prevent bleed-through) */
+  resetClassColors(): void {
+    this._config = { ...this._config, classColors: {} };
+  }
+
   /** Merge additional class colors (from ViewConfig nodeTypes) into the style config */
   setClassColors(colors: Record<string, string>): void {
     this._config = {

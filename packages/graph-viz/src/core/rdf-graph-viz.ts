@@ -520,6 +520,10 @@ export class RdfGraphViz {
    * ```
    */
   applyView(config: ViewConfig): void {
+    // Reset view-specific state to prevent previous view's styles from bleeding through
+    this._styleEngine.resetClassColors();
+    this._hexPainter.setCircleTypes([]);
+
     // Resolve and apply palette
     const palette = resolvePalette(config.palette, config.paletteOverrides);
     this._styleEngine.setPalette(palette);

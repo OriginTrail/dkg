@@ -417,10 +417,18 @@ describe('GitHub Collab API handler', () => {
 
     it('returns 400 when repo is not configured', async () => {
       const result = await post(handler, '/review/request', {
-        owner: 'unknown', repo: 'repo', prNumber: 1,
+        owner: 'unknown', repo: 'repo', prNumber: 1, reviewers: ['peer-1'],
       });
       expect(result.status).toBe(400);
       expect(result.body.error).toContain('not configured');
+    });
+
+    it('returns 400 when reviewers is empty', async () => {
+      const result = await post(handler, '/review/request', {
+        owner: 'octocat', repo: 'Hello-World', prNumber: 1,
+      });
+      expect(result.status).toBe(400);
+      expect(result.body.error).toContain('At least one reviewer');
     });
 
     it('returns 503 when no coordinator', async () => {
@@ -453,7 +461,7 @@ describe('GitHub Collab API handler', () => {
       // Must add the repo first
       await post(handler, '/config/repo', { owner: 'octocat', repo: 'Hello-World' });
       const createResult = await post(handler, '/review/request', {
-        owner: 'octocat', repo: 'Hello-World', prNumber: 42,
+        owner: 'octocat', repo: 'Hello-World', prNumber: 42, reviewers: ['peer-1'],
       });
       const sessionId = createResult.body.sessionId;
 

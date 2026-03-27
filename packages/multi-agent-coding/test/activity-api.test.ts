@@ -352,11 +352,12 @@ describe('Agent Activity API endpoints', () => {
       expect('syncJobId' in res.body).toBe(true);
     });
 
-    it('returns null syncJobId when no token', async () => {
+    it('attempts sync even without token (anonymous access for public repos)', async () => {
       await post(handler, '/config/repo', { owner: 'octocat', repo: 'NoToken', privacyLevel: 'local' });
       const res = await post(handler, '/convert-to-shared', { owner: 'octocat', repo: 'NoToken' });
       expect(res.status).toBe(200);
-      expect(res.body.syncJobId).toBeNull();
+      // Sync is always attempted now — syncJobId should be present
+      expect('syncJobId' in res.body).toBe(true);
     });
   });
 });

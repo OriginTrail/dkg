@@ -387,7 +387,7 @@ export class SyncEngine {
             quads.push(...transformPullRequestFiles(files, owner, repo, pr.number, graph));
           } catch { /* skip on error */ }
 
-          // Fetch reviews
+          // Fetch reviews (sub-scope of pull_requests — only works when pull_requests is also enabled)
           if (scopes.includes('reviews')) {
             try {
               const reviews = await client.getPullRequestReviews(owner, repo, pr.number);
@@ -421,6 +421,7 @@ export class SyncEngine {
           if (since && issue.updated_at && issue.updated_at < since) continue;
           const quads = transformIssue(issue, owner, repo, graph);
 
+          // comments is a sub-scope of issues — only works when issues is also enabled
           if (scopes.includes('comments') && issue.comments > 0) {
             try {
               const comments = await client.getIssueComments(owner, repo, issue.number);
