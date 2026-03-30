@@ -23,6 +23,7 @@ import {
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
   compareAcceptedJobs,
+  createJobSlug,
   expectBindings,
   getRecoveryTxHash,
   isFailedJob,
@@ -60,6 +61,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const jobId = this.idGenerator();
     const job: LiftJobAccepted = {
       jobId,
+      jobSlug: createJobSlug(request),
       request,
       status: 'accepted',
       timestamps: { acceptedAt: now, updatedAt: now },
@@ -278,6 +280,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const now = this.now();
     return {
       jobId: job.jobId,
+      jobSlug: job.jobSlug,
       request: job.request,
       status: 'accepted',
       timestamps: { acceptedAt: job.timestamps.acceptedAt, lastRecoveredAt: now, updatedAt: now },
@@ -296,6 +299,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     return {
       jobId: job.jobId,
+      jobSlug: job.jobSlug,
       request: job.request,
       status: 'accepted',
       timestamps: {

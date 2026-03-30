@@ -6,6 +6,21 @@ import {
   type AsyncLiftPublisherRecoveryResult,
   type LiftRequest,
 } from '../src/index.js';
+import {
+  CONTROL_JOB_SLUG,
+  CONTROL_ACCEPTED_AT,
+  CONTROL_AUTHORITY_PROOF_REF,
+  CONTROL_HAS_REQUEST,
+  CONTROL_PARANET_ID,
+  CONTROL_PAYLOAD,
+  CONTROL_REQUEST_TYPE,
+  CONTROL_ROOT,
+  CONTROL_SCOPE,
+  CONTROL_STATUS,
+  DEFAULT_CONTROL_GRAPH_URI,
+  requestSubject,
+  jobSubject,
+} from '../src/async-lift-control-plane.js';
 
 describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
@@ -45,7 +60,48 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
+    expect(job?.jobSlug).toBe('music-social/person-profile/create/op-1/rihana');
     expect(job?.request.paranetId).toBe('music-social');
+  });
+
+  it('stores explicit LiftJob and LiftRequest control-plane triples', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+
+    const result = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+        <${jobSubject(jobId)}> ?p ?o .
+      }
+    }`);
+
+    expect(result.type).toBe('bindings');
+    if (result.type !== 'bindings') return;
+
+    const triples = new Map(result.bindings.map((row) => [row['p'], row['o']]));
+    expect(triples.get(CONTROL_STATUS)).toBe('"accepted"');
+    expect(triples.get(CONTROL_JOB_SLUG)).toBe('"music-social/person-profile/create/op-1/rihana"');
+    expect(triples.get(CONTROL_HAS_REQUEST)).toBe(requestSubject(jobId));
+    expect(triples.get(CONTROL_ACCEPTED_AT)).toBe('"1001"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    expect(triples.get(CONTROL_PAYLOAD)).toBeDefined();
+
+    const requestResult = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
+        <${requestSubject(jobId)}> ?p ?o .
+      }
+    }`);
+
+    expect(requestResult.type).toBe('bindings');
+    if (requestResult.type !== 'bindings') return;
+
+    const requestTriples = requestResult.bindings.map((row) => [row['p'], row['o']]);
+    expect(requestTriples).toContainEqual([
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      CONTROL_REQUEST_TYPE,
+    ]);
+    expect(requestTriples).toContainEqual([CONTROL_PARANET_ID, '"music-social"']);
+    expect(requestTriples).toContainEqual([CONTROL_SCOPE, '"person-profile"']);
+    expect(requestTriples).toContainEqual([CONTROL_AUTHORITY_PROOF_REF, '"proof:owner:1"']);
+    expect(requestTriples).toContainEqual([CONTROL_ROOT, '"urn:local:/rihana"']);
   });
 
   it('claims the oldest accepted job for a wallet', async () => {
@@ -62,6 +118,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(claimed?.claim?.walletId).toBe('wallet-1');
     expect(remaining).toHaveLength(1);
     expect(remaining[0]?.jobId).toBe('job-2');
+  });
+
+  it('derives readable root-range slugs for multiple roots', async () => {
+    const publisher = createPublisher();
+
+    const jobId = await publisher.lift({
+      ...request(),
+      workspaceOperationId: 'op-9',
+      roots: ['urn:local:/manson', 'urn:local:/rihana'],
+    });
+
+    const job = await publisher.getStatus(jobId);
+    expect(job?.jobSlug).toBe('music-social/person-profile/create/op-9/manson-rihana');
   });
 
   it('updates jobs through the MVP state machine', async () => {
