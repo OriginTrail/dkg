@@ -104,6 +104,13 @@ export {
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
+export {
+  TripleStoreAsyncLiftPublisher,
+  type AsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+  type AsyncLiftPublisherRecoveryResult,
+  type AsyncLiftPublisherRecoveryResolver,
+} from './async-lift-publisher.js';
 export { WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
