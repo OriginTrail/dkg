@@ -36,6 +36,7 @@ describe('LiftJob request and record types', () => {
     ]);
     expect(LIFT_JOB_IMMUTABLE_FIELDS).toEqual([
       'jobId',
+      'jobSlug',
       'request',
       'timestamps.acceptedAt',
       'retries.maxRetries',
@@ -78,6 +79,7 @@ describe('LiftJob request and record types', () => {
 
     const accepted: LiftJobAccepted = {
       jobId: 'job-1',
+      jobSlug: 'music-social/person-profile/create/op-1/rihana',
       request,
       status: 'accepted',
       timestamps: { acceptedAt: 1, updatedAt: 1 },
@@ -91,6 +93,7 @@ describe('LiftJob request and record types', () => {
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {
     const job: LiftJobBroadcast = {
       jobId: 'job-2',
+      jobSlug: 'music-social/person-profile/mutate/op-2/rihana',
       request: {
         workspaceId: 'ws-2',
         workspaceOperationId: 'op-2',
@@ -124,6 +127,7 @@ describe('LiftJob request and record types', () => {
   it('captures finalization and failure payload references for persistence', () => {
     const finalized: LiftJobFinalized = {
       jobId: 'job-3',
+      jobSlug: 'music-social/person-profile/create/op-3/rihana',
       request: {
         workspaceId: 'ws-3',
         workspaceOperationId: 'op-3',
@@ -167,6 +171,7 @@ describe('LiftJob request and record types', () => {
 
     const failed: LiftJobFailedFromBroadcast = {
       jobId: 'job-4',
+      jobSlug: 'music-social/person-profile/create/op-3/rihana',
       request: finalized.request,
       status: 'failed',
       timestamps: { acceptedAt: 1, claimedAt: 2, broadcastAt: 3, failedAt: 4, updatedAt: 4 },
@@ -202,6 +207,7 @@ describe('LiftJob request and record types', () => {
   it('supports chain-driven recovery from included jobs', () => {
     const failed: LiftJobFailedFromIncluded = {
       jobId: 'job-5',
+      jobSlug: 'music-social/person-profile/create/op-5/rihana',
       request: {
         workspaceId: 'ws-5',
         workspaceOperationId: 'op-5',
@@ -274,6 +280,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error failed jobs from broadcast require validation metadata
     const invalidMissingValidation: LiftJobFailed = {
       jobId: 'job-invalid-1',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, failedAt: 3, updatedAt: 3 },
@@ -295,6 +302,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error reset_to_accepted cannot recover from included
     const invalidRecoveryState: LiftJobFailed = {
       jobId: 'job-invalid-2',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },
@@ -323,6 +331,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error finalized_from_chain requires txHashChecked
     const invalidMissingTxHash: LiftJobFailed = {
       jobId: 'job-invalid-3',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },

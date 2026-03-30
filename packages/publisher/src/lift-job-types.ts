@@ -142,6 +142,7 @@ export interface LiftJobControlPlaneRefs {
 
 export const LIFT_JOB_IMMUTABLE_FIELDS = [
   'jobId',
+  'jobSlug',
   'request',
   'timestamps.acceptedAt',
   'retries.maxRetries',
@@ -173,6 +174,7 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
 
 export interface LiftJobBase {
   readonly jobId: string;
+  readonly jobSlug: string;
   readonly request: LiftRequest;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
