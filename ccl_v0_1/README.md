@@ -129,9 +129,16 @@ CCL produces two kinds of outputs:
 
 A decision is still **non-authoritative** until a normal DKG `PUBLISH` introduces it as a typed transition into shared state.
 
-## Current lifecycle limitation
+## Policy lifecycle and supersession
 
-CCL v0.1 supports `publish -> approve -> resolve -> evaluate`, but does not yet include explicit policy revocation or deactivation. If multiple approvals exist for the same `paranetId + policy name + context`, resolution currently selects the most recently approved binding for that scope.
+CCL policy bindings now support explicit revocation in addition to `publish -> approve -> resolve -> evaluate`.
+
+- approving a newer binding in the same scope supersedes older bindings for resolution purposes
+- revoking the currently active binding removes it from selection without deleting audit history
+- resolution selects the latest non-revoked binding for the exact context
+- if no exact-context binding remains active, resolution falls back to the latest non-revoked default binding
+
+This makes supersession explicit while preserving old bindings for auditability.
 
 ## Included policies
 

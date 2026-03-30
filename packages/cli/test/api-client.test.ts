@@ -143,6 +143,16 @@ describe('ApiClient', () => {
       expect(body.contextType).toBe('incident_review');
     });
 
+    it('revokeCclPolicy() posts revocation payload', async () => {
+      globalThis.fetch = mockFetchOk({ policyUri: 'urn:policy', bindingUri: 'urn:binding', revokedAt: 'now', status: 'revoked' });
+      await client.revokeCclPolicy({ paranetId: 'ops', policyUri: 'urn:policy', contextType: 'incident_review' });
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/ccl/policy/revoke`);
+      const body = JSON.parse(opts.body);
+      expect(body.contextType).toBe('incident_review');
+    });
+
     it('evaluateCclPolicy() posts evaluation payload', async () => {
       globalThis.fetch = mockFetchOk({ policy: { name: 'incident' }, factSetHash: 'sha256:abc', result: { derived: {}, decisions: {} } });
       await client.evaluateCclPolicy({ paranetId: 'ops', name: 'incident', facts: [['claim', 'c1']], snapshotId: 'snap-1', publishResult: true });

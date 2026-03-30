@@ -39,7 +39,11 @@ export interface PolicyApprovalBinding {
   paranetId: string;
   name: string;
   contextType?: string;
+  status: 'approved' | 'revoked';
   approvedAt: string;
+  approvedBy?: string;
+  revokedAt?: string;
+  revokedBy?: string;
 }
 
 export function hashCclPolicy(content: string): string {
@@ -114,6 +118,7 @@ export function buildPolicyApprovalQuads(opts: {
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET, object: paranetUri, graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: sparqlString(opts.policyName), graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_ACTIVE_POLICY, object: opts.policyUri, graph: opts.graph },
+    { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_BINDING_STATUS, object: sparqlString('approved'), graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_BY, object: opts.creator, graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_AT, object: sparqlString(opts.approvedAt), graph: opts.graph },
     { subject: bindingUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: sparqlString(opts.approvedAt), graph: opts.graph },
@@ -129,6 +134,19 @@ export function buildPolicyApprovalQuads(opts: {
   }
 
   return { bindingUri, quads };
+}
+
+export function buildPolicyRevocationQuads(opts: {
+  bindingUri: string;
+  revoker: string;
+  graph: string;
+  revokedAt: string;
+}): Quad[] {
+  return [
+    { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_BINDING_STATUS, object: sparqlString('revoked'), graph: opts.graph },
+    { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_REVOKED_BY, object: opts.revoker, graph: opts.graph },
+    { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_REVOKED_AT, object: sparqlString(opts.revokedAt), graph: opts.graph },
+  ];
 }
 
 function encodeSegment(value: string): string {

@@ -242,6 +242,14 @@ export class ApiClient {
     return this.post('/api/ccl/policy/approve', request);
   }
 
+  async revokeCclPolicy(request: {
+    paranetId: string;
+    policyUri: string;
+    contextType?: string;
+  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
+    return this.post('/api/ccl/policy/revoke', request);
+  }
+
   async listCclPolicies(opts: {
     paranetId?: string;
     name?: string;

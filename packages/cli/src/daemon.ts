@@ -2109,6 +2109,17 @@ async function handleRequest(
     return jsonResponse(res, 200, result);
   }
 
+  // POST /api/ccl/policy/revoke
+  if (req.method === 'POST' && path === '/api/ccl/policy/revoke') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { paranetId, policyUri, contextType } = JSON.parse(body);
+    if (!paranetId || !policyUri) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, policyUri' });
+    }
+    const result = await agent.revokeCclPolicy({ paranetId, policyUri, contextType });
+    return jsonResponse(res, 200, result);
+  }
+
   // GET /api/ccl/policy/list
   if (req.method === 'GET' && path === '/api/ccl/policy/list') {
     const policies = await agent.listCclPolicies({

@@ -806,6 +806,113 @@ decisions: []
     await agent.stop().catch(() => {});
   });
 
+  it('falls back to the previous default policy after revoking a superseding binding', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'RevokeDefaultBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-revoke-default', name: 'Ops Revoke Default' });
+
+    const v1 = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-default',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    const v2 = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-default',
+      name: 'incident-review',
+      version: '0.2.0',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v1.policyUri });
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v2.policyUri });
+
+    const resolvedLatest = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    expect(resolvedLatest?.policyUri).toBe(v2.policyUri);
+
+    const revoked = await agent.revokeCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v2.policyUri });
+    expect(revoked.status).toBe('revoked');
+
+    const resolvedFallback = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    expect(resolvedFallback?.policyUri).toBe(v1.policyUri);
+
+    const listed = await agent.listCclPolicies({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    const revokedRecord = listed.find(policy => policy.policyUri === v2.policyUri);
+    const activeRecord = listed.find(policy => policy.policyUri === v1.policyUri);
+    expect(revokedRecord?.status).toBe('revoked');
+    expect(activeRecord?.status).toBe('approved');
+    expect(activeRecord?.isActiveDefault).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('falls back from a revoked context override to the default policy', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'RevokeContextBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-revoke-context', name: 'Ops Revoke Context' });
+
+    const base = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-context',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    const override = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-context',
+      name: 'incident-review',
+      version: '0.2.0',
+      contextType: 'incident_review',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-context', policyUri: base.policyUri });
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-context', policyUri: override.policyUri, contextType: 'incident_review' });
+
+    const resolvedOverride = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedOverride?.policyUri).toBe(override.policyUri);
+
+    const revoked = await agent.revokeCclPolicy({
+      paranetId: 'ops-revoke-context',
+      policyUri: override.policyUri,
+      contextType: 'incident_review',
+    });
+    expect(revoked.contextType).toBe('incident_review');
+
+    const resolvedFallback = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedFallback?.policyUri).toBe(base.policyUri);
+    expect(resolvedFallback?.isActiveDefault).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
   it('restricts CCL policy approval to the paranet owner', async () => {
     const store = new OxigraphStore();
     const owner = await DKGAgent.create({
@@ -835,10 +942,49 @@ decisions: []
     });
 
     await expect(other.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
-      .rejects.toThrow(/Only the paranet owner can approve policies/);
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
 
     await expect(owner.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
       .resolves.toBeTruthy();
+
+    await owner.stop().catch(() => {});
+    await other.stop().catch(() => {});
+  });
+
+  it('restricts CCL policy revocation to the paranet owner', async () => {
+    const store = new OxigraphStore();
+    const owner = await DKGAgent.create({
+      name: 'OwnerRevokeBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const other = await DKGAgent.create({
+      name: 'OtherRevokeBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    await owner.start();
+    await other.start();
+    await owner.createParanet({ id: 'ops-owner-revoke', name: 'Ops Owner Revoke' });
+
+    const published = await owner.publishCclPolicy({
+      paranetId: 'ops-owner-revoke',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    await owner.approveCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri });
+
+    await expect(other.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+
+    await expect(owner.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
+      .resolves.toMatchObject({ status: 'revoked' });
 
     await owner.stop().catch(() => {});
     await other.stop().catch(() => {});

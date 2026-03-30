@@ -1134,7 +1134,7 @@ const cclCmd = program
 
 const cclPolicyCmd = cclCmd
   .command('policy')
-  .description('Publish, approve, list, and resolve CCL policies');
+  .description('Publish, approve, revoke, list, and resolve CCL policies');
 
 cclPolicyCmd
   .command('publish <paranetId>')
@@ -1183,6 +1183,26 @@ cclPolicyCmd
       console.log(`  Binding:  ${result.bindingUri}`);
       if (result.contextType) console.log(`  Context:  ${result.contextType}`);
       console.log(`  Approved: ${result.approvedAt}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclPolicyCmd
+  .command('revoke <paranetId> <policyUri>')
+  .description('Revoke the currently active CCL policy binding for a paranet or context override')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .action(async (paranetId: string, policyUri: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.revokeCclPolicy({ paranetId, policyUri, contextType: opts.contextType });
+      console.log(`Policy revoked:`);
+      console.log(`  Policy:   ${result.policyUri}`);
+      console.log(`  Binding:  ${result.bindingUri}`);
+      if (result.contextType) console.log(`  Context:  ${result.contextType}`);
+      console.log(`  Revoked:  ${result.revokedAt}`);
+      console.log(`  Status:   ${result.status}`);
     } catch (err: any) {
       console.error(err.message);
       process.exit(1);
