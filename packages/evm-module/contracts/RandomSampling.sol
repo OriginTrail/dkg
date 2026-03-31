@@ -12,6 +12,7 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
+import {ConvictionStakeStorage} from "./storage/ConvictionStakeStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
@@ -39,6 +40,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     DelegatorsInfo public delegatorsInfo;
     ParametersStorage public parametersStorage;
     ShardingTableStorage public shardingTableStorage;
+    ConvictionStakeStorage public convictionStakeStorage;
 
     error MerkleRootMismatchError(bytes32 computedMerkleRoot, bytes32 expectedMerkleRoot);
 
@@ -90,6 +92,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
+        convictionStakeStorage = ConvictionStakeStorage(hub.getContractAddress("ConvictionStakeStorage"));
     }
 
     /**
@@ -228,8 +231,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
             randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-            // Calculate and add to nodeEpochScorePerStake
-            uint96 totalNodeStake = stakingStorage.getNodeStake(identityId);
+            // Calculate and add to nodeEpochScorePerStake (uses effective stake for conviction)
+            uint256 totalNodeStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
+            // Fallback to raw stake for backward compatibility (pre-migration nodes)
+            if (totalNodeStake == 0) {
+                totalNodeStake = uint256(stakingStorage.getNodeStake(identityId));
+            }
             if (totalNodeStake > 0) {
                 uint256 nodeScorePerStake36 = (score18 * SCALE18) / totalNodeStake;
                 randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
@@ -437,7 +444,11 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = uint256(stakingStorage.getNodeStake(identityId));
+        uint256 nodeStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
+        // Fallback to raw stake for backward compatibility (pre-migration nodes)
+        if (nodeStake == 0) {
+            nodeStake = uint256(stakingStorage.getNodeStake(identityId));
+        }
         nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
         // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
         uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;
