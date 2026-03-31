@@ -116,6 +116,12 @@ export {
   type LiftResolvedPublishSlice,
   type LiftPublishMappingInput,
 } from './async-lift-publish-options.js';
+export {
+  mapPublishResultToLiftJobSuccess,
+  mapPublishExceptionToLiftJobFailure,
+  type AsyncLiftPublishSuccess,
+  type AsyncLiftPublishFailureInput,
+} from './async-lift-publish-result.js';
 export { WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
