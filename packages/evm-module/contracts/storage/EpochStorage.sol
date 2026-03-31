@@ -152,6 +152,11 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
         uint256 endEpoch,
         uint96 tokenAmount
     ) external onlyContracts {
+        require(
+            startEpoch > lastFinalizedEpoch[shardId],
+            "EpochStorage: start epoch already finalized"
+        );
+
         uint256 numEpochs = endEpoch - startEpoch + 1;
 
         uint96 totalTokens = tokenAmount + accumulatedRemainder[shardId];
@@ -183,6 +188,11 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
         if (currentEpoch > 1) {
             _finalizeEpochsUpTo(shardId, currentEpoch - 1);
         }
+
+        require(
+            amount <= getEpochRemainingPool(shardId, epoch),
+            "EpochStorage: payout exceeds remaining pool"
+        );
 
         distributed[shardId][epoch] += amount;
         nodesPaidOut[identityId][shardId][epoch] += amount;

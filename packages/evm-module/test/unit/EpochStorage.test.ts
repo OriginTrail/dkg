@@ -366,6 +366,55 @@ describe('@unit EpochStorage', () => {
     ).to.equal(1000);
   });
 
+  it('payOutEpochTokens reverts when payout exceeds remaining pool (M-16)', async () => {
+    const shardId = 19;
+    // Allocate 1000 tokens to epoch 5
+    await EpochStorage.addTokensToEpochRange(shardId, 5, 5, 1000);
+
+    // Pay out exactly 1000 — should succeed
+    await EpochStorage.payOutEpochTokens(shardId, 5, 42, 1000);
+    expect(await EpochStorage.getEpochDistributedPool(shardId, 5)).to.equal(
+      1000,
+    );
+
+    // Pay out 1 more — should revert (pool exhausted)
+    await expect(
+      EpochStorage.payOutEpochTokens(shardId, 5, 42, 1),
+    ).to.be.revertedWith('EpochStorage: payout exceeds remaining pool');
+  });
+
+  it('addTokensToEpochRange reverts if startEpoch <= lastFinalizedEpoch (M-17)', async () => {
+    const shardId = 21;
+    // Allocate tokens to epoch 2-4
+    await EpochStorage.addTokensToEpochRange(shardId, 2, 4, 3000);
+
+    // Advance time so currentEpoch becomes 2, which means epoch 1 gets finalized on next call
+    await time.increase(3601);
+
+    // Trigger finalization of epoch 1 by adding to a future range
+    await EpochStorage.addTokensToEpochRange(shardId, 10, 10, 100);
+
+    // Now lastFinalizedEpoch[shardId] >= 1.
+    // Advance again so currentEpoch becomes 3, finalizing epoch 2 on next write
+    await time.increase(3601);
+    await EpochStorage.addTokensToEpochRange(shardId, 20, 20, 100);
+
+    // lastFinalizedEpoch[shardId] should now be >= 2
+    // Try to add tokens starting at epoch 2 — should revert
+    await expect(
+      EpochStorage.addTokensToEpochRange(shardId, 2, 5, 500),
+    ).to.be.revertedWith('EpochStorage: start epoch already finalized');
+  });
+
+  it('payOutEpochTokens reverts on first call if amount > pool (M-16)', async () => {
+    const shardId = 20;
+    await EpochStorage.addTokensToEpochRange(shardId, 3, 3, 500);
+
+    await expect(
+      EpochStorage.payOutEpochTokens(shardId, 3, 77, 501),
+    ).to.be.revertedWith('EpochStorage: payout exceeds remaining pool');
+  });
+
   it('getNodeCurrentEpochProducedKnowledgeValuePercentage, getNodePreviousEpochProducedKnowledgeValuePercentage', async () => {
     await EpochStorage.addEpochProducedKnowledgeValue(1111, 1, 500);
     await EpochStorage.addEpochProducedKnowledgeValue(2222, 1, 1500);
