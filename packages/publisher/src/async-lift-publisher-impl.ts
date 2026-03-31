@@ -1,4 +1,5 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
@@ -18,6 +19,11 @@ import type {
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
 } from './async-lift-publisher-types.js';
+import {
+  mapPublishExceptionToLiftJobFailure,
+  mapPublishResultToLiftJobSuccess,
+  type AsyncLiftPublishFailureInput,
+} from './async-lift-publish-result.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -147,6 +153,75 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null)
       .sort(compareAcceptedJobs);
+  }
+
+  async recordPublishResult(
+    jobId: string,
+    publishResult: PublishResult,
+    options: { publicByteSize?: number } = {},
+  ): Promise<LiftJob> {
+    await this.ensureGraph();
+    const current = await this.getRequiredJob(jobId);
+    if (!current.claim || !current.validation) {
+      throw new Error(`LiftJob ${jobId} must be claimed and validated before recording publish results`);
+    }
+
+    const mapped = mapPublishResultToLiftJobSuccess({
+      publishResult,
+      walletId: current.claim.walletId,
+      publicByteSize: options.publicByteSize,
+    });
+
+    let next: LiftJob = current;
+    if (current.status === 'validated') {
+      next = this.mergeJob(next, 'broadcast', { broadcast: mapped.broadcast });
+      this.assertJobMatchesStatus(next);
+      await this.writeJob(next);
+      await this.syncWalletLockForJob(next);
+    }
+
+    if (mapped.status === 'included') {
+      next = this.mergeJob(next, 'included', {
+        broadcast: mapped.broadcast,
+        inclusion: mapped.inclusion,
+      });
+      this.assertJobMatchesStatus(next);
+      await this.writeJob(next);
+      await this.syncWalletLockForJob(next);
+      return next;
+    }
+
+    if (next.status === 'broadcast') {
+      next = this.mergeJob(next, 'included', {
+        broadcast: mapped.broadcast,
+        inclusion: mapped.inclusion,
+      });
+      this.assertJobMatchesStatus(next);
+      await this.writeJob(next);
+      await this.syncWalletLockForJob(next);
+    }
+
+    next = this.mergeJob(next, 'finalized', {
+      broadcast: mapped.broadcast,
+      inclusion: mapped.inclusion,
+      finalization: mapped.finalization,
+    });
+    this.assertJobMatchesStatus(next);
+    await this.writeJob(next);
+    await this.syncWalletLockForJob(next);
+    return next;
+  }
+
+  async recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob> {
+    await this.ensureGraph();
+    const current = await this.getRequiredJob(jobId);
+    const next = this.mergeJob(current, 'failed', {
+      failure: mapPublishExceptionToLiftJobFailure(failure) as any,
+    });
+    this.assertJobMatchesStatus(next);
+    await this.writeJob(next);
+    await this.syncWalletLockForJob(next);
+    return next;
   }
 
   async recover(): Promise<number> {

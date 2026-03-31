@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -18,6 +18,7 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+import { resolveWorkspaceSelection } from './workspace-resolution.js';
 
 export interface DKGPublisherConfig {
   store: TripleStore;
@@ -393,44 +394,12 @@ export class DKGPublisher implements Publisher {
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('enshrine');
     const workspaceGraph = this.graphManager.workspaceGraphUri(paranetId);
-
-    let sparql: string;
-    if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${workspaceGraph}> { ?s ?p ?o } }`;
-    } else {
-      const roots = [...new Set(
-        selection.rootEntities
-          .map((r) => String(r).trim())
-          .filter((r) => isSafeIri(r)),
-      )];
-      if (roots.length === 0) {
-        const hadInput = selection.rootEntities.length > 0;
-        throw new Error(
-          hadInput
-            ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
-            : `No rootEntities provided for paranet ${paranetId}`,
-        );
-      }
-      const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${workspaceGraph}> {
-          VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(
-            ?s = ?root
-            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-      }`;
-    }
-
-    const result = await this.store.query(sparql);
-    const quads: Quad[] =
-      result.type === 'quads' ? result.quads : [];
-
-    if (quads.length === 0) {
-      throw new Error(`No quads in workspace for paranet ${paranetId} matching selection`);
-    }
+    const quads = await resolveWorkspaceSelection({
+      store: this.store,
+      graphManager: this.graphManager,
+      paranetId,
+      selection,
+    });
 
     const ctxGraphId = options?.contextGraphId;
     if (ctxGraphId !== undefined && ctxGraphId !== null) {
@@ -442,7 +411,7 @@ export class DKGPublisher implements Publisher {
     this.log.info(ctx, `Enshrining ${quads.length} quads from workspace to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}`);
     const publishResult = await this.publish({
       paranetId,
-      quads: quads.map((q) => ({ ...q, graph: '' })),
+      quads,
       operationCtx: ctx,
       onPhase: options?.onPhase,
     });

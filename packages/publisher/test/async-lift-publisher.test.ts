@@ -411,6 +411,98 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.finalization?.txHash).toBe('0xabc');
   });
 
+  it('records canonical publish results back into LiftJob progress states', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        workspaceQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    const included = await publisher.recordPublishResult(
+      jobId,
+      {
+        kcId: 1n,
+        ual: 'did:dkg:mock:31337/0xabc/1',
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+        kaManifest: [],
+        status: 'tentative',
+        onChainResult: {
+          batchId: 7n,
+          startKAId: 1n,
+          endKAId: 1n,
+          txHash: '0xabc',
+          blockNumber: 10,
+          blockTimestamp: 1700000000,
+          publisherAddress: '0x1111111111111111111111111111111111111111',
+        },
+      },
+      { publicByteSize: 123 },
+    );
+
+    expect(included.status).toBe('included');
+    expect(included.broadcast?.txHash).toBe('0xabc');
+    expect(included.broadcast?.publicByteSize).toBe(123);
+    expect(included.inclusion?.blockNumber).toBe(10);
+
+    const finalized = await publisher.recordPublishResult(jobId, {
+      kcId: 1n,
+      ual: 'did:dkg:mock:31337/0xabc/1',
+      merkleRoot: new Uint8Array([0xab, 0xcd]),
+      kaManifest: [],
+      status: 'confirmed',
+      onChainResult: {
+        batchId: 7n,
+        startKAId: 1n,
+        endKAId: 1n,
+        txHash: '0xabc',
+        blockNumber: 10,
+        blockTimestamp: 1700000000,
+        publisherAddress: '0x1111111111111111111111111111111111111111',
+      },
+    });
+
+    expect(finalized.status).toBe('finalized');
+    expect(finalized.finalization?.ual).toBe('did:dkg:mock:31337/0xabc/1');
+    expect(finalized.finalization?.batchId).toBe('7');
+  });
+
+  it('records canonical publish failures back into LiftJob failed state', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        workspaceQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: new Error('RPC submit timed out after 30s'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:submit-timeout',
+      timeout: {
+        timeoutMs: 30_000,
+        timeoutAt: 123,
+        handling: 'check_chain_then_finalize_or_reset',
+      },
+    });
+
+    expect(failed.status).toBe('failed');
+    expect(failed.failure?.code).toBe('tx_submit_timeout');
+    expect(failed.failure?.timeout?.timeoutMs).toBe(30_000);
+  });
+
   it('lists and counts jobs by status', async () => {
     const publisher = createPublisher();
     const acceptedId = await publisher.lift(request());
