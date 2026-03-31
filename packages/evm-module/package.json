@@ -20,14 +20,14 @@
     "typechain": "hardhat typechain"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.1.0",
-    "solady": "^0.0.285",
+    "@openzeppelin/contracts": "5.4.0",
+    "dotenv": "^16.4.7",
     "hardhat": "^2.22.17",
     "hardhat-deploy": "^0.12.4",
     "hardhat-deploy-ethers": "^0.4.2",
+    "solady": "^0.0.285",
     "ts-node": "^10.9.1",
-    "typescript": "^5.7.2",
-    "dotenv": "^16.4.7"
+    "typescript": "^5.7.2"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.8",
