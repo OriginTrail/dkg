@@ -111,8 +111,6 @@ describe('@unit PublishingConvictionAccount contract', function () {
     });
 
     it('has no lockEpochs parameter (enforced 12-month term)', async () => {
-      // Verify createAccount only accepts (uint256 amount) — no lockEpochs parameter.
-      // The contract enforces LOCK_DURATION_EPOCHS = 12 internally.
       const lockDuration = await PCA.LOCK_DURATION_EPOCHS();
       expect(lockDuration).to.equal(12);
     });
@@ -320,13 +318,52 @@ describe('@unit PublishingConvictionAccount contract', function () {
       ).to.be.revertedWithCustomError(PCA, 'NotAccountAdmin');
     });
 
-    it('emits AccountClosed and clears admin mapping so new account can be created', async function () {
-      // This test needs an account with zero balances AND expired lock.
-      // Since there's no withdraw, we can't drain balances directly.
-      // We need coverPublishingCost (subtask 9) to drain them.
-      // For now, we test the revert paths — the happy path for close
-      // will be testable once coverPublishingCost exists.
-      this.skip();
+    it('closes account after lock expired and balances drained, clears admin mapping', async () => {
+      // Deploy test harness that can drain balances (simulating coverPublishingCost from subtask 9)
+      const hubAddress = await Hub.getAddress();
+      const HarnessFactory = await hre.ethers.getContractFactory('PCATestHarness');
+      const harness = await HarnessFactory.deploy(hubAddress);
+      await harness.waitForDeployment();
+
+      // Register harness in Hub so it can be initialized
+      const harnessAddress = await harness.getAddress();
+      await Hub.setContractAddress('PCATestHarness', harnessAddress);
+      await harness.initialize();
+
+      const token = await hre.ethers.getContract('Token');
+      const amount = hre.ethers.parseEther('100000');
+
+      await token.approve(harnessAddress, amount);
+      await harness.createAccount(amount);
+
+      // Verify admin mapping is set
+      expect(await harness.adminToAccountId(accounts[0].address)).to.equal(1);
+
+      // Advance past 12 epochs
+      const epochLength = await ChronosContract.EPOCH_LENGTH();
+      await time.increase(epochLength * 13n);
+
+      // Drain balances via test harness
+      await harness.__test_drainBalances(1);
+
+      // Close account
+      await expect(harness.closeAccount(1))
+        .to.emit(harness, 'AccountClosed')
+        .withArgs(1, accounts[0].address);
+
+      // Verify admin mapping is cleared
+      expect(await harness.adminToAccountId(accounts[0].address)).to.equal(0);
+
+      // Verify account is deleted (getAccountInfo should revert)
+      await expect(harness.getAccountInfo(1)).to.be.revertedWithCustomError(
+        harness,
+        'AccountNotFound',
+      );
+
+      // Verify admin can create a new account
+      await token.approve(harnessAddress, amount);
+      await harness.createAccount(amount);
+      expect(await harness.adminToAccountId(accounts[0].address)).to.equal(2);
     });
   });
 
@@ -481,12 +518,27 @@ describe('@unit PublishingConvictionAccount contract', function () {
   });
 
   // ========================================================================
-  // Initialized guard
+  // Initialization guard
   // ========================================================================
 
   describe('initialization', () => {
     it('starts nextAccountId at 1', async () => {
       expect(await PCA.nextAccountId()).to.equal(1);
+    });
+
+    it('sets initialized flag to true after first initialization', async () => {
+      expect(await PCA.initialized()).to.be.true;
+    });
+
+    it('reverts on re-initialization', async () => {
+      // PCA is already initialized via the deploy fixture.
+      // Hub.forwardCall can invoke initialize() again — verify it reverts.
+      const pcaAddress = await PCA.getAddress();
+      const initializeData = PCA.interface.encodeFunctionData('initialize');
+
+      await expect(
+        Hub.forwardCall(pcaAddress, initializeData),
+      ).to.be.revertedWithCustomError(PCA, 'AlreadyInitialized');
     });
 
     it('increments accountId correctly on sequential creates', async () => {

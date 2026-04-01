@@ -4,36 +4,36 @@
             "evmAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
             "version": "1.0.0",
             "gitBranch": "feat/8-pca-rewrite",
-            "gitCommitHash": "2af4f3f612becd2f64131fc9d12fdf5a774f49c6",
+            "gitCommitHash": "60f45ac485e21e229b1ce273bce244c99e491a82",
             "deploymentBlock": 1,
-            "deploymentTimestamp": 1774970875192,
+            "deploymentTimestamp": 1775033006605,
             "deployed": true
         },
         "Token": {
             "evmAddress": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
             "version": null,
             "gitBranch": "feat/8-pca-rewrite",
-            "gitCommitHash": "2af4f3f612becd2f64131fc9d12fdf5a774f49c6",
+            "gitCommitHash": "60f45ac485e21e229b1ce273bce244c99e491a82",
             "deploymentBlock": 2,
-            "deploymentTimestamp": 1774970875256,
+            "deploymentTimestamp": 1775033006670,
             "deployed": true
         },
         "Chronos": {
             "evmAddress": "0xe70f935c32dA4dB13e7876795f1e175465e6458e",
             "version": null,
             "gitBranch": "feat/8-pca-rewrite",
-            "gitCommitHash": "2af4f3f612becd2f64131fc9d12fdf5a774f49c6",
+            "gitCommitHash": "60f45ac485e21e229b1ce273bce244c99e491a82",
             "deploymentBlock": 205,
-            "deploymentTimestamp": 1774970875438,
+            "deploymentTimestamp": 1775033006902,
             "deployed": true
         },
         "PublishingConvictionAccount": {
             "evmAddress": "0xccf1769D8713099172642EB55DDFFC0c5A444FE9",
             "version": "2.0.0",
             "gitBranch": "feat/8-pca-rewrite",
-            "gitCommitHash": "2af4f3f612becd2f64131fc9d12fdf5a774f49c6",
+            "gitCommitHash": "60f45ac485e21e229b1ce273bce244c99e491a82",
             "deploymentBlock": 207,
-            "deploymentTimestamp": 1774970875517,
+            "deploymentTimestamp": 1775033006986,
             "deployed": true
         }
     }
