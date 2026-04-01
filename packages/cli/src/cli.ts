@@ -1240,6 +1240,118 @@ const publisherWalletCmd = publisherCmd
   .command('wallet')
   .description('Manage async publisher wallets');
 
+publisherCmd
+  .command('enable')
+  .description('Enable async publisher startup inside `dkg start`')
+  .option('--poll-interval <ms>', 'Idle poll interval in milliseconds', '1000')
+  .option('--error-backoff <ms>', 'Error backoff in milliseconds', '1000')
+  .action(async (opts: ActionOpts) => {
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { parsePositiveMsOption } = await import('./publisher-runner.js');
+      const { loadPublisherWallets } = await import('./publisher-wallets.js');
+      const publisherWallets = await loadPublisherWallets(dkgDir());
+      if (publisherWallets.wallets.length === 0) {
+        console.error('No publisher wallets configured.');
+        console.error('Add one first with: dkg publisher wallet add <privateKey>');
+        process.exit(1);
+      }
+      config.publisher = {
+        enabled: true,
+        pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval), '--poll-interval'),
+        errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff), '--error-backoff'),
+      };
+      await saveConfig(config);
+      console.log('Async publisher enabled for `dkg start`.');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('disable')
+  .description('Disable async publisher startup inside `dkg start`')
+  .action(async () => {
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      config.publisher = {
+        ...config.publisher,
+        enabled: false,
+      };
+      await saveConfig(config);
+      console.log('Async publisher disabled for `dkg start`.');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('jobs')
+  .description('List async publisher jobs')
+  .option('--status <status>', 'Filter by job status')
+  .action(async (opts: ActionOpts) => {
+    let inspector: { publisher: { list(filter?: { status?: string }): Promise<any[]> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      const filter = opts.status ? { status: String(opts.status) } : undefined;
+      const jobs = await inspector.publisher.list(filter as any);
+
+      if (!jobs.length) {
+        console.log('No publisher jobs found.');
+        return;
+      }
+
+      console.log(`\nPublisher jobs (${jobs.length}):\n`);
+      for (const job of jobs) {
+        console.log(`${job.jobId}  ${job.status}  ${job.jobSlug}`);
+      }
+      console.log('');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
+publisherCmd
+  .command('job <jobId>')
+  .description('Inspect a specific async publisher job')
+  .action(async (jobId: string) => {
+    let inspector: { publisher: { getStatus(jobId: string): Promise<any | null> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      const job = await inspector.publisher.getStatus(jobId);
+      if (!job) {
+        console.error(`Publisher job not found: ${jobId}`);
+        process.exit(1);
+      }
+
+      console.log(JSON.stringify(job, null, 2));
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
 publisherWalletCmd
   .command('list')
   .description('List async publisher wallet addresses')

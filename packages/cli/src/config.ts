@@ -106,6 +106,12 @@ export interface DkgConfig {
   workspaceTtlMs?: number;
   /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
   epcis?: { paranetId: string };
+  /** Async publisher worker integration. */
+  publisher?: {
+    enabled?: boolean;
+    pollIntervalMs?: number;
+    errorBackoffMs?: number;
+  };
 }
 
 /**

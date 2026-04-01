@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, type DkgConfig } from './config.js';
@@ -11,6 +11,25 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly walletIds: string[];
   readonly stop: () => Promise<void>;
+}
+
+export interface PublisherInspector {
+  readonly publisher: TripleStoreAsyncLiftPublisher;
+  readonly stop: () => Promise<void>;
+}
+
+interface PublisherRuntimeBaseArgs {
+  dataDir: string;
+  keypair: Ed25519Keypair;
+  store: TripleStore;
+  chainBase?: {
+    rpcUrl: string;
+    hubAddress: string;
+    chainId?: string;
+  };
+  pollIntervalMs?: number;
+  errorBackoffMs?: number;
+  closeStoreOnStop: boolean;
 }
 
 export async function createPublisherRuntime(args: {
@@ -27,33 +46,84 @@ export async function createPublisherRuntime(args: {
   const network = await loadNetworkConfig();
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
+  return createPublisherRuntimeFromBase({
+    dataDir: args.dataDir,
+    keypair: keypair.keypair,
+    store,
+    chainBase: args.config.chain ?? network?.chain,
+    pollIntervalMs: args.pollIntervalMs,
+    errorBackoffMs: args.errorBackoffMs,
+    closeStoreOnStop: true,
+  });
+}
 
-  const chainBase = args.config.chain ?? network?.chain;
+export async function createPublisherInspector(args: {
+  dataDir: string;
+  config: DkgConfig;
+}): Promise<PublisherInspector> {
+  const store = await createPublisherStore(args.dataDir, args.config);
+  return {
+    publisher: new TripleStoreAsyncLiftPublisher(store),
+    stop: async () => {
+      await store.close();
+    },
+  };
+}
+
+export async function createPublisherRuntimeFromAgent(args: {
+  dataDir: string;
+  store: TripleStore;
+  keypair: Ed25519Keypair;
+  chainBase?: {
+    rpcUrl: string;
+    hubAddress: string;
+    chainId?: string;
+  };
+  pollIntervalMs?: number;
+  errorBackoffMs?: number;
+}): Promise<PublisherRuntime> {
+  return createPublisherRuntimeFromBase({
+    dataDir: args.dataDir,
+    keypair: args.keypair,
+    store: args.store,
+    chainBase: args.chainBase,
+    pollIntervalMs: args.pollIntervalMs,
+    errorBackoffMs: args.errorBackoffMs,
+    closeStoreOnStop: false,
+  });
+}
+
+async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): Promise<PublisherRuntime> {
+  const publisherWallets = await loadPublisherWallets(args.dataDir);
+  if (publisherWallets.wallets.length === 0) {
+    throw new Error('No publisher wallets configured. Use `dkg publisher wallet add <privateKey>` first.');
+  }
+
   const eventBus = new TypedEventBus();
   const publishers = new Map<string, DKGPublisher>();
 
   for (const wallet of publisherWallets.wallets) {
-    const chain = chainBase
+    const chain = args.chainBase
       ? new EVMChainAdapter({
-          rpcUrl: chainBase.rpcUrl,
+          rpcUrl: args.chainBase.rpcUrl,
           privateKey: wallet.privateKey,
-          hubAddress: chainBase.hubAddress,
-          chainId: chainBase.chainId,
+          hubAddress: args.chainBase.hubAddress,
+          chainId: args.chainBase.chainId,
         })
       : new NoChainAdapter();
     publishers.set(
       wallet.address,
       new DKGPublisher({
-        store,
+        store: args.store,
         chain,
         eventBus,
-        keypair: keypair.keypair,
+        keypair: args.keypair,
         publisherPrivateKey: wallet.privateKey,
       }),
     );
   }
 
-  const asyncPublisher = new TripleStoreAsyncLiftPublisher(store, {
+  const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
@@ -76,7 +146,9 @@ export async function createPublisherRuntime(args: {
     walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
     stop: async () => {
       await runner.stop();
-      await store.close();
+      if (args.closeStoreOnStop) {
+        await args.store.close();
+      }
     },
   };
 }

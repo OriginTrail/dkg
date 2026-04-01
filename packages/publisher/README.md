@@ -73,3 +73,37 @@ Key points:
 
 See `../../docs/diagrams/publish-flow.md#liftjob-sequence` for the state diagram,
 control-plane layout, and recovery notes.
+
+### Running the async publisher
+
+The async publisher worker can be run in two ways.
+
+1. Standalone worker command
+
+```bash
+dkg publisher wallet add <privateKey>
+dkg publisher start
+```
+
+2. Integrated into the normal daemon startup
+
+```bash
+dkg publisher wallet add <privateKey>
+dkg publisher enable --poll-interval 1000 --error-backoff 1000
+dkg start
+```
+
+Useful wallet commands:
+
+```bash
+dkg publisher wallet list
+dkg publisher wallet remove <address>
+dkg publisher disable
+```
+
+Operational notes:
+
+- Publisher wallets are stored in `publisher-wallets.json` under `DKG_HOME`.
+- `dkg publisher start` runs the worker directly.
+- `dkg start` also launches the async publisher when `config.publisher.enabled` is set.
+- The worker always runs `recover()` before processing new jobs.

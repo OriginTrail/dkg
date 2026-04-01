@@ -50,6 +50,7 @@ import {
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
+import { createPublisherRuntimeFromAgent } from './publisher-runner.js';
 
 function getNodeVersion(): string {
   try {
@@ -301,6 +302,31 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   await agent.start();
   await agent.publishProfile();
+
+  let publisherRuntime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | null = null;
+  if (config.publisher?.enabled) {
+    try {
+      publisherRuntime = await createPublisherRuntimeFromAgent({
+        dataDir: dkgDir(),
+        store: agent.store,
+        keypair: agent.wallet.keypair,
+        chainBase: chainBase,
+        pollIntervalMs: config.publisher.pollIntervalMs,
+        errorBackoffMs: config.publisher.errorBackoffMs,
+      });
+      await publisherRuntime.runner.start();
+      log(`Async publisher runner started (${publisherRuntime.walletIds.length} wallet${publisherRuntime.walletIds.length === 1 ? '' : 's'})`);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (message.includes('No publisher wallets configured')) {
+        log(`Publisher startup skipped: ${message}`);
+        log('Add a wallet with `dkg publisher wallet add <privateKey>` and re-enable publisher startup if needed.');
+      } else {
+        log(`Publisher startup failed: ${message}`);
+        throw err;
+      }
+    }
+  }
 
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
@@ -855,6 +881,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();
+    if (publisherRuntime) {
+      await publisherRuntime.stop().catch((err: any) => log(`Publisher stop error: ${err?.message ?? String(err)}`));
+    }
     await agent.stop();
     dashDb.close();
     await removePid();
