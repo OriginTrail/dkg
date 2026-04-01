@@ -26,7 +26,7 @@ import {
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-import { prepareAsyncPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
@@ -165,6 +165,46 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null)
       .sort(compareAcceptedJobs);
+  }
+
+  async inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null> {
+    await this.ensureGraph();
+    const job = await this.getStatus(jobId);
+    if (!job) {
+      return null;
+    }
+
+    const resolved = await resolveLiftWorkspaceSlice({
+      store: this.store,
+      graphManager: this.graphManager,
+      request: job.request,
+    });
+    const validated = validateLiftPublishPayload({
+      request: job.request,
+      resolved: {
+        ...resolved,
+        ...this.resolvedSliceOverrides,
+      },
+    });
+    const subtracted = await subtractFinalizedExactQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      request: job.request,
+      validation: validated.validation,
+      resolved: validated.resolved,
+    });
+
+    return {
+      ...prepareAsyncPublishPayload({
+        request: job.request,
+        validation: validated.validation,
+        resolved: subtracted.resolved,
+      }),
+      subtraction: {
+        alreadyPublishedPublicCount: subtracted.alreadyPublishedPublicCount,
+        alreadyPublishedPrivateCount: subtracted.alreadyPublishedPrivateCount,
+      },
+    };
   }
 
   async processNext(walletId: string): Promise<LiftJob | null> {

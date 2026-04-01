@@ -1,7 +1,7 @@
 import type { LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobIncluded, LiftJobInclusionMetadata, LiftJobState, LiftRequest } from './lift-job.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
-import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 
 export interface AsyncLiftPublisher {
   lift(request: LiftRequest): Promise<string>;
@@ -9,6 +9,7 @@ export interface AsyncLiftPublisher {
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
   list(filter?: { status?: LiftJobState }): Promise<LiftJob[]>;
+  inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<LiftJob | null>;
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob>;

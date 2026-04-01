@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput } from '@origintrail-official/dkg-publisher';
+import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -14,7 +14,7 @@ export interface PublisherRuntime {
 }
 
 export interface PublisherInspector {
-  readonly publisher: TripleStoreAsyncLiftPublisher;
+  readonly publisher: AsyncLiftPublisher;
   readonly stop: () => Promise<void>;
 }
 
@@ -62,10 +62,16 @@ export async function createPublisherInspector(args: {
   config: DkgConfig;
 }): Promise<PublisherInspector> {
   const store = await createPublisherStore(args.dataDir, args.config);
+  return createPublisherInspectorFromStore(store, true);
+}
+
+export function createPublisherInspectorFromStore(store: TripleStore, closeStoreOnStop = false): PublisherInspector {
   return {
     publisher: new TripleStoreAsyncLiftPublisher(store),
     stop: async () => {
-      await store.close();
+      if (closeStoreOnStop) {
+        await store.close();
+      }
     },
   };
 }

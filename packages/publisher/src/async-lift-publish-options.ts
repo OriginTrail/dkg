@@ -58,6 +58,10 @@ export interface AsyncPreparedPublishPayload {
   readonly quads: Quad[];
   readonly privateQuads: Quad[];
   readonly publishOptions: PublishOptions;
+  readonly subtraction?: {
+    alreadyPublishedPublicCount: number;
+    alreadyPublishedPrivateCount: number;
+  };
 }
 
 /**

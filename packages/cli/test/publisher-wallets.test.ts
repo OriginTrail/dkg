@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherRuntime, createPublisherRuntimeFromAgent, parsePositiveMsOption } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, parsePositiveMsOption } from '../src/publisher-runner.js';
 
 describe('publisher wallets', () => {
   it('adds, loads, and removes publisher wallets', async () => {
@@ -144,21 +147,25 @@ describe('publisher wallets', () => {
 
   it('can inspect persisted publisher jobs', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-inspector-'));
-    const inspector = await createPublisherInspector({
-      dataDir,
-      config: {
-        name: 'test-node',
-        apiPort: 9200,
-        listenPort: 0,
-        nodeRole: 'edge',
-        paranets: [],
-        store: { backend: 'oxigraph' },
-      },
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const inspector = createPublisherInspectorFromStore(store, false);
+    const keypair = await generateEd25519Keypair();
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', wallet.address),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
     });
+    const write = await dkgPublisher.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
 
     await inspector.publisher.lift({
       workspaceId: 'workspace-main',
-      workspaceOperationId: 'ws-1',
+      workspaceOperationId: write.workspaceOperationId,
       roots: ['urn:local:/rihana'],
       paranetId: 'music-social',
       namespace: 'aloha',
@@ -174,8 +181,15 @@ describe('publisher wallets', () => {
 
     const job = await inspector.publisher.getStatus(jobs[0]!.jobId);
     expect(job?.jobId).toBe(jobs[0]?.jobId);
-    expect(job?.jobSlug).toContain('music-social/person-profile/create/ws-1/');
+    expect(job?.jobSlug).toContain('music-social/person-profile/create/');
+    expect(job?.jobSlug).toContain('/rihana');
+
+    const payload = await inspector.publisher.inspectPreparedPayload(jobs[0]!.jobId);
+    expect(payload?.paranetId).toBe('music-social');
+    expect(payload?.publishOptions.quads.length).toBeGreaterThan(0);
+    expect(payload?.subtraction?.alreadyPublishedPublicCount).toBe(0);
 
     await inspector.stop();
+    await store.close();
   });
 });

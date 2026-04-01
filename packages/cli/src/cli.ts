@@ -1327,21 +1327,24 @@ publisherCmd
 publisherCmd
   .command('job <jobId>')
   .description('Inspect a specific async publisher job')
-  .action(async (jobId: string) => {
-    let inspector: { publisher: { getStatus(jobId: string): Promise<any | null> }; stop(): Promise<void> } | undefined;
+  .option('--payload', 'Show the prepared canonical publish payload instead of the stored job record')
+  .action(async (jobId: string, opts: ActionOpts) => {
+    let inspector: { publisher: { getStatus(jobId: string): Promise<any | null>; inspectPreparedPayload(jobId: string): Promise<any | null> }; stop(): Promise<void> } | undefined;
     try {
       await ensureDkgDir();
       const config = await loadConfig();
       const { createPublisherInspector } = await import('./publisher-runner.js');
       inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
 
-      const job = await inspector.publisher.getStatus(jobId);
-      if (!job) {
+      const result = opts.payload
+        ? await inspector.publisher.inspectPreparedPayload(jobId)
+        : await inspector.publisher.getStatus(jobId);
+      if (!result) {
         console.error(`Publisher job not found: ${jobId}`);
         process.exit(1);
       }
 
-      console.log(JSON.stringify(job, null, 2));
+      console.log(JSON.stringify(result, null, 2));
     } catch (err: any) {
       console.error(err.message ?? String(err));
       process.exit(1);
