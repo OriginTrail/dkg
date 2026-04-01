@@ -275,6 +275,24 @@ describe('@unit PublishingConvictionAccount contract', function () {
       expect(infoAfter.initialCommitment).to.equal(initialAmount);
     });
 
+    it('discount stays fixed to initial commitment even when top-up crosses next tier', async () => {
+      const token = await hre.ethers.getContract('Token');
+      // 40K initial = 10% tier. Top up 60K so total funds = 100K (30% tier).
+      // Discount must remain 10% because it's based on initialCommitment, not total.
+      const initialAmount = hre.ethers.parseEther('40000');
+      const topUpAmount = hre.ethers.parseEther('60000');
+
+      await token.approve(await PCA.getAddress(), initialAmount + topUpAmount);
+      await PCA.createAccount(initialAmount);
+
+      expect(await PCA.getDiscount(1)).to.equal(1000); // 10%
+
+      await PCA.topUp(1, topUpAmount);
+
+      // Discount must NOT change to 30% despite total funds being 100K
+      expect(await PCA.getDiscount(1)).to.equal(1000); // still 10%
+    });
+
     it('emits TopUp event', async () => {
       const token = await hre.ethers.getContract('Token');
       const initialAmount = hre.ethers.parseEther('100000');
@@ -339,6 +357,35 @@ describe('@unit PublishingConvictionAccount contract', function () {
 
       // Still has lockedBalance > 0
       await expect(PCA.closeAccount(1)).to.be.revertedWithCustomError(PCA, 'BalanceNotZero');
+    });
+
+    it('reverts when lockedBalance is zero but topUpBalance is non-zero', async () => {
+      const hubAddress = await Hub.getAddress();
+      const HarnessFactory = await hre.ethers.getContractFactory('PCATestHarness');
+      const harness = await HarnessFactory.deploy(hubAddress);
+      await harness.waitForDeployment();
+      await Hub.setContractAddress('PCATestHarness', await harness.getAddress());
+      await harness.initialize();
+
+      const token = await hre.ethers.getContract('Token');
+      const amount = hre.ethers.parseEther('100000');
+      const topUpAmount = hre.ethers.parseEther('10000');
+
+      await token.approve(await harness.getAddress(), amount + topUpAmount);
+      await harness.createAccount(amount);
+      await harness.topUp(1, topUpAmount);
+
+      // Advance past lock
+      const epochLength = await ChronosContract.EPOCH_LENGTH();
+      await time.increase(epochLength * 13n);
+
+      // Zero only lockedBalance, leave topUpBalance non-zero
+      await harness.__test_drainBalances(1);
+      // Re-add topUpBalance by topping up again
+      await token.approve(await harness.getAddress(), topUpAmount);
+      await harness.topUp(1, topUpAmount);
+
+      await expect(harness.closeAccount(1)).to.be.revertedWithCustomError(harness, 'BalanceNotZero');
     });
 
     it('reverts at epoch createdAtEpoch + 11 (one epoch before unlock)', async () => {
