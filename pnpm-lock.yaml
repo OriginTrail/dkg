@@ -198,6 +198,9 @@ importers:
       '@origintrail-official/dkg-app-origin-trail-game':
         specifier: workspace:*
         version: link:../origin-trail-game
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../chain
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
@@ -207,6 +210,12 @@ importers:
       '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:../publisher
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       commander:
         specifier: ^13
         version: 13.1.0

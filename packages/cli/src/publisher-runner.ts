@@ -18,6 +18,45 @@ export interface PublisherInspector {
   readonly stop: () => Promise<void>;
 }
 
+export async function startPublisherRuntimeIfEnabled(args: {
+  dataDir: string;
+  config: DkgConfig;
+  store: TripleStore;
+  keypair: Ed25519Keypair;
+  chainBase?: {
+    rpcUrl: string;
+    hubAddress: string;
+    chainId?: string;
+  };
+  log: (message: string) => void;
+}): Promise<PublisherRuntime | null> {
+  if (!args.config.publisher?.enabled) {
+    return null;
+  }
+
+  try {
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir: args.dataDir,
+      store: args.store,
+      keypair: args.keypair,
+      chainBase: args.chainBase,
+      pollIntervalMs: args.config.publisher.pollIntervalMs,
+      errorBackoffMs: args.config.publisher.errorBackoffMs,
+    });
+    await runtime.runner.start();
+    args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
+    return runtime;
+  } catch (err: any) {
+    const message = err?.message ?? String(err);
+    if (message.includes('No publisher wallets configured')) {
+      args.log(`Publisher startup skipped: ${message}`);
+      args.log('Add a wallet with `dkg publisher wallet add <privateKey>` and re-enable publisher startup if needed.');
+      return null;
+    }
+    throw err;
+  }
+}
+
 interface PublisherRuntimeBaseArgs {
   dataDir: string;
   keypair: Ed25519Keypair;

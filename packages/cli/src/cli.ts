@@ -1298,10 +1298,18 @@ publisherCmd
     try {
       await ensureDkgDir();
       const config = await loadConfig();
+      const { LIFT_JOB_STATES } = await import('@origintrail-official/dkg-publisher');
       const { createPublisherInspector } = await import('./publisher-runner.js');
       inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
 
-      const filter = opts.status ? { status: String(opts.status) } : undefined;
+      const requestedStatus = opts.status ? String(opts.status) : undefined;
+      if (requestedStatus && !LIFT_JOB_STATES.includes(requestedStatus as any)) {
+        console.error(`Invalid publisher job status: ${requestedStatus}`);
+        console.error(`Valid statuses: ${LIFT_JOB_STATES.join(', ')}`);
+        process.exit(1);
+      }
+
+      const filter = requestedStatus ? { status: requestedStatus } : undefined;
       const jobs = await inspector.publisher.list(filter as any);
 
       if (!jobs.length) {

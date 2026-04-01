@@ -9,7 +9,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, parsePositiveMsOption } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveMsOption } from '../src/publisher-runner.js';
 
 describe('publisher wallets', () => {
   it('adds, loads, and removes publisher wallets', async () => {
@@ -132,6 +132,34 @@ describe('publisher wallets', () => {
 
     expect(runtime.walletIds).toEqual([wallet.address]);
     await runtime.stop();
+    await store.close();
+  });
+
+  it('skips daemon-integrated publisher startup with a warning when no wallets exist', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const logs: string[] = [];
+
+    const runtime = await startPublisherRuntimeIfEnabled({
+      dataDir,
+      config: {
+        name: 'test-node',
+        apiPort: 9200,
+        listenPort: 0,
+        nodeRole: 'edge',
+        paranets: [],
+        publisher: { enabled: true },
+      },
+      store,
+      keypair,
+      chainBase: undefined,
+      log: (message) => logs.push(message),
+    });
+
+    expect(runtime).toBeNull();
+    expect(logs.join('\n')).toContain('Publisher startup skipped');
+    expect(logs.join('\n')).toContain('dkg publisher wallet add <privateKey>');
     await store.close();
   });
 
