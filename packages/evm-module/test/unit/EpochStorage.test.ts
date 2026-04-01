@@ -406,6 +406,22 @@ describe('@unit EpochStorage', () => {
     ).to.be.revertedWith('EpochStorage: start epoch already finalized');
   });
 
+  it('addTokensToEpochRange reverts even when lastFinalizedEpoch is stale (M-17)', async () => {
+    const shardId = 22;
+    // No prior writes to this shard — lastFinalizedEpoch[22] == 0.
+    // Advance time so currentEpoch becomes 3 (two epoch advances).
+    await time.increase(3601);
+    await time.increase(3601);
+
+    // At this point currentEpoch == 3, but lastFinalizedEpoch[22] is still 0
+    // because no write has triggered finalization for this shard yet.
+    // Attempting startEpoch=1 should revert — epoch 1 is in the past
+    // (currentEpoch-1 == 2, so epochs 1 and 2 should be considered finalized).
+    await expect(
+      EpochStorage.addTokensToEpochRange(shardId, 1, 1, 1000),
+    ).to.be.revertedWith('EpochStorage: start epoch already finalized');
+  });
+
   it('payOutEpochTokens reverts on first call if amount > pool (M-16)', async () => {
     const shardId = 20;
     await EpochStorage.addTokensToEpochRange(shardId, 3, 3, 500);

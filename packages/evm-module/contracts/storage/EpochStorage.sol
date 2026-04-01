@@ -152,6 +152,11 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
         uint256 endEpoch,
         uint96 tokenAmount
     ) external onlyContracts {
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (currentEpoch > 1) {
+            _finalizeEpochsUpTo(shardId, currentEpoch - 1);
+        }
+
         require(
             startEpoch > lastFinalizedEpoch[shardId],
             "EpochStorage: start epoch already finalized"
@@ -169,11 +174,6 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
 
         diff[shardId][startEpoch] += tokensPerEpoch;
         diff[shardId][endEpoch + 1] -= tokensPerEpoch;
-
-        uint256 currentEpoch = chronos.getCurrentEpoch();
-        if (currentEpoch > 1) {
-            _finalizeEpochsUpTo(shardId, currentEpoch - 1);
-        }
 
         emit TokensAddedToEpochRange(shardId, startEpoch, endEpoch, tokenAmount, remainder);
     }
