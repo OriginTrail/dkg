@@ -342,4 +342,112 @@ describe('ConvictionStaking — stake -> proof -> score -> reward', function () 
       );
     expect(cumulativeEarned).to.be.gt(0);
   });
+
+  it('should use effective stake (not raw) as submitProof scorePerStake divisor', async () => {
+    // This test creates divergence: effective = 2x raw, then submits a proof and
+    // verifies the scorePerStake stored in RandomSamplingStorage uses effective.
+
+    // ── Setup: create a fresh node with a second delegator ──
+    const signers = await hre.ethers.getSigners();
+    const node4 = { operational: signers[7], admin: signers[8] };
+    const delegator2 = signers[11];
+    const p4 = await createProfile(contracts.profile, node4);
+    const node4Id = p4.identityId;
+
+    // @ts-expect-error – hub owner insert for test setup
+    await contracts.shardingTable.connect(owner).insertNode(node4Id);
+    const nodeAsk = hre.ethers.parseUnits('0.2', 18);
+    await contracts.profile
+      .connect(node4.operational)
+      .updateAsk(node4Id, nodeAsk);
+    await contracts.ask.connect(owner).recalculateActiveSet();
+
+    // Mint tokens and stake via ConvictionStaking
+    await contracts.token.mint(delegator2.address, toTRAC(1_000_000));
+    const stakeAmount = toTRAC(50_000);
+    await contracts.token
+      .connect(delegator2)
+      .approve(await contracts.convictionStaking.getAddress(), stakeAmount);
+    await contracts.convictionStaking
+      .connect(delegator2)
+      .stake(node4Id, stakeAmount, 0);
+
+    // Create divergence: set effective to 2x raw (simulates future multiplier)
+    const boostedEffective = stakeAmount * 2n;
+    await contracts.convictionStakeStorage.setEffectiveNodeStake(
+      node4Id,
+      boostedEffective,
+    );
+
+    // Advance to a new epoch for fresh scoring
+    await time.increase(
+      (await contracts.chronos.timeUntilNextEpoch()) + 1n,
+    );
+    const proofEpoch = await contracts.chronos.getCurrentEpoch();
+
+    // Publish a KC so the node can generate challenges
+    const allNodes = [node1, node2, node3, node4];
+    const allNodeIds = [node1Id, node2Id, node3Id, node4Id];
+
+    // @ts-expect-error – dynamic CJS import
+    const { kcTools } = await import('assertion-tools');
+    const merkleRoot = kcTools.calculateMerkleRoot(quads, 32);
+
+    await createKnowledgeCollection(
+      owner,
+      node4,
+      node4Id,
+      allNodes,
+      allNodeIds,
+      { KnowledgeCollection: contracts.kc, Token: contracts.token },
+      merkleRoot,
+      `divisor-test-kc-${Date.now()}`,
+      3,
+      chunkSize * 3,
+      5,
+      toTRAC(500),
+    );
+
+    // ── Submit proof ──
+    await advanceToNextProofingPeriod(contracts);
+
+    await contracts.randomSampling
+      .connect(node4.operational)
+      .createChallenge();
+
+    const challenge =
+      await contracts.randomSamplingStorage.getNodeChallenge(node4Id);
+    const chunks = kcTools.splitIntoChunks(quads, 32);
+    const chunkId = Number(challenge[1]);
+    const { proof } = kcTools.calculateMerkleProof(quads, 32, chunkId);
+
+    await contracts.randomSampling
+      .connect(node4.operational)
+      .submitProof(chunks[chunkId], proof);
+
+    // ── Verify scorePerStake uses effective stake as divisor ──
+    const nodeScore = await contracts.randomSamplingStorage.getNodeEpochScore(
+      proofEpoch,
+      node4Id,
+    );
+    const scorePerStake =
+      await contracts.randomSamplingStorage.getNodeEpochScorePerStake(
+        proofEpoch,
+        node4Id,
+      );
+    expect(nodeScore).to.be.gt(0);
+    expect(scorePerStake).to.be.gt(0);
+
+    // scorePerStake should equal score * 1e18 / max(effective, raw)
+    // max(100K, 50K) = 100K = boostedEffective
+    const SCALE18 = 10n ** 18n;
+    const expectedScorePerStake = (nodeScore * SCALE18) / boostedEffective;
+
+    // If code were using raw stake (50K), scorePerStake would be 2x larger
+    const wrongScorePerStake = (nodeScore * SCALE18) / stakeAmount;
+
+    // Verify actual matches expected (effective-based), not wrong (raw-based)
+    expect(scorePerStake).to.equal(expectedScorePerStake);
+    expect(scorePerStake).to.not.equal(wrongScorePerStake);
+  });
 });

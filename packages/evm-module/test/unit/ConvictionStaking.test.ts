@@ -493,8 +493,7 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       expect(scoreAtBoosted).to.be.gt(scoreAtBase);
     });
 
-    it('Should use effectiveNodeStake (not raw) as scorePerStake divisor', async () => {
-      // Stake via ConvictionStaking: raw = 50K, effective = 50K
+    it('Should track exact sqrt ratio when effective stake changes in calculateNodeScore', async () => {
       const { identityId } = await createProfile();
       await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
       await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
@@ -506,19 +505,16 @@ describe('ConvictionStaking - Tracer Bullet', function () {
         doubledEffective,
       );
 
-      // Verify the calculateNodeScore uses the boosted value
       const scoreAtDoubled =
         await RandSampling.calculateNodeScore(identityId);
 
-      // Now set effective back to base
+      // Set effective back to base
       await ConvStakeStorage.setEffectiveNodeStake(
         identityId,
         STAKE_AMOUNT,
       );
       const scoreAtBase = await RandSampling.calculateNodeScore(identityId);
 
-      // scoreAtDoubled > scoreAtBase proves effective is used for scoring
-      // (sqrt(100K/2M) > sqrt(50K/2M))
       expect(scoreAtDoubled).to.be.gt(scoreAtBase);
 
       // The ratio should be sqrt(2) ≈ 1.414 (within 1% tolerance)
