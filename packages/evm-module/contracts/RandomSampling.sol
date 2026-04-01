@@ -231,12 +231,11 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
             randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-            // Calculate and add to nodeEpochScorePerStake (uses effective stake for conviction)
-            uint256 totalNodeStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
-            // Fallback to raw stake for backward compatibility (pre-migration nodes)
-            if (totalNodeStake == 0) {
-                totalNodeStake = uint256(stakingStorage.getNodeStake(identityId));
-            }
+            // Calculate and add to nodeEpochScorePerStake
+            // Use max(effective, raw): effective tracks conviction multiplier, raw catches reward restakes
+            uint256 effectiveNodeStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
+            uint256 rawNodeStake = uint256(stakingStorage.getNodeStake(identityId));
+            uint256 totalNodeStake = effectiveNodeStake > rawNodeStake ? effectiveNodeStake : rawNodeStake;
             if (totalNodeStake > 0) {
                 uint256 nodeScorePerStake36 = (score18 * SCALE18) / totalNodeStake;
                 randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
@@ -444,11 +443,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
-        // Fallback to raw stake for backward compatibility (pre-migration nodes)
-        if (nodeStake == 0) {
-            nodeStake = uint256(stakingStorage.getNodeStake(identityId));
-        }
+        uint256 effectiveStake = convictionStakeStorage.getEffectiveNodeStake(identityId);
+        uint256 rawStake = uint256(stakingStorage.getNodeStake(identityId));
+        // Use max(effective, raw): effective tracks conviction multiplier, raw catches reward restakes
+        uint256 nodeStake = effectiveStake > rawStake ? effectiveStake : rawStake;
         nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
         // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
         uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;

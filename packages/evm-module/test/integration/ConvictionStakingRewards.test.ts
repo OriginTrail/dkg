@@ -299,6 +299,8 @@ describe('ConvictionStaking — stake -> proof -> score -> reward', function () 
         node1Id,
         delegatorKey,
       );
+    const effectiveBefore =
+      await contracts.convictionStakeStorage.getEffectiveNodeStake(node1Id);
 
     await contracts.staking.claimDelegatorRewards(
       node1Id,
@@ -313,6 +315,24 @@ describe('ConvictionStaking — stake -> proof -> score -> reward', function () 
         delegatorKey,
       );
     expect(stakeBaseAfter).to.be.gt(stakeBaseBefore);
+
+    // After claim restake: raw nodeStake increased, effective stays at original
+    // RandomSampling uses max(effective, raw), so scoring picks up the restaked reward
+    const effectiveAfter =
+      await contracts.convictionStakeStorage.getEffectiveNodeStake(node1Id);
+    const rawNodeStakeAfter = await contracts.stakingStorage.getNodeStake(
+      node1Id,
+    );
+    const rewardAmount = stakeBaseAfter - stakeBaseBefore;
+
+    // Effective didn't change (old Staking doesn't sync it)
+    expect(effectiveAfter).to.equal(effectiveBefore);
+    // Raw increased by the reward
+    expect(rawNodeStakeAfter).to.equal(
+      BigInt(stakeAmount) + rewardAmount,
+    );
+    // For tier 0: raw > effective after restake, so max(eff, raw) = raw — scoring is correct
+    expect(rawNodeStakeAfter).to.be.gte(effectiveAfter);
 
     // Cumulative earned rewards tracked
     const cumulativeEarned =

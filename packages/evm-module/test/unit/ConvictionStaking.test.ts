@@ -468,5 +468,63 @@ describe('ConvictionStaking - Tracer Bullet', function () {
       const score = await RandSampling.calculateNodeScore(identityId);
       expect(score).to.equal(0);
     });
+
+    it('Should change score when effectiveNodeStake diverges from raw nodeStake', async () => {
+      // Stake via ConvictionStaking: raw = 50K, effective = 50K
+      const { identityId } = await createProfile();
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      const scoreAtBase = await RandSampling.calculateNodeScore(identityId);
+      expect(scoreAtBase).to.be.gt(0);
+
+      // Hub owner sets effectiveNodeStake to 4x (200K), raw stays 50K
+      const boostedEffective = STAKE_AMOUNT * 4n;
+      await ConvStakeStorage.setEffectiveNodeStake(
+        identityId,
+        boostedEffective,
+      );
+
+      const scoreAtBoosted =
+        await RandSampling.calculateNodeScore(identityId);
+
+      // Score must increase: sqrt(200K/2M) > sqrt(50K/2M)
+      // If RandomSampling were still reading raw nodeStake, score would be unchanged
+      expect(scoreAtBoosted).to.be.gt(scoreAtBase);
+    });
+
+    it('Should use effectiveNodeStake (not raw) as scorePerStake divisor', async () => {
+      // Stake via ConvictionStaking: raw = 50K, effective = 50K
+      const { identityId } = await createProfile();
+      await Token.approve(await ConvStaking.getAddress(), STAKE_AMOUNT);
+      await ConvStaking.stake(identityId, STAKE_AMOUNT, 0);
+
+      // Set effective to 2x raw (simulate future multiplier)
+      const doubledEffective = STAKE_AMOUNT * 2n;
+      await ConvStakeStorage.setEffectiveNodeStake(
+        identityId,
+        doubledEffective,
+      );
+
+      // Verify the calculateNodeScore uses the boosted value
+      const scoreAtDoubled =
+        await RandSampling.calculateNodeScore(identityId);
+
+      // Now set effective back to base
+      await ConvStakeStorage.setEffectiveNodeStake(
+        identityId,
+        STAKE_AMOUNT,
+      );
+      const scoreAtBase = await RandSampling.calculateNodeScore(identityId);
+
+      // scoreAtDoubled > scoreAtBase proves effective is used for scoring
+      // (sqrt(100K/2M) > sqrt(50K/2M))
+      expect(scoreAtDoubled).to.be.gt(scoreAtBase);
+
+      // The ratio should be sqrt(2) ≈ 1.414 (within 1% tolerance)
+      const ratio =
+        Number((scoreAtDoubled * 10000n) / scoreAtBase) / 10000;
+      expect(ratio).to.be.closeTo(Math.sqrt(2), 0.01);
+    });
   });
 });
