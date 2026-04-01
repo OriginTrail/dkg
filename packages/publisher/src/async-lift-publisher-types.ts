@@ -26,6 +26,11 @@ export interface AsyncLiftPublisherRecoveryResult {
   finalization: LiftJobFinalizationMetadata;
 }
 
+export interface AsyncLiftPublishExecutionInput {
+  readonly walletId: string;
+  readonly publishOptions: PublishOptions;
+}
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
@@ -36,6 +41,6 @@ export interface AsyncLiftPublisherConfig {
   now?: () => number;
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
-  publishExecutor?: (options: PublishOptions) => Promise<PublishResult>;
+  publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
 }

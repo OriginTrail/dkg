@@ -108,6 +108,7 @@ export {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
 } from './async-lift-publisher.js';

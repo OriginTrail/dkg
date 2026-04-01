@@ -203,7 +203,10 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       });
 
       failureState = 'broadcast';
-      const publishResult = await this.publishExecutor(prepared.publishOptions);
+      const publishResult = await this.publishExecutor({
+        walletId,
+        publishOptions: prepared.publishOptions,
+      });
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
       });

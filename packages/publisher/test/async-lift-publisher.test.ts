@@ -518,9 +518,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('processes the next job through workspace resolution, validation, and canonical publish', async () => {
     const publisher = createPublisher({
       config: {
-        publishExecutor: async (options) => {
-          expect(options.paranetId).toBe('music-social');
-          expect(options.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
+        publishExecutor: async ({ walletId, publishOptions }) => {
+          expect(walletId).toBe('wallet-1');
+          expect(publishOptions.paranetId).toBe('music-social');
+          expect(publishOptions.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
           return {
             kcId: 1n,
             ual: 'did:dkg:mock:31337/0xabc/1',
