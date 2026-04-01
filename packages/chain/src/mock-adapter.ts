@@ -377,52 +377,66 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- Publishing Conviction Accounts ---
 
+  private static readonly LOCK_DURATION_EPOCHS = 12n;
   private convictionAccounts = new Map<bigint, {
     admin: string;
-    balance: bigint;
-    initialDeposit: bigint;
-    lockEpochs: number;
+    lockedBalance: bigint;
+    topUpBalance: bigint;
+    initialCommitment: bigint;
+    createdAtEpoch: bigint;
     conviction: bigint;
     authorizedKeys: Set<string>;
   }>();
   private nextConvictionAccountId = 1n;
+  private mockCurrentEpoch = 1n;
 
-  async createConvictionAccount(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult> {
+  async createConvictionAccount(amount: bigint): Promise<{ accountId: bigint } & TxResult> {
     const accountId = this.nextConvictionAccountId++;
-    const conviction = amount * BigInt(lockEpochs);
+    const conviction = amount * MockChainAdapter.LOCK_DURATION_EPOCHS;
     this.convictionAccounts.set(accountId, {
       admin: this.signerAddress,
-      balance: amount,
-      initialDeposit: amount,
-      lockEpochs,
+      lockedBalance: amount,
+      topUpBalance: 0n,
+      initialCommitment: amount,
+      createdAtEpoch: this.mockCurrentEpoch,
       conviction,
       authorizedKeys: new Set([this.signerAddress]),
     });
-    this.pushEvent('ConvictionAccountCreated', { accountId: accountId.toString(), admin: this.signerAddress });
+    this.pushEvent('AccountCreated', { accountId: accountId.toString(), admin: this.signerAddress });
     return { ...this.txResult(true), accountId };
   }
 
-  async addConvictionFunds(accountId: bigint, amount: bigint): Promise<TxResult> {
+  async topUpConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return this.txResult(false);
-    acct.balance += amount;
+    acct.topUpBalance += amount;
     return this.txResult(true);
   }
 
-  async extendConvictionLock(accountId: bigint, additionalEpochs: number): Promise<TxResult> {
+  async closeConvictionAccount(accountId: bigint): Promise<TxResult> {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return this.txResult(false);
-    acct.lockEpochs += additionalEpochs;
-    acct.conviction = acct.initialDeposit * BigInt(acct.lockEpochs);
+    if (this.mockCurrentEpoch < acct.createdAtEpoch + MockChainAdapter.LOCK_DURATION_EPOCHS) {
+      return this.txResult(false);
+    }
+    if (acct.lockedBalance !== 0n || acct.topUpBalance !== 0n) {
+      return this.txResult(false);
+    }
+    this.convictionAccounts.delete(accountId);
+    this.pushEvent('AccountClosed', { accountId: accountId.toString(), admin: acct.admin });
     return this.txResult(true);
   }
 
-  async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }> {
+  async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number }> {
     const acct = this.convictionAccounts.get(accountId);
-    if (!acct) return { discountBps: 0, conviction: 0n };
-    const cHalf = 3_000_000n * 10n ** 18n;
-    const discountBps = Number((5000n * acct.conviction) / (acct.conviction + cHalf));
-    return { discountBps, conviction: acct.conviction };
+    if (!acct) return { discountBps: 0 };
+    return { discountBps: computePublisherDiscount(acct.initialCommitment) };
+  }
+
+  async getConvictionDiscountedCost(accountId: bigint, baseCost: bigint): Promise<{ discountedCost: bigint }> {
+    const { discountBps } = await this.getConvictionDiscount(accountId);
+    const discountedCost = baseCost * BigInt(10_000 - discountBps) / 10_000n;
+    return { discountedCost };
   }
 
   async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
@@ -432,12 +446,18 @@ export class MockChainAdapter implements ChainAdapter {
     return {
       accountId,
       admin: acct.admin,
-      balance: acct.balance,
-      initialDeposit: acct.initialDeposit,
-      lockEpochs: acct.lockEpochs,
+      lockedBalance: acct.lockedBalance,
+      topUpBalance: acct.topUpBalance,
+      initialCommitment: acct.initialCommitment,
+      createdAtEpoch: acct.createdAtEpoch,
       conviction: acct.conviction,
       discountBps,
     };
+  }
+
+  /** Test helper: advance the mock epoch counter. */
+  setMockEpoch(epoch: bigint): void {
+    this.mockCurrentEpoch = epoch;
   }
 
   // --- FairSwap Judge ---
@@ -739,4 +759,19 @@ export function computeConvictionMultiplier(lockEpochs: number): number {
   const x = lockEpochs - 1;
   const result = 1 + (18 * x) / (7 * x + 22);
   return Math.min(3.0, result);
+}
+
+/**
+ * Discrete publisher discount tiers matching the V10 roadmap.
+ * Based on initialCommitment amount (in wei), returns discount in basis points.
+ */
+export function computePublisherDiscount(initialCommitment: bigint): number {
+  const ether = 10n ** 18n;
+  if (initialCommitment >= 1_000_000n * ether) return 7500;
+  if (initialCommitment >= 500_000n * ether)   return 5000;
+  if (initialCommitment >= 250_000n * ether)   return 4000;
+  if (initialCommitment >= 100_000n * ether)   return 3000;
+  if (initialCommitment >= 50_000n * ether)    return 2000;
+  if (initialCommitment >= 25_000n * ether)    return 1000;
+  return 0;
 }

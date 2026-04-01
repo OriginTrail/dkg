@@ -526,19 +526,27 @@ describe('@unit PublishingConvictionAccount contract', function () {
       expect(await PCA.nextAccountId()).to.equal(1);
     });
 
-    it('sets initialized flag to true after first initialization', async () => {
-      expect(await PCA.initialized()).to.be.true;
-    });
+    it('re-initialization is idempotent: refreshes dependencies without resetting nextAccountId', async () => {
+      const token = await hre.ethers.getContract('Token');
+      const amount = hre.ethers.parseEther('25000');
 
-    it('reverts on re-initialization', async () => {
-      // PCA is already initialized via the deploy fixture.
-      // Hub.forwardCall can invoke initialize() again — verify it reverts.
+      // Create an account to advance nextAccountId
+      await token.approve(await PCA.getAddress(), amount);
+      await PCA.createAccount(amount);
+      expect(await PCA.nextAccountId()).to.equal(2);
+
+      // Re-initialize via Hub.forwardCall (simulates Hub.setAndReinitializeContracts)
       const pcaAddress = await PCA.getAddress();
       const initializeData = PCA.interface.encodeFunctionData('initialize');
+      await Hub.forwardCall(pcaAddress, initializeData);
 
-      await expect(
-        Hub.forwardCall(pcaAddress, initializeData),
-      ).to.be.revertedWithCustomError(PCA, 'AlreadyInitialized');
+      // nextAccountId must NOT reset to 1
+      expect(await PCA.nextAccountId()).to.equal(2);
+
+      // Existing account data survives re-initialization
+      const info = await PCA.getAccountInfo(1);
+      expect(info.admin).to.equal(accounts[0].address);
+      expect(info.lockedBalance).to.equal(amount);
     });
 
     it('increments accountId correctly on sequential creates', async () => {

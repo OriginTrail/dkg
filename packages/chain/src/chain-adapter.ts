@@ -178,9 +178,10 @@ export interface PermanentPublishParams {
 export interface ConvictionAccountInfo {
   accountId: bigint;
   admin: string;
-  balance: bigint;
-  initialDeposit: bigint;
-  lockEpochs: number;
+  lockedBalance: bigint;
+  topUpBalance: bigint;
+  initialCommitment: bigint;
+  createdAtEpoch: bigint;
   conviction: bigint;
   discountBps: number;
 }
@@ -267,10 +268,11 @@ export interface ChainAdapter {
   listParanetsFromChain?(fromBlock?: number): Promise<ParanetOnChain[]>;
 
   // Publishing Conviction Accounts
-  createConvictionAccount?(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult>;
-  addConvictionFunds?(accountId: bigint, amount: bigint): Promise<TxResult>;
-  extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
-  getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
+  createConvictionAccount?(amount: bigint): Promise<{ accountId: bigint } & TxResult>;
+  topUpConvictionAccount?(accountId: bigint, amount: bigint): Promise<TxResult>;
+  closeConvictionAccount?(accountId: bigint): Promise<TxResult>;
+  getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number }>;
+  getConvictionDiscountedCost?(accountId: bigint, baseCost: bigint): Promise<{ discountedCost: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
 
   // FairSwap (Private Knowledge Exchange)

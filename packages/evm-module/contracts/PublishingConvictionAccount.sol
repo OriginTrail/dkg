@@ -49,7 +49,6 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
     IERC20 public tokenContract;
     Chronos public chronos;
     uint256 public nextAccountId;
-    bool public initialized;
 
     mapping(uint256 => Account) internal _accounts;
     mapping(uint256 => mapping(address => bool)) public authorizedKeys;
@@ -70,16 +69,13 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
     error LockNotExpired(uint256 accountId, uint256 expiresAtEpoch, uint256 currentEpoch);
     error BalanceNotZero(uint256 accountId, uint256 lockedBalance, uint256 topUpBalance);
     error CannotRemoveOwnKey(uint256 accountId, address admin);
-    error AlreadyInitialized();
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
     function initialize() public onlyHub {
-        if (initialized) revert AlreadyInitialized();
-        initialized = true;
         tokenContract = IERC20(hub.getContractAddress("Token"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
-        nextAccountId = 1;
+        if (nextAccountId == 0) nextAccountId = 1;
     }
 
     function name() public pure virtual returns (string memory) {

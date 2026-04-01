@@ -337,7 +337,7 @@ importers:
   packages/evm-module:
     dependencies:
       '@openzeppelin/contracts':
-        specifier: ^5.1.0
+        specifier: 5.4.0
         version: 5.4.0
       dotenv:
         specifier: ^16.4.7

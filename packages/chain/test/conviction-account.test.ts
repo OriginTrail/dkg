@@ -1,60 +1,83 @@
 import { describe, it, expect } from 'vitest';
-import { MockChainAdapter } from '../src/mock-adapter.js';
+import { MockChainAdapter, computePublisherDiscount } from '../src/mock-adapter.js';
 
 describe('Publishing Conviction Account (MockChainAdapter)', () => {
-  it('creates a conviction account', async () => {
+  it('creates a conviction account with 12-month lock', async () => {
     const adapter = new MockChainAdapter();
-    const result = await adapter.createConvictionAccount(100_000n * 10n ** 18n, 6);
+    const amount = 100_000n * 10n ** 18n;
+    const result = await adapter.createConvictionAccount(amount);
 
     expect(result.success).toBe(true);
     expect(result.accountId).toBe(1n);
-  });
-
-  it('returns correct discount for known conviction', async () => {
-    const adapter = new MockChainAdapter();
-
-    // 500K TRAC locked for 6 epochs = conviction of 3M (in ether units)
-    // discount = 5000 * 3M / (3M + 3M) = 2500 bps = 25%
-    await adapter.createConvictionAccount(500_000n * 10n ** 18n, 6);
-    const { discountBps, conviction } = await adapter.getConvictionDiscount(1n);
-
-    expect(conviction).toBe(3_000_000n * 10n ** 18n);
-    expect(discountBps).toBe(2500);
-  });
-
-  it('returns higher discount for larger locks', async () => {
-    const adapter = new MockChainAdapter();
-
-    // 1M TRAC locked for 12 epochs = conviction of 12M
-    // discount ≈ 5000 * 12M / (12M + 3M) = 4000 bps = 40%
-    await adapter.createConvictionAccount(1_000_000n * 10n ** 18n, 12);
-    const { discountBps } = await adapter.getConvictionDiscount(1n);
-
-    expect(discountBps).toBe(4000);
-  });
-
-  it('adds funds to account', async () => {
-    const adapter = new MockChainAdapter();
-    await adapter.createConvictionAccount(100_000n * 10n ** 18n, 6);
-    await adapter.addConvictionFunds(1n, 50_000n * 10n ** 18n);
 
     const info = await adapter.getConvictionAccountInfo(1n);
     expect(info).not.toBeNull();
-    expect(info!.balance).toBe(150_000n * 10n ** 18n);
+    expect(info!.lockedBalance).toBe(amount);
+    expect(info!.topUpBalance).toBe(0n);
+    expect(info!.initialCommitment).toBe(amount);
+    expect(info!.conviction).toBe(amount * 12n);
   });
 
-  it('extends lock and recalculates conviction', async () => {
+  it('returns correct discount for each tier', async () => {
+    const tiers: Array<[bigint, number]> = [
+      [24_999n * 10n ** 18n, 0],
+      [25_000n * 10n ** 18n, 1000],
+      [50_000n * 10n ** 18n, 2000],
+      [100_000n * 10n ** 18n, 3000],
+      [250_000n * 10n ** 18n, 4000],
+      [500_000n * 10n ** 18n, 5000],
+      [1_000_000n * 10n ** 18n, 7500],
+      [2_000_000n * 10n ** 18n, 7500],
+    ];
+
+    for (const [commitment, expectedBps] of tiers) {
+      expect(computePublisherDiscount(commitment)).toBe(expectedBps);
+    }
+  });
+
+  it('returns discount via adapter for created account', async () => {
     const adapter = new MockChainAdapter();
-    await adapter.createConvictionAccount(100_000n * 10n ** 18n, 6);
+    await adapter.createConvictionAccount(500_000n * 10n ** 18n);
+    const { discountBps } = await adapter.getConvictionDiscount(1n);
+    expect(discountBps).toBe(5000); // 50%
+  });
+
+  it('computes discounted cost correctly', async () => {
+    const adapter = new MockChainAdapter();
+    await adapter.createConvictionAccount(100_000n * 10n ** 18n); // 30% discount
+    const baseCost = 1000n * 10n ** 18n;
+    const { discountedCost } = await adapter.getConvictionDiscountedCost(1n, baseCost);
+    expect(discountedCost).toBe(700n * 10n ** 18n); // 1000 * 7000/10000
+  });
+
+  it('tops up account without changing conviction', async () => {
+    const adapter = new MockChainAdapter();
+    const initial = 100_000n * 10n ** 18n;
+    const topUp = 50_000n * 10n ** 18n;
+    await adapter.createConvictionAccount(initial);
 
     const before = await adapter.getConvictionAccountInfo(1n);
-    expect(before!.conviction).toBe(600_000n * 10n ** 18n);
-
-    await adapter.extendConvictionLock(1n, 6);
-
+    await adapter.topUpConvictionAccount(1n, topUp);
     const after = await adapter.getConvictionAccountInfo(1n);
-    expect(after!.lockEpochs).toBe(12);
-    expect(after!.conviction).toBe(1_200_000n * 10n ** 18n);
+
+    expect(after!.topUpBalance).toBe(topUp);
+    expect(after!.lockedBalance).toBe(initial);
+    expect(after!.conviction).toBe(before!.conviction);
+    expect(after!.initialCommitment).toBe(initial);
+  });
+
+  it('closes account after lock expired and balances zero', async () => {
+    const adapter = new MockChainAdapter();
+    await adapter.createConvictionAccount(100_000n * 10n ** 18n);
+
+    // Cannot close during lock
+    const failResult = await adapter.closeConvictionAccount(1n);
+    expect(failResult.success).toBe(false);
+
+    // Advance past 12 epochs — still can't close (balances not zero)
+    adapter.setMockEpoch(14n);
+    const failResult2 = await adapter.closeConvictionAccount(1n);
+    expect(failResult2.success).toBe(false);
   });
 
   it('returns null for nonexistent account', async () => {
