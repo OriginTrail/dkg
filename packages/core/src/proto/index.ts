@@ -61,3 +61,27 @@ export {
   encodeFinalizationMessage,
   decodeFinalizationMessage,
 } from './finalization.js';
+
+// ── V10 messages ────────────────────────────────────────────────────────
+
+export {
+  type VerifyProposalMsg,
+  type VerifyApprovalMsg,
+  encodeVerifyProposal,
+  decodeVerifyProposal,
+  encodeVerifyApproval,
+  decodeVerifyApproval,
+} from './verify.js';
+
+export {
+  type StorageACKMsg,
+  encodeStorageACK,
+  decodeStorageACK,
+} from './storage-ack.js';
+
+export {
+  type GossipEnvelopeMsg,
+  encodeGossipEnvelope,
+  decodeGossipEnvelope,
+  computeGossipSigningPayload,
+} from './gossip-envelope.js';
