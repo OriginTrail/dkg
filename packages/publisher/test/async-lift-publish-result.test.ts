@@ -79,7 +79,7 @@ describe('async lift publish result mapping', () => {
           status: 'tentative',
         },
       }),
-    ).toThrow('Async lift publish result requires onChainResult to produce LiftJob state');
+    ).toThrow('Canonical publish returned status tentative without onChainResult');
   });
 
   it('rejects failed canonical publish results in the success mapper', () => {

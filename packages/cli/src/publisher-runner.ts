@@ -9,6 +9,7 @@ import { loadPublisherWallets } from './publisher-wallets.js';
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
+  readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
   readonly stop: () => Promise<void>;
 }
@@ -156,6 +157,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
           chainId: args.chainBase.chainId,
         })
       : new NoChainAdapter();
+    const identityId = await chain.getIdentityId();
     publishers.set(
       wallet.address,
       new DKGPublisher({
@@ -163,6 +165,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         chain,
         eventBus,
         keypair: args.keypair,
+        publisherNodeIdentityId: identityId,
         publisherPrivateKey: wallet.privateKey,
       }),
     );
@@ -188,6 +191,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   return {
     runner,
+    publisher: asyncPublisher,
     walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
     stop: async () => {
       await runner.stop();

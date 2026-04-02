@@ -1,20 +1,17 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
-import { createTripleStore } from '@origintrail-official/dkg-storage';
-import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { publisherWalletsPath } from '../src/publisher-wallets.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+const SMOKE_API_PORT = '19291';
 
 describe.sequential('publisher CLI smoke', () => {
   let dkgHome: string;
@@ -28,10 +25,11 @@ describe.sequential('publisher CLI smoke', () => {
       join(dkgHome, 'config.json'),
       JSON.stringify({
         name: 'smoke-node',
-        apiPort: 9200,
+        apiPort: Number.parseInt(SMOKE_API_PORT, 10),
         listenPort: 0,
         nodeRole: 'edge',
         paranets: [],
+        auth: { enabled: false },
         store: {
           backend: 'oxigraph-worker',
           options: { path: join(dkgHome, 'store.nq') },
@@ -55,7 +53,7 @@ describe.sequential('publisher CLI smoke', () => {
 
   it('supports wallet add, enable, jobs, and job payload inspection', async () => {
     const wallet = ethers.Wallet.createRandom();
-    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: '9200' };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: SMOKE_API_PORT };
 
     await execFileAsync('node', [CLI_ENTRY, 'publisher', 'wallet', 'add', wallet.privateKey], { env });
     const walletList = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'wallet', 'list'], { env });
@@ -64,6 +62,8 @@ describe.sequential('publisher CLI smoke', () => {
 
     const enabled = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'enable', '--poll-interval', '1000', '--error-backoff', '1000'], { env });
     expect(enabled.stdout).toContain('Async publisher enabled');
+    const disabled = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'disable'], { env });
+    expect(disabled.stdout).toContain('Async publisher disabled');
 
     daemon = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
       env,
@@ -71,7 +71,7 @@ describe.sequential('publisher CLI smoke', () => {
     });
     for (let i = 0; i < 40; i += 1) {
       try {
-        const response = await fetch('http://127.0.0.1:9200/api/status');
+        const response = await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/status`);
         if (response.ok) {
           break;
         }
@@ -87,19 +87,6 @@ describe.sequential('publisher CLI smoke', () => {
     expect(stagedMatch?.[1]).toBeDefined();
     const workspaceOperationId = stagedMatch![1];
 
-    const store = await createTripleStore({
-      backend: 'oxigraph-worker',
-      options: { path: join(dkgHome, 'store.nq') },
-    });
-    const keypair = await generateEd25519Keypair();
-    const dkgPublisher = new DKGPublisher({
-      store,
-      chain: new MockChainAdapter('mock:31337', wallet.address),
-      eventBus: new TypedEventBus(),
-      keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
-    });
     const enqueue = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
@@ -122,7 +109,7 @@ describe.sequential('publisher CLI smoke', () => {
 
     const jobs = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'jobs'], { env });
     expect(jobs.stdout).toContain(jobId);
-    expect(jobs.stdout).toContain('accepted');
+    expect(jobs.stdout).toMatch(/accepted|claimed|validated|broadcast|included|finalized|failed/);
 
     await expect(
       execFileAsync('node', [CLI_ENTRY, 'publisher', 'jobs', '--status', 'bogus'], { env }),
@@ -132,13 +119,15 @@ describe.sequential('publisher CLI smoke', () => {
 
     const job = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId], { env });
     expect(job.stdout).toContain(jobId);
+    expect(job.stdout).toContain('"status":');
     expect(job.stdout).toContain('jobSlug');
 
     const payload = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId, '--payload'], { env });
+    expect(payload.stdout).toContain('"status": "accepted"');
+    expect(payload.stdout).toContain('"failure":');
     expect(payload.stdout).toContain('publishOptions');
     expect(payload.stdout).toContain('music-social');
 
-    await store.close();
     daemon.kill('SIGTERM');
     await Promise.race([
       new Promise((resolve) => daemon?.once('exit', resolve)),

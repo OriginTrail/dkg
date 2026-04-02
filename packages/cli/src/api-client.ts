@@ -126,6 +126,50 @@ export class ApiClient {
     return this.post('/api/workspace/enshrine', { paranetId, selection, clearAfter });
   }
 
+  async workspaceRoots(paranetId: string, workspaceOperationId?: string): Promise<{
+    operations: Array<{
+      workspaceOperationId: string;
+      publisherPeerId: string;
+      publishedAt: string;
+      roots: string[];
+    }>;
+  }> {
+    const params = new URLSearchParams({ paranetId });
+    if (workspaceOperationId) {
+      params.set('workspaceOperationId', workspaceOperationId);
+    }
+    return this.get(`/api/workspace/roots?${params.toString()}`);
+  }
+
+  async publisherEnqueue(request: {
+    workspaceId: string;
+    workspaceOperationId: string;
+    roots: string[];
+    paranetId: string;
+    namespace: string;
+    scope: string;
+    transitionType: 'CREATE' | 'MUTATE' | 'REVOKE';
+    authority: { type: 'owner' | 'multisig' | 'quorum' | 'capability'; proofRef: string };
+    priorVersion?: string;
+  }): Promise<{ jobId: string }> {
+    return this.post('/api/publisher/enqueue', request);
+  }
+
+  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    const qs = params.toString();
+    return this.get(`/api/publisher/jobs${qs ? `?${qs}` : ''}`);
+  }
+
+  async publisherJob(jobId: string): Promise<{ job: any }> {
+    return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
+  }
+
+  async publisherJobPayload(jobId: string): Promise<any> {
+    return this.get(`/api/publisher/job/payload?id=${encodeURIComponent(jobId)}`);
+  }
+
   async query(sparql: string, paranetId?: string): Promise<{ result: QueryResult }> {
     return this.post('/api/query', { sparql, paranetId });
   }

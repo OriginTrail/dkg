@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
@@ -51,6 +52,7 @@ import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 import { startPublisherRuntimeIfEnabled } from './publisher-runner.js';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 
 function getNodeVersion(): string {
   try {
@@ -317,6 +319,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     log(`Publisher startup failed: ${err?.message ?? String(err)}`);
     throw err;
   }
+  const publisherApi = publisherRuntime?.publisher ?? new TripleStoreAsyncLiftPublisher(agent.store);
 
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
@@ -816,6 +819,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         req,
         res,
         agent,
+        publisherApi,
         config,
         startedAt,
         dashDb,
@@ -1112,6 +1116,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   agent: DKGAgent,
+  publisherApi: import('@origintrail-official/dkg-publisher').AsyncLiftPublisher,
   config: DkgConfig,
   startedAt: number,
   dashDb: DashboardDB,
@@ -1828,12 +1833,19 @@ async function handleRequest(
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside writeToWorkspace
       });
+      const graphManager = new GraphManager(agent.store);
       const result = await tracker.trackPhase(ctx, 'store', () =>
         agent.writeToWorkspace(paranetId, quads, { operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
       const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ...result, phases: opDetail.phases });
+      return jsonResponse(res, 200, {
+        ...result,
+        paranetId,
+        graph: graphManager.workspaceGraphUri(paranetId),
+        triplesWritten: quads.length,
+        phases: opDetail.phases,
+      });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
@@ -1875,6 +1887,111 @@ async function handleRequest(
       tracker.fail(ctx, err);
       throw err;
     }
+  }
+
+  // GET /api/workspace/roots?paranetId=...&workspaceOperationId=...
+  if (req.method === 'GET' && path === '/api/workspace/roots') {
+    const paranetId = url.searchParams.get('paranetId');
+    const workspaceOperationId = url.searchParams.get('workspaceOperationId');
+    if (!paranetId) {
+      return jsonResponse(res, 400, { error: 'Missing paranetId' });
+    }
+
+    const graphManager = new GraphManager(agent.store);
+    const workspaceMetaGraph = graphManager.workspaceMetaGraphUri(paranetId);
+    const opFilter = workspaceOperationId
+      ? `FILTER(STRENDS(STR(?op), ${JSON.stringify(`:${workspaceOperationId}`)}))`
+      : '';
+    const result = await agent.store.query(
+      `SELECT ?op ?root ?publisherPeerId ?publishedAt WHERE {
+        GRAPH <${workspaceMetaGraph}> {
+          ?op a <http://dkg.io/ontology/WorkspaceOperation> ;
+              <http://dkg.io/ontology/rootEntity> ?root ;
+              <http://www.w3.org/ns/prov#wasAttributedTo> ?publisherPeerId ;
+              <http://dkg.io/ontology/publishedAt> ?publishedAt .
+          ${opFilter}
+        }
+      } ORDER BY ?op ?root`,
+    );
+
+    if (result.type !== 'bindings') {
+      return jsonResponse(res, 500, { error: 'Unexpected workspace roots query result' });
+    }
+
+    type WorkspaceRootsEntry = {
+      workspaceOperationId: string;
+      publisherPeerId: string;
+      publishedAt: string;
+      roots: string[];
+    };
+    const operations = new Map<string, WorkspaceRootsEntry>();
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (!op) continue;
+      const opId = op.split(':').pop() ?? op;
+      const entry: WorkspaceRootsEntry = operations.get(opId) ?? {
+        workspaceOperationId: opId,
+        publisherPeerId: stripWorkspaceLiteral(String(row['publisherPeerId'] ?? '')),
+        publishedAt: stripWorkspaceLiteral(String(row['publishedAt'] ?? '')),
+        roots: [],
+      };
+      const root = row['root'];
+      if (root && !entry.roots.includes(root)) {
+        entry.roots.push(root);
+      }
+      operations.set(opId, entry);
+    }
+
+    return jsonResponse(res, 200, { operations: [...operations.values()] });
+  }
+
+  // POST /api/publisher/enqueue
+  if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const payload = JSON.parse(body);
+    const jobId = await publisherApi.lift(payload);
+    return jsonResponse(res, 200, { jobId });
+  }
+
+  // GET /api/publisher/jobs?status=...
+  if (req.method === 'GET' && path === '/api/publisher/jobs') {
+    const status = url.searchParams.get('status') ?? undefined;
+    const jobs = await publisherApi.list(status ? { status: status as any } : undefined);
+    return jsonResponse(res, 200, { jobs });
+  }
+
+  // GET /api/publisher/job?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) {
+      return jsonResponse(res, 400, { error: 'Missing id' });
+    }
+    const job = await publisherApi.getStatus(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: 'Publisher job not found' });
+    }
+    return jsonResponse(res, 200, { job });
+  }
+
+  // GET /api/publisher/job/payload?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job/payload') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) {
+      return jsonResponse(res, 400, { error: 'Missing id' });
+    }
+    const job = await publisherApi.getStatus(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: 'Publisher job not found' });
+    }
+    const payload = await publisherApi.inspectPreparedPayload(jobId);
+    return jsonResponse(res, 200, {
+      jobId: job.jobId,
+      jobSlug: job.jobSlug,
+      status: job.status,
+      request: job.request,
+      failure: job.failure ?? null,
+      payload,
+    });
   }
 
   // POST /api/context-graph/create  { participantIdentityIds: number[], requiredSignatures: number }
@@ -2406,6 +2523,17 @@ function shortId(peerId: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function stripWorkspaceLiteral(value: string): string {
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, value.lastIndexOf('"'));
+    }
+  }
+  return value;
 }
 
 function deriveBlockExplorerUrl(chainId?: string): string | undefined {

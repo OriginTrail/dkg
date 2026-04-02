@@ -651,6 +651,9 @@ importers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
     devDependencies:
+      '@types/n3':
+        specifier: ^1.26.1
+        version: 1.26.1
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0))

@@ -34,7 +34,9 @@ export function mapPublishResultToLiftJobSuccess(params: {
   const onChain = publishResult.onChainResult;
 
   if (!onChain) {
-    throw new Error('Async lift publish result requires onChainResult to produce LiftJob state');
+    throw new Error(
+      `Canonical publish returned status ${publishResult.status} without onChainResult. Async lift can only map results that include chain submission/finality details. Check chain configuration, publisher wallet, and canonical publish behavior.`,
+    );
   }
 
   const txHash = onChain.txHash as `0x${string}`;

@@ -1246,6 +1246,43 @@ workspaceCmd
     }
   });
 
+workspaceCmd
+  .command('roots <paranet>')
+  .description('List workspace operations and root entities available for lift/enshrine')
+  .option('--workspace-operation-id <id>', 'Filter to a single workspace operation')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.workspaceRoots(paranet, opts.workspaceOperationId ? String(opts.workspaceOperationId) : undefined);
+
+      if (result.operations.length === 0) {
+        console.log('No workspace operations found.');
+        return;
+      }
+
+      console.log(`\nWorkspace operations for "${paranet}":\n`);
+      for (const op of result.operations) {
+        console.log(`Operation: ${op.workspaceOperationId}`);
+        console.log(`  Publisher: ${op.publisherPeerId}`);
+        console.log(`  Published: ${op.publishedAt}`);
+        console.log('  Roots:');
+        for (const root of op.roots) {
+          console.log(`    - ${root}`);
+        }
+        console.log('');
+      }
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (message === 'Not found') {
+        console.error('The running daemon does not support `workspace roots` yet. Restart it using the latest CLI build and try again.');
+        console.error('For local development, use: node packages/cli/dist/cli.js daemon');
+      } else {
+        console.error(message);
+      }
+      process.exit(1);
+    }
+  });
+
 // ─── dkg logs ────────────────────────────────────────────────────────
 
 program
@@ -1345,8 +1382,18 @@ publisherCmd
         process.exit(1);
       }
 
-      const filter = requestedStatus ? { status: requestedStatus } : undefined;
-      const jobs = await inspector.publisher.list(filter as any);
+      let jobs: any[];
+      try {
+        const client = await ApiClient.connect();
+        jobs = (await client.publisherJobs(requestedStatus)).jobs;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          const filter = requestedStatus ? { status: requestedStatus } : undefined;
+          jobs = await inspector.publisher.list(filter as any);
+        } else {
+          throw err;
+        }
+      }
 
       if (!jobs.length) {
         console.log('No publisher jobs found.');
@@ -1355,7 +1402,8 @@ publisherCmd
 
       console.log(`\nPublisher jobs (${jobs.length}):\n`);
       for (const job of jobs) {
-        console.log(`${job.jobId}  ${job.status}  ${job.jobSlug}`);
+        const failureSuffix = job.failure?.message ? `  ERROR: ${job.failure.message}` : '';
+        console.log(`${job.jobId}  ${job.status}  ${job.jobSlug}${failureSuffix}`);
       }
       console.log('');
     } catch (err: any) {
@@ -1406,7 +1454,7 @@ publisherCmd
         process.exit(1);
       }
 
-      const jobId = await inspector.publisher.lift({
+      const request = {
         workspaceId: String(opts.workspaceId),
         workspaceOperationId: String(opts.workspaceOperationId),
         roots,
@@ -1419,7 +1467,19 @@ publisherCmd
           proofRef: String(opts.authorityProofRef),
         },
         priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
-      });
+      };
+
+      let jobId: string;
+      try {
+        const client = await ApiClient.connect();
+        jobId = (await client.publisherEnqueue(request)).jobId;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          jobId = await inspector.publisher.lift(request);
+        } else {
+          throw err;
+        }
+      }
 
       console.log('Publisher job enqueued:');
       console.log(`  Job ID:   ${jobId}`);
@@ -1449,15 +1509,43 @@ publisherCmd
       const { createPublisherInspector } = await import('./publisher-runner.js');
       inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
 
-      const result = opts.payload
-        ? await inspector.publisher.inspectPreparedPayload(jobId)
-        : await inspector.publisher.getStatus(jobId);
-      if (!result) {
+      let job: any | null;
+      try {
+        const client = await ApiClient.connect();
+        job = (await client.publisherJob(jobId)).job;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          job = await inspector.publisher.getStatus(jobId);
+        } else {
+          throw err;
+        }
+      }
+      if (!job) {
         console.error(`Publisher job not found: ${jobId}`);
         process.exit(1);
       }
 
-      console.log(JSON.stringify(result, null, 2));
+      if (opts.payload) {
+        let payload: any | null;
+        try {
+          const client = await ApiClient.connect();
+          payload = await client.publisherJobPayload(jobId);
+        } catch (err: any) {
+          if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+            payload = await inspector.publisher.inspectPreparedPayload(jobId);
+          } else {
+            throw err;
+          }
+        }
+        if (!payload) {
+          console.error(`Publisher job not found: ${jobId}`);
+          process.exit(1);
+        }
+
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(JSON.stringify(job, null, 2));
+      }
     } catch (err: any) {
       console.error(err.message ?? String(err));
       process.exit(1);
