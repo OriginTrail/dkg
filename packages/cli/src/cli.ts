@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import { batchEntityQuads, type PublishQuad } from './batching.js';
 import { requestFaucetFunding } from './faucet.js';
 import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import {
@@ -671,6 +672,7 @@ program
   .description('Publish triples to a paranet from an RDF file or inline')
   .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
   .option('--private-file <path>', 'RDF file with private triples (encrypted, access-controlled)')
+  .option('--workspace', 'Stage quads in workspace instead of publishing immediately')
   .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
   .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
   .option('-s, --subject <uri>', 'Subject URI for simple publish')
@@ -684,7 +686,7 @@ program
       const rdfParser = await import('./rdf-parser.js');
       const defaultGraph = `did:dkg:context-graph:${paranet}`;
 
-      let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+        let quads: PublishQuad[];
 
       if (opts.file) {
         const { readFile } = await import('node:fs/promises');
@@ -709,8 +711,12 @@ program
         process.exit(1);
       }
 
-      let privateQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> | undefined;
+        let privateQuads: PublishQuad[] | undefined;
       if (opts.privateFile) {
+        if (opts.workspace) {
+          console.error('--private-file is not supported with --workspace');
+          process.exit(1);
+        }
         const { readFile } = await import('node:fs/promises');
         const raw = await readFile(opts.privateFile, 'utf-8');
         const format = opts.format ?? rdfParser.detectFormat(opts.privateFile);
@@ -733,21 +739,51 @@ program
         process.exit(1);
       }
 
-      const result = await client.publish(paranet, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-      });
-      console.log(`Published to "${paranet}":`);
-      console.log(`  Status:    ${result.status}`);
-      console.log(`  KC ID:     ${result.kcId}`);
-      if (result.txHash) {
-        console.log(`  TX hash:   ${result.txHash}`);
-        console.log(`  Block:     ${result.blockNumber}`);
-        console.log(`  Batch ID:  ${result.batchId}`);
-        console.log(`  Publisher: ${result.publisherAddress}`);
-      }
-      for (const ka of result.kas) {
-        console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
+      if (opts.workspace) {
+        let workspaceOperationId: string | undefined;
+        let graph: string | undefined;
+        let skolemizedBlankNodes = 0;
+        const workspaceBatches = batchEntityQuads(quads, {
+          maxBatchQuads: 500,
+          maxBatchBytes: 450 * 1024,
+          estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ paranetId: paranet, quads: batch })).length,
+          splitOversizedEntities: true,
+        });
+        let sent = 0;
+        for (const batch of workspaceBatches) {
+          const result = await client.workspaceWrite(paranet, batch);
+          workspaceOperationId ??= result.workspaceOperationId;
+          graph ??= result.graph;
+          skolemizedBlankNodes += result.skolemizedBlankNodes ?? 0;
+          sent += batch.length;
+          process.stdout.write(`\r  Staging in workspace: ${sent}/${quads.length} quads`);
+        }
+        process.stdout.write('\n');
+        console.log(`Staged to workspace for "${paranet}":`);
+        console.log(`  Workspace operation: ${workspaceOperationId}`);
+        console.log(`  Graph:               ${graph}`);
+        console.log(`  Triples written:     ${quads.length}`);
+        if (skolemizedBlankNodes > 0) {
+          console.log(`  Skolemized blanks:   ${skolemizedBlankNodes}`);
+        }
+        console.log(`  Next: dkg publisher enqueue ${paranet} --workspace-operation-id ${workspaceOperationId} --root <entity> --namespace <ns> --scope <scope> --authority-proof-ref <ref>`);
+      } else {
+        const result = await client.publish(paranet, quads, privateQuads, {
+          accessPolicy,
+          allowedPeers,
+        });
+        console.log(`Published to "${paranet}":`);
+        console.log(`  Status:    ${result.status}`);
+        console.log(`  KC ID:     ${result.kcId}`);
+        if (result.txHash) {
+          console.log(`  TX hash:   ${result.txHash}`);
+          console.log(`  Block:     ${result.blockNumber}`);
+          console.log(`  Batch ID:  ${result.batchId}`);
+          console.log(`  Publisher: ${result.publisherAddress}`);
+        }
+        for (const ka of result.kas) {
+          console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
+        }
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1333,6 +1369,75 @@ publisherCmd
   });
 
 publisherCmd
+  .command('enqueue <paranet>')
+  .description('Enqueue a workspace lift request into the async publisher queue')
+  .requiredOption('--workspace-operation-id <id>', 'Workspace operation ID to lift from')
+  .requiredOption('--root <entity...>', 'Root entity or entities to lift')
+  .requiredOption('--namespace <namespace>', 'Protected namespace for the publication')
+  .requiredOption('--scope <scope>', 'Protected scope for the publication')
+  .option('--workspace-id <id>', 'Workspace identifier', 'workspace-main')
+  .option('--transition-type <type>', 'Transition type (CREATE|MUTATE|REVOKE)', 'CREATE')
+  .option('--authority-type <type>', 'Authority type (owner|multisig|quorum|capability)', 'owner')
+  .requiredOption('--authority-proof-ref <ref>', 'Authority proof reference')
+  .option('--prior-version <version>', 'Prior version required for MUTATE/REVOKE')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    let inspector: { publisher: { lift(request: any): Promise<string> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      const transitionType = String(opts.transitionType).toUpperCase();
+      if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
+        console.error(`Invalid transition type: ${opts.transitionType}`);
+        process.exit(1);
+      }
+
+      const authorityType = String(opts.authorityType);
+      if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
+        console.error(`Invalid authority type: ${opts.authorityType}`);
+        process.exit(1);
+      }
+
+      const roots = (opts.root as string[]).map((value) => String(value).trim()).filter(Boolean);
+      if (roots.length === 0) {
+        console.error('At least one --root value is required.');
+        process.exit(1);
+      }
+
+      const jobId = await inspector.publisher.lift({
+        workspaceId: String(opts.workspaceId),
+        workspaceOperationId: String(opts.workspaceOperationId),
+        roots,
+        paranetId: paranet,
+        namespace: String(opts.namespace),
+        scope: String(opts.scope),
+        transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
+        authority: {
+          type: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
+          proofRef: String(opts.authorityProofRef),
+        },
+        priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
+      });
+
+      console.log('Publisher job enqueued:');
+      console.log(`  Job ID:   ${jobId}`);
+      console.log(`  Paranet:  ${paranet}`);
+      console.log(`  Roots:    ${roots.join(', ')}`);
+      console.log(`  Scope:    ${opts.scope}`);
+      console.log(`  Type:     ${transitionType}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
+publisherCmd
   .command('job <jobId>')
   .description('Inspect a specific async publisher job')
   .option('--payload', 'Show the prepared canonical publish payload instead of the stored job record')
@@ -1663,34 +1768,14 @@ function formatUptime(ms: number): string {
 }
 
 async function publishEntityBatches(
-  quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
-  applyBatch: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => Promise<unknown>,
+  quads: PublishQuad[],
+  applyBatch: (batch: PublishQuad[]) => Promise<unknown>,
   onProgress?: (publishedQuadCount: number) => void,
 ): Promise<void> {
-  // Keep entities intact per batch to avoid partial-entity writes.
-  const byEntity = new Map<string, typeof quads>();
-  for (const q of quads) {
-    const key = q.subject;
-    let arr = byEntity.get(key);
-    if (!arr) { arr = []; byEntity.set(key, arr); }
-    arr.push(q);
-  }
-
-  const MAX_BATCH_QUADS = 500;
-  let batch: typeof quads = [];
+  const batches = batchEntityQuads(quads, { maxBatchQuads: 500 });
   let sent = 0;
 
-  for (const entityQuads of byEntity.values()) {
-    if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
-      await applyBatch(batch);
-      sent += batch.length;
-      onProgress?.(sent);
-      batch = [];
-    }
-    batch.push(...entityQuads);
-  }
-
-  if (batch.length > 0) {
+  for (const batch of batches) {
     await applyBatch(batch);
     sent += batch.length;
     onProgress?.(sent);

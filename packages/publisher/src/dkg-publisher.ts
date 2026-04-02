@@ -18,6 +18,7 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+import { serializeQuadsToNQuads } from './nquads.js';
 import { resolveWorkspaceSelection } from './workspace-resolution.js';
 
 export interface DKGPublisherConfig {
@@ -223,12 +224,7 @@ export class DKGPublisher implements Publisher {
     // destructive workspace mutations to avoid leaving orphaned state.
     const paranetGraph = this.graphManager.dataGraphUri(paranetId);
     const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: paranetGraph }));
-    const nquadsStr = gossipQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
+    const nquadsStr = await serializeQuadsToNQuads(gossipQuads);
 
     const casConditions = options.conditions?.map(c => ({
       subject: c.subject,
@@ -714,12 +710,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = allSkolemizedQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
+    const nquadsStr = await serializeQuadsToNQuads(allSkolemizedQuads);
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 

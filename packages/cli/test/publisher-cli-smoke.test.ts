@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -18,10 +18,12 @@ const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
 
 describe.sequential('publisher CLI smoke', () => {
   let dkgHome: string;
+  let daemon: ReturnType<typeof spawn> | undefined;
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-cli-smoke-'));
     await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
+    await writeFile(join(dkgHome, 'smoke.nt'), '<urn:local:/rihana> <http://schema.org/name> "Rihana" .\n');
     await writeFile(
       join(dkgHome, 'config.json'),
       JSON.stringify({
@@ -39,12 +41,21 @@ describe.sequential('publisher CLI smoke', () => {
   });
 
   afterAll(async () => {
+    if (daemon) {
+      daemon.kill('SIGTERM');
+      await Promise.race([
+        new Promise((resolve) => daemon?.once('exit', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 3000)).then(() => {
+          daemon?.kill('SIGKILL');
+        }),
+      ]);
+    }
     await rm(dkgHome, { recursive: true, force: true });
   });
 
   it('supports wallet add, enable, jobs, and job payload inspection', async () => {
     const wallet = ethers.Wallet.createRandom();
-    const env = { ...process.env, DKG_HOME: dkgHome };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: '9200' };
 
     await execFileAsync('node', [CLI_ENTRY, 'publisher', 'wallet', 'add', wallet.privateKey], { env });
     const walletList = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'wallet', 'list'], { env });
@@ -53,6 +64,28 @@ describe.sequential('publisher CLI smoke', () => {
 
     const enabled = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'enable', '--poll-interval', '1000', '--error-backoff', '1000'], { env });
     expect(enabled.stdout).toContain('Async publisher enabled');
+
+    daemon = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
+      env,
+      stdio: 'ignore',
+    });
+    for (let i = 0; i < 40; i += 1) {
+      try {
+        const response = await fetch('http://127.0.0.1:9200/api/status');
+        if (response.ok) {
+          break;
+        }
+      } catch {
+        // wait for daemon readiness
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    const staged = await execFileAsync('node', [CLI_ENTRY, 'publish', 'music-social', '--file', join(dkgHome, 'smoke.nt'), '--workspace'], { env });
+    expect(staged.stdout).toContain('Staged to workspace for "music-social":');
+    const stagedMatch = staged.stdout.match(/Workspace operation:\s+(\S+)/);
+    expect(stagedMatch?.[1]).toBeDefined();
+    const workspaceOperationId = stagedMatch![1];
 
     const store = await createTripleStore({
       backend: 'oxigraph-worker',
@@ -67,20 +100,25 @@ describe.sequential('publisher CLI smoke', () => {
       publisherPrivateKey: wallet.privateKey,
       publisherNodeIdentityId: 1n,
     });
-    const write = await dkgPublisher.writeToWorkspace('music-social', [
-      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
-    ], { publisherPeerId: 'peer-1' });
-    const inspector = new (await import('@origintrail-official/dkg-publisher')).TripleStoreAsyncLiftPublisher(store);
-    const jobId = await inspector.lift({
-      workspaceId: 'workspace-main',
-      workspaceOperationId: write.workspaceOperationId,
-      roots: ['urn:local:/rihana'],
-      paranetId: 'music-social',
-      namespace: 'aloha',
-      scope: 'person-profile',
-      transitionType: 'CREATE',
-      authority: { type: 'owner', proofRef: 'proof:owner:1' },
-    });
+    const enqueue = await execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'enqueue',
+      'music-social',
+      '--workspace-operation-id',
+      workspaceOperationId,
+      '--root',
+      'urn:local:/rihana',
+      '--namespace',
+      'aloha',
+      '--scope',
+      'person-profile',
+      '--authority-proof-ref',
+      'proof:owner:1',
+    ], { env });
+    const match = enqueue.stdout.match(/Job ID:\s+(\S+)/);
+    expect(match?.[1]).toBeDefined();
+    const jobId = match![1];
 
     const jobs = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'jobs'], { env });
     expect(jobs.stdout).toContain(jobId);
@@ -101,5 +139,13 @@ describe.sequential('publisher CLI smoke', () => {
     expect(payload.stdout).toContain('music-social');
 
     await store.close();
-  });
+    daemon.kill('SIGTERM');
+    await Promise.race([
+      new Promise((resolve) => daemon?.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 3000)).then(() => {
+        daemon?.kill('SIGKILL');
+      }),
+    ]);
+    daemon = undefined;
+  }, 30000);
 });
