@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './memory-model.js';
 export * from './event-bus.js';
 export { Logger, createOperationContext, type OperationContext, type OperationName, type LogSink } from './logger.js';
 export * from './crypto/index.js';
