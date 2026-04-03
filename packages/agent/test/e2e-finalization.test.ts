@@ -208,8 +208,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
   // ── Finalization promotion (2 nodes) ───────────────────────────────────
 
-  it('creates two agents with real EVM chain adapters', async () => {
-    if (skipSuite) return;
+  it('creates two agents with real EVM chain adapters', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
 
     const nodeA = await DKGAgent.create({
       name: 'FinChainA',
@@ -231,8 +231,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeB.wallet).toBeDefined();
   }, 60_000);
 
-  it('starts agents, connects them, and both subscribe to paranet', async () => {
-    if (skipSuite) return;
+  it('starts agents, connects them, and both subscribe to paranet', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
     await nodeA.start();
@@ -251,8 +251,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     await sleep(1000);
   }, 30_000);
 
-  it('A writes to workspace; B receives via GossipSub', async () => {
-    if (skipSuite) return;
+  it('A writes to workspace; B receives via GossipSub', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
     const quads = [
@@ -278,8 +278,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(bWorkspace.bindings[0]['name']).toBe('"Finalization Chain Draft"');
   }, 25000);
 
-  it('A enshrines on-chain; B receives finalization and promotes to canonical', async () => {
-    if (skipSuite) return;
+  it('A enshrines on-chain; B receives finalization and promotes to canonical', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
     const enshrineResult = await nodeA.enshrineFromWorkspace(PARANET, {
@@ -316,8 +316,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(bData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
   }, 60_000);
 
-  it('B has confirmed KC metadata with real chain provenance', async () => {
-    if (skipSuite) return;
+  it('B has confirmed KC metadata with real chain provenance', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const nodeB = agents[1];
 
     const metaResult = await nodeB.query(
@@ -339,8 +339,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(String(provenanceResult.bindings[0]['txHash'])).toMatch(/0x/);
   }, 10_000);
 
-  it('B workspace data is cleaned up after promotion', async () => {
-    if (skipSuite) return;
+  it('B workspace data is cleaned up after promotion', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const nodeB = agents[1];
 
     const wsResult = await nodeB.query(
@@ -352,8 +352,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
   // ── Enshrine cycle: write → enshrine → write new entity → enshrine ────
 
-  it('enshrines two separate entities across successive workspace cycles', async () => {
-    if (skipSuite) return;
+  it('enshrines two separate entities across successive workspace cycles', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 
     // Write entity 2 to workspace
@@ -384,8 +384,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
   // ── Workspace cleanup: clearWorkspaceAfter flag ────────────────────────
 
-  it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async () => {
-    if (skipSuite) return;
+  it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 
     await nodeA.writeToWorkspace(PARANET, [

@@ -133,11 +133,20 @@ describe('MerkleTree', () => {
     expect(MerkleTree.computeKARoot(pub, undefined)).toEqual(pub);
   });
 
-  it('computeKCRoot computes root from KA roots', () => {
+  it('computeKCRoot computes root from KA roots as a MerkleTree', () => {
     const r1 = sha256(new TextEncoder().encode('ka1'));
     const r2 = sha256(new TextEncoder().encode('ka2'));
     const root = MerkleTree.computeKCRoot([r1, r2]);
     expect(root).toHaveLength(32);
+
+    const tree = new MerkleTree([r1, r2]);
+    expect(root).toEqual(tree.root);
+  });
+
+  it('computeKCRoot with single KA root equals that root', () => {
+    const r = sha256(new TextEncoder().encode('only-ka'));
+    const root = MerkleTree.computeKCRoot([r]);
+    expect(root).toEqual(r);
   });
 });
 
@@ -165,13 +174,36 @@ describe('hashTriple', () => {
 });
 
 describe('canonicalize', () => {
-  it('canonicalizes N-Quads', async () => {
+  it('returns exact canonical output for a single quad', async () => {
     const input = [
       '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
       '',
     ].join('\n');
     const result = await canonicalize(input);
-    expect(result).toContain('<http://example.org/s>');
+    expect(result.trim()).toBe(
+      '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+    );
+  });
+
+  it('sorts multiple quads into deterministic order', async () => {
+    const input = [
+      '<http://example.org/b> <http://example.org/p> <http://example.org/o> .',
+      '<http://example.org/a> <http://example.org/p> <http://example.org/o> .',
+      '',
+    ].join('\n');
+    const result = await canonicalize(input);
+    const lines = result.trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('example.org/a');
+    expect(lines[1]).toContain('example.org/b');
+  });
+
+  it('produces identical output regardless of input order', async () => {
+    const inputA = '<http://ex.org/z> <http://ex.org/p> "1" .\n<http://ex.org/a> <http://ex.org/p> "2" .\n';
+    const inputB = '<http://ex.org/a> <http://ex.org/p> "2" .\n<http://ex.org/z> <http://ex.org/p> "1" .\n';
+    const resultA = await canonicalize(inputA);
+    const resultB = await canonicalize(inputB);
+    expect(resultA).toBe(resultB);
   });
 });
 

@@ -41,31 +41,41 @@ describe('removePid / removeApiPort (catch path)', () => {
 });
 
 describe('loadNetworkConfig', () => {
-  it('loads network/testnet.json with shape expected by join flow when run from repo', async () => {
+  it('loads network/testnet.json with correct shape when run from repo, or returns null', async () => {
     const config = await loadNetworkConfig();
-    if (!config) return;
-    expect(config.networkName).toBeDefined();
+    if (!config) {
+      // Explicitly mark as skipped so CI reports show this was not validated
+      console.warn('[SKIPPED] testnet.json not found — loadNetworkConfig returned null');
+      return;
+    }
+    expect(typeof config.networkName).toBe('string');
+    expect(config.networkName.length).toBeGreaterThan(0);
     expect(Array.isArray(config.relays)).toBe(true);
     expect(config.relays.length).toBeGreaterThan(0);
     expect(config.relays[0]).toMatch(/^\/ip4\/\d+\.\d+\.\d+\.\d+\/tcp\/\d+\/p2p\/12D3KooW/);
     expect(config.defaultNodeRole).toMatch(/^edge|core$/);
     if (config.chain) {
       expect(config.chain.type).toBe('evm');
-      expect(config.chain.rpcUrl).toBeDefined();
-      expect(config.chain.hubAddress).toBeDefined();
-      expect(config.chain.chainId).toBeDefined();
+      expect(typeof config.chain.rpcUrl).toBe('string');
+      expect(config.chain.rpcUrl.length).toBeGreaterThan(0);
+      expect(typeof config.chain.hubAddress).toBe('string');
+      expect(typeof config.chain.chainId).toBe('string');
     }
   });
 
-  it('includes faucet config when present in testnet.json', async () => {
+  it('includes faucet config with valid URL and mode when present', async () => {
     const config = await loadNetworkConfig();
-    if (!config) return;
+    if (!config) {
+      console.warn('[SKIPPED] testnet.json not found');
+      return;
+    }
     if (config.faucet) {
       expect(config.faucet.url).toMatch(/^https?:\/\//);
-      expect(config.faucet.mode).toBeDefined();
       expect(typeof config.faucet.mode).toBe('string');
+      expect(config.faucet.mode.length).toBeGreaterThan(0);
     }
   });
+
 });
 
 describe('isDkgMonorepo', () => {

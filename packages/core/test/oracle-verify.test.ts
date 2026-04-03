@@ -142,18 +142,19 @@ describe('verifyOracleResponse', () => {
     it('detects a tampered proof (wrong sibling)', () => {
       const { provedTriples, verification } = buildOraclePayload(testTriples, '5');
 
-      if (provedTriples[0].proof.siblings.length > 0) {
-        provedTriples[0] = {
-          ...provedTriples[0],
-          proof: {
-            ...provedTriples[0].proof,
-            siblings: ['0x' + 'ff'.repeat(32)],
-          },
-        };
-      }
+      expect(provedTriples[0].proof.siblings.length).toBeGreaterThan(0);
+
+      provedTriples[0] = {
+        ...provedTriples[0],
+        proof: {
+          ...provedTriples[0].proof,
+          siblings: ['0x' + 'ff'.repeat(32)],
+        },
+      };
 
       const result = verifyOracleResponse(provedTriples, verification);
       expect(result.valid).toBe(false);
+      expect(result.tripleResults[0].proofValid).toBe(false);
     });
 
     it('detects when proof merkle root does not match verification merkle root', () => {

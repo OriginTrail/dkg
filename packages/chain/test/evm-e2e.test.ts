@@ -196,8 +196,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     }
   });
 
-  it('deploys V8 + V9 contracts and registers them in Hub', async () => {
-    if (skipSuite) return;
+  it('deploys V8 + V9 contracts and registers them in Hub', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     // Directly query the Hub to verify contracts are registered
     const hub = new Contract(hubAddress, [
       'function getContractAddress(string) view returns (address)',
@@ -218,16 +218,16 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(await kc.name()).toBe('KnowledgeCollection');
   }, 30_000);
 
-  it('reserves a UAL range (no identity needed)', async () => {
-    if (skipSuite) return;
+  it('reserves a UAL range (no identity needed)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const adapter = new EVMChainAdapter(makeConfig(PUBLISHER_KEY));
     const result = await adapter.reserveUALRange(50);
     expect(result.startId).toBe(1n);
     expect(result.endId).toBe(50n);
   }, 30_000);
 
-  it('publishes KAs in a single transaction (publishKnowledgeAssets)', async () => {
-    if (skipSuite) return;
+  it('publishes KAs in a single transaction (publishKnowledgeAssets)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
     const publicByteSize = 1000n;
     const epochs = 2;
@@ -286,8 +286,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     );
   }, 60_000);
 
-  it('minted ERC1155 NFTs for each KA (publisher owns one per token id in batch)', async () => {
-    if (skipSuite) return;
+  it('minted ERC1155 NFTs for each KA (publisher owns one per token id in batch)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const hub = new Contract(hubAddress, [
       'function getContractAddress(string) view returns (address)',
       'function getAssetStorageAddress(string) view returns (address)',
@@ -315,8 +315,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     }
   }, 30_000);
 
-  it('updates knowledge assets (new merkle root)', async () => {
-    if (skipSuite) return;
+  it('updates knowledge assets (new merkle root)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
 
     const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('e2e-updated-root'));
@@ -329,8 +329,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('extends storage duration (adapter auto-approves TRAC)', async () => {
-    if (skipSuite) return;
+  it('extends storage duration (adapter auto-approves TRAC)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const pubAdapter = new EVMChainAdapter(makeConfig(PUBLISHER2_KEY));
     // Extension cost: (ask * publicByteSize * additionalEpochs) / 1024 (batch was updated to 2048 bytes)
     const extensionCost = await pubAdapter.getRequiredPublishTokenAmount(2048n, 5);
@@ -352,8 +352,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('transfers namespace to a fresh address', async () => {
-    if (skipSuite) return;
+  it('transfers namespace to a fresh address', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const publisherAdapter = new EVMChainAdapter(makeConfig(PUBLISHER_KEY));
     const freshAddress = new Wallet(FRESH_TRANSFER_KEY).address;
 
@@ -361,8 +361,8 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  it('retrieves KnowledgeBatchCreated events', async () => {
-    if (skipSuite) return;
+  it('retrieves KnowledgeBatchCreated events', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const adapter = new EVMChainAdapter(makeConfig());
 
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];

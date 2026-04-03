@@ -171,8 +171,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     }
   });
 
-  it('creates agents with real EVMChainAdapter (no mocks)', async () => {
-    if (skipSuite) return;
+  it('creates agents with real EVMChainAdapter (no mocks)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const agentA = await DKGAgent.create({
       name: 'ChainNodeA',
       listenPort: 0,
@@ -193,8 +193,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(agentB.wallet).toBeDefined();
   }, 60_000);
 
-  it('starts agents and connects them', async () => {
-    if (skipSuite) return;
+  it('starts agents and connects them', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     await agents[0].start();
     await agents[1].start();
 
@@ -210,8 +210,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(peersB.length).toBeGreaterThanOrEqual(1);
   }, 30_000);
 
-  it('publishes knowledge through agent (on-chain finality)', async () => {
-    if (skipSuite) return;
+  it('publishes knowledge through agent (on-chain finality)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const paranetId = 'test-chain-paranet';
     await agents[0].createParanet({
       id: paranetId,
@@ -245,8 +245,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(result.kaManifest.length).toBeGreaterThan(0);
   }, 60_000);
 
-  it('queries published knowledge', async () => {
-    if (skipSuite) return;
+  it('queries published knowledge', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const result = await agents[0].query(
       'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
     );
@@ -257,8 +257,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     }
   }, 30_000);
 
-  it('second agent receives published knowledge via gossipsub', async () => {
-    if (skipSuite) return;
+  it('second agent receives published knowledge via gossipsub', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     await new Promise((r) => setTimeout(r, 3000));
 
     const result = await agents[1].query(

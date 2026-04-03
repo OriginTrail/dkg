@@ -249,7 +249,7 @@ describe('Protobuf: operationId propagation round-trip', () => {
       publisherSignatureVs: new Uint8Array(0),
     };
     const decoded = decodePublishRequest(encodePublishRequest(original));
-    expect(decoded.operationId).toBeFalsy();
+    expect(decoded.operationId).toBe('');
   });
 
   it('WorkspacePublishRequest preserves operationId', () => {

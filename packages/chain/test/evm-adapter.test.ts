@@ -104,8 +104,8 @@ describe('EVMChainAdapter integration', () => {
     }
   });
 
-  it('should connect and resolve V8 contracts from Hub', async () => {
-    if (skipSuite) return;
+  it('should connect and resolve V8 contracts from Hub', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const adapter = new EVMChainAdapter(makeConfig());
 
     expect(adapter.chainType).toBe('evm');
@@ -120,8 +120,8 @@ describe('EVMChainAdapter integration', () => {
     expect(await staking.name()).toBe('Staking');
   }, 30_000);
 
-  it('should have correct signer address', () => {
-    if (skipSuite) return;
+  it('should have correct signer address', (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
     const adapter = new EVMChainAdapter(makeConfig());
     const address = adapter.getSignerAddress();
     expect(address.toLowerCase()).toBe('0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266');

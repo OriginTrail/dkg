@@ -1,0 +1,5 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`computeNetworkId > matches a known golden value to detect accidental genesis changes 1`] = `"f81f9df2e9604fcaa0aaeb34d07171434199d2bc70d9f35680614453300d9b9d"`;
+
+exports[`getGenesisQuads > genesis content integrity check — hash detects any modification 1`] = `"55feb41d1c21067170ec030ac60f7b7fd386fa69a38f6af6750e55a7abe20156"`;

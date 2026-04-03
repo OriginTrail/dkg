@@ -34,6 +34,21 @@ describe('paranet topic helpers (V10 — deprecated aliases use context-graph pr
   it('paranetFinalizationTopic returns V10 finalization topic', () => {
     expect(paranetFinalizationTopic('testing')).toBe('dkg/context-graph/testing/finalization');
   });
+
+  it('handles empty string paranet ID (deprecated aliases use V10 format)', () => {
+    expect(paranetPublishTopic('')).toBe('dkg/context-graph//finalization');
+    expect(paranetDataGraphUri('')).toBe('did:dkg:context-graph:');
+  });
+
+  it('preserves paranet IDs with special characters (V10 format)', () => {
+    expect(paranetPublishTopic('my-paranet')).toBe('dkg/context-graph/my-paranet/finalization');
+    expect(paranetPublishTopic('paranet_v2')).toBe('dkg/context-graph/paranet_v2/finalization');
+  });
+
+  it('does not sanitize slashes in paranet IDs (caller responsibility)', () => {
+    const result = paranetPublishTopic('a/b');
+    expect(result).toBe('dkg/context-graph/a/b/finalization');
+  });
 });
 
 describe('createOperationContext', () => {
