@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
+  CclEvaluator,
   DiscoveryClient,
   ProfileManager,
   encrypt,
@@ -11,15 +12,60 @@ import {
   x25519SharedSecret,
   DKGAgent,
   AGENT_REGISTRY_PARANET,
+  parseCclPolicy,
 } from '../src/index.js';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { tmpdir } from 'node:os';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const require = createRequire(import.meta.url);
+const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
+const CCL_FACT_NS = 'https://example.org/ccl-fact#';
+
+function buildSnapshotFactQuads(opts: {
+  paranetId: string;
+  snapshotId: string;
+  view: 'accepted' | 'workspace';
+  scopeUal?: string;
+  facts: Array<[string, ...unknown[]]>;
+}): Quad[] {
+  const graph = opts.view === 'workspace'
+    ? paranetWorkspaceGraphUri(opts.paranetId)
+    : paranetDataGraphUri(opts.paranetId);
+
+  return opts.facts.flatMap((fact, index) => {
+    const [predicate, ...args] = fact;
+    const subject = `did:dkg:ccl-fact:${opts.paranetId}:${opts.snapshotId}:${index}`;
+    const quads: Quad[] = [
+      { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: `${CCL_FACT_NS}InputFact`, graph },
+      { subject, predicate: `${CCL_FACT_NS}predicate`, object: sparqlString(predicate), graph },
+      { subject, predicate: DKG_ONTOLOGY.DKG_SNAPSHOT_ID, object: sparqlString(opts.snapshotId), graph },
+      { subject, predicate: DKG_ONTOLOGY.DKG_VIEW, object: sparqlString(opts.view), graph },
+    ];
+
+    if (opts.scopeUal) {
+      quads.push({ subject, predicate: DKG_ONTOLOGY.DKG_SCOPE_UAL, object: sparqlString(opts.scopeUal), graph });
+    }
+
+    args.forEach((arg, argIndex) => {
+      quads.push({
+        subject,
+        predicate: `${CCL_FACT_NS}arg${argIndex}`,
+        object: sparqlString(JSON.stringify(arg)),
+        graph,
+      });
+    });
+
+    return quads;
+  });
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -616,6 +662,539 @@ describe('Genesis Knowledge', () => {
 
     await agent1.stop().catch(() => {});
     await agent2.stop().catch(() => {});
+  });
+
+  it('publishes, approves, lists, and resolves CCL policies per paranet', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'PolicyBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-policy', name: 'Ops Policy' });
+
+    const published = await agent.publishCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+
+    expect(published.policyUri).toContain('did:dkg:policy:');
+    expect(published.hash).toContain('sha256:');
+
+    await agent.approveCclPolicy({ paranetId: 'ops-policy', policyUri: published.policyUri });
+
+    const listed = await agent.listCclPolicies({ paranetId: 'ops-policy' });
+    expect(listed).toHaveLength(1);
+    expect(listed[0].name).toBe('incident-review');
+    expect(listed[0].isActiveDefault).toBe(true);
+
+    const resolved = await agent.resolveCclPolicy({ paranetId: 'ops-policy', name: 'incident-review', includeBody: true });
+    expect(resolved?.policyUri).toBe(published.policyUri);
+    expect(resolved?.body).toContain('rules: []');
+
+    const evaluation = await agent.evaluateCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      facts: [['claim', 'c1']],
+      snapshotId: 'snap-1',
+    });
+    expect(evaluation.policy.policyUri).toBe(published.policyUri);
+    expect(evaluation.factSetHash).toContain('sha256:');
+    expect(evaluation.result.derived).toEqual({});
+
+    const publishedEval = await agent.evaluateAndPublishCclPolicy({
+      paranetId: 'ops-policy',
+      name: 'incident-review',
+      facts: [['claim', 'c1']],
+      snapshotId: 'snap-2',
+    });
+    expect(publishedEval.evaluationUri).toContain('did:dkg:ccl-eval:');
+    expect(publishedEval.publish.status).toBeDefined();
+
+    const storedEval = await store.query(
+      `SELECT ?hash WHERE { GRAPH <did:dkg:paranet:ops-policy> { <${publishedEval.evaluationUri}> <https://dkg.network/ontology#factSetHash> ?hash } }`,
+    );
+    expect(storedEval.type).toBe('bindings');
+    if (storedEval.type === 'bindings') {
+      expect(storedEval.bindings.length).toBe(1);
+    }
+
+    const listedEvals = await agent.listCclEvaluations({
+      paranetId: 'ops-policy',
+      snapshotId: 'snap-2',
+    });
+    expect(listedEvals).toHaveLength(1);
+    expect(listedEvals[0].evaluationUri).toBe(publishedEval.evaluationUri);
+    expect(listedEvals[0].results).toEqual([]);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('prefers stricter per-context policy overrides when resolving CCL policy', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'ContextPolicyBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-context', name: 'Ops Context' });
+
+    const base = await agent.publishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    await agent.approveCclPolicy({ paranetId: 'ops-context', policyUri: base.policyUri });
+
+    const override = await agent.publishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      version: '0.2.0',
+      contextType: 'incident_review',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+    await agent.approveCclPolicy({ paranetId: 'ops-context', policyUri: override.policyUri, contextType: 'incident_review' });
+
+    const resolvedDefault = await agent.resolveCclPolicy({ paranetId: 'ops-context', name: 'incident-review' });
+    expect(resolvedDefault?.policyUri).toBe(base.policyUri);
+
+    const resolvedContext = await agent.resolveCclPolicy({ paranetId: 'ops-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedContext?.policyUri).toBe(override.policyUri);
+    expect(resolvedContext?.activeContexts).toContain('incident_review');
+
+    const evaluatedContext = await agent.evaluateCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      contextType: 'incident_review',
+      facts: [['claim', 'c2']],
+    });
+    expect(evaluatedContext.policy.policyUri).toBe(override.policyUri);
+
+    const publishedContextEval = await agent.evaluateAndPublishCclPolicy({
+      paranetId: 'ops-context',
+      name: 'incident-review',
+      contextType: 'incident_review',
+      facts: [['claim', 'c2']],
+      snapshotId: 'snap-ctx',
+    });
+    const listedByContext = await agent.listCclEvaluations({
+      paranetId: 'ops-context',
+      contextType: 'incident_review',
+      snapshotId: 'snap-ctx',
+    });
+    expect(listedByContext.some(entry => entry.evaluationUri === publishedContextEval.evaluationUri)).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('falls back to the previous default policy after revoking a superseding binding', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'RevokeDefaultBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-revoke-default', name: 'Ops Revoke Default' });
+
+    const v1 = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-default',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    const v2 = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-default',
+      name: 'incident-review',
+      version: '0.2.0',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v1.policyUri });
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v2.policyUri });
+
+    const resolvedLatest = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    expect(resolvedLatest?.policyUri).toBe(v2.policyUri);
+
+    const revoked = await agent.revokeCclPolicy({ paranetId: 'ops-revoke-default', policyUri: v2.policyUri });
+    expect(revoked.status).toBe('revoked');
+
+    const resolvedFallback = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    expect(resolvedFallback?.policyUri).toBe(v1.policyUri);
+
+    const listed = await agent.listCclPolicies({ paranetId: 'ops-revoke-default', name: 'incident-review' });
+    const revokedRecord = listed.find(policy => policy.policyUri === v2.policyUri);
+    const activeRecord = listed.find(policy => policy.policyUri === v1.policyUri);
+    expect(revokedRecord?.status).toBe('revoked');
+    expect(activeRecord?.status).toBe('approved');
+    expect(activeRecord?.isActiveDefault).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('falls back from a revoked context override to the default policy', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'RevokeContextBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+
+    await agent.createParanet({ id: 'ops-revoke-context', name: 'Ops Revoke Context' });
+
+    const base = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-context',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    const override = await agent.publishCclPolicy({
+      paranetId: 'ops-revoke-context',
+      name: 'incident-review',
+      version: '0.2.0',
+      contextType: 'incident_review',
+      content: `policy: incident-review
+version: 0.2.0
+rules: []
+decisions: []
+`,
+    });
+
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-context', policyUri: base.policyUri });
+    await agent.approveCclPolicy({ paranetId: 'ops-revoke-context', policyUri: override.policyUri, contextType: 'incident_review' });
+
+    const resolvedOverride = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedOverride?.policyUri).toBe(override.policyUri);
+
+    const revoked = await agent.revokeCclPolicy({
+      paranetId: 'ops-revoke-context',
+      policyUri: override.policyUri,
+      contextType: 'incident_review',
+    });
+    expect(revoked.contextType).toBe('incident_review');
+
+    const resolvedFallback = await agent.resolveCclPolicy({ paranetId: 'ops-revoke-context', name: 'incident-review', contextType: 'incident_review' });
+    expect(resolvedFallback?.policyUri).toBe(base.policyUri);
+    expect(resolvedFallback?.isActiveDefault).toBe(true);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('restricts CCL policy approval to the paranet owner', async () => {
+    const store = new OxigraphStore();
+    const owner = await DKGAgent.create({
+      name: 'OwnerBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const other = await DKGAgent.create({
+      name: 'OtherBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    await owner.start();
+    await other.start();
+    await owner.createParanet({ id: 'ops-owner', name: 'Ops Owner' });
+
+    const published = await owner.publishCclPolicy({
+      paranetId: 'ops-owner',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+
+    await expect(other.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+
+    await expect(owner.approveCclPolicy({ paranetId: 'ops-owner', policyUri: published.policyUri }))
+      .resolves.toBeTruthy();
+
+    await owner.stop().catch(() => {});
+    await other.stop().catch(() => {});
+  });
+
+  it('restricts CCL policy revocation to the paranet owner', async () => {
+    const store = new OxigraphStore();
+    const owner = await DKGAgent.create({
+      name: 'OwnerRevokeBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const other = await DKGAgent.create({
+      name: 'OtherRevokeBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    await owner.start();
+    await other.start();
+    await owner.createParanet({ id: 'ops-owner-revoke', name: 'Ops Owner Revoke' });
+
+    const published = await owner.publishCclPolicy({
+      paranetId: 'ops-owner-revoke',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+    await owner.approveCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri });
+
+    await expect(other.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
+      .rejects.toThrow(/Only the paranet owner can manage policies/);
+
+    await expect(owner.revokeCclPolicy({ paranetId: 'ops-owner-revoke', policyUri: published.policyUri }))
+      .resolves.toMatchObject({ status: 'revoked' });
+
+    await owner.stop().catch(() => {});
+    await other.stop().catch(() => {});
+  });
+
+  it('validates CCL policy content before publish', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'ValidateBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+    await agent.createParanet({ id: 'ops-validate', name: 'Ops Validate' });
+
+    await expect(agent.publishCclPolicy({
+      paranetId: 'ops-validate',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: wrong-name
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    })).rejects.toThrow(/name mismatch/);
+
+    await expect(agent.publishCclPolicy({
+      paranetId: 'ops-validate',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: 'rules: []',
+    })).rejects.toThrow(/must define a string "policy" name/);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('rejects conflicting CCL republish for the same name and version', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'CollisionBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+    await agent.createParanet({ id: 'ops-collision', name: 'Ops Collision' });
+
+    await agent.publishCclPolicy({
+      paranetId: 'ops-collision',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules: []
+decisions: []
+`,
+    });
+
+    await expect(agent.publishCclPolicy({
+      paranetId: 'ops-collision',
+      name: 'incident-review',
+      version: '0.1.0',
+      content: `policy: incident-review
+version: 0.1.0
+rules:
+  - name: flagged
+    params: [Claim]
+    all:
+      - atom: { pred: claim, args: ["$Claim"] }
+decisions: []
+`,
+    })).rejects.toThrow(/already exists with different content/);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('resolves canonical snapshot facts and evaluates bundled policies without caller facts', async () => {
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'SnapshotBot',
+      store,
+      chainAdapter: new MockChainAdapter(),
+    });
+    await agent.start();
+    await agent.createParanet({ id: 'ops-snapshot', name: 'Ops Snapshot' });
+
+    const published = await agent.publishCclPolicy({
+      paranetId: 'ops-snapshot',
+      name: 'owner_assertion',
+      version: '0.1.0',
+      content: `policy: owner_assertion
+version: 0.1.0
+rules:
+  - name: owner_asserted
+    params: [Claim]
+    all:
+      - atom: { pred: claim, args: ["$Claim"] }
+      - exists:
+          where:
+            - atom: { pred: owner_of, args: ["$Claim", "$Agent"] }
+            - atom: { pred: signed_by, args: ["$Claim", "$Agent"] }
+decisions:
+  - name: propose_accept
+    params: [Claim]
+    all:
+      - atom: { pred: owner_asserted, args: ["$Claim"] }
+`,
+    });
+    await agent.approveCclPolicy({ paranetId: 'ops-snapshot', policyUri: published.policyUri });
+
+    await store.insert(buildSnapshotFactQuads({
+      paranetId: 'ops-snapshot',
+      snapshotId: 'snap-owner-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+      facts: [
+        ['signed_by', 'p1', '0xalice'],
+        ['claim', 'p1'],
+        ['owner_of', 'p1', '0xalice'],
+      ],
+    }));
+
+    const resolved = await agent.resolveFactsFromSnapshot({
+      paranetId: 'ops-snapshot',
+      policyName: 'owner_assertion',
+      snapshotId: 'snap-owner-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+
+    expect(resolved.factResolutionMode).toBe('snapshot-resolved');
+    expect(resolved.factResolverVersion).toBe('canonical-input-facts/v1');
+    expect(resolved.facts).toEqual([
+      ['claim', 'p1'],
+      ['owner_of', 'p1', '0xalice'],
+      ['signed_by', 'p1', '0xalice'],
+    ]);
+
+    const evaluation = await agent.evaluateCclPolicy({
+      paranetId: 'ops-snapshot',
+      name: 'owner_assertion',
+      snapshotId: 'snap-owner-01',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+
+    expect(evaluation.factResolutionMode).toBe('snapshot-resolved');
+    expect(evaluation.factQueryHash).toContain('sha256:');
+    expect(evaluation.result.derived.owner_asserted).toEqual([['p1']]);
+    expect(evaluation.result.decisions.propose_accept).toEqual([['p1']]);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('resolves the same snapshot facts deterministically across nodes', async () => {
+    const snapshotFacts: Array<[string, ...unknown[]]> = [
+      ['signed_by', 'p1', '0xalice'],
+      ['claim', 'p1'],
+      ['owner_of', 'p1', '0xalice'],
+    ];
+    const quads = buildSnapshotFactQuads({
+      paranetId: 'ops-deterministic',
+      snapshotId: 'snap-owner-02',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+      facts: snapshotFacts,
+    });
+
+    const storeA = new OxigraphStore();
+    const storeB = new OxigraphStore();
+    await storeA.insert(quads);
+    await storeB.insert(quads);
+
+    const agentA = await DKGAgent.create({ name: 'DeterministicA', store: storeA, chainAdapter: new MockChainAdapter() });
+    const agentB = await DKGAgent.create({ name: 'DeterministicB', store: storeB, chainAdapter: new MockChainAdapter() });
+
+    const resolvedA = await agentA.resolveFactsFromSnapshot({
+      paranetId: 'ops-deterministic',
+      policyName: 'owner_assertion',
+      snapshotId: 'snap-owner-02',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+    const resolvedB = await agentB.resolveFactsFromSnapshot({
+      paranetId: 'ops-deterministic',
+      policyName: 'owner_assertion',
+      snapshotId: 'snap-owner-02',
+      view: 'accepted',
+      scopeUal: 'ual:dkg:example:owner-assertion',
+    });
+
+    expect(resolvedA.facts).toEqual(resolvedB.facts);
+    expect(resolvedA.factSetHash).toBe(resolvedB.factSetHash);
+    expect(resolvedA.factQueryHash).toBe(resolvedB.factQueryHash);
+    expect(resolvedA.factResolverVersion).toBe(resolvedB.factResolverVersion);
+  });
+
+  it('matches the reference evaluator across bundled CCL cases', async () => {
+    const casesDir = fileURLToPath(new URL('../../../ccl_v0_1/tests/cases', import.meta.url));
+    const policiesDir = fileURLToPath(new URL('../../../ccl_v0_1/policies', import.meta.url));
+    const caseFiles = (await readdir(casesDir)).filter(name => name.endsWith('.yaml')).sort();
+
+    for (const caseFile of caseFiles) {
+      const testCase = loadYaml(join(casesDir, caseFile));
+      const policyBody = await readFile(join(policiesDir, testCase.policy), 'utf8');
+      const parsed = parseCclPolicy(policyBody);
+      const agentResult = new CclEvaluator(parsed, testCase.facts).run();
+      const referenceResult = new ReferenceEvaluator(parsed, testCase.facts).run();
+      expect(agentResult).toEqual(referenceResult);
+      expect(agentResult).toEqual(testCase.expected);
+    }
   });
 });
 

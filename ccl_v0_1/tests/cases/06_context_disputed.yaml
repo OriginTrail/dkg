@@ -1,0 +1,33 @@
+name: context_accepted_contradiction_blocks_promotion
+policy: context_corroboration.yaml
+context:
+  paranet: ops-paranet
+  scope_ual: ual:dkg:ops-paranet:auth:context:incident-126:claim-c1
+  view: accepted
+  snapshot_id: snap-context-06
+facts:
+  - [claim, c1]
+  - [claim, c2]
+  - [supports, e1, c1]
+  - [supports, e2, c1]
+  - [evidence_view, e1, accepted]
+  - [evidence_view, e2, accepted]
+  - [independent, e1]
+  - [independent, e2]
+  - [authority_class, e1, vendor]
+  - [authority_class, e2, operator]
+  - [claim_epoch, c1, 7]
+  - [quorum_epoch, incident_review, 7]
+  - [quorum_reached, incident_review, 3, 4]
+  - [contradicts, c2, c1]
+  - [accepted_status, c2, accepted]
+expected:
+  derived:
+    corroborated: []
+    disputed:
+      - [c1]
+    promotable: []
+  decisions:
+    propose_accept: []
+    propose_reject:
+      - [c1]

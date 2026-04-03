@@ -18,6 +18,7 @@ export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => vo
 
 export interface GossipPublishHandlerCallbacks {
   paranetExists: (id: string) => Promise<boolean>;
+  getParanetOwner: (id: string) => Promise<string | null>;
   subscribeToParanet: (id: string, options?: { trackSyncScope?: boolean }) => void;
   onPhase?: GossipPhaseCallback;
 }
@@ -124,6 +125,8 @@ export class GossipPublishHandler {
             this.log.info(ctx, `Discovered paranet "${name}" (${newId}) via gossip — auto-subscribed`);
           }
         }
+
+        normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
       }
 
       // Structural validation (I-002): reject malformed gossip before inserting.
@@ -318,6 +321,65 @@ export class GossipPublishHandler {
         `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    const bindingSubjects = new Set(
+      quads
+        .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_POLICY_BINDING)
+        .map(q => q.subject),
+    );
+    if (bindingSubjects.size === 0) return quads;
+
+    const invalidBindings = new Set<string>();
+    for (const bindingUri of bindingSubjects) {
+      const bindingQuads = quads.filter(q => q.subject === bindingUri);
+      const paranetUri = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET)?.object;
+      const approvedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_AT)?.object;
+      const approvedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_BY)?.object;
+      const revokedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_AT)?.object;
+      const revokedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_BY)?.object;
+      const paranetId = paranetUri?.startsWith('did:dkg:paranet:') ? paranetUri.slice('did:dkg:paranet:'.length) : null;
+
+      if (!paranetId) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: missing or invalid paranet reference`);
+        continue;
+      }
+
+      const owner = await this.callbacks.getParanetOwner(paranetId);
+      if (!owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: paranet "${paranetId}" owner is unknown locally`);
+        continue;
+      }
+
+      if (approvedAt && !approvedBy) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: approvedBy is required when approvedAt is present`);
+        continue;
+      }
+
+      if (approvedBy && approvedBy !== owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: approvedBy ${approvedBy} does not match owner ${owner}`);
+        continue;
+      }
+
+      if (revokedAt && !revokedBy) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: revokedBy is required when revokedAt is present`);
+        continue;
+      }
+
+      if (revokedBy && revokedBy !== owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: revokedBy ${revokedBy} does not match owner ${owner}`);
+      }
+    }
+
+    if (invalidBindings.size === 0) return quads;
+    return quads.filter(q => !invalidBindings.has(q.subject));
   }
 }
 

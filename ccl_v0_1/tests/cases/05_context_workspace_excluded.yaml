@@ -1,0 +1,26 @@
+name: context_workspace_evidence_excluded_from_accepted_view
+policy: context_corroboration.yaml
+context:
+  paranet: ops-paranet
+  scope_ual: ual:dkg:ops-paranet:auth:context:incident-125:claim-c1
+  view: accepted
+  snapshot_id: snap-context-05
+facts:
+  - [claim, c1]
+  - [supports, e1, c1]
+  - [supports, e2, c1]
+  - [evidence_view, e1, accepted]
+  - [evidence_view, e2, workspace]
+  - [independent, e1]
+  - [independent, e2]
+  - [authority_class, e1, vendor]
+  - [authority_class, e2, operator]
+  - [claim_epoch, c1, 7]
+expected:
+  derived:
+    corroborated: []
+    disputed: []
+    promotable: []
+  decisions:
+    propose_accept: []
+    propose_reject: []

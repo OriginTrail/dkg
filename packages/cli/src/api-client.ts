@@ -221,6 +221,104 @@ export class ApiClient {
     return this.get(`/api/paranet/exists?id=${encodeURIComponent(id)}`);
   }
 
+  async publishCclPolicy(request: {
+    paranetId: string;
+    name: string;
+    version: string;
+    content: string;
+    description?: string;
+    contextType?: string;
+    language?: string;
+    format?: string;
+  }): Promise<{ policyUri: string; hash: string; status: 'proposed' }> {
+    return this.post('/api/ccl/policy/publish', request);
+  }
+
+  async approveCclPolicy(request: {
+    paranetId: string;
+    policyUri: string;
+    contextType?: string;
+  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
+    return this.post('/api/ccl/policy/approve', request);
+  }
+
+  async revokeCclPolicy(request: {
+    paranetId: string;
+    policyUri: string;
+    contextType?: string;
+  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
+    return this.post('/api/ccl/policy/revoke', request);
+  }
+
+  async listCclPolicies(opts: {
+    paranetId?: string;
+    name?: string;
+    contextType?: string;
+    status?: string;
+    includeBody?: boolean;
+  } = {}): Promise<{ policies: any[] }> {
+    const params = new URLSearchParams();
+    if (opts.paranetId) params.set('paranetId', opts.paranetId);
+    if (opts.name) params.set('name', opts.name);
+    if (opts.contextType) params.set('contextType', opts.contextType);
+    if (opts.status) params.set('status', opts.status);
+    if (opts.includeBody) params.set('includeBody', 'true');
+    const qs = params.toString();
+    return this.get(`/api/ccl/policy/list${qs ? `?${qs}` : ''}`);
+  }
+
+  async resolveCclPolicy(opts: {
+    paranetId: string;
+    name: string;
+    contextType?: string;
+    includeBody?: boolean;
+  }): Promise<{ policy: any | null }> {
+    const params = new URLSearchParams({ paranetId: opts.paranetId, name: opts.name });
+    if (opts.contextType) params.set('contextType', opts.contextType);
+    if (opts.includeBody) params.set('includeBody', 'true');
+    return this.get(`/api/ccl/policy/resolve?${params.toString()}`);
+  }
+
+  async evaluateCclPolicy(request: {
+    paranetId: string;
+    name: string;
+    facts?: Array<[string, ...unknown[]]>;
+    contextType?: string;
+    view?: string;
+    snapshotId?: string;
+    scopeUal?: string;
+    publishResult?: boolean;
+  }): Promise<{
+    policy: any;
+    context: any;
+    factSetHash: string;
+    factQueryHash: string;
+    factResolverVersion: string;
+    factResolutionMode: 'manual' | 'snapshot-resolved';
+    result: any;
+  }> {
+    return this.post('/api/ccl/eval', request);
+  }
+
+  async listCclEvaluations(opts: {
+    paranetId: string;
+    policyUri?: string;
+    snapshotId?: string;
+    view?: string;
+    contextType?: string;
+    resultKind?: 'derived' | 'decision';
+    resultName?: string;
+  }): Promise<{ evaluations: any[] }> {
+    const params = new URLSearchParams({ paranetId: opts.paranetId });
+    if (opts.policyUri) params.set('policyUri', opts.policyUri);
+    if (opts.snapshotId) params.set('snapshotId', opts.snapshotId);
+    if (opts.view) params.set('view', opts.view);
+    if (opts.contextType) params.set('contextType', opts.contextType);
+    if (opts.resultKind) params.set('resultKind', opts.resultKind);
+    if (opts.resultName) params.set('resultName', opts.resultName);
+    return this.get(`/api/ccl/results?${params.toString()}`);
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});

@@ -1,0 +1,18 @@
+name: owner_valid_with_readable_variables
+policy: owner_assertion_readable.yaml
+context:
+  paranet: ops-paranet
+  scope_ual: ual:dkg:ops-paranet:auth:profile:p1
+  view: accepted
+  snapshot_id: snap-owner-readable-01
+facts:
+  - [claim, p1]
+  - [owner_of, p1, 0xalice]
+  - [signed_by, p1, 0xalice]
+expected:
+  derived:
+    owner_asserted:
+      - [p1]
+  decisions:
+    propose_accept:
+      - [p1]

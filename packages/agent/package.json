@@ -21,10 +21,18 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@libp2p/peer-id": "^6.0.4",
+    "@multiformats/multiaddr": "*",
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^2",
+    "@noble/ed25519": "^3",
+    "@noble/hashes": "^2",
     "ethers": "^6",
+    "js-yaml": "^4.1.1",
     "jsonld": "^8.3.3"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

@@ -20,10 +20,12 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
+    "js-yaml": "^4.1.1",
     "n3": "^2.0.1",
     "typescript": "^5.7"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/n3": "^1.26.1",
     "vitest": "^4.0.18"
   },
