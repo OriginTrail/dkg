@@ -1,7 +1,7 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, realpath } from 'node:fs/promises';
 import type { DashboardDB } from './db.js';
 import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
 import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
@@ -807,6 +807,34 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
 
+  const lexicalResolved = resolve(filePath);
+  const lexicalBase = resolve(staticDir);
+  const lexicalRel = relative(lexicalBase, lexicalResolved);
+  if (lexicalRel === '..' || lexicalRel.startsWith(`..${sep}`) || isAbsolute(lexicalRel) || resolve(lexicalBase, lexicalRel) !== lexicalResolved) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Forbidden' }));
+    return true;
+  }
+
+  if (existsSync(filePath)) {
+    try {
+      const realFile = await realpath(filePath);
+      const realBase = await realpath(staticDir);
+      const realRel = relative(realBase, realFile);
+      if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Forbidden' }));
+        return true;
+      }
+    }
+  }
+
   // SPA fallback: if not a file with extension, serve index.html
   const ext = filePath.slice(filePath.lastIndexOf('.'));
   if (!MIME[ext]) {
@@ -840,7 +868,16 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
         'Content-Length': s.size,
         'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
       });
-      createReadStream(filePath).pipe(res);
+      const stream = createReadStream(filePath);
+      stream.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Stream read error' }));
+        } else {
+          res.destroy(err);
+        }
+      });
+      stream.pipe(res);
     }
   } catch {
     res.writeHead(200, { 'Content-Type': 'text/html' });

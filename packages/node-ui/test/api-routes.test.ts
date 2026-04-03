@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { Readable, Writable } from 'node:stream';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleNodeUIRequest } from '../src/api.js';
@@ -32,6 +33,7 @@ function createMockRes(): {
     headers: Record<string, string>;
     body: string;
   };
+  finished: Promise<void>;
 } {
   const chunks: Buffer[] = [];
   const state = {
@@ -40,29 +42,42 @@ function createMockRes(): {
     body: '',
   };
 
-  const res: any = {
-    writableEnded: false,
-    destroyed: false,
+  let resolveFinished: () => void;
+  const finished = new Promise<void>((r) => { resolveFinished = r; });
+
+  const writable = new Writable({
+    write(chunk, _enc, cb) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      cb();
+    },
+    final(cb) {
+      state.body = Buffer.concat(chunks).toString('utf8');
+      resolveFinished();
+      cb();
+    },
+  });
+
+  const res = Object.assign(writable, {
+    headersSent: false,
+    statusCode: 200,
     writeHead(code: number, headers?: Record<string, string>) {
       state.statusCode = code;
       state.headers = headers ?? {};
+      (res as any).headersSent = true;
       return res;
-    },
-    write(chunk: Buffer | string) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
-      return true;
     },
     end(chunk?: Buffer | string) {
       if (chunk !== undefined) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
       }
       state.body = Buffer.concat(chunks).toString('utf8');
-      res.writableEnded = true;
+      writable.destroy();
+      resolveFinished();
       return res;
     },
-  };
+  });
 
-  return { res: res as ServerResponse, state };
+  return { res: res as unknown as ServerResponse, state, finished };
 }
 
 function parseJsonBody(body: string): any {
@@ -590,5 +605,100 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const body = parseJsonBody(state.body);
     expect(body.lines).toEqual([]);
     expect(body.totalSize).toBe(0);
+  });
+});
+
+describe('serveStatic path traversal prevention', () => {
+  let staticDir: string;
+
+  function fakeDb(dir: string) { return { dataDir: dir } as any; }
+
+  afterEach(() => {
+    if (staticDir) rmSync(staticDir, { recursive: true, force: true });
+  });
+
+  function setup(): void {
+    staticDir = mkdtempSync(join(tmpdir(), 'dkg-static-'));
+    writeFileSync(join(staticDir, 'index.html'), '<html></html>');
+    mkdirSync(join(staticDir, 'assets'), { recursive: true });
+    writeFileSync(join(staticDir, 'assets', 'app.js'), 'console.log("ok")');
+  }
+
+  it('URL normalization prevents ../ traversal at the HTTP layer', async () => {
+    setup();
+    const { req, url } = createMockReq({ method: 'GET', path: '/ui/../../etc/passwd' });
+    const { res, state } = createMockRes();
+
+    const handled = await handleNodeUIRequest(
+      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+
+    // URL parser normalizes /ui/../../etc/passwd to /etc/passwd which doesn't match /ui
+    expect(handled).toBe(false);
+  });
+
+  it('rejects ../ traversal if URL bypasses normalization (defense-in-depth)', async () => {
+    setup();
+    const { req } = createMockReq({ method: 'GET', path: '/ui/../../etc/passwd' });
+    const { res, state } = createMockRes();
+    const rawUrl = { pathname: '/ui/../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+
+    await handleNodeUIRequest(
+      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).toBe(403);
+    expect(state.body).toContain('Forbidden');
+  });
+
+  it('rejects deeply nested traversal if URL bypasses normalization', async () => {
+    setup();
+    const { req } = createMockReq({ method: 'GET', path: '/ui/x' });
+    const { res, state } = createMockRes();
+    const rawUrl = { pathname: '/ui/assets/../../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+
+    await handleNodeUIRequest(
+      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+
+    expect(state.statusCode).toBe(403);
+    expect(state.body).toContain('Forbidden');
+  });
+
+  it('serves valid /ui/index.html normally', async () => {
+    setup();
+    const { req, url } = createMockReq({ method: 'GET', path: '/ui/index.html' });
+    const { res, state, finished } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+    await finished;
+
+    expect(state.statusCode).toBe(200);
+    expect(state.body).toContain('<html>');
+  });
+
+  it('allows filenames starting with .. that are not traversals', () => {
+    const { relative: rel, resolve: res, sep: s, isAbsolute: abs } = require('node:path');
+    const base = '/srv/static';
+    const file = res(base, '..page.html');
+    const r = rel(base, file);
+    expect(r).toBe('..page.html');
+    expect(r === '..' || r.startsWith(`..${s}`) || abs(r)).toBe(false);
+  });
+
+  it('serves valid /ui/ root normally', async () => {
+    setup();
+    const { req, url } = createMockReq({ method: 'GET', path: '/ui/' });
+    const { res, state, finished } = createMockRes();
+
+    await handleNodeUIRequest(
+      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    );
+    await finished;
+
+    expect(state.statusCode).toBe(200);
+    expect(state.body).toContain('<html>');
   });
 });
