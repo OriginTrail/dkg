@@ -2137,8 +2137,6 @@ describe('Workspace lineage quads', () => {
   });
 });
 
-// TODO: Workspace lineage on success path is not yet implemented in coordinator
-// (writeLineageFromSnapshot is never called on successful publish — see TODO_UNRESOLVED_PR_COMMENTS.md)
 describe.skip('Workspace lineage tracking', () => {
   it('writes lineage quads after force-resolve turn publish', async () => {
     const leaderPeerId = 'lineage-leader';

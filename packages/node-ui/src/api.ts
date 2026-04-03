@@ -119,67 +119,6 @@ export async function handleNodeUIRequest(
     return json(res, 200, { snapshots });
   }
 
-  // --- Prometheus metrics ---
-
-  // TODO: Prometheus /metrics endpoint — implementation in progress, hidden until ready
-  // if (req.method === 'GET' && path === '/metrics') {
-  //   if (metricsCollector) {
-  //     try {
-  //       const m = await metricsCollector.collect();
-  //       const lines = [
-  //         `# HELP dkg_uptime_seconds Node uptime in seconds`,
-  //         `# TYPE dkg_uptime_seconds gauge`,
-  //         `dkg_uptime_seconds ${m.uptime_seconds ?? 0}`,
-  //         `# HELP dkg_cpu_percent CPU usage percentage`,
-  //         `# TYPE dkg_cpu_percent gauge`,
-  //         `dkg_cpu_percent ${m.cpu_percent ?? 0}`,
-  //         `# HELP dkg_memory_bytes Memory usage in bytes`,
-  //         `# TYPE dkg_memory_bytes gauge`,
-  //         `dkg_memory_bytes{type="heap"} ${m.heap_used_bytes ?? 0}`,
-  //         `dkg_memory_bytes{type="system"} ${m.mem_used_bytes ?? 0}`,
-  //         `# HELP dkg_peers_total Number of connected peers`,
-  //         `# TYPE dkg_peers_total gauge`,
-  //         `dkg_peers_total{type="direct"} ${m.direct_peers ?? 0}`,
-  //         `dkg_peers_total{type="relayed"} ${m.relayed_peers ?? 0}`,
-  //         `dkg_peers_total{type="mesh"} ${m.mesh_peers ?? 0}`,
-  //         `# HELP dkg_triples_total Total triples in the store`,
-  //         `# TYPE dkg_triples_total gauge`,
-  //         `dkg_triples_total ${m.total_triples ?? 0}`,
-  //         `# HELP dkg_kcs_total Knowledge collections`,
-  //         `# TYPE dkg_kcs_total gauge`,
-  //         `dkg_kcs_total{status="confirmed"} ${m.confirmed_kcs ?? 0}`,
-  //         `dkg_kcs_total{status="tentative"} ${m.tentative_kcs ?? 0}`,
-  //         `# HELP dkg_kas_total Knowledge assets`,
-  //         `# TYPE dkg_kas_total gauge`,
-  //         `dkg_kas_total ${m.total_kas ?? 0}`,
-  //         `# HELP dkg_store_bytes Triple store size in bytes`,
-  //         `# TYPE dkg_store_bytes gauge`,
-  //         `dkg_store_bytes ${m.store_bytes ?? 0}`,
-  //         `# HELP dkg_rpc_latency_ms RPC latency in milliseconds`,
-  //         `# TYPE dkg_rpc_latency_ms gauge`,
-  //         `dkg_rpc_latency_ms ${m.rpc_latency_ms ?? 0}`,
-  //         `# HELP dkg_rpc_healthy RPC health status (1=healthy, 0=unhealthy)`,
-  //         `# TYPE dkg_rpc_healthy gauge`,
-  //         `dkg_rpc_healthy ${m.rpc_healthy ?? 0}`,
-  //         '',
-  //       ];
-  //       res.writeHead(200, {
-  //         'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
-  //         'Cache-Control': 'no-cache',
-  //       });
-  //       res.end(lines.join('\n'));
-  //       return true;
-  //     } catch {
-  //       res.writeHead(503, { 'Content-Type': 'text/plain' });
-  //       res.end('# metrics temporarily unavailable\n');
-  //       return true;
-  //     }
-  //   }
-  //   res.writeHead(503, { 'Content-Type': 'text/plain' });
-  //   res.end('# metrics collector not initialized\n');
-  //   return true;
-  // }
-
   // --- Error hotspots ---
 
   if (req.method === 'GET' && path === '/api/error-hotspots') {

@@ -15,7 +15,6 @@
     "@multiformats/multiaddr": "*",
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2",
-    "@noble/ed25519": "^3",
     "@noble/hashes": "^2",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",

@@ -9,7 +9,7 @@ import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-c
 import {
   computeTripleHash, computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
-  validatePublishRequest,
+  validatePublishRequest, parseSimpleNQuads,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -319,68 +319,6 @@ export class GossipPublishHandler {
       );
     }
   }
-}
-
-function parseSimpleNQuads(text: string): Quad[] {
-  const quads: Quad[] = [];
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const body = trimmed.endsWith(' .') ? trimmed.slice(0, -2).trim() : trimmed;
-    const parts = splitNQuadLine(body);
-    if (parts.length >= 3) {
-      quads.push({
-        subject: strip(parts[0]),
-        predicate: strip(parts[1]),
-        object: parts[2].startsWith('"') ? parts[2] : strip(parts[2]),
-        graph: parts[3] ? strip(parts[3]) : '',
-      });
-    }
-  }
-  return quads;
-}
-
-function splitNQuadLine(line: string): string[] {
-  const parts: string[] = [];
-  let i = 0;
-  while (i < line.length) {
-    while (i < line.length && line[i] === ' ') i++;
-    if (i >= line.length) break;
-    if (line[i] === '<') {
-      const end = line.indexOf('>', i);
-      if (end === -1) break;
-      parts.push(line.slice(i, end + 1));
-      i = end + 1;
-    } else if (line[i] === '"') {
-      let j = i + 1;
-      while (j < line.length) {
-        if (line[j] === '\\') { j += 2; continue; }
-        if (line[j] === '"') {
-          j++;
-          if (line[j] === '@') { while (j < line.length && line[j] !== ' ') j++; }
-          else if (line[j] === '^' && line[j + 1] === '^') {
-            j += 2;
-            if (line[j] === '<') { const end = line.indexOf('>', j); if (end === -1) break; j = end + 1; }
-          }
-          break;
-        }
-        j++;
-      }
-      parts.push(line.slice(i, j));
-      i = j;
-    } else if (line[i] === '_') {
-      let j = i;
-      while (j < line.length && line[j] !== ' ') j++;
-      parts.push(line.slice(i, j));
-      i = j;
-    } else break;
-  }
-  return parts;
-}
-
-function strip(s: string): string {
-  if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
-  return s;
 }
 
 function protoToNumber(val: number | { low: number; high: number; unsigned: boolean }): number {

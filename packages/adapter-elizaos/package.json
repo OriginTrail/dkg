@@ -18,9 +18,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@origintrail-official/dkg-agent": "workspace:*",
-    "@origintrail-official/dkg-core": "workspace:*",
-    "@origintrail-official/dkg-storage": "workspace:*"
+    "@origintrail-official/dkg-agent": "workspace:*"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
