@@ -2675,6 +2675,23 @@ function getCurrentCliVersion(): string {
   } catch { return ''; }
 }
 
+export function parseMajorVersion(version: string): number | null {
+  const m = version.match(/^(\d+)\./);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Refuse to auto-update across major versions. A major version bump
+ * (e.g. 9.x → 10.x) indicates breaking protocol changes that require
+ * manual operator intervention — not a silent background update.
+ */
+export function isMajorVersionBump(currentVersion: string, targetVersion: string): boolean {
+  const currentMajor = parseMajorVersion(currentVersion);
+  const targetMajor = parseMajorVersion(targetVersion);
+  if (currentMajor === null || targetMajor === null) return false;
+  return targetMajor !== currentMajor;
+}
+
 export type NpmVersionStatus = {
   status: 'available' | 'up-to-date' | 'error';
   version?: string;
@@ -2702,6 +2719,14 @@ export async function checkForNpmVersionUpdate(
 
   if (result.version === currentVersion) return { status: 'up-to-date' };
   if (compareSemver(result.version, currentVersion) <= 0) return { status: 'up-to-date' };
+
+  if (isMajorVersionBump(currentVersion, result.version)) {
+    log(
+      `Auto-update (npm): major version change detected (${currentVersion} → ${result.version}). ` +
+      `Major upgrades require manual intervention. Skipping.`,
+    );
+    return { status: 'up-to-date' };
+  }
 
   return { status: 'available', version: result.version };
 }
@@ -3095,6 +3120,27 @@ async function _performUpdateInner(
   } catch (fetchErr: any) {
     log(`Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`);
     return 'failed';
+  }
+
+  // Major-version guard: refuse to auto-update across major versions.
+  const currentMajorVersion = getCurrentCliVersion();
+  try {
+    const fetchedPkgRaw = await readFile(join(targetDir, 'packages', 'cli', 'package.json'), 'utf-8');
+    const fetchedPkg = JSON.parse(fetchedPkgRaw) as { version?: string };
+    const fetchedVersion = String(fetchedPkg.version ?? '').trim();
+    if (currentMajorVersion && fetchedVersion && isMajorVersionBump(currentMajorVersion, fetchedVersion)) {
+      log(
+        `Auto-update: BLOCKED — major version change detected (${currentMajorVersion} → ${fetchedVersion}). ` +
+        `Major upgrades (e.g. V9 → V10) require manual operator intervention. ` +
+        `See https://docs.origintrail.io/upgrade for instructions.`,
+      );
+      return 'failed';
+    }
+    if (fetchedVersion) {
+      log(`Auto-update: version check passed (${currentMajorVersion || 'unknown'} → ${fetchedVersion}).`);
+    }
+  } catch {
+    log('Auto-update: could not read version from fetched code; proceeding with caution.');
   }
 
   try {
