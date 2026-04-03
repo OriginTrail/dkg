@@ -35,8 +35,9 @@ describe('DkgDaemonClient', () => {
 
   it('auto-loads the daemon auth token from ~/.dkg/auth.token', async () => {
     const readFileSync = vi.fn().mockReturnValue('# comment\nsecret-token\n');
+    const existsSync = vi.fn().mockReturnValue(true);
     const homedir = vi.fn().mockReturnValue('/fake-home');
-    vi.doMock('node:fs', () => ({ readFileSync }));
+    vi.doMock('node:fs', () => ({ readFileSync, existsSync }));
     vi.doMock('node:os', () => ({ homedir }));
     vi.resetModules();
 

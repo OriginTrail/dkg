@@ -104,6 +104,9 @@ importers:
 
   packages/adapter-openclaw:
     dependencies:
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       commander:
         specifier: ^13
         version: 13.1.0
