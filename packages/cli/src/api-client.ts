@@ -1,6 +1,11 @@
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
+export type QueryResult =
+  | { type: 'bindings'; bindings: Array<Record<string, string>> }
+  | { type: 'boolean'; value: boolean }
+  | { type?: undefined; [key: string]: unknown };
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
@@ -121,7 +126,7 @@ export class ApiClient {
     return this.post('/api/workspace/enshrine', { paranetId, selection, clearAfter });
   }
 
-  async query(sparql: string, paranetId?: string): Promise<{ result: any }> {
+  async query(sparql: string, paranetId?: string): Promise<{ result: QueryResult }> {
     return this.post('/api/query', { sparql, paranetId });
   }
 
@@ -235,7 +240,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((body as any).error ?? `HTTP ${res.status}`);
+      throw new Error((body as Record<string, unknown>).error as string ?? `HTTP ${res.status}`);
     }
     return res.json() as Promise<T>;
   }
@@ -248,7 +253,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((data as any).error ?? `HTTP ${res.status}`);
+      throw new Error((data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`);
     }
     return res.json() as Promise<T>;
   }
