@@ -9,7 +9,7 @@ developers integrating the DKG into their own agents (e.g. OpenClaw, ElizaOS).
 sequenceDiagram
     actor Dev as Developer / Framework
     participant Agent as @origintrail-official/dkg-agent<br/>DKGAgent
-    participant Wallet as @origintrail-official/dkg-agent<br/>AgentWallet
+    participant Wallet as @origintrail-official/dkg-agent<br/>DKGAgentWallet
     participant Node as @origintrail-official/dkg-core<br/>DKGNode
     participant Store as @origintrail-official/dkg-storage<br/>TripleStore
     participant Chain as @origintrail-official/dkg-chain<br/>EVMChainAdapter
@@ -23,10 +23,10 @@ sequenceDiagram
     Agent ->> Agent: Generate operationId (connect)
 
     alt dataDir exists
-        Agent ->> Wallet: AgentWallet.load(dataDir)
+        Agent ->> Wallet: DKGAgentWallet.load(dataDir)
         Wallet -->> Agent: Existing Ed25519 + X25519 keypairs
     else First run
-        Agent ->> Wallet: AgentWallet.generate()
+        Agent ->> Wallet: DKGAgentWallet.generate()
         Wallet -->> Agent: New keypairs
         Agent ->> Wallet: wallet.save(dataDir)
     end
@@ -54,7 +54,7 @@ sequenceDiagram
     Node -->> Agent: PeerId assigned
 
     Agent ->> Agent: Register protocol handlers
-    Note right of Agent: /dkg/publish/1.0.0<br/>/dkg/access/1.0.0
+    Note right of Agent: /dkg/publish/1.0.0<br/>/dkg/access/1.0.0<br/>/dkg/query/2.0.0<br/>/dkg/sync/1.0.0
 
     Agent ->> Gossip: Subscribe to paranet topics
     Note right of Gossip: dkg/paranet/id/publish<br/>for each configured paranet
@@ -89,25 +89,33 @@ sequenceDiagram
 
 ```typescript
 interface DKGAgentConfig {
+  name: string;                    // Human-readable node name
+  framework?: string;              // e.g. 'ElizaOS', 'OpenClaw', 'custom'
+  description?: string;            // Agent description
+
   // Network
-  listenAddresses?: string[];      // Default: random TCP + WS ports
+  listenPort?: number;             // Default: random
+  listenHost?: string;             // Default: '0.0.0.0'
   bootstrapPeers?: string[];       // DKG bootstrap multiaddrs
-  enableMdns?: boolean;            // Default: true (local discovery)
+  relayPeers?: string[];           // Relay multiaddrs for NAT traversal
+  announceAddresses?: string[];    // Multiaddrs to announce (VPS/cloud)
   nodeRole?: 'core' | 'edge';     // Default: 'edge'
 
   // Chain (optional — omit for offline mode)
-  chain?: {
+  chainConfig?: {
     rpcUrl: string;                // e.g. https://sepolia.base.org
-    privateKey: string;            // 0x-prefixed hex
     hubAddress: string;            // Hub contract address
+    operationalKeys: string[];     // Private keys for on-chain ops
+    chainId?: string;
   };
 
   // Storage
   dataDir?: string;                // Persistent data directory
-  store?: TripleStore;             // Custom store (default: Oxigraph)
+  store?: TripleStore;             // Custom store (default: Oxigraph worker)
+  storeConfig?: TripleStoreConfig; // Backend config (e.g. oxigraph-worker)
 
-  // Identity
-  publisherPrivateKey?: string;    // EVM key for on-chain publishing
+  // Skills (optional)
+  skills?: Array<{ skillType: string; handler: SkillHandler; ... }>;
 }
 ```
 
@@ -117,12 +125,13 @@ interface DKGAgentConfig {
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 
 const agent = await DKGAgent.create({
+  name: 'MyAgent',
   dataDir: './my-agent-data',
-  bootstrapPeers: ['/dns4/bootstrap.dkg.io/tcp/9000/...'],
-  chain: {
+  relayPeers: ['/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj'],
+  chainConfig: {
     rpcUrl: 'https://sepolia.base.org',
-    privateKey: process.env.EVM_KEY!,
-    hubAddress: '0x...',
+    hubAddress: '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6',
+    operationalKeys: [process.env.EVM_KEY!],
   },
 });
 

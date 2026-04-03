@@ -62,7 +62,7 @@ This brings the node online:
 2. **Protocol registration** -- A `ProtocolRouter` is created and handlers are registered for:
    - `/dkg/access/1.0.0` -- access-controlled data retrieval
    - `/dkg/publish/1.0.0` -- receive published knowledge collections
-   - `/dkg/query-remote/1.0.0` -- cross-agent SPARQL queries
+   - `/dkg/query/2.0.0` -- cross-agent SPARQL queries
    - `/dkg/sync/1.0.0` -- paginated data sync for new peers
 
 3. **GossipSub setup** -- A `GossipSubManager` subscribes to the system paranet topics (`agents`, `ontology`).

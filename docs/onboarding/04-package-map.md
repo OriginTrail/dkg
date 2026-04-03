@@ -1,6 +1,6 @@
 # Package Map
 
-This guide maps all 14 packages in the DKG v9 monorepo, explains what each one does, and shows how they depend on each other.
+This guide maps all 17 packages in the DKG v9 monorepo, explains what each one does, and shows how they depend on each other.
 
 > **Key Concepts**
 >
@@ -172,6 +172,13 @@ An OpenClaw plugin adapter that turns any OpenClaw agent into a DKG v9 node. Fol
 
 **Depends on**: `core`, `storage`, `agent`.
 
+### @origintrail-official/dkg-adapter-autoresearch
+`packages/adapter-autoresearch/`
+
+An adapter for the AutoResearch framework that integrates DKG capabilities into autonomous research pipelines.
+
+**Depends on**: `core`, `agent`.
+
 ### @origintrail-official/dkg-mcp-server
 `packages/mcp-server/`
 
@@ -213,6 +220,20 @@ A browser-based network simulator for visualizing DKG node interactions. A React
 
 **Depends on**: `react` (no workspace deps).
 
+### @origintrail-official/dkg-attested-assets
+`packages/attested-assets/`
+
+Attested Knowledge Assets (AKA) protocol implementation. Provides session management, multi-round attestation with M/N signature gating, canonical signing, and domain separation for collaborative knowledge attestation across multiple agents.
+
+**Depends on**: `core`, `agent`.
+
+### @origintrail-official/dkg-app-origin-trail-game
+`packages/origin-trail-game/`
+
+An installable DKG app implementing a multiplayer Oregon Trail-style game. Uses workspace writes, context graphs, and CAS conditions for coordinating swarm state across players. Serves as the reference implementation for the installable app pattern (see `DKG_APPS_INSTALLABLE.md`).
+
+**Depends on**: `core`, `agent`, `publisher`.
+
 ---
 
 ## "Where Do I Look?" Quick Reference
@@ -233,7 +254,7 @@ A browser-based network simulator for visualizing DKG node interactions. A React
 | Add a metric to the node dashboard              | `packages/node-ui/`              |
 | Customize knowledge graph rendering             | `packages/graph-viz/`            |
 | Understand network behavior visually            | `packages/network-sim/`          |
-| See how agent identity/profiles work            | `packages/agent/src/profile.ts`  |
+| See how agent identity/profiles work            | `packages/agent/src/profile-manager.ts`  |
 | Understand encrypted agent-to-agent messaging   | `packages/agent/src/messaging.ts`|
 | See the full agent orchestration lifecycle      | `packages/agent/src/dkg-agent.ts`|
 

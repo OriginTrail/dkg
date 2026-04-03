@@ -16,16 +16,31 @@ Agent runtime for DKG V9. Provides the `DKGAgent` class — the primary entry po
 ```typescript
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 
-const agent = new DKGAgent({
-  storagePath: './data',
-  network: 'testnet',
-  chainConfig: { rpcUrl: '...', privateKey: '...' },
+const agent = await DKGAgent.create({
+  name: 'my-agent',
+  dataDir: './data',
+  relayPeers: ['/dns4/relay.origintrail.io/tcp/9000/...'],
+  chainConfig: {
+    rpcUrl: 'https://sepolia.base.org',
+    hubAddress: '0x...',
+    operationalKeys: ['0xprivateKey1'],
+  },
 });
 
 await agent.start();
-await agent.publish({ paranetId: '...', nquads: myData });
 
-const agents = await agent.discover({ skill: 'sentiment-analysis' });
+// Publish Knowledge Assets (positional args)
+const result = await agent.publish('urn:paranet:example', quads, privateQuads);
+
+// Query the knowledge graph
+const { bindings } = await agent.query(
+  'SELECT ?s ?name WHERE { ?s <urn:name> ?name }',
+  { paranetId: 'urn:paranet:example' },
+);
+
+// Discover agents and skills
+const agents = await agent.findAgents();
+const skills = await agent.findSkills({ skillType: 'sentiment-analysis' });
 ```
 
 ## Internal Dependencies

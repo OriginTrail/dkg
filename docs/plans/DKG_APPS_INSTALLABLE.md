@@ -1,6 +1,9 @@
 # Installable DKG Apps — No edits to core packages
 
+**Status**: Implemented  
 **Goal:** Anyone can build an app (e.g. a game) in **their own repo**, publish it (npm, GitHub), and **node runners** can install it so the app appears in the Node UI and its API is served by the daemon — **without changing `packages/cli` or `packages/node-ui`** (or any other core package). No maintainer approval required for new apps.
+
+> **Implementation note (2026-03):** The app loader system is implemented in `packages/cli/src/app-loader.ts`. The daemon discovers app packages via the `dkgApp` manifest field, loads API handlers, and serves static UI. The `GET /api/apps` endpoint returns installed apps for the Node UI sidebar. The OriginTrail game (`packages/origin-trail-game`) is the reference installable app and ships as a default dependency.
 
 ---
 

@@ -18,13 +18,14 @@ Foundation package for DKG V9. Provides P2P networking, protocol messaging, cryp
 ## Usage
 
 ```typescript
-import { DKGNode, EventBus, Logger, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGNode, TypedEventBus, DKGEvent, Logger } from '@origintrail-official/dkg-core';
 
+const eventBus = new TypedEventBus();
 const node = new DKGNode(config);
 await node.start();
 
-EventBus.on('PEER_DISCOVERED', (peer) => {
-  console.log('Found peer:', peer.id);
+eventBus.on(DKGEvent.PEER_CONNECTED, (peer) => {
+  console.log('Peer connected:', peer);
 });
 ```
 

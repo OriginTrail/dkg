@@ -18,10 +18,18 @@ Triple store abstraction layer for DKG V9. Provides a unified API over multiple 
 ```typescript
 import { createTripleStore, GraphManager } from '@origintrail-official/dkg-storage';
 
-const store = createTripleStore({ backend: 'oxigraph', path: './data' });
+// In-memory store
+const memStore = await createTripleStore({ backend: 'oxigraph' });
+
+// Persistent store (requires a path)
+const store = await createTripleStore({
+  backend: 'oxigraph-persistent',
+  options: { path: './data' },
+});
+
 const graphs = new GraphManager(store);
 
-await store.insert(quads, { graph: 'urn:paranet:example:data' });
+await store.insert(quads);
 const result = await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
 ```
 

@@ -9,7 +9,7 @@ Prioritize correctness first, then maintainability and simplicity.
 - This repository is an early-stage `pnpm` + `turbo` monorepo.
 - Most packages are TypeScript-first and ESM-first.
 - It includes runtime packages, adapters, UI packages, and Solidity contracts.
-- Conventions are defined in `CLAUDE.md`.
+- Conventions are defined in `CLAUDE.md` and `CONTRIBUTING.md`.
 
 Because the project is evolving quickly, keep review guidance general and durable.
 Do not enforce overly narrow style preferences that may soon change.
@@ -19,8 +19,7 @@ Do not enforce overly narrow style preferences that may soon change.
 Read these before reviewing:
 
 1. `pr-diff.patch` (primary input)
-2. `CLAUDE.md` (project conventions and coding standards)
-3. `README.md` (project overview, if needed for additional context)
+2. `CLAUDE.md` (agent instructions) and `README.md`
 
 You may read additional files only to understand changed behavior in the diff.
 Do not review or mention unrelated unchanged code.
