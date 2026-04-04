@@ -2320,6 +2320,10 @@ export class DKGAgent {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
+        // Returns all connected peers. Non-core/edge peers are filtered out
+        // by the verifyIdentity callback which checks IdentityStorage on-chain.
+        // TODO: pre-filter by libp2p protocol support or cached role metadata
+        // to reduce P2P probing overhead on mixed networks.
         const peers = this.node.libp2p.getPeers();
         return peers
           .map(p => p.toString())
@@ -2328,11 +2332,11 @@ export class DKGAgent {
       verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => {
         try {
           const identityStorage = await (this.chain as any).resolveContract?.('IdentityStorage');
-          if (!identityStorage) return true;
+          if (!identityStorage) return false;
           const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
           return chainId === claimedIdentityId;
         } catch {
-          return true;
+          return false;
         }
       },
       log: (msg) => {

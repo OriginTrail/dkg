@@ -55,18 +55,22 @@ export class StorageACKHandler {
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
 
-    // Prefer inline staging quads (sent via direct P2P) over SWM lookup.
-    // This avoids workspace graph pollution from gossip-based pre-positioning.
-    let swmQuads: Quad[];
+    const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
+
+    // When inline staging quads are provided via P2P, persist them to SWM
+    // first to maintain the storage-attestation guarantee — we only sign
+    // after the data is actually stored locally.
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      swmQuads = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
-    } else {
-      const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
-      swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+      const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+      if (parsed.length > 0) {
+        const graphedQuads = parsed.map(q => ({ ...q, graph: swmGraphUri }));
+        await this.store.insert(graphedQuads);
+      }
     }
 
+    const swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+
     if (swmQuads.length === 0) {
-      const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
       throw new Error(`No data found in SWM graph ${swmGraphUri} for entities: ${intent.rootEntities.join(', ')}`);
     }
 
@@ -87,6 +91,14 @@ export class StorageACKHandler {
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );
+
+    const MAX_UINT64 = (1n << 64n) - 1n;
+    if (this.config.nodeIdentityId > MAX_UINT64) {
+      throw new Error(
+        `nodeIdentityId ${this.config.nodeIdentityId} exceeds uint64 wire format — ` +
+        `protocol upgrade required before this identity can issue ACKs`,
+      );
+    }
 
     return encodeStorageACK({
       merkleRoot,
