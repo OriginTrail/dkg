@@ -1197,7 +1197,6 @@ export class DKGAgent {
         );
       }
     }
-    const v10ACKProvider = this.createV10ACKProvider(paranetId);
     const result = await this.publisher.publish({
       paranetId,
       quads,
@@ -1207,7 +1206,6 @@ export class DKGAgent {
       allowedPeers: opts?.allowedPeers,
       operationCtx: ctx,
       onPhase,
-      v10ACKProvider,
     });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);

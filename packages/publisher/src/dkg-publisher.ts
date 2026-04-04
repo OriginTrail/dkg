@@ -718,8 +718,8 @@ export class DKGPublisher implements Publisher {
     const privateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRootV10(allSkolemizedQuads, privateRoots);
-    this.log.info(ctx, `Computed V10 kcMerkleRoot (keccak256) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
+    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -1030,7 +1030,7 @@ export class DKGPublisher implements Publisher {
     const updatePrivateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRootV10(allSkolemizedQuads, updatePrivateRoots);
+    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 

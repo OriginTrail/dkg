@@ -13,7 +13,7 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
-import { computeTripleHash, computeFlatKCRoot, computeFlatKCRootV10 } from './merkle.js';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
@@ -219,7 +219,7 @@ export class PublishHandler {
       const privateRoots = (request.kas ?? [])
         .filter(ka => ka.privateMerkleRoot?.length)
         .map(ka => new Uint8Array(ka.privateMerkleRoot));
-      const computedMerkleRoot = computeFlatKCRootV10(quads, privateRoots);
+      const computedMerkleRoot = computeFlatKCRoot(quads, privateRoots);
 
       const partitioned = autoPartition(quads);
 

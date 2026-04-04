@@ -91,6 +91,7 @@ export class ACKCollector {
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();
+    const seenIdentityIds = new Set<bigint>();
 
     const requestACK = async (peerId: string): Promise<CollectedACK | null> => {
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -138,8 +139,9 @@ export class ACKCollector {
         const promises = corePeers.map(async (peerId) => {
           if (collected.length >= REQUIRED_ACKS) return;
           const ack = await requestACK(peerId);
-          if (ack && !seenPeers.has(ack.peerId)) {
+          if (ack && !seenPeers.has(ack.peerId) && !seenIdentityIds.has(ack.nodeIdentityId)) {
             seenPeers.add(ack.peerId);
+            seenIdentityIds.add(ack.nodeIdentityId);
             collected.push(ack);
             if (collected.length >= REQUIRED_ACKS) return;
           }

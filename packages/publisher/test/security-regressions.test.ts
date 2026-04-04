@@ -15,7 +15,6 @@ import {
   computePublicRoot,
   computeKARoot,
   computeKCRoot,
-  computeFlatKCRootV10,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 
@@ -35,9 +34,16 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
-function computeGossipMerkleRoot(quads: Quad[], _manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
-  // V10: update handler uses flat keccak256 computation
-  return computeFlatKCRootV10(quads, []);
+function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
+  const partitioned = autoPartition(quads);
+  const kaRoots: Uint8Array[] = [];
+  for (const m of manifest) {
+    const entityQuads = partitioned.get(m.rootEntity) ?? [];
+    const pubRoot = computePublicRoot(entityQuads);
+    const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
+    kaRoots.push(computeKARoot(pubRoot, privRoot));
+  }
+  return computeKCRoot(kaRoots);
 }
 
 // =====================================================================

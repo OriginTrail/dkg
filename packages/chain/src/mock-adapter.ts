@@ -684,9 +684,14 @@ export class MockChainAdapter implements ChainAdapter {
       convictionAccountId: params.convictionAccountId.toString(),
     });
 
+    const startKAId = kcId * 100n + 1n;
+    const endKAId = startKAId + BigInt(params.knowledgeAssetsAmount) - 1n;
+
     const result = this.txResult(true);
     return {
       batchId: kcId,
+      startKAId,
+      endKAId,
       txHash: result.hash,
       blockNumber: result.blockNumber,
       blockTimestamp: Math.floor(Date.now() / 1000),

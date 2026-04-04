@@ -16,7 +16,6 @@ import {
   decodePublishAck,
   createOperationContext,
   MerkleTree,
-  V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -24,7 +23,7 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
-import { computeTripleHash, computeTripleHashV10 } from '../src/merkle.js';
+import { computeTripleHash } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 const PARANET = 'test-lifecycle';
@@ -62,9 +61,8 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.merkleRoot).toHaveLength(32);
     expect(result.status).toBe('confirmed');
 
-    // V10: verify against keccak256 merkle
-    const hashes = triples.map(computeTripleHashV10);
-    const flatTree = new V10MerkleTree(hashes);
+    const hashes = triples.map(computeTripleHash);
+    const flatTree = new MerkleTree(hashes);
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
@@ -97,9 +95,8 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     expect(result.merkleRoot).toHaveLength(32);
 
-    // V10: verify against keccak256 merkle
-    const hashes = triples.map(computeTripleHashV10);
-    const flatTree = new V10MerkleTree(hashes);
+    const hashes = triples.map(computeTripleHash);
+    const flatTree = new MerkleTree(hashes);
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
@@ -133,9 +130,8 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     });
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
-    // V10 golden value: keccak256 merkle root over 6 fixed quads
     const goldenHex =
-      'd0d2a43d52a4925eabf280043ac3fa21043d7da90f9813fb22fecfc038d3da97';
+      '89a5e67f0c299318f22ba653ebae8eb5eb98e49f69126e901b067a6596abcc4b';
     expect(actualHex).toBe(goldenHex);
   });
 
@@ -207,10 +203,9 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
 
-    // V10: verify against keccak256 merkle with private root as synthetic leaf
-    const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHashV10);
+    const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
     const privateRoot = result.kaManifest[0].privateMerkleRoot!;
-    const expectedRoot = new V10MerkleTree([...publicHashes, privateRoot]).root;
+    const expectedRoot = new MerkleTree([...publicHashes, privateRoot]).root;
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(expectedRoot).toString('hex'));
   });
@@ -267,9 +262,12 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
     expect(result.merkleRoot).toHaveLength(32);
     const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
 
-    // V10: Receiver uses keccak256 triple hashing + V10MerkleTree
-    const receiverHashes = result.publicQuads!.map(computeTripleHashV10);
-    const receiverRoot = new V10MerkleTree(receiverHashes).root;
+    // Simulate what a receiver does: hash all received public quads with
+    // computeTripleHash and build a flat MerkleTree. This MUST match the
+    // publisher's root — if it doesn't, the finalization handler will log
+    // "merkle mismatch" and fall back to full-payload sync.
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
+    const receiverRoot = new MerkleTree(receiverHashes).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);
@@ -298,9 +296,8 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
     });
 
     const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
-    // V10: use keccak256 triple hashing
-    const receiverHashes = result.publicQuads!.map(computeTripleHashV10);
-    const receiverRoot = new V10MerkleTree(receiverHashes).root;
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
+    const receiverRoot = new MerkleTree(receiverHashes).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);
@@ -335,12 +332,12 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
 
     const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
 
-    // V10: Receiver uses keccak256 + private roots as synthetic leaves
-    const receiverHashes = result.publicQuads!.map(computeTripleHashV10);
+    // Receiver sees public quads + private roots from manifest as synthetic leaves
+    const receiverHashes = result.publicQuads!.map(computeTripleHash);
     const privateRoots = result.kaManifest
       .filter(m => m.privateMerkleRoot)
       .map(m => m.privateMerkleRoot!);
-    const receiverRoot = new V10MerkleTree([...receiverHashes, ...privateRoots]).root;
+    const receiverRoot = new MerkleTree([...receiverHashes, ...privateRoots]).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);
@@ -355,9 +352,8 @@ describe('Tentative data and chain event confirmation', () => {
     const publisherAddress = TEST_WALLET.address;
 
     const triples = [q('did:dkg:agent:QmTentative', 'http://schema.org/name', '"TentBot"')];
-    // V10: handler now stores V10 merkle root internally
-    const hashes = triples.map(computeTripleHashV10);
-    const merkleRoot = new V10MerkleTree(hashes).root;
+    const hashes = triples.map(computeTripleHash);
+    const merkleRoot = new MerkleTree(hashes).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
@@ -551,9 +547,8 @@ describe('Tentative data and chain event confirmation', () => {
     const publisherAddress = TEST_WALLET.address;
 
     const triples = [q('did:dkg:agent:QmByRoot', 'http://schema.org/name', '"RootBot"')];
-    // V10: use keccak256 merkle to match handler's internal computation
-    const hashes = triples.map(computeTripleHashV10);
-    const merkleRoot = new V10MerkleTree(hashes).root;
+    const hashes = triples.map(computeTripleHash);
+    const merkleRoot = new MerkleTree(hashes).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
@@ -614,9 +609,11 @@ describe('Tentative data and chain event confirmation', () => {
       quads: triples,
     });
 
-    // V10: Receiver and handler both use V10 keccak256 merkle
-    const _hashes = triples.map(computeTripleHashV10);
-    const _expectedMerkleRoot = new V10MerkleTree(_hashes).root;
+    // Simulate a receiver getting the data via P2P: build the same merkle root
+    // The handler computes its own merkle root from the autoPartition of received quads,
+    // so we need to ensure the merkle root matches what the chain event carries.
+    const hashes = triples.map(computeTripleHash);
+    const expectedMerkleRoot = new MerkleTree(hashes).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,

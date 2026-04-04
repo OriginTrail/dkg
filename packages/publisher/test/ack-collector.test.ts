@@ -78,18 +78,25 @@ describe('ACKCollector', () => {
     }
   });
 
-  it('deduplicates by peerId', async () => {
+  it('deduplicates by peerId and nodeIdentityId', async () => {
+    const peerIdentityMap: Record<string, number> = {
+      'peer-0': 1,
+      'peer-1': 2,
+      'peer-2': 3,
+      'peer-3': 4,
+    };
     const deps: ACKCollectorDeps = {
       gossipPublish: async () => {},
-      sendP2P: async (_peerId) => {
-        const wallet = coreWallets[0];
+      sendP2P: async (peerId) => {
+        const walletIdx = Math.min(Object.keys(peerIdentityMap).indexOf(peerId), coreWallets.length - 1);
+        const wallet = coreWallets[walletIdx >= 0 ? walletIdx : 0];
         const { r, vs } = await signACK(wallet, testCGId, merkleRoot);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
           coreNodeSignatureVS: vs,
           contextGraphId: testCGIdStr,
-          nodeIdentityId: 1,
+          nodeIdentityId: peerIdentityMap[peerId] ?? 1,
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
@@ -111,6 +118,8 @@ describe('ACKCollector', () => {
     expect(result.acks).toHaveLength(3);
     const peerIds = new Set(result.acks.map(a => a.peerId));
     expect(peerIds.size).toBe(3);
+    const identityIds = new Set(result.acks.map(a => a.nodeIdentityId));
+    expect(identityIds.size).toBe(3);
   });
 
   it('fails if no connected peers', async () => {

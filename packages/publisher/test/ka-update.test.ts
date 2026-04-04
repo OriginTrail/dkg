@@ -4,7 +4,7 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, computeFlatKCRootV10, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
+import { DKGPublisher, UpdateHandler, autoPartition, computePublicRoot, computeKARoot, computeKCRoot, computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -766,7 +766,7 @@ describe('UpdateHandler', () => {
     expect(newRootResult.type).toBe('bindings');
     if (newRootResult.type === 'bindings') {
       expect(newRootResult.bindings.length).toBe(1);
-      const newRootHex = toHex(computeFlatKCRootV10(updateQuads, []));
+      const newRootHex = toHex(computeFlatKCRoot(updateQuads, []));
       expect(newRootResult.bindings[0]['root']).toContain(newRootHex);
       expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
     }

@@ -6,7 +6,7 @@ import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@origintrai
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computeTripleHash, computeFlatKCRoot, computeFlatKCRootV10 } from './merkle.js';
+import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
 import { updateMetaMerkleRoot } from './metadata.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
@@ -136,7 +136,7 @@ export class UpdateHandler {
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
 
-      const computedRoot = computeFlatKCRootV10(quads, []);
+      const computedRoot = computeFlatKCRoot(quads, []);
 
       const partitioned = autoPartition(quads);
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));

@@ -4,6 +4,7 @@ import {
   decodePublishIntent,
   encodeStorageACK,
   computeACKDigest,
+  assertSafeIri,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { ethers } from 'ethers';
@@ -88,6 +89,7 @@ export class StorageACKHandler {
   };
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
+    assertSafeIri(graphUri);
     if (rootEntities.length === 0) {
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`;
       const result = await this.store.query(sparql);
@@ -96,7 +98,9 @@ export class StorageACKHandler {
 
     const allQuads: Quad[] = [];
     for (const entity of rootEntities) {
-      const sparql = `CONSTRUCT { <${entity}> ?p ?o } WHERE { GRAPH <${graphUri}> { <${entity}> ?p ?o } }`;
+      assertSafeIri(entity);
+      const genidPrefix = `${entity}/.well-known/genid/`;
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } }`;
       const result = await this.store.query(sparql);
       if (result.type === 'quads') {
         allQuads.push(...result.quads);

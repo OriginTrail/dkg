@@ -1072,6 +1072,9 @@ export class EVMChainAdapter implements ChainAdapter {
     if (!receipt) throw new Error('Transaction receipt is null');
 
     let kcId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = txSigner.address;
     const kcs = this.contracts.knowledgeCollectionStorage;
     if (kcs) {
       for (const log of receipt.logs) {
@@ -1083,15 +1086,30 @@ export class EVMChainAdapter implements ChainAdapter {
         } catch { /* not this contract */ }
       }
     }
+    const kaStorage = this.contracts.knowledgeAssetsStorage;
+    if (kaStorage) {
+      for (const log of receipt.logs) {
+        try {
+          const parsed = kaStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed?.name === 'UALRangeReserved') {
+            publisherAddress = parsed.args.publisher;
+            startKAId = BigInt(parsed.args.startId);
+            endKAId = BigInt(parsed.args.endId);
+          }
+        } catch { /* not this contract */ }
+      }
+    }
 
     const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
 
     return {
       batchId: kcId,
+      startKAId,
+      endKAId,
       txHash: receipt.hash,
       blockNumber: receipt.blockNumber,
       blockTimestamp,
-      publisherAddress: txSigner.address,
+      publisherAddress,
       gasUsed: receipt.gasUsed ? BigInt(receipt.gasUsed) : undefined,
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
