@@ -28,7 +28,7 @@ export interface ACKCollectionResult {
   contextGraphId: bigint;
 }
 
-const REQUIRED_ACKS = 3;
+const DEFAULT_REQUIRED_ACKS = 3;
 const ACK_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 
@@ -58,12 +58,14 @@ export class ACKCollector {
     kaCount: number;
     rootEntities: string[];
     finalizationTopic: string;
+    requiredACKs?: number;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
       publisherPeerId, publicByteSize, isPrivate,
       kaCount, rootEntities, finalizationTopic,
     } = params;
+    const REQUIRED_ACKS = params.requiredACKs ?? DEFAULT_REQUIRED_ACKS;
 
     const log = this.deps.log ?? (() => {});
 

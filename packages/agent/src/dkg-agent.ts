@@ -315,20 +315,6 @@ export class DKGAgent {
       }
     }
 
-    // Register V10 StorageACK handler (core nodes only)
-    if ((this.config.nodeRole ?? 'edge') === 'core' && this.config.chainConfig?.operationalKeys?.[0]) {
-      const ackSignerWallet = new ethers.Wallet(this.config.chainConfig.operationalKeys[0]);
-      const identityId = await this.chain.getIdentityId();
-      const ackHandler = new StorageACKHandler(this.store, {
-        nodeRole: 'core',
-        nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
-        signerWallet: ackSignerWallet,
-        contextGraphSharedMemoryUri,
-      }, this.eventBus);
-      this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-      this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
-    }
-
     // Register cross-agent query handler (deny-by-default for security)
     const queryAccessConfig: QueryAccessConfig = this.config.queryAccess ?? {
       defaultPolicy: 'deny',
@@ -355,7 +341,6 @@ export class DKGAgent {
         }
       } catch (err) {
         this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
-        // Profile may have been created before the error — re-check
         try {
           identityId = await this.chain.getIdentityId();
           if (identityId > 0n) {
@@ -368,6 +353,24 @@ export class DKGAgent {
         this.log.info(ctx, `Publisher using identityId=${identityId}`);
       } else {
         this.log.warn(ctx, `No valid on-chain identity — on-chain publishes will be skipped`);
+      }
+    }
+
+    // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved
+    if ((this.config.nodeRole ?? 'edge') === 'core' && this.config.chainConfig?.operationalKeys?.[0]) {
+      const ackSignerWallet = new ethers.Wallet(this.config.chainConfig.operationalKeys[0]);
+      const identityId = await this.chain.getIdentityId();
+      if (identityId > 0n) {
+        const ackHandler = new StorageACKHandler(this.store, {
+          nodeRole: 'core',
+          nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
+          signerWallet: ackSignerWallet,
+          contextGraphSharedMemoryUri,
+        }, this.eventBus);
+        this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+        this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
+      } else {
+        this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
       }
     }
 
@@ -1197,6 +1200,7 @@ export class DKGAgent {
         );
       }
     }
+    const v10ACKProvider = this.createV10ACKProvider(paranetId);
     const result = await this.publisher.publish({
       paranetId,
       quads,
@@ -1206,6 +1210,7 @@ export class DKGAgent {
       allowedPeers: opts?.allowedPeers,
       operationCtx: ctx,
       onPhase,
+      v10ACKProvider,
     });
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
@@ -2290,8 +2295,9 @@ export class DKGAgent {
 
   /**
    * Create a V10 ACK provider callback for the publisher.
-   * Uses ACKCollector to broadcast PublishIntent and collect 3 StorageACKs
-   * via direct P2P from connected core nodes.
+   * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
+   * via direct P2P from connected core nodes. The required number of ACKs
+   * is read from chain ParametersStorage.minimumRequiredSignatures().
    */
   private createV10ACKProvider(paranetId: string) {
     if (!this.router || !this.gossip) return undefined;
@@ -2315,6 +2321,8 @@ export class DKGAgent {
       },
     });
 
+    const chain = this.chain;
+
     return async (
       merkleRoot: Uint8Array,
       contextGraphId: string,
@@ -2323,10 +2331,12 @@ export class DKGAgent {
       publicByteSize: bigint,
     ) => {
       const finalizationTopic = paranetFinalizationTopic(paranetId);
-      // Derive a numeric context graph ID from the string for the ACK digest.
-      // In V10 production, this will be the on-chain CG uint256 ID.
       const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
       const cgIdBigInt = BigInt(cgIdHash);
+
+      const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
+        ? await chain.getMinimumRequiredSignatures()
+        : undefined;
 
       const result = await collector.collect({
         merkleRoot,
@@ -2338,6 +2348,7 @@ export class DKGAgent {
         kaCount,
         rootEntities,
         finalizationTopic,
+        requiredACKs,
       });
       return result.acks;
     };

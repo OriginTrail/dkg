@@ -684,7 +684,7 @@ export class DKGPublisher implements Publisher {
         tokenId: tokenCounter,
         rootEntity,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRootV10(entityPrivateQuads)
+          ? computePrivateRoot(entityPrivateQuads)
           : undefined,
         privateTripleCount: entityPrivateQuads.length,
       });
@@ -696,7 +696,7 @@ export class DKGPublisher implements Publisher {
         publicTripleCount: publicQuads.length,
         privateTripleCount: entityPrivateQuads.length,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRootV10(entityPrivateQuads)
+          ? computePrivateRoot(entityPrivateQuads)
           : undefined,
       });
 
@@ -1019,7 +1019,7 @@ export class DKGPublisher implements Publisher {
         tokenId: tokenCounter++,
         rootEntity,
         privateMerkleRoot: entityPrivateQuads.length > 0
-          ? computePrivateRootV10(entityPrivateQuads) : undefined,
+          ? computePrivateRoot(entityPrivateQuads) : undefined,
         privateTripleCount: entityPrivateQuads.length,
       });
     }

@@ -597,6 +597,10 @@ export class MockChainAdapter implements ChainAdapter {
     return { r: new Uint8Array(32), vs: new Uint8Array(32) };
   }
 
+  async getMinimumRequiredSignatures(): Promise<number> {
+    return this.minimumRequiredSignatures;
+  }
+
   async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {

@@ -1083,18 +1083,10 @@ export class EVMChainAdapter implements ChainAdapter {
           if (parsed?.name === 'KnowledgeCollectionCreated') {
             kcId = BigInt(parsed.args.id);
           }
-        } catch { /* not this contract */ }
-      }
-    }
-    const kaStorage = this.contracts.knowledgeAssetsStorage;
-    if (kaStorage) {
-      for (const log of receipt.logs) {
-        try {
-          const parsed = kaStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (parsed?.name === 'UALRangeReserved') {
-            publisherAddress = parsed.args.publisher;
+          if (parsed?.name === 'KnowledgeAssetsMinted') {
             startKAId = BigInt(parsed.args.startId);
             endKAId = BigInt(parsed.args.endId);
+            publisherAddress = parsed.args.to;
           }
         } catch { /* not this contract */ }
       }
@@ -1123,6 +1115,11 @@ export class EVMChainAdapter implements ChainAdapter {
 
   getSignerAddress(): string {
     return this.signer.address;
+  }
+
+  async getMinimumRequiredSignatures(): Promise<number> {
+    if (!this.contracts.parametersStorage) return 3;
+    return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

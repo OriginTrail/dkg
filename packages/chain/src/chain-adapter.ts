@@ -321,6 +321,9 @@ export interface ChainAdapter {
   // V10 publish (KnowledgeAssetsV10 contract — writes to KnowledgeCollectionStorage)
   createKnowledgeAssetsV10?(params: V10PublishParams): Promise<OnChainPublishResult>;
 
+  /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
+  getMinimumRequiredSignatures?(): Promise<number>;
+
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
