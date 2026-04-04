@@ -101,7 +101,8 @@ export class ACKCollector {
           const response = await this.deps.sendP2P(peerId, PROTOCOL_STORAGE_ACK, intentBytes);
           const ack: StorageACKMsg = decodeStorageACK(response);
 
-          if (!this.verifyACKSignature(ack, ackDigest)) {
+          const recoveredAddress = this.recoverACKSigner(ack, ackDigest);
+          if (!recoveredAddress) {
             log(`[ACKCollector] Invalid ACK signature from ${peerId.slice(-8)}`);
             return null;
           }
@@ -115,7 +116,7 @@ export class ACKCollector {
             ? BigInt(ack.nodeIdentityId)
             : BigInt(ack.nodeIdentityId.low) | (BigInt(ack.nodeIdentityId.high) << 32n);
 
-          log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId})`);
+          log(`[ACKCollector] Valid ACK from ${peerId.slice(-8)} (identity=${identityId}, signer=${recoveredAddress.slice(0, 10)}...)`);
 
           return {
             peerId,
@@ -136,6 +137,9 @@ export class ACKCollector {
       return null;
     };
 
+    let quorumResolve: (() => void) | undefined;
+    const quorumPromise = new Promise<void>(resolve => { quorumResolve = resolve; });
+
     await Promise.race([
       (async () => {
         const promises = corePeers.map(async (peerId) => {
@@ -145,10 +149,13 @@ export class ACKCollector {
             seenPeers.add(ack.peerId);
             seenIdentityIds.add(ack.nodeIdentityId);
             collected.push(ack);
-            if (collected.length >= REQUIRED_ACKS) return;
+            if (collected.length >= REQUIRED_ACKS) {
+              quorumResolve?.();
+              return;
+            }
           }
         });
-        await Promise.allSettled(promises);
+        await Promise.race([Promise.allSettled(promises), quorumPromise]);
       })(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`storage_ack_timeout: only ${collected.length}/${REQUIRED_ACKS} ACKs received within ${ACK_TIMEOUT_MS}ms`)),
@@ -172,7 +179,12 @@ export class ACKCollector {
     };
   }
 
-  private verifyACKSignature(ack: StorageACKMsg, expectedDigest: Uint8Array): boolean {
+  /**
+   * Recover the signer address from an ACK signature. Returns the address
+   * or null if the signature is malformed. On-chain verification in
+   * KnowledgeAssetsV10 binds this address to the claimed nodeIdentityId.
+   */
+  private recoverACKSigner(ack: StorageACKMsg, expectedDigest: Uint8Array): string | null {
     try {
       const r = ethers.hexlify(ack.coreNodeSignatureR);
       const vs = ethers.hexlify(ack.coreNodeSignatureVS);
@@ -180,9 +192,9 @@ export class ACKCollector {
       const prefixedHash = ethers.hashMessage(expectedDigest);
       const recovered = ethers.recoverAddress(prefixedHash, { r, yParityAndS: vs });
 
-      return recovered.length > 0;
+      return recovered || null;
     } catch {
-      return false;
+      return null;
     }
   }
 

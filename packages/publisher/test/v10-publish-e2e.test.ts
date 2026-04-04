@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10, computeTripleHashV10 } from '../src/merkle.js';
+import { computeFlatKCRoot, computeFlatKCRootV10, computeTripleHashV10 } from '../src/merkle.js';
 import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
@@ -36,7 +36,7 @@ describe('V10 Publish E2E', () => {
 
   it('full V10 publish flow: merkle → ACK collection → verification', async () => {
     // Phase 1: Publisher computes V10 merkle root
-    const merkleRoot = computeFlatKCRootV10(publishQuads, []);
+    const merkleRoot = computeFlatKCRoot(publishQuads, []);
     expect(merkleRoot).toBeInstanceOf(Uint8Array);
     expect(merkleRoot.length).toBe(32);
 
@@ -44,7 +44,7 @@ describe('V10 Publish E2E', () => {
     const coreNodeResponses = await Promise.all(
       coreWallets.map(async (wallet, idx) => {
         // Core node recomputes merkle root from its SWM copy
-        const localRoot = computeFlatKCRootV10(publishQuads, []);
+        const localRoot = computeFlatKCRoot(publishQuads, []);
         expect(Buffer.from(localRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
         // Core node signs ACK: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
@@ -82,10 +82,9 @@ describe('V10 Publish E2E', () => {
   });
 
   it('StorageACKHandler + ACKCollector round-trip', async () => {
-    const merkleRoot = computeFlatKCRootV10(publishQuads, []);
+    const merkleRoot = computeFlatKCRoot(publishQuads, []);
     const rootEntities = ['urn:experiment:wsd'];
 
-    // Set up a mock store that returns publishQuads for CONSTRUCT queries
     const mockStore = {
       insert: vi.fn(),
       delete: vi.fn(),
@@ -93,7 +92,18 @@ describe('V10 Publish E2E', () => {
       hasGraph: vi.fn().mockResolvedValue(true),
       createGraph: vi.fn(),
       dropGraph: vi.fn(),
-      query: vi.fn().mockResolvedValue({ type: 'quads' as const, quads: publishQuads }),
+      query: vi.fn().mockImplementation((sparql: string) => {
+        const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
+        if (entityMatch) {
+          const entity = entityMatch[1];
+          const genidPrefix = `${entity}/.well-known/genid/`;
+          const filtered = publishQuads.filter(q =>
+            q.subject === entity || q.subject.startsWith(genidPrefix),
+          );
+          return Promise.resolve({ type: 'quads' as const, quads: filtered });
+        }
+        return Promise.resolve({ type: 'quads' as const, quads: publishQuads });
+      }),
       close: vi.fn(),
     };
 

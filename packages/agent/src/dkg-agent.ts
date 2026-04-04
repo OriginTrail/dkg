@@ -2310,6 +2310,9 @@ export class DKGAgent {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
+        // Returns all connected peers; non-core nodes reject with
+        // "Only core nodes can issue StorageACKs" (handled by retry loop).
+        // TODO: filter by sharding table / profile role metadata.
         const peers = this.node.libp2p.getPeers();
         return peers
           .map(p => p.toString())

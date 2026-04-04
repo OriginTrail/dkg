@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10 } from '../src/merkle.js';
+import { computeFlatKCRoot } from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computeACKDigest,
 } from '@origintrail-official/dkg-core';
@@ -25,7 +25,7 @@ describe('StorageACKHandler', () => {
     makeQuad('urn:entity:1', 'urn:p', 'urn:o2'),
     makeQuad('urn:entity:2', 'urn:p', 'urn:o3'),
   ];
-  const merkleRoot = computeFlatKCRootV10(swmQuads, []);
+  const merkleRoot = computeFlatKCRoot(swmQuads, []);
 
   const coreWallet = ethers.Wallet.createRandom();
   const coreIdentityId = 42n;
@@ -39,7 +39,18 @@ describe('StorageACKHandler', () => {
       hasGraph: vi.fn().mockResolvedValue(true),
       createGraph: vi.fn(),
       dropGraph: vi.fn(),
-      query: vi.fn().mockResolvedValue({ type: 'quads' as const, quads: storeQuads }),
+      query: vi.fn().mockImplementation((sparql: string) => {
+        const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
+        if (entityMatch) {
+          const entity = entityMatch[1];
+          const genidPrefix = `${entity}/.well-known/genid/`;
+          const filtered = storeQuads.filter(q =>
+            q.subject === entity || q.subject.startsWith(genidPrefix),
+          );
+          return Promise.resolve({ type: 'quads' as const, quads: filtered });
+        }
+        return Promise.resolve({ type: 'quads' as const, quads: storeQuads });
+      }),
       close: vi.fn(),
     };
 

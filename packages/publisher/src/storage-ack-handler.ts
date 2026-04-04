@@ -6,7 +6,7 @@ import {
   computeACKDigest,
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 } from './merkle.js';
+import { computeFlatKCRoot } from './merkle.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -61,7 +61,7 @@ export class StorageACKHandler {
       throw new Error(`No data found in SWM graph ${swmGraphUri} for entities: ${intent.rootEntities.join(', ')}`);
     }
 
-    const recomputedRoot = computeFlatKCRootV10(swmQuads, []);
+    const recomputedRoot = computeFlatKCRoot(swmQuads, []);
 
     if (!bytesEqual(recomputedRoot, merkleRoot)) {
       throw new Error(

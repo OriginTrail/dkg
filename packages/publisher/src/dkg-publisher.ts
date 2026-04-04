@@ -754,9 +754,12 @@ export class DKGPublisher implements Publisher {
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 
-    // V10: Collect 3 core node StorageACKs (spec §9.0, Phase 3)
+    // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
+    // Skipped for private publishes because StorageACKHandler cannot recompute
+    // private merkle roots from SWM data alone.
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
-    if (options.v10ACKProvider) {
+    const hasPrivateData = privateRoots.length > 0;
+    if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
