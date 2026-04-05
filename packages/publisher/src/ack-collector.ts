@@ -99,7 +99,7 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const ackDigest = computeACKDigest(contextGraphId, merkleRoot);
+    const ackDigest = computeACKDigest(contextGraphId, merkleRoot, kaCount);
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();

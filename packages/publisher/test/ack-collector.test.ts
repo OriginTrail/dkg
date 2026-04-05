@@ -8,8 +8,8 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test') {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot);
+async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number) {
+  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount);
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -38,7 +38,7 @@ describe('ACKCollector', () => {
       sendP2P: async (peerId, _protocol, _data) => {
         const idx = parseInt(peerId.replace('peer-', ''), 10);
         const wallet = coreWallets[idx];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -89,7 +89,7 @@ describe('ACKCollector', () => {
       sendP2P: async (peerId) => {
         const walletIdx = Math.min(Object.keys(peerIdentityMap).indexOf(peerId), coreWallets.length - 1);
         const wallet = coreWallets[walletIdx >= 0 ? walletIdx : 0];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -148,7 +148,7 @@ describe('ACKCollector', () => {
         callCount++;
         if (callCount > 2) throw new Error('peer offline');
         const wallet = coreWallets[callCount - 1];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1);
         return encodeStorageACK({
           merkleRoot,
           coreNodeSignatureR: r,
@@ -179,7 +179,7 @@ describe('ACKCollector', () => {
       gossipPublish: async () => {},
       sendP2P: async (_peerId, _protocol, _data) => {
         const wallet = coreWallets[0];
-        const { r, vs } = await signACK(wallet, testCGId, merkleRoot);
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1);
         return encodeStorageACK({
           merkleRoot: wrongRoot,
           coreNodeSignatureR: r,

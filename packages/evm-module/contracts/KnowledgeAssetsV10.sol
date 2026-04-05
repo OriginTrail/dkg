@@ -145,7 +145,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             publisherNodeVS
         );
 
-        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot));
+        bytes32 ackDigest = keccak256(abi.encodePacked(contextGraphId, merkleRoot, knowledgeAssetsAmount));
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
 
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;

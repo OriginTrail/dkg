@@ -48,6 +48,7 @@ async function getV10SignaturesData(
   publisherIdentityId: number,
   receivingNodes: { operational: SignerWithAddress; admin: SignerWithAddress }[],
   contextGraphId: bigint,
+  knowledgeAssetsAmount: number = 10,
   merkleRoot: string = ethers.keccak256(ethers.toUtf8Bytes('test-merkle-root')),
 ) {
   const publisherMessageHash = ethers.solidityPackedKeccak256(
@@ -61,8 +62,8 @@ async function getV10SignaturesData(
   );
 
   const ackDigest = ethers.solidityPackedKeccak256(
-    ['uint256', 'bytes32'],
-    [contextGraphId, merkleRoot],
+    ['uint256', 'bytes32', 'uint256'],
+    [contextGraphId, merkleRoot, knowledgeAssetsAmount],
   );
 
   const receiverRs = [];

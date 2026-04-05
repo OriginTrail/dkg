@@ -76,6 +76,26 @@ export class StorageACKHandler {
         throw new Error('stagingQuads present but contained no parseable N-Quads');
       }
 
+      // Validate kaCount matches the number of distinct root entities
+      const uniqueSubjects = new Set(parsed.map(q => q.subject));
+      if (intent.kaCount > 0 && uniqueSubjects.size !== intent.kaCount) {
+        throw new Error(
+          `kaCount mismatch: intent claims ${intent.kaCount} KAs but staging quads have ` +
+          `${uniqueSubjects.size} distinct root entities`,
+        );
+      }
+
+      // Validate rootEntities match actual subjects in the payload
+      if (intent.rootEntities && intent.rootEntities.length > 0) {
+        for (const entity of intent.rootEntities) {
+          if (!uniqueSubjects.has(entity)) {
+            throw new Error(
+              `rootEntity '${entity}' from intent not found in staging quads subjects`,
+            );
+          }
+        }
+      }
+
       const inMemoryRoot = computeFlatKCRoot(parsed, []);
       if (!bytesEqual(inMemoryRoot, merkleRoot)) {
         throw new Error(
@@ -126,7 +146,7 @@ export class StorageACKHandler {
     } catch {
       contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
     }
-    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot);
+    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, intent.kaCount);
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

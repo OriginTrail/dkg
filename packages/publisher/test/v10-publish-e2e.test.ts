@@ -153,7 +153,7 @@ describe('V10 Publish E2E', () => {
     expect(result.acks).toHaveLength(3);
 
     // Verify each collected ACK can be recovered to the core node's address
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot);
+    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 1);
     const prefixedHash = ethers.hashMessage(digest);
 
     for (let i = 0; i < 3; i++) {

@@ -86,8 +86,8 @@ describe('StorageACKHandler', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(Buffer.from(decodedRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
-    // Verify signature recovers to core wallet address
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot);
+    // Verify signature recovers to core wallet address (kaCount=2 included in digest)
+    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2);
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
