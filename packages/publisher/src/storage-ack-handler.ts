@@ -85,12 +85,21 @@ export class StorageACKHandler {
         );
       }
 
-      // Verify inline — quads are already validated in-memory above.
-      // Do NOT persist staging quads to disk; the merkle root verification
-      // is sufficient for ACK signing. Persisting would grow disk usage
-      // indefinitely with no cleanup path. The data will be written to
-      // LTM during finalization after the chain TX confirms.
+      // Root verified — persist to a scoped staging graph so the data is
+      // durable before we sign the ACK (crash safety: on-chain KC implies
+      // at least one core node stored the data). The staging graph is keyed
+      // by merkle root prefix and cleaned up during finalization.
+      const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
+      await this.store.dropGraph(stagingGraphUri);
+      const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
+      await this.store.insert(graphedQuads);
       swmQuads = parsed;
+
+      // Schedule cleanup: remove staging graph after 10 minutes.
+      // Finalization may promote data to LTM before this fires.
+      setTimeout(async () => {
+        try { await this.store.dropGraph(stagingGraphUri); } catch { /* ignore */ }
+      }, 10 * 60 * 1000);
     } else {
       // Fallback: data should already be in SWM (enshrineFromWorkspace path)
       swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
@@ -109,9 +118,14 @@ export class StorageACKHandler {
       }
     }
 
-    // Derive numeric CG ID the same way the publisher does
-    const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(cgId));
-    const contextGraphIdBigInt = BigInt(cgIdHash);
+    // Derive numeric CG ID the same way the publisher does.
+    // If already numeric (on-chain ID), use directly; otherwise hash the string.
+    let contextGraphIdBigInt: bigint;
+    try {
+      contextGraphIdBigInt = BigInt(cgId);
+    } catch {
+      contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
+    }
     const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot);
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),

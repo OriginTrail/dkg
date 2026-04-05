@@ -884,7 +884,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       .rejects.toThrow('exceeds');
   });
 
-  it('handler does NOT persist inline quads to disk (verify in-memory only)', async () => {
+  it('persists inline quads to staging graph before signing (crash safety)', async () => {
     const store = createMockStore([]);
     const handler = createHandler(store);
 
@@ -904,8 +904,11 @@ describe('V10 StorageACKHandler round-trip', () => {
 
     await handler.handler(intent, fakePeerId);
 
-    expect(store.insert).not.toHaveBeenCalled();
-    expect(store.delete).not.toHaveBeenCalled();
+    expect(store.dropGraph).toHaveBeenCalled();
+    expect(store.insert).toHaveBeenCalled();
+    const insertedQuads = store.insert.mock.calls[0][0];
+    expect(insertedQuads.length).toBeGreaterThan(0);
+    expect(insertedQuads[0].graph).toContain('/staging/');
   });
 
   it('uint64 overflow check for nodeIdentityId > 2^64', async () => {

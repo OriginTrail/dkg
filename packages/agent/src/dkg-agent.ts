@@ -2365,8 +2365,12 @@ export class DKGAgent {
       publicByteSize: bigint,
       stagingQuads?: Uint8Array,
     ) => {
-      const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
-      const cgIdBigInt = BigInt(cgIdHash);
+      let cgIdBigInt: bigint;
+      try {
+        cgIdBigInt = BigInt(contextGraphId);
+      } catch {
+        cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+      }
 
       const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
         ? await chain.getMinimumRequiredSignatures()

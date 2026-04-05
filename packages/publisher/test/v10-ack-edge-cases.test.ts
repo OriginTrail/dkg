@@ -448,7 +448,7 @@ describe('StorageACKHandler inline verification', () => {
     expect(store.query).not.toHaveBeenCalled();
   });
 
-  it('does NOT call store.insert or store.dropGraph for inline quads (no disk write)', async () => {
+  it('persists inline quads to staging graph before signing (crash safety)', async () => {
     const store = createMockStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
@@ -466,8 +466,10 @@ describe('StorageACKHandler inline verification', () => {
 
     await handler.handler(intent, fakePeerId);
 
-    expect(store.insert).not.toHaveBeenCalled();
-    expect(store.dropGraph).not.toHaveBeenCalled();
+    expect(store.dropGraph).toHaveBeenCalled();
+    expect(store.insert).toHaveBeenCalled();
+    const insertedQuads = store.insert.mock.calls[0][0];
+    expect(insertedQuads[0].graph).toContain('/staging/');
     expect(store.query).not.toHaveBeenCalled();
   });
 

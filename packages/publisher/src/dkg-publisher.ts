@@ -874,7 +874,12 @@ export class DKGPublisher implements Publisher {
       try {
         if (v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function') {
           const ackDomain = options.contextGraphId ?? paranetId;
-          const contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomain)));
+          let contextGraphIdBigInt: bigint;
+          try {
+            contextGraphIdBigInt = BigInt(ackDomain);
+          } catch {
+            contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomain)));
+          }
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
             contextGraphId: contextGraphIdBigInt,

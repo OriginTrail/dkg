@@ -1153,7 +1153,19 @@ export class EVMChainAdapter implements ChainAdapter {
     const identityStorage = await this.resolveContract('IdentityStorage');
     if (!identityStorage) return false;
     const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
-    return chainId === claimedIdentityId;
+    if (chainId !== claimedIdentityId) return false;
+
+    // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked")
+    try {
+      const stakingStorage = await this.resolveContract('StakingStorage');
+      if (stakingStorage) {
+        const stake: bigint = await stakingStorage.getNodeStake(claimedIdentityId);
+        if (stake === 0n) return false;
+      }
+    } catch {
+      // StakingStorage not available — accept identity-only verification
+    }
+    return true;
   }
 
   getACKSignerKey(): string | undefined {
