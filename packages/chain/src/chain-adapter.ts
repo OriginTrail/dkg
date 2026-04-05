@@ -327,7 +327,14 @@ export interface ChainAdapter {
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
 
-  /** Get the private key for V10 ACK signing (core nodes only). */
+  /**
+   * Sign an ACK digest for V10 StorageACK (core nodes only).
+   * Returns { r, vs } signature components or undefined if not capable.
+   * The private key never leaves the adapter implementation.
+   */
+  signACKDigest?(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined>;
+
+  /** @deprecated Use signACKDigest instead. Will be removed in V10.1. */
   getACKSignerKey?(): string | undefined;
 
   /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */

@@ -601,15 +601,35 @@ export class MockChainAdapter implements ChainAdapter {
     return this.minimumRequiredSignatures;
   }
 
-  async verifyACKIdentity(_recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
-    for (const [, id] of this.identities) {
-      if (id === claimedIdentityId) return true;
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    // Strict binding: recovered address must match the identity's registered address
+    const normalizedAddress = recoveredAddress.toLowerCase();
+    for (const [addr, id] of this.identities) {
+      if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
+        return true;
+      }
     }
-    return claimedIdentityId > 0n;
+    return false;
+  }
+
+  private mockACKSigner?: import('ethers').Wallet;
+
+  setMockACKSigner(wallet: import('ethers').Wallet) {
+    this.mockACKSigner = wallet;
+  }
+
+  async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
+    if (!this.mockACKSigner) return undefined;
+    const { ethers: eth } = await import('ethers');
+    const sig = eth.Signature.from(await this.mockACKSigner.signMessage(digest));
+    return {
+      r: eth.getBytes(sig.r),
+      vs: eth.getBytes(sig.yParityAndS),
+    };
   }
 
   getACKSignerKey(): string | undefined {
-    return undefined;
+    return this.mockACKSigner?.privateKey;
   }
 
   isV10Ready(): boolean {

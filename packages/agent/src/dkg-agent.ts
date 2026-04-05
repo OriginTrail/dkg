@@ -359,13 +359,18 @@ export class DKGAgent {
     }
 
     // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
-    // Priority: explicit ackSignerKey > adapter.getACKSignerKey().
+    // Priority: explicit ackSignerKey > adapter.signACKDigest > adapter.getACKSignerKey (deprecated).
     // chainConfig.operationalKeys is NOT consulted — when a prebuilt chainAdapter is
     // supplied, chainConfig is conceptually ignored per the config contract.
     const ackSignerKeyStr = this.config.ackSignerKey
       ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
-    if ((this.config.nodeRole ?? 'edge') === 'core' && ackSignerKeyStr) {
+    const hasACKSigningCapability = ackSignerKeyStr || typeof this.chain.signACKDigest === 'function';
+    if ((this.config.nodeRole ?? 'edge') === 'core' && hasACKSigningCapability) {
       try {
+        if (!ackSignerKeyStr) {
+          this.log.warn(ctx, `V10 StorageACK handler requires an ACK signer key — signACKDigest alone is not yet supported`);
+          throw new Error('No ACK signer key available');
+        }
         const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
         const identityId = await this.chain.getIdentityId();
         if (identityId > 0n) {

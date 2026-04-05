@@ -1168,6 +1168,18 @@ export class EVMChainAdapter implements ChainAdapter {
     return true;
   }
 
+  async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
+    try {
+      const sig = ethers.Signature.from(await this.signer.signMessage(digest));
+      return {
+        r: ethers.getBytes(sig.r),
+        vs: ethers.getBytes(sig.yParityAndS),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   getACKSignerKey(): string | undefined {
     return this.signer.privateKey;
   }
