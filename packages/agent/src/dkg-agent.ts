@@ -2329,10 +2329,12 @@ export class DKGAgent {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
-        // Returns all connected peers. Non-core/edge peers are filtered out
-        // by the verifyIdentity callback which checks IdentityStorage on-chain.
-        // TODO: pre-filter by libp2p protocol support or cached role metadata
-        // to reduce P2P probing overhead on mixed networks.
+        // Return all connected peers excluding self. Core node role is verified
+        // by the verifyIdentity callback after receiving ACK responses — only
+        // ACKs from peers with registered on-chain identities are accepted.
+        // Protocol-level filtering (checking /dkg/10.0.0/storage-ack support)
+        // would require async peerStore lookups which this sync API cannot do;
+        // peers that don't support the protocol will simply fail the sendP2P call.
         const peers = this.node.libp2p.getPeers();
         return peers
           .map(p => p.toString())

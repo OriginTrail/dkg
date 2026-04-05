@@ -758,19 +758,25 @@ export class DKGPublisher implements Publisher {
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
-    // Staging quads are sent inline via P2P so core nodes can verify
-    // the merkle root without workspace gossip pre-positioning.
+    // For direct publish: send staging quads inline via P2P so core nodes
+    // can verify the merkle root without needing SWM pre-positioning.
+    // For enshrineFromWorkspace (contextGraphId set): data is already in
+    // peers' SWM via workspace gossip — do NOT send inline quads; core nodes
+    // verify against their local SWM copy (preserving storage-attestation).
     // Skipped for private publishes because StorageACKHandler cannot
     // recompute private merkle roots from SWM data alone.
     const hasPrivateData = privateRoots.length > 0;
-    const nquadsBytes = new TextEncoder().encode(nquadsStr);
+    const isEnshrineFromWorkspace = !!options.contextGraphId;
+    const stagingQuads = isEnshrineFromWorkspace
+      ? undefined
+      : new TextEncoder().encode(nquadsStr);
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
         const ackDomain = options.contextGraphId ?? paranetId;
-        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, nquadsBytes);
+        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads);
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

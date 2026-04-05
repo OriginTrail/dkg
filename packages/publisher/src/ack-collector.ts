@@ -92,7 +92,12 @@ export class ACKCollector {
     if (corePeers.length === 0) {
       throw new Error('ACK collection failed: no connected core peers');
     }
-    log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers`);
+    if (corePeers.length < REQUIRED_ACKS) {
+      throw new Error(
+        `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
+      );
+    }
+    log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     const ackDigest = computeACKDigest(contextGraphId, merkleRoot);
 

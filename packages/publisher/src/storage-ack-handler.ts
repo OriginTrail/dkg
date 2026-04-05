@@ -85,12 +85,11 @@ export class StorageACKHandler {
         );
       }
 
-      // Root verified — persist into a scoped staging sub-graph to avoid
-      // mutating the main SWM graph (which may contain unrelated workspace data).
-      const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      await this.store.dropGraph(stagingGraphUri);
-      const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads);
+      // Verify inline — quads are already validated in-memory above.
+      // Do NOT persist staging quads to disk; the merkle root verification
+      // is sufficient for ACK signing. Persisting would grow disk usage
+      // indefinitely with no cleanup path. The data will be written to
+      // LTM during finalization after the chain TX confirms.
       swmQuads = parsed;
     } else {
       // Fallback: data should already be in SWM (enshrineFromWorkspace path)
