@@ -601,6 +601,17 @@ export class MockChainAdapter implements ChainAdapter {
     return this.minimumRequiredSignatures;
   }
 
+  async verifyACKIdentity(_recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    for (const [, id] of this.identities) {
+      if (id === claimedIdentityId) return true;
+    }
+    return claimedIdentityId > 0n;
+  }
+
+  getACKSignerKey(): string | undefined {
+    return undefined;
+  }
+
   async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {

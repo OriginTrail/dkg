@@ -103,7 +103,7 @@ export class ChainEventPoller {
       }
     }
 
-    const eventTypes = ['KnowledgeBatchCreated'];
+    const eventTypes = ['KnowledgeBatchCreated', 'KCCreated'];
     if (watchParanets) eventTypes.push('ParanetCreated');
 
     const fromBlock = this.lastBlock + 1;
@@ -122,7 +122,7 @@ export class ChainEventPoller {
     let maxEventBlock = this.lastBlock;
     for await (const event of this.chain.listenForEvents(filter)) {
       if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
-      if (event.type === 'KnowledgeBatchCreated') {
+      if (event.type === 'KnowledgeBatchCreated' || event.type === 'KCCreated') {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'ParanetCreated') {
         await this.handleParanetCreated(event, ctx);

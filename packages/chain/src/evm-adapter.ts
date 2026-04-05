@@ -733,23 +733,43 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
 
-      // V8 backward compat
+      // V10/V8: KnowledgeCollectionStorage events
       if (eventType === 'KCCreated' || eventType === 'KnowledgeCollectionCreated') {
         const kcStorage = this.contracts.knowledgeCollectionStorage;
         if (kcStorage) {
-          const eventFilter = kcStorage.filters.KnowledgeCollectionCreated();
-          const logs = await kcStorage.queryFilter(eventFilter, filter.fromBlock ?? 0);
+          const kcFilter = kcStorage.filters.KnowledgeCollectionCreated();
+          const kcLogs = await kcStorage.queryFilter(kcFilter, filter.fromBlock ?? 0);
 
-          for (const log of logs) {
+          // Also fetch KnowledgeAssetsMinted to get publisher address and KA range
+          const mintFilter = kcStorage.filters.KnowledgeAssetsMinted();
+          const mintLogs = await kcStorage.queryFilter(mintFilter, filter.fromBlock ?? 0);
+          const mintByBlock = new Map<number, { publisherAddress: string; startKAId: string; endKAId: string }>();
+          for (const ml of mintLogs) {
+            const mp = kcStorage.interface.parseLog({ topics: [...ml.topics], data: ml.data });
+            if (mp) {
+              mintByBlock.set(ml.blockNumber, {
+                publisherAddress: mp.args.to,
+                startKAId: mp.args.startId.toString(),
+                endKAId: (BigInt(mp.args.endId) - 1n).toString(),
+              });
+            }
+          }
+
+          for (const log of kcLogs) {
             const parsed = kcStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
+              const mint = mintByBlock.get(log.blockNumber);
               yield {
                 type: 'KCCreated',
                 blockNumber: log.blockNumber,
                 data: {
                   kcId: parsed.args.id.toString(),
                   merkleRoot: parsed.args.merkleRoot,
+                  merkleRootBytes: parsed.args.merkleRoot,
                   byteSize: parsed.args.byteSize.toString(),
+                  publisherAddress: mint?.publisherAddress ?? '',
+                  startKAId: mint?.startKAId ?? '0',
+                  endKAId: mint?.endKAId ?? '0',
                 },
               };
             }
@@ -1123,6 +1143,18 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     if (!this.contracts.parametersStorage) return 3;
     return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+  }
+
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    if (!identityStorage) return false;
+    const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
+    return chainId === claimedIdentityId;
+  }
+
+  getACKSignerKey(): string | undefined {
+    return this.signer.privateKey;
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

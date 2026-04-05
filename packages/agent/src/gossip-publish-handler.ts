@@ -262,7 +262,7 @@ export class GossipPublishHandler {
 
     try {
       const filter: EventFilter = {
-        eventTypes: ['KnowledgeBatchCreated'],
+        eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
         fromBlock: blockNumber,
         toBlock: blockNumber,
       };

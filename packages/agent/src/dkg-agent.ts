@@ -359,8 +359,10 @@ export class DKGAgent {
     }
 
     // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
-    // ackSignerKey is preferred; falls back to chainConfig.operationalKeys[0].
-    const ackSignerKeyStr = this.config.ackSignerKey ?? this.config.chainConfig?.operationalKeys?.[0];
+    // Priority: explicit ackSignerKey > chainConfig.operationalKeys[0] > adapter.getACKSignerKey()
+    const ackSignerKeyStr = this.config.ackSignerKey
+      ?? this.config.chainConfig?.operationalKeys?.[0]
+      ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
     if ((this.config.nodeRole ?? 'edge') === 'core' && ackSignerKeyStr) {
       const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
       const identityId = await this.chain.getIdentityId();
@@ -2329,16 +2331,15 @@ export class DKGAgent {
           .map(p => p.toString())
           .filter(id => id !== this.peerId);
       },
-      verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => {
-        try {
-          const identityStorage = await (this.chain as any).resolveContract?.('IdentityStorage');
-          if (!identityStorage) return false;
-          const chainId: bigint = await identityStorage.getIdentityId(recoveredAddress);
-          return chainId === claimedIdentityId;
-        } catch {
-          return false;
-        }
-      },
+      verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
+        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+            try {
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+            } catch {
+              return false;
+            }
+          }
+        : undefined,
       log: (msg) => {
         const ctx = createOperationContext('publish');
         this.log.info(ctx, msg);

@@ -206,9 +206,9 @@ export class FinalizationHandler {
     if (blockNumber <= 0) return false;
 
     try {
-      // Verify KnowledgeBatchCreated at the specific block
+      // Verify KnowledgeBatchCreated or KCCreated (V10) at the specific block
       const batchFilter: EventFilter = {
-        eventTypes: ['KnowledgeBatchCreated'],
+        eventTypes: ['KnowledgeBatchCreated', 'KCCreated'],
         fromBlock: blockNumber,
         toBlock: blockNumber,
       };

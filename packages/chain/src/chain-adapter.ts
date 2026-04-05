@@ -324,6 +324,12 @@ export interface ChainAdapter {
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;
 
+  /** Verify that a recovered signer address is a registered operational key for the given identity. */
+  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+
+  /** Get the private key for V10 ACK signing (core nodes only). */
+  getACKSignerKey?(): string | undefined;
+
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
