@@ -296,7 +296,7 @@ export class ChatPersistenceQueue {
       }
     } catch (err: unknown) {
       console.error('[chat-persistence] queue-level error:', err instanceof Error ? err.message : String(err));
-      setTimeout(() => this.processQueue(), 5_000);
+      setTimeout(() => this.process(), 5_000);
     } finally {
       this.processing = false;
     }
