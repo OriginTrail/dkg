@@ -492,6 +492,29 @@ export class DkgNodePlugin {
         },
         execute: async (_toolCallId, args) => this.handleInvokeSkill(args),
       },
+
+      // Legacy V9 tool name aliases for backward compatibility with existing agents/prompts
+      {
+        name: 'dkg_list_paranets',
+        description: '[Deprecated: use dkg_list_context_graphs] List all context graphs (formerly paranets).',
+        parameters: { type: 'object', properties: {}, required: [] },
+        execute: async (_toolCallId, _params) => this.handleListContextGraphs(),
+      },
+      {
+        name: 'dkg_paranet_create',
+        description: '[Deprecated: use dkg_context_graph_create] Create a new context graph (formerly paranet).',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Context graph name' },
+            description: { type: 'string', description: 'Optional description' },
+            paranet_id: { type: 'string', description: 'Optional custom ID slug' },
+          },
+          required: ['name'],
+        },
+        execute: async (_toolCallId, args) =>
+          this.handleContextGraphCreate({ ...args, id: args.paranet_id ?? args.id }),
+      },
     ];
   }
 
@@ -522,7 +545,7 @@ export class DkgNodePlugin {
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id);
+      const contextGraphId = String(args.context_graph_id ?? args.paranet_id ?? '');
       const rawQuads = args.quads;
 
       if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
@@ -587,7 +610,7 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
-      const contextGraphId = args.context_graph_id ? String(args.context_graph_id) : undefined;
+      const contextGraphId = (args.context_graph_id ?? args.paranet_id) ? String(args.context_graph_id ?? args.paranet_id) : undefined;
       const includeSharedMemory = args.include_shared_memory === 'true' || args.include_shared_memory === true;
       const result = await this.client.query(sparql, {
         contextGraphId,
@@ -679,7 +702,7 @@ export class DkgNodePlugin {
 
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const contextGraphId = String(args.context_graph_id ?? args.paranet_id ?? '').trim();
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }

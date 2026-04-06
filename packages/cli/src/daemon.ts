@@ -2044,12 +2044,12 @@ async function handleRequest(
     });
   }
 
-  // GET /api/sync/catchup-status?paranetId=<id> | ?jobId=<id>
+  // GET /api/sync/catchup-status?contextGraphId=<id> | ?paranetId=<id> | ?jobId=<id>
   if (req.method === 'GET' && path === '/api/sync/catchup-status') {
-    const paranetId = url.searchParams.get('paranetId');
+    const paranetId = url.searchParams.get('contextGraphId') ?? url.searchParams.get('paranetId');
     const jobIdParam = url.searchParams.get('jobId');
     if (!paranetId && !jobIdParam) {
-      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "jobId" query param' });
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "jobId" query param' });
     }
 
     const jobId = jobIdParam ?? (paranetId ? catchupTracker.latestByParanet.get(paranetId) : undefined);

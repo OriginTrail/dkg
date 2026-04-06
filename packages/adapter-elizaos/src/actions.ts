@@ -29,7 +29,8 @@ export const dkgPublish: Action = {
       const agent = requireAgent();
       const text = message.content.text;
 
-      const contextGraphMatch = text.match(/context[- ]?graph[:\s]+["']?([^\s"']+)/i);
+      const contextGraphMatch = text.match(/context[- ]?graph[:\s]+["']?([^\s"']+)/i)
+        ?? text.match(/paranet[:\s]+["']?([^\s"']+)/i);
       const contextGraphId = contextGraphMatch?.[1] ?? 'default';
 
       const nquadsMatch = text.match(/```(?:nquads|n-quads|turtle)?\s*([\s\S]*?)```/i);

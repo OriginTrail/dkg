@@ -1767,7 +1767,7 @@ export class DKGAgent {
     } else if (this.chain.chainId !== 'none') {
       try {
         const result = await this.chain.createContextGraph({
-          name: opts.id,
+          name: opts.name,
           description: opts.description,
           accessPolicy: opts.accessPolicy ?? 0,
           revealOnChain: opts.revealOnChain,
@@ -1902,7 +1902,7 @@ export class DKGAgent {
     if (this.chain.chainId !== 'none') {
       try {
         const result = await this.chain.createContextGraph({
-          name: opts.id,
+          name: opts.name,
           description: opts.description,
           accessPolicy: 0,
           revealOnChain: opts.revealOnChain,
