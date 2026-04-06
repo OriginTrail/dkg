@@ -261,6 +261,15 @@ describe('ContextOracle', () => {
       expect(sparql).toContain('<http://schema.org/name>');
       expect(sparql).toContain('"Alice"');
     });
+
+    it('rejects malformed literals to avoid unsafe SPARQL injection', async () => {
+      await expect(
+        oracle.proveTriple(
+          PARANET, CG_ID,
+          'did:dkg:agent:Alice', 'http://schema.org/name', '"unclosed',
+        ),
+      ).rejects.toThrow(/Malformed or unsafe SPARQL literal/);
+    });
   });
 
   describe('proof index integration', () => {

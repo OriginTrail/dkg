@@ -180,7 +180,9 @@ export class BlazegraphStore implements TripleStore {
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
     const r = await this.query(sparql);
     if (r.type === 'bindings' && r.bindings.length > 0) {
-      return parseInt(r.bindings[0].c, 10) || 0;
+      const cell = r.bindings[0].c ?? '';
+      const digits = cell.match(/\d+/)?.[0];
+      return digits ? parseInt(digits, 10) : 0;
     }
     return 0;
   }
