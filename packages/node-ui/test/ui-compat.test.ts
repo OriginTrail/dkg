@@ -417,8 +417,6 @@ describe('daemon.ts app token injection', () => {
   const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
 
   it('does not use req.socket.remoteAddress for localhost/auth detection (rate-limit use is OK)', () => {
-    // remoteAddress must not appear in the auth/token-injection section (loopback detection).
-    // It IS allowed for rate limiting (clientIp). Verify the auth section uses config.apiHost instead.
     const authSection = daemon.slice(daemon.indexOf('boundToLoopback'), daemon.indexOf('boundToLoopback') + 500);
     expect(authSection).not.toContain('req.socket.remoteAddress');
   });

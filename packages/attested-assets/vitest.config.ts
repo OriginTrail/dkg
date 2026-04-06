@@ -1,13 +1,14 @@
 import { defineConfig } from 'vitest/config';
+import { buraAttestedAssetsCoverage } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'html', 'lcov'],
+      reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
-      thresholds: { lines: 50, functions: 60, branches: 45, statements: 50 },
+      thresholds: buraAttestedAssetsCoverage,
     },
   },
 });
