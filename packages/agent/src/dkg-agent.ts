@@ -365,7 +365,8 @@ export class DKGAgent {
     const ackSignerKeyStr = this.config.ackSignerKey
       ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
     const hasACKSigningCapability = ackSignerKeyStr || typeof this.chain.signACKDigest === 'function';
-    if ((this.config.nodeRole ?? 'edge') === 'core' && hasACKSigningCapability) {
+    // All staked nodes can provide V10 ACKs — not just core nodes
+    if (hasACKSigningCapability) {
       try {
         if (!ackSignerKeyStr) {
           // signACKDigest is available but no extractable key — skip registration
@@ -383,7 +384,7 @@ export class DKGAgent {
             contextGraphSharedMemoryUri,
           }, this.eventBus);
           this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-          this.log.info(ctx, `Registered V10 StorageACK handler (core node, identity=${identityId})`);
+          this.log.info(ctx, `Registered V10 StorageACK handler (role=${this.config.nodeRole ?? 'edge'}, identity=${identityId})`);
         } else {
           this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
         }

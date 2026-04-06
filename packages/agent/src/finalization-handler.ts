@@ -20,6 +20,7 @@ export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly log = new Logger('FinalizationHandler');
+  private readonly processedUals = new Set<string>();
 
   constructor(store: TripleStore, chain: ChainAdapter | undefined) {
     this.store = store;
@@ -37,6 +38,19 @@ export class FinalizationHandler {
       if (msg.paranetId && msg.paranetId !== paranetId) {
         this.log.warn(ctx, `Finalization: paranetId "${msg.paranetId}" does not match topic "${paranetId}", ignoring`);
         return;
+      }
+
+      // Deduplicate: skip if we already processed this UAL
+      const dedupeKey = `${msg.ual}:${msg.txHash}`;
+      if (this.processedUals.has(dedupeKey)) {
+        this.log.info(ctx, `Finalization: already processed ${msg.ual}, skipping duplicate`);
+        return;
+      }
+      this.processedUals.add(dedupeKey);
+      // Cap the dedup set to prevent unbounded growth
+      if (this.processedUals.size > 10_000) {
+        const first = this.processedUals.values().next().value;
+        if (first) this.processedUals.delete(first);
       }
 
       if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
@@ -94,7 +108,11 @@ export class FinalizationHandler {
       // the regular publish topic broadcast or ChainEventPoller sync.
       this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching workspace snapshot)`);
     } catch (err) {
-      this.log.warn(ctx, `Finalization: failed to process message: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      // Protobuf decode errors (wire type / index out of range) happen when receiving
+      // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
+      if (/wire type|index out of range|offset|unexpected tag/i.test(msg)) return;
+      this.log.warn(ctx, `Finalization: failed to process message: ${msg}`);
     }
   }
 

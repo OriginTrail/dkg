@@ -67,6 +67,7 @@ function getCliVersion(): string {
 }
 
 function resolveDaemonEntryPoint(): string {
+  if (process.env.DKG_NO_BLUE_GREEN) return fileURLToPath(import.meta.url);
   const rDir = releasesDir();
   if (existsSync(rDir)) {
     const entry = slotEntryPoint(join(rDir, 'current'));
@@ -435,7 +436,9 @@ program
     }
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
-    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
+    if (!process.env.DKG_NO_BLUE_GREEN) {
+      await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
+    }
 
     if (opts.foreground) {
       await runForegroundSupervisor();

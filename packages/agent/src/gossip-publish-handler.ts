@@ -56,6 +56,10 @@ export class GossipPublishHandler {
         if (!request.paranetId) {
           request.paranetId = paranetId;
         } else if (request.paranetId !== paranetId) {
+          // If the decoded paranetId contains non-printable characters, this is a
+          // different message type (e.g. finalization) that was decoded as a publish
+          // request. Silently skip to avoid spammy WARN logs.
+          if (/[^\x20-\x7E]/.test(request.paranetId)) return;
           this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
           return;
         }

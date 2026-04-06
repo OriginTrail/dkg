@@ -425,7 +425,7 @@ start_node() {
   rm -f "$node_dir/daemon.pid"
 
   log "Starting node $node_num..."
-  DKG_HOME="$node_dir" \
+  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
     node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
     > "$node_dir/daemon.log" 2>&1 &
   local node_pid=$!

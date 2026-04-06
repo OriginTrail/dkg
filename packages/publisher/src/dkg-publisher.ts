@@ -544,10 +544,10 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // SWM cleanup (spec §9.0.5): delete published triples from _shared_memory after confirmation.
-    // Defaults to true per spec — published triples MUST be removed from SWM.
-    const shouldClearSWM = options?.clearWorkspaceAfter !== false && publishResult.status === 'confirmed';
-    if (shouldClearSWM) {
+    // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
+    // Published triples must not linger in SWM — they live in LTM now.
+    // clearWorkspaceAfter controls only whether the REMAINING unpublished triples are also cleared.
+    if (publishResult.status === 'confirmed') {
       const wsMetaGraph = this.graphManager.sharedMemoryMetaUri(paranetId);
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
@@ -562,7 +562,17 @@ export class DKGPublisher implements Publisher {
         this.workspaceOwnedEntities.get(paranetId)?.delete(rootEntity);
       }
       if (ownerDeletedTotal > 0) {
-        this.log.info(ctx, `Cleared ${ownerDeletedTotal} SWM triple(s) after confirmed publish`);
+        this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
+      }
+      // If clearWorkspaceAfter is explicitly true, also clear any remaining unpublished content.
+      // Default is false: unpublished entities stay in SWM for future publishes.
+      if (options?.clearWorkspaceAfter === true) {
+        const remainingCount = await this.store.deleteByPattern({ graph: workspaceGraph });
+        const remainingMetaCount = await this.store.deleteByPattern({ graph: wsMetaGraph });
+        if (remainingCount > 0 || remainingMetaCount > 0) {
+          this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
+        }
+        this.workspaceOwnedEntities.delete(paranetId);
       }
     }
 
