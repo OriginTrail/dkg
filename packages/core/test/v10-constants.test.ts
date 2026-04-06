@@ -11,7 +11,7 @@ import {
   PROTOCOL_VERIFY_APPROVAL,
   PROTOCOL_STORAGE_ACK,
   DHT_PROTOCOL,
-  contextGraphWorkspaceTopic,
+  contextGraphSharedMemoryTopic,
   contextGraphFinalizationTopic,
   contextGraphUpdateTopic,
   contextGraphAppTopic,
@@ -68,8 +68,8 @@ describe('V10 protocol stream IDs', () => {
 describe('V10 GossipSub topics', () => {
   const id = 'test-cg-42';
 
-  it('workspace topic', () => {
-    expect(contextGraphWorkspaceTopic(id)).toBe('dkg/context-graph/test-cg-42/workspace');
+  it('shared memory (SWM) topic', () => {
+    expect(contextGraphSharedMemoryTopic(id)).toBe('dkg/context-graph/test-cg-42/shared-memory');
   });
 
   it('finalization topic', () => {
@@ -148,8 +148,8 @@ describe('deprecated V9 aliases still work', () => {
     expect(paranetPublishTopic(id)).toBe(contextGraphFinalizationTopic(id));
   });
 
-  it('paranetWorkspaceTopic maps to workspace topic', () => {
-    expect(paranetWorkspaceTopic(id)).toBe(contextGraphWorkspaceTopic(id));
+  it('paranetWorkspaceTopic maps to shared memory topic', () => {
+    expect(paranetWorkspaceTopic(id)).toBe(contextGraphSharedMemoryTopic(id));
   });
 
   it('paranetFinalizationTopic maps to finalization topic', () => {

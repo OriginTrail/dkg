@@ -1,10 +1,10 @@
 export interface DkgClientLike {
-  query(sparql: string, paranetId?: string): Promise<{ result: unknown }>;
-  publish(paranetId: string, quads: Array<{
+  query(sparql: string, contextGraphId?: string): Promise<{ result: unknown }>;
+  publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{ kcId: string; status: string }>;
-  createParanet(id: string, name: string, description?: string): Promise<{ created: string; uri: string }>;
-  subscribe(paranetId: string): Promise<{ subscribed: string }>;
+  createContextGraph(id: string, name: string, description?: string): Promise<{ created: string; uri: string }>;
+  subscribe(contextGraphId: string): Promise<{ subscribed: string }>;
 }
 
 export interface Experiment {

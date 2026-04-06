@@ -8,8 +8,11 @@ const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
-export const AGENT_REGISTRY_PARANET = SYSTEM_PARANETS.AGENTS;
-export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_PARANET}`;
+export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_PARANETS.AGENTS;
+export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_CONTEXT_GRAPH}`;
+
+/** @deprecated Use AGENT_REGISTRY_CONTEXT_GRAPH */
+export const AGENT_REGISTRY_PARANET = AGENT_REGISTRY_CONTEXT_GRAPH;
 
 export interface SkillOfferingConfig {
   skillType: string;
@@ -25,6 +28,8 @@ export interface AgentProfileConfig {
   description?: string;
   framework?: string;
   skills: SkillOfferingConfig[];
+  contextGraphsServed?: string[];
+  /** @deprecated Use contextGraphsServed */
   paranetsServed?: string[];
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
@@ -106,11 +111,14 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
   q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
 
-  if (config.paranetsServed?.length) {
+  const served = config.contextGraphsServed ?? config.paranetsServed;
+  if (served?.length) {
     const hostingUri = `${entity}/.well-known/genid/hosting`;
     q(entity, `${SKILL}hostingProfile`, hostingUri);
     q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
-    q(hostingUri, `${SKILL}paranetsServed`, `"${config.paranetsServed.join(',')}"`);
+    const val = `"${served.join(',')}"`;
+    q(hostingUri, `${SKILL}contextGraphsServed`, val);
+    q(hostingUri, `${SKILL}paranetsServed`, val);
   }
 
   return { quads, rootEntity: entity };

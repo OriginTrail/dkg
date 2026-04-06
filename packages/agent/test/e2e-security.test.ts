@@ -76,9 +76,9 @@ describe('Private triple confidentiality via GossipSub', () => {
     await sleep(1000);
 
     const PARANET = 'privacy-test';
-    await agentA.createParanet({ id: PARANET, name: 'Privacy', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
+    await agentA.createContextGraph({ id: PARANET, name: 'Privacy', description: '' });
+    agentA.subscribeToContextGraph(PARANET);
+    agentB.subscribeToContextGraph(PARANET);
     await sleep(500);
 
     const PUBLIC_NAME = '"PublicAgent"';
@@ -141,9 +141,9 @@ describe('Private triple confidentiality via GossipSub', () => {
     await sleep(1000);
 
     const PARANET = 'retention-test';
-    await agentA.createParanet({ id: PARANET, name: 'Retention', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
+    await agentA.createContextGraph({ id: PARANET, name: 'Retention', description: '' });
+    agentA.subscribeToContextGraph(PARANET);
+    agentB.subscribeToContextGraph(PARANET);
     await sleep(500);
 
     await agentA.publish(
@@ -224,7 +224,7 @@ describe('Remote query privacy', () => {
     await sleep(1000);
 
     const PARANET = 'remote-query-priv';
-    await agentA.createParanet({ id: PARANET, name: 'RQP', description: '' });
+    await agentA.createContextGraph({ id: PARANET, name: 'RQP', description: '' });
 
     await agentA.publish(
       PARANET,
@@ -235,7 +235,7 @@ describe('Remote query privacy', () => {
     // B queries A's paranet remotely — should see public, not private
     const response = await agentB.queryRemote(agentA.peerId, {
       lookupType: 'SPARQL_QUERY',
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
     });
     expect(response.status).toBe('OK');
@@ -313,7 +313,7 @@ describe('Access protocol denial', () => {
 
     // Publish with public triples ONLY (no private)
     await publisherA.publish({
-      paranetId: 'no-priv-test',
+      contextGraphId: 'no-priv-test',
       quads: [
         { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:context-graph:no-priv-test' },
       ],
@@ -350,8 +350,8 @@ describe('Paranet isolation', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'isolated-a', name: 'A', description: '' });
-    await agent.createParanet({ id: 'isolated-b', name: 'B', description: '' });
+    await agent.createContextGraph({ id: 'isolated-a', name: 'A', description: '' });
+    await agent.createContextGraph({ id: 'isolated-b', name: 'B', description: '' });
 
     await agent.publish('isolated-a', [
       { subject: 'did:dkg:test:SecretInA', predicate: 'http://ex.org/classification', object: '"TOP SECRET"', graph: '' },
@@ -386,8 +386,8 @@ describe('Paranet isolation', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'para-priv-a', name: 'PrivA', description: '' });
-    await agent.createParanet({ id: 'para-priv-b', name: 'PrivB', description: '' });
+    await agent.createContextGraph({ id: 'para-priv-a', name: 'PrivA', description: '' });
+    await agent.createContextGraph({ id: 'para-priv-b', name: 'PrivB', description: '' });
 
     await agent.publish(
       'para-priv-a',
@@ -441,7 +441,7 @@ describe('Access protocol round-trip', () => {
     });
 
     const result = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       publisherPeerId: nodeA.peerId.toString(),
       quads: [
         { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:context-graph:${PARANET}` },
@@ -525,7 +525,7 @@ describe('Persistent store isolation', () => {
     await agentA.start();
     await agentB.start();
 
-    await agentA.createParanet({ id: 'persist-test', name: 'Persist', description: '' });
+    await agentA.createContextGraph({ id: 'persist-test', name: 'Persist', description: '' });
     await agentA.publish('persist-test', [
       { subject: 'did:dkg:test:PersistEntity', predicate: 'http://schema.org/name', object: '"OnlyOnA"', graph: '' },
     ]);
@@ -538,7 +538,7 @@ describe('Persistent store isolation', () => {
     expect(aResult.bindings.length).toBe(1);
 
     // Agent B should NOT have agent A's data (isolated store)
-    await agentB.createParanet({ id: 'persist-test', name: 'Persist', description: '' });
+    await agentB.createContextGraph({ id: 'persist-test', name: 'Persist', description: '' });
     const bResult = await agentB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name FILTER(?name = "OnlyOnA") }',
       'persist-test',
@@ -572,9 +572,9 @@ describe('Private triple confidentiality via sync protocol', () => {
     await sleep(1000);
 
     const PARANET = 'sync-privacy-test';
-    await agentA.createParanet({ id: PARANET, name: 'SyncPrivacy', description: '' });
-    agentA.subscribeToParanet(PARANET);
-    agentB.subscribeToParanet(PARANET);
+    await agentA.createContextGraph({ id: PARANET, name: 'SyncPrivacy', description: '' });
+    agentA.subscribeToContextGraph(PARANET);
+    agentB.subscribeToContextGraph(PARANET);
     await sleep(500);
 
     await agentA.publish(

@@ -37,9 +37,9 @@ describe('NoChainAdapter', () => {
       batchId: 0n, additionalEpochs: 1, tokenAmount: 0n,
     })],
     ['transferNamespace', () => adapter.transferNamespace('0x0')],
-    ['createParanet', () => adapter.createParanet({})],
-    ['submitToParanet', () => adapter.submitToParanet('kc1', 'paranet1')],
-    ['revealParanetMetadata', () => adapter.revealParanetMetadata('p1', 'name', 'desc')],
+    ['createContextGraph', () => adapter.createContextGraph({})],
+    ['submitToContextGraph', () => adapter.submitToContextGraph('kc1', 'cg1')],
+    ['revealContextGraphMetadata', () => adapter.revealContextGraphMetadata('cg1', 'name', 'desc')],
   ];
 
   it.each(throwingMethods)('%s throws "No blockchain configured"', async (_name, fn) => {

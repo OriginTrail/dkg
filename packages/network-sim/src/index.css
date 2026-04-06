@@ -424,13 +424,13 @@ select {
   margin: 4px 0;
 }
 
-.paranet-list {
+.context-graph-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.paranet-list label {
+.context-graph-list label {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
@@ -438,7 +438,7 @@ select {
   letter-spacing: 0.04em;
 }
 
-.paranet-item {
+.context-graph-item {
   font-size: 12px;
   font-family: var(--font-mono);
   color: var(--accent);

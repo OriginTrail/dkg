@@ -94,13 +94,20 @@ export interface Publication {
 }
 
 /**
- * GET view selectors for retrieving knowledge at different trust levels.
- *   local         → WM (agent's own drafts)
- *   shared        → SWM (shared but unanchored)
- *   authoritative → LTM (anchored on-chain)
- *   verified      → VM (M-of-N verified)
+ * V10 GET view selectors — each declares which memory layer(s) a query targets.
+ *
+ *   working-memory        → WM  (agent's own draft graphs, local-only)
+ *   shared-working-memory → SWM (provisional, gossip-replicated)
+ *   long-term-memory      → LTM (chain-confirmed, published)
+ *   verified-memory       → VM  (M-of-N quorum verified)
+ *   authoritative         → LTM ∪ VM (VM wins on conflict)
  */
-export type GetView = 'local' | 'shared' | 'authoritative' | 'verified';
+export type GetView =
+  | 'working-memory'
+  | 'shared-working-memory'
+  | 'long-term-memory'
+  | 'verified-memory'
+  | 'authoritative';
 
 /**
  * Valid memory layer transitions. The protocol enforces a strict
@@ -124,8 +131,8 @@ export const PUBLICATION_STATES: readonly PublicationState[] = [
 ] as const;
 
 /**
- * All four GET views, ordered by trust level (ascending).
+ * All five GET views, ordered by trust level (ascending).
  */
 export const GET_VIEWS: readonly GetView[] = [
-  'local', 'shared', 'authoritative', 'verified',
+  'working-memory', 'shared-working-memory', 'long-term-memory', 'verified-memory', 'authoritative',
 ] as const;

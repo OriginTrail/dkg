@@ -26,26 +26,26 @@ describe('Workspace TTL', () => {
       name: 'TtlNode',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      workspaceTtlMs: 2000, // 2 seconds for testing
+      sharedMemoryTtlMs: 2000, // 2 seconds for testing
     });
 
     await node.start();
     await sleep(500);
 
-    await node.createParanet({
+    await node.createContextGraph({
       id: PARANET,
       name: 'TTL Test Paranet',
       description: 'For workspace TTL tests',
     });
 
     // Write the "stale" entity first
-    await node.writeToWorkspace(PARANET, [
+    await node.share(PARANET, [
       { subject: STALE_ENTITY, predicate: 'http://schema.org/name', object: '"Will Expire"', graph: '' },
     ]);
 
     const before = await node.query(
       'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(before.bindings.length).toBe(1);
   }, 10000);
@@ -55,19 +55,19 @@ describe('Workspace TTL', () => {
     await sleep(3000);
 
     // Write a fresh entity (this one should survive cleanup)
-    await node.writeToWorkspace(PARANET, [
+    await node.share(PARANET, [
       { subject: FRESH_ENTITY, predicate: 'http://schema.org/name', object: '"Still Fresh"', graph: '' },
     ]);
 
     // Run cleanup explicitly
-    const deleted = await node.cleanupExpiredWorkspace();
+    const deleted = await node.cleanupExpiredSharedMemory();
     expect(deleted).toBeGreaterThan(0);
   }, 10000);
 
   it('stale entity is gone, fresh entity remains', async () => {
     const result = await node.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
 
     const subjects = result.bindings.map((b: any) => b['s']);
@@ -79,7 +79,7 @@ describe('Workspace TTL', () => {
   }, 5000);
 });
 
-describe('setWorkspaceTtlMs timer lifecycle', () => {
+describe('setSharedMemoryTtlMs timer lifecycle', () => {
   let node: DKGAgent;
 
   afterAll(async () => {
@@ -91,22 +91,22 @@ describe('setWorkspaceTtlMs timer lifecycle', () => {
       name: 'TtlLifecycleNode',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      workspaceTtlMs: 0, // disabled
+      sharedMemoryTtlMs: 0, // disabled
     });
 
     await node.start();
     await sleep(300);
 
     // Timer should not be running (TTL=0)
-    expect((node as any).workspaceCleanupTimer).toBeNull();
+    expect((node as any).swmCleanupTimer).toBeNull();
 
     // Enable TTL at runtime
-    node.setWorkspaceTtlMs(60_000);
-    expect((node as any).workspaceCleanupTimer).not.toBeNull();
+    node.setSharedMemoryTtlMs(60_000);
+    expect((node as any).swmCleanupTimer).not.toBeNull();
 
     // Disable again
-    node.setWorkspaceTtlMs(0);
-    expect((node as any).workspaceCleanupTimer).toBeNull();
+    node.setSharedMemoryTtlMs(0);
+    expect((node as any).swmCleanupTimer).toBeNull();
   }, 10000);
 });
 
@@ -126,21 +126,21 @@ describe('Workspace TTL sync filtering', () => {
       name: 'TtlSyncA',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: ['ttl-sync-test'],
-      workspaceTtlMs: 2000,
+      syncContextGraphs: ['ttl-sync-test'],
+      sharedMemoryTtlMs: 2000,
     });
 
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: 'ttl-sync-test',
       name: 'TTL Sync Test',
       description: 'Testing TTL filtering during sync',
     });
 
     // Write stale entity
-    await nodeA.writeToWorkspace('ttl-sync-test', [
+    await nodeA.share('ttl-sync-test', [
       { subject: 'urn:ttl-sync:old', predicate: 'http://schema.org/name', object: '"Old Data"', graph: '' },
     ]);
 
@@ -148,7 +148,7 @@ describe('Workspace TTL sync filtering', () => {
     await sleep(3000);
 
     // Write fresh entity
-    await nodeA.writeToWorkspace('ttl-sync-test', [
+    await nodeA.share('ttl-sync-test', [
       { subject: 'urn:ttl-sync:new', predicate: 'http://schema.org/name', object: '"New Data"', graph: '' },
     ]);
 
@@ -157,24 +157,24 @@ describe('Workspace TTL sync filtering', () => {
       name: 'TtlSyncB',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: ['ttl-sync-test'],
+      syncContextGraphs: ['ttl-sync-test'],
     });
     await nodeB.start();
     await sleep(500);
 
-    nodeB.subscribeToParanet('ttl-sync-test');
+    nodeB.subscribeToContextGraph('ttl-sync-test');
     await sleep(200);
 
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
     if (addrA) await nodeB.connectTo(addrA);
     await sleep(1000);
 
-    const synced = await nodeB.syncWorkspaceFromPeer(nodeA.peerId, ['ttl-sync-test']);
+    const synced = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, ['ttl-sync-test']);
     expect(synced).toBeGreaterThan(0);
 
     const result = await nodeB.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: 'ttl-sync-test', graphSuffix: '_shared_memory' },
+      { contextGraphId: 'ttl-sync-test', graphSuffix: '_shared_memory' },
     );
 
     const subjects = result.bindings.map((b: any) => b['s']);

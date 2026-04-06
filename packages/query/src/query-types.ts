@@ -16,6 +16,8 @@ export type QueryStatus =
 export interface QueryRequest {
   operationId: string;
   lookupType: LookupType;
+  contextGraphId?: string;
+  /** @deprecated Use contextGraphId */
   paranetId?: string;
   ual?: string;
   entityUri?: string;
@@ -37,7 +39,7 @@ export interface QueryResponse {
   error?: string;
 }
 
-export interface ParanetQueryPolicy {
+export interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';
   allowedPeers?: string[];
   allowedLookupTypes?: LookupType[];
@@ -46,8 +48,13 @@ export interface ParanetQueryPolicy {
   sparqlMaxResults?: number;
 }
 
+/** @deprecated Use ContextGraphQueryPolicy */
+export type ParanetQueryPolicy = ContextGraphQueryPolicy;
+
 export interface QueryAccessConfig {
   defaultPolicy: 'deny' | 'public';
-  paranets?: Record<string, ParanetQueryPolicy>;
+  contextGraphs?: Record<string, ContextGraphQueryPolicy>;
+  /** @deprecated Use contextGraphs */
+  paranets?: Record<string, ContextGraphQueryPolicy>;
   rateLimitPerMinute?: number;
 }

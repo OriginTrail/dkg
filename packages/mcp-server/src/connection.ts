@@ -71,11 +71,11 @@ export class DkgClient {
     }>('/api/status');
   }
 
-  async query(sparql: string, paranetId?: string) {
-    return this.post<{ result: unknown }>('/api/query', { sparql, paranetId });
+  async query(sparql: string, contextGraphId?: string) {
+    return this.post<{ result: unknown }>('/api/query', { sparql, contextGraphId });
   }
 
-  async publish(paranetId: string, quads: Array<{
+  async publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>) {
     return this.post<{
@@ -83,22 +83,22 @@ export class DkgClient {
       status: string;
       kas: Array<{ tokenId: string; rootEntity: string }>;
       txHash?: string;
-    }>('/api/publish', { paranetId, quads });
+    }>('/api/publish', { contextGraphId, quads });
   }
 
-  async listParanets() {
+  async listContextGraphs() {
     return this.get<{
-      paranets: Array<{
+      contextGraphs: Array<{
         id: string; uri: string; name: string;
         description?: string; creator?: string;
         createdAt?: string; isSystem: boolean;
       }>;
-    }>('/api/paranet/list');
+    }>('/api/context-graph/list');
   }
 
-  async createParanet(id: string, name: string, description?: string) {
+  async createContextGraph(id: string, name: string, description?: string) {
     return this.post<{ created: string; uri: string }>(
-      '/api/paranet/create', { id, name, description },
+      '/api/context-graph/create', { id, name, description },
     );
   }
 
@@ -111,7 +111,7 @@ export class DkgClient {
     }>('/api/agents');
   }
 
-  async subscribe(paranetId: string) {
-    return this.post<{ subscribed: string }>('/api/subscribe', { paranetId });
+  async subscribe(contextGraphId: string) {
+    return this.post<{ subscribed: string }>('/api/subscribe', { contextGraphId });
   }
 }

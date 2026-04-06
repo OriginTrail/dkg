@@ -113,31 +113,31 @@ describe('DkgDaemonClient', () => {
     expect(body.sparql).toContain('SELECT');
   });
 
-  it('query should pass paranetId option', async () => {
+  it('query should pass contextGraphId option', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
-    await client.query('SELECT * WHERE { ?s ?p ?o }', { paranetId: 'agent-memory' });
+    await client.query('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'agent-memory' });
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.paranetId).toBe('agent-memory');
+    expect(body.contextGraphId).toBe('agent-memory');
   });
 
   // ---------------------------------------------------------------------------
   // Workspace write
   // ---------------------------------------------------------------------------
 
-  it('writeToWorkspace should POST quads', async () => {
+  it('share should POST quads', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ workspaceOperationId: 'op-1' }), { status: 200 }),
+      new Response(JSON.stringify({ shareOperationId: 'op-1' }), { status: 200 }),
     );
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
-    await client.writeToWorkspace('agent-memory', quads);
+    await client.share('agent-memory', quads);
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.paranetId).toBe('agent-memory');
+    expect(body.contextGraphId).toBe('agent-memory');
     expect(body.quads).toHaveLength(1);
     expect(body.localOnly).toBe(true);
   });
@@ -300,7 +300,7 @@ describe('DkgDaemonClient', () => {
     expect(url).toBe('http://localhost:9200/api/publish');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
-    expect(body.paranetId).toBe('testing');
+    expect(body.contextGraphId).toBe('testing');
     expect(body.quads).toHaveLength(1);
   });
 
@@ -337,32 +337,32 @@ describe('DkgDaemonClient', () => {
   // Paranets
   // ---------------------------------------------------------------------------
 
-  it('listParanets should GET /api/paranet/list', async () => {
+  it('listContextGraphs should GET /api/context-graph/list', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ paranets: [{ id: 'p1' }, { id: 'p2' }] }), { status: 200 }),
+      new Response(JSON.stringify({ contextGraphs: [{ id: 'p1' }, { id: 'p2' }] }), { status: 200 }),
     );
 
-    const result = await client.listParanets();
-    expect(result.paranets).toHaveLength(2);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/paranet/list');
+    const result = await client.listContextGraphs();
+    expect(result.contextGraphs).toHaveLength(2);
+    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
   });
 
-  it('createParanet should POST to /api/paranet/create', async () => {
+  it('createContextGraph should POST to /api/context-graph/create', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
-    const result = await client.createParanet('my-research', 'My Research', 'A research paranet');
+    const result = await client.createContextGraph('my-research', 'My Research', 'A research context graph');
     expect(result.created).toBe('my-research');
     expect(result.uri).toBe('did:dkg:context-graph:my-research');
 
     const [url, opts] = fetchSpy.mock.calls[0];
-    expect(url).toBe('http://localhost:9200/api/paranet/create');
+    expect(url).toBe('http://localhost:9200/api/context-graph/create');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
-    expect(body.description).toBe('A research paranet');
+    expect(body.description).toBe('A research context graph');
   });
 
   // ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ describe('DkgDaemonClient', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({
         subscribed: 'my-paranet',
-        catchup: { jobId: 'job-1', status: 'queued', includeWorkspace: true },
+        catchup: { jobId: 'job-1', status: 'queued', includeSharedMemory: true },
       }), { status: 200 }),
     );
 
@@ -385,18 +385,18 @@ describe('DkgDaemonClient', () => {
     expect(url).toBe('http://localhost:9200/api/subscribe');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
-    expect(body.paranetId).toBe('my-paranet');
+    expect(body.contextGraphId).toBe('my-paranet');
   });
 
-  it('subscribe passes includeWorkspace option', async () => {
+  it('subscribe passes includeSharedMemory option', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeWorkspace: false } }), { status: 200 }),
+      new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeSharedMemory: false } }), { status: 200 }),
     );
 
-    await client.subscribe('p1', { includeWorkspace: false });
+    await client.subscribe('p1', { includeSharedMemory: false });
 
     const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.includeWorkspace).toBe(false);
+    expect(body.includeSharedMemory).toBe(false);
   });
 
   // ---------------------------------------------------------------------------

@@ -51,12 +51,12 @@ export function literal(value: string | number | boolean): string {
   return `"${value}"^^<http://www.w3.org/2001/XMLSchema#boolean>`;
 }
 
-export function workspaceGraph(paranetId: string): string {
-  return `did:dkg:context-graph:${paranetId}`;
+export function sharedMemoryGraph(contextGraphId: string): string {
+  return `did:dkg:context-graph:${contextGraphId}`;
 }
 
-export function contextGraph(paranetId: string, swarmId: string): string {
-  return `did:dkg:context-graph:${paranetId}/context/${swarmId}`;
+export function contextGraph(contextGraphId: string, swarmId: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/context/${swarmId}`;
 }
 
 export const SWARM_STATUS_PREDICATE = otUri('status');
@@ -64,7 +64,7 @@ export const SWARM_STATUS_PREDICATE = otUri('status');
 export const SWARM_STAGES = ['recruiting', 'traveling', 'finished'] as const;
 
 export function swarmSnapshotQuads(
-  paranetId: string,
+  contextGraphId: string,
   swarmId: string,
   swarmName: string,
   leaderPeerId: string,
@@ -72,7 +72,7 @@ export function swarmSnapshotQuads(
   maxPlayers: number,
   status: typeof SWARM_STAGES[number],
 ): Quad[] {
-  const g = workspaceGraph(paranetId);
+  const g = sharedMemoryGraph(contextGraphId);
   const s = swarmUri(swarmId);
   return [
     quad(s, `${RDF}type`, otUri('AgentSwarm'), g),
@@ -84,8 +84,8 @@ export function swarmSnapshotQuads(
   ];
 }
 
-export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName: string, leaderPeerId: string, createdAt: number, maxPlayers: number): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function swarmCreatedQuads(contextGraphId: string, swarmId: string, swarmName: string, leaderPeerId: string, createdAt: number, maxPlayers: number): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const s = swarmUri(swarmId);
   return [
     quad(s, `${RDF}type`, otUri('AgentSwarm'), g),
@@ -97,8 +97,8 @@ export function swarmCreatedQuads(paranetId: string, swarmId: string, swarmName:
   ];
 }
 
-export function playerJoinedQuads(paranetId: string, swarmId: string, peerId: string, displayName: string, joinedAt: number = Date.now()): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function playerJoinedQuads(contextGraphId: string, swarmId: string, peerId: string, displayName: string, joinedAt: number = Date.now()): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const membership = `${OT}swarm/${swarmId}/member/${peerId}`;
   return [
     quad(membership, `${RDF}type`, otUri('SwarmMembership'), g),
@@ -109,8 +109,8 @@ export function playerJoinedQuads(paranetId: string, swarmId: string, peerId: st
   ];
 }
 
-export function voteCastQuads(paranetId: string, swarmId: string, turn: number, peerId: string, action: string, params?: Record<string, any>): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function voteCastQuads(contextGraphId: string, swarmId: string, turn: number, peerId: string, action: string, params?: Record<string, any>): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const v = voteUri(swarmId, turn, peerId);
   const quads = [
     quad(v, `${RDF}type`, otUri('Vote'), g),
@@ -124,8 +124,8 @@ export function voteCastQuads(paranetId: string, swarmId: string, turn: number, 
   return quads;
 }
 
-export function expeditionLaunchedQuads(paranetId: string, swarmId: string, gameStateJson: string, launchedAt: number): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function expeditionLaunchedQuads(contextGraphId: string, swarmId: string, gameStateJson: string, launchedAt: number): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const s = `urn:dkg:expedition:${swarmId}:launched`;
   return [
     quad(s, `${RDF}type`, otUri('ExpeditionLaunch'), g),
@@ -142,10 +142,10 @@ export interface ChainProvenance {
   ual: string;
 }
 
-export function turnResolvedQuads(paranetId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[]): Quad[] {
-  // Publish validation requires graph URI to match the target paranet graph exactly.
-  // Context graph routing is handled during enshrinement, not by quad graph value.
-  const g = workspaceGraph(paranetId);
+export function turnResolvedQuads(contextGraphId: string, swarmId: string, turn: number, winningAction: string, gameStateJson: string, approvers: string[]): Quad[] {
+  // Publish validation requires graph URI to match the target context graph exactly.
+  // Context graph routing is handled during publishing, not by quad graph value.
+  const g = sharedMemoryGraph(contextGraphId);
   const t = turnUri(swarmId, turn);
   const quads = [
     quad(t, `${RDF}type`, otUri('TurnResult'), g),
@@ -161,8 +161,8 @@ export function turnResolvedQuads(paranetId: string, swarmId: string, turn: numb
 }
 
 
-export function turnProvenanceQuads(paranetId: string, swarmId: string, turn: number, provenance: ChainProvenance): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function turnProvenanceQuads(contextGraphId: string, swarmId: string, turn: number, provenance: ChainProvenance): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const s = `${turnUri(swarmId, turn)}/provenance`;
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('TurnProvenance'), g),
@@ -185,15 +185,15 @@ export interface ConsensusAttestation {
 }
 
 export function consensusAttestationQuads(
-  paranetId: string,
+  contextGraphId: string,
   swarmId: string,
   turn: number,
   attestations: ConsensusAttestation[],
   resolution: string,
   proposalHash: string,
 ): Quad[] {
-  // Keep attestation quads publish-compatible with paranet graph validation.
-  const g = workspaceGraph(paranetId);
+  // Keep attestation quads publish-compatible with context graph validation.
+  const g = sharedMemoryGraph(contextGraphId);
   const t = turnUri(swarmId, turn);
   const root = `urn:dkg:attestation:${swarmId}:turn${turn}:${proposalHash}`;
   const quads: Quad[] = [
@@ -225,8 +225,8 @@ export interface PublishProvenance {
   publishedAt: number;
 }
 
-export function publishProvenanceChainQuads(paranetId: string, provenance: PublishProvenance): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function publishProvenanceChainQuads(contextGraphId: string, provenance: PublishProvenance): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const s = `${provenance.rootEntity}/provenance/${provenance.txHash}`;
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('PublishedEntity'), g),
@@ -243,8 +243,8 @@ export function publishProvenanceChainQuads(paranetId: string, provenance: Publi
 }
 
 
-export function playerProfileQuads(paranetId: string, peerId: string, displayName: string): Quad[] {
-  const g = `did:dkg:context-graph:${paranetId}`;
+export function playerProfileQuads(contextGraphId: string, peerId: string, displayName: string): Quad[] {
+  const g = `did:dkg:context-graph:${contextGraphId}`;
   const entity = `did:dkg:game:player:${peerId}`;
   return [
     quad(entity, `${RDF}type`, otUri('Player'), g),
@@ -261,8 +261,8 @@ export interface TopologyPeer {
   lastSeen: number;
 }
 
-export function networkTopologyQuads(paranetId: string, writerPeerId: string, peers: TopologyPeer[]): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function networkTopologyQuads(contextGraphId: string, writerPeerId: string, peers: TopologyPeer[]): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const s = otUri(`topology/snapshot-${writerPeerId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('NetworkSnapshot'), g),
@@ -283,13 +283,13 @@ export function networkTopologyQuads(paranetId: string, writerPeerId: string, pe
   return quads;
 }
 
-export function workspaceLineageQuads(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Quad[] {
-  const g = workspaceGraph(paranetId);
+export function sharedMemoryLineageQuads(contextGraphId: string, entries: Array<{ shareOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Quad[] {
+  const g = sharedMemoryGraph(contextGraphId);
   const quads: Quad[] = [];
   for (const entry of entries) {
-    const s = otUri(`lineage/${entry.workspaceOperationId}`);
+    const s = otUri(`lineage/${entry.shareOperationId}`);
     quads.push(quad(s, `${RDF}type`, otUri('WorkspaceLineage'), g));
-    quads.push(quad(s, otUri('workspaceOperationId'), literal(entry.workspaceOperationId), g));
+    quads.push(quad(s, otUri('shareOperationId'), literal(entry.shareOperationId), g));
     quads.push(quad(s, otUri('rootEntity'), entry.rootEntity, g));
     if (entry.publishedUal) {
       quads.push(quad(s, otUri('publishedUal'), literal(entry.publishedUal), g));
@@ -308,12 +308,12 @@ export function workspaceLineageQuads(paranetId: string, entries: Array<{ worksp
 }
 
 export function strategyPatternQuads(
-  paranetId: string,
+  contextGraphId: string,
   swarmId: string,
   peerId: string,
   stats: { totalVotes: number; actionCounts: Record<string, number>; favoriteAction: string; turnsSurvived: number },
 ): Quad[] {
-  const g = workspaceGraph(paranetId);
+  const g = sharedMemoryGraph(contextGraphId);
   const s = otUri(`strategy/${swarmId}/${peerId}`);
   const quads: Quad[] = [
     quad(s, `${RDF}type`, otUri('StrategyPattern'), g),
@@ -334,7 +334,7 @@ export function strategyPatternQuads(
 }
 
 export function leaderboardEntryQuads(
-  paranetId: string,
+  contextGraphId: string,
   swarmId: string,
   peerId: string,
   displayName: string,
@@ -345,7 +345,7 @@ export function leaderboardEntryQuads(
   partySize: number,
   finishedAt: number,
 ): Quad[] {
-  const g = workspaceGraph(paranetId);
+  const g = sharedMemoryGraph(contextGraphId);
   const entry = otUri(`swarm/${swarmId}/leaderboard/${peerId}`);
   return [
     quad(entry, `${RDF}type`, otUri('LeaderboardEntry'), g),
@@ -362,13 +362,13 @@ export function leaderboardEntryQuads(
 }
 
 export function syncMemoryDkgQuads(
-  paranetId: string,
+  contextGraphId: string,
   swarmId: string,
   turn: number,
   peerId: string,
   tracSpent: number,
 ): Quad[] {
-  const g = workspaceGraph(paranetId);
+  const g = sharedMemoryGraph(contextGraphId);
   const s = otUri(`swarm/${swarmId}/turn/${turn}/sync/${peerId}`);
   return [
     quad(s, `${RDF}type`, otUri('SyncMemoryViaDKG'), g),

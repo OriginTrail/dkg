@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { DkgClient } from './connection.js';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
-const PARANET = 'dev-coordination';
+const CONTEXT_GRAPH = 'dev-coordination';
 const DG = 'https://ontology.dkg.io/devgraph#';
 
 let _client: DkgClient | null = null;
@@ -63,7 +63,7 @@ function toTable(bindings: Bindings, columns?: string[]): string {
 
 async function sparql(query: string): Promise<Bindings> {
   const client = await getClient();
-  const result = await client.query(query, PARANET);
+  const result = await client.query(query, CONTEXT_GRAPH);
   return parseBindings(result.result);
 }
 
@@ -364,7 +364,7 @@ server.registerTool(
   {
     title: 'Publish to DKG',
     description:
-      'Publish RDF quads (knowledge) to the dev-coordination paranet. ' +
+      'Publish RDF quads (knowledge) to the dev-coordination context graph. ' +
       'Use this to record architectural decisions, session summaries, or other knowledge.',
     inputSchema: {
       quads: z.array(z.object({
@@ -378,7 +378,7 @@ server.registerTool(
   async ({ quads }) => {
     try {
       const client = await getClient();
-      const result = await client.publish(PARANET, quads);
+      const result = await client.publish(CONTEXT_GRAPH, quads);
       return ok(`Published ${quads.length} quads. KC: ${result.kcId}, status: ${result.status}`);
     } catch (e) { return err(`Publish error: ${formatError(e)}`); }
   },
@@ -397,7 +397,7 @@ const esc = escapeSparqlLiteral;
 type AdapterRegisterFn = (
   server: McpServer,
   getClient: () => Promise<DkgClient>,
-  paranetId?: string,
+  contextGraphId?: string,
 ) => void;
 
 const ADAPTER_MAP: Record<string, string> = {

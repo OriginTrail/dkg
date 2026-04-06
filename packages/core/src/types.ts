@@ -23,7 +23,9 @@ export interface DKGNodeConfig {
   bootstrapPeers?: string[];
   /** Enable mDNS for local peer discovery. Default: true. */
   enableMdns?: boolean;
-  /** GossipSub paranet topics to subscribe to at startup. */
+  /** GossipSub context graph topics to subscribe to at startup. */
+  contextGraphSubscriptions?: string[];
+  /** @deprecated Use contextGraphSubscriptions */
   paranetSubscriptions?: string[];
   /** Ed25519 private key bytes. Generated if absent. */
   privateKey?: Uint8Array;

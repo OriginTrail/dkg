@@ -180,7 +180,7 @@ describe('computeTurnCommitment', () => {
 describe('computeConfigHash', () => {
   const baseConfig = {
     sessionId: 'session-1',
-    paranetId: 'paranet-1',
+    contextGraphId: 'paranet-1',
     appId: 'test-app',
     createdBy: 'peer-1',
     createdAt: '2026-01-01T00:00:00Z',
@@ -213,7 +213,7 @@ describe('signAKAPayload / verifyAKASignature', () => {
   const context: SigningContext = {
     domain: 'AKA-v1',
     network: 'test-net',
-    paranetId: 'paranet-1',
+    contextGraphId: 'paranet-1',
     sessionId: 'session-1',
     round: 1,
     type: 'RoundAck',

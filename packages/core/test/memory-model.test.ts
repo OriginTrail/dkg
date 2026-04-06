@@ -98,9 +98,11 @@ describe('PublicationState type', () => {
 });
 
 describe('GetView type', () => {
-  it('GET_VIEWS contains all 4 views in trust order', () => {
-    expect(GET_VIEWS).toHaveLength(4);
-    const expected: GetView[] = ['local', 'shared', 'authoritative', 'verified'];
+  it('GET_VIEWS contains all 5 views in trust order', () => {
+    expect(GET_VIEWS).toHaveLength(5);
+    const expected: GetView[] = [
+      'working-memory', 'shared-working-memory', 'long-term-memory', 'verified-memory', 'authoritative',
+    ];
     expect([...GET_VIEWS]).toEqual(expected);
   });
 });

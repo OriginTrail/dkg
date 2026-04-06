@@ -1,6 +1,6 @@
 /**
- * E2E tests for the workspace graph: writeToWorkspace → GossipSub replicate →
- * query workspace → enshrineFromWorkspace → query data graph.
+ * E2E tests for the workspace graph: share → GossipSub replicate →
+ * query workspace → publishFromSharedMemory → query data graph.
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
@@ -52,16 +52,16 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 10000);
 
   it('node A creates a paranet; node B subscribes; A writes to workspace and B receives via GossipSub', async () => {
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: PARANET,
       name: 'Workspace E2E Paranet',
       description: 'For workspace graph tests',
     });
 
-    const exists = await nodeA.paranetExists(PARANET);
+    const exists = await nodeA.contextGraphExists(PARANET);
     expect(exists).toBe(true);
 
-    nodeB.subscribeToParanet(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
     await sleep(2000);
 
     const quads = [
@@ -69,14 +69,14 @@ describe('Workspace E2E (2 nodes)', () => {
       { subject: ENTITY, predicate: 'http://schema.org/description', object: '"Replicated via workspace topic"', graph: '' as const },
     ];
 
-    const result = await nodeA.writeToWorkspace(PARANET, quads);
-    expect(result.workspaceOperationId).toMatch(/^ws-\d+-[a-z0-9]+$/);
+    const result = await nodeA.share(PARANET, quads);
+    expect(result.shareOperationId).toMatch(/^swm-\d+-[a-z0-9]+$/);
 
     await sleep(5000);
 
     const onA = await nodeA.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
@@ -84,17 +84,17 @@ describe('Workspace E2E (2 nodes)', () => {
     // Node B may receive via GossipSub (depends on mesh formation timing)
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     if (onB.bindings.length > 0) {
       expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
     }
   }, 25000);
 
-  it('query with includeWorkspace returns workspace data', async () => {
+  it('query with includeSharedMemory returns workspace data', async () => {
     const unionResult = await nodeA.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, includeWorkspace: true },
+      { contextGraphId: PARANET, includeSharedMemory: true },
     );
     expect(unionResult.bindings.length).toBeGreaterThanOrEqual(1);
     const names = unionResult.bindings.map((r) => String(r['name']));
@@ -102,7 +102,7 @@ describe('Workspace E2E (2 nodes)', () => {
   }, 5000);
 
   it('node A enshrines workspace to data graph', async () => {
-    const result = await nodeA.enshrineFromWorkspace(PARANET, 'all');
+    const result = await nodeA.publishFromSharedMemory(PARANET, 'all');
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
     expect(result.kaManifest[0].rootEntity).toBe(ENTITY);

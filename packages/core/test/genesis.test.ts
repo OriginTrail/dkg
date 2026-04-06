@@ -3,7 +3,7 @@ import {
   getGenesisQuads,
   computeNetworkId,
   getGenesisRaw,
-  SYSTEM_PARANETS,
+  SYSTEM_CONTEXT_GRAPHS,
   DKG_ONTOLOGY,
 } from '../src/genesis.js';
 import { sha256 } from '../src/index.js';
@@ -36,7 +36,7 @@ describe('getGenesisQuads', () => {
     expect(networkQuad).toBeDefined();
   });
 
-  it('includes system paranets (agents and ontology)', () => {
+  it('includes system context graphs (agents and ontology)', () => {
     const quads = getGenesisQuads();
     const subjects = new Set(quads.map(q => q.subject));
     expect(subjects.has('did:dkg:context-graph:agents')).toBe(true);
@@ -106,10 +106,10 @@ describe('getGenesisRaw', () => {
   });
 });
 
-describe('SYSTEM_PARANETS', () => {
+describe('SYSTEM_CONTEXT_GRAPHS', () => {
   it('has AGENTS and ONTOLOGY keys', () => {
-    expect(SYSTEM_PARANETS.AGENTS).toBe('agents');
-    expect(SYSTEM_PARANETS.ONTOLOGY).toBe('ontology');
+    expect(SYSTEM_CONTEXT_GRAPHS.AGENTS).toBe('agents');
+    expect(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY).toBe('ontology');
   });
 });
 
@@ -126,8 +126,8 @@ describe('DKG_ONTOLOGY', () => {
       DKG_PUBLIC_KEY: 'https://dkg.network/ontology#publicKey',
       DKG_NODE_ROLE: 'https://dkg.network/ontology#nodeRole',
       DKG_RELAY_ADDRESS: 'https://dkg.network/ontology#relayAddress',
-      DKG_PARANET: 'https://dkg.network/ontology#Paranet',
-      DKG_SYSTEM_PARANET: 'https://dkg.network/ontology#SystemParanet',
+      DKG_CONTEXT_GRAPH: 'https://dkg.network/ontology#Paranet',
+      DKG_SYSTEM_CONTEXT_GRAPH: 'https://dkg.network/ontology#SystemParanet',
       DKG_NETWORK: 'https://dkg.network/ontology#Network',
       DKG_NETWORK_ID: 'https://dkg.network/ontology#networkId',
       DKG_GENESIS_VERSION: 'https://dkg.network/ontology#genesisVersion',
@@ -138,8 +138,11 @@ describe('DKG_ONTOLOGY', () => {
     }
   });
 
-  it('all values are unique URIs', () => {
-    const values = Object.values(DKG_ONTOLOGY);
+  it('all values are unique URIs (excluding deprecated alias keys that mirror canonical URIs)', () => {
+    const deprecatedAliasKeys = new Set(['DKG_PARANET', 'DKG_SYSTEM_PARANET']);
+    const values = Object.entries(DKG_ONTOLOGY)
+      .filter(([k]) => !deprecatedAliasKeys.has(k))
+      .map(([, v]) => v);
     const uniqueValues = new Set(values);
     expect(uniqueValues.size).toBe(values.length);
   });

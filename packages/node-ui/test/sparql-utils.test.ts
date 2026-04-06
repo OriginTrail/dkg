@@ -118,9 +118,9 @@ SELECT ?s WHERE {
         s: 's1',
         p: 'p1',
         o: 'o1',
-        g: 'did:dkg:context-graph:agents/workspace',
-        graphType: 'workspace',
-        paranet: 'agents',
+        g: 'did:dkg:context-graph:agents/shared-memory',
+        graphType: 'shared-memory',
+        contextGraph: 'agents',
         source: '12D3abc',
         ual: 'did:dkg:kc:1',
         txHash: '0x1',
@@ -132,7 +132,7 @@ SELECT ?s WHERE {
         o: 'o1',
         g: 'did:dkg:context-graph:agents/data',
         graphType: 'data',
-        paranet: 'agents',
+        contextGraph: 'agents',
         source: '12D3abc',
         ual: 'did:dkg:kc:1',
         txHash: '0x2',
@@ -143,7 +143,7 @@ SELECT ?s WHERE {
     expect(expanded).toHaveLength(2);
     expect(expanded.map((row) => row.g).sort()).toEqual([
       'did:dkg:context-graph:agents/data',
-      'did:dkg:context-graph:agents/workspace',
+      'did:dkg:context-graph:agents/shared-memory',
     ]);
   });
 
@@ -157,7 +157,7 @@ SELECT ?s WHERE {
         o: 'o1',
         g: '',
         graphType: '',
-        paranet: '',
+        contextGraph: '',
         source: '',
         ual: '',
         txHash: '',

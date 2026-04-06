@@ -8,8 +8,8 @@ import {
   decodeAccessRequest,
   encodeAccessResponse,
   decodeAccessResponse,
-  encodeWorkspacePublishRequest,
-  decodeWorkspacePublishRequest,
+  encodeSharePublishRequest,
+  decodeSharePublishRequest,
   encodeFinalizationMessage,
   decodeFinalizationMessage,
   encodeKAUpdateRequest,
@@ -18,10 +18,11 @@ import {
 
 describe('Protobuf: PublishRequest round-trip', () => {
   it('encodes and decodes correctly', () => {
+    const contextGraphId = 'agent-registry';
     const original = {
       ual: 'did:dkg:base:8453/0xKCS/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: 'agent-registry',
+      paranetId: contextGraphId,
       kas: [
         {
           tokenId: 1,
@@ -38,7 +39,7 @@ describe('Protobuf: PublishRequest round-trip', () => {
 
     const decoded = decodePublishRequest(encoded);
     expect(decoded.ual).toBe(original.ual);
-    expect(decoded.paranetId).toBe(original.paranetId);
+    expect(decoded.paranetId).toBe(contextGraphId);
     expect(decoded.kas).toHaveLength(1);
     expect(decoded.kas[0].rootEntity).toBe('did:dkg:agent:QmBot');
     expect(decoded.kas[0].privateTripleCount).toBe(5);
@@ -90,21 +91,22 @@ describe('Protobuf: AccessRequest round-trip', () => {
   });
 });
 
-describe('Protobuf: WorkspacePublishRequest round-trip', () => {
+describe('Protobuf: SharePublishRequest round-trip (WorkspacePublishRequest wire format)', () => {
   it('encodes and decodes correctly', () => {
+    const contextGraphId = 'test-para';
     const original = {
-      paranetId: 'test-para',
+      paranetId: contextGraphId,
       nquads: new TextEncoder().encode('<urn:entity> <http://purl.org/dc/terms/title> "Hello" .'),
       manifest: [{ rootEntity: 'urn:entity', privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWTest',
       workspaceOperationId: 'ws-123',
       timestampMs: Date.now(),
     };
-    const encoded = encodeWorkspacePublishRequest(original);
+    const encoded = encodeSharePublishRequest(original);
     expect(encoded).toBeInstanceOf(Uint8Array);
     expect(encoded.length).toBeGreaterThan(0);
-    const decoded = decodeWorkspacePublishRequest(encoded);
-    expect(decoded.paranetId).toBe(original.paranetId);
+    const decoded = decodeSharePublishRequest(encoded);
+    expect(decoded.paranetId).toBe(contextGraphId);
     expect(decoded.publisherPeerId).toBe(original.publisherPeerId);
     expect(decoded.workspaceOperationId).toBe(original.workspaceOperationId);
     expect(decoded.manifest).toHaveLength(1);
@@ -112,7 +114,7 @@ describe('Protobuf: WorkspacePublishRequest round-trip', () => {
   });
 });
 
-describe('Protobuf: WorkspacePublishRequest CAS conditions round-trip', () => {
+describe('Protobuf: SharePublishRequest CAS conditions round-trip', () => {
   it('preserves casConditions through encode/decode', () => {
     const original = {
       paranetId: 'test-cas',
@@ -126,7 +128,7 @@ describe('Protobuf: WorkspacePublishRequest CAS conditions round-trip', () => {
         { subject: 'urn:e', predicate: 'http://example.org/turn', expectedValue: '', expectAbsent: true },
       ],
     };
-    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    const decoded = decodeSharePublishRequest(encodeSharePublishRequest(original));
     expect(decoded.casConditions).toHaveLength(2);
     expect(decoded.casConditions![0].subject).toBe('urn:e');
     expect(decoded.casConditions![0].predicate).toBe('http://example.org/status');
@@ -144,7 +146,7 @@ describe('Protobuf: WorkspacePublishRequest CAS conditions round-trip', () => {
       workspaceOperationId: 'ws-no-cas',
       timestampMs: Date.now(),
     };
-    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    const decoded = decodeSharePublishRequest(encodeSharePublishRequest(original));
     expect(decoded.casConditions ?? []).toHaveLength(0);
   });
 });
@@ -167,9 +169,10 @@ describe('Protobuf: AccessResponse round-trip', () => {
 
 describe('Protobuf: FinalizationMessage round-trip', () => {
   it('encodes and decodes correctly', () => {
+    const contextGraphId = 'test-finalization';
     const original = {
       ual: 'did:dkg:base:8453/0xKCS/42',
-      paranetId: 'test-finalization',
+      paranetId: contextGraphId,
       kcMerkleRoot: new Uint8Array(32).fill(0xab),
       txHash: '0x1234567890abcdef',
       blockNumber: 12345,
@@ -186,7 +189,7 @@ describe('Protobuf: FinalizationMessage round-trip', () => {
 
     const decoded = decodeFinalizationMessage(encoded);
     expect(decoded.ual).toBe(original.ual);
-    expect(decoded.paranetId).toBe(original.paranetId);
+    expect(decoded.paranetId).toBe(contextGraphId);
     expect(decoded.txHash).toBe(original.txHash);
     expect(decoded.publisherAddress).toBe(original.publisherAddress);
     expect(decoded.rootEntities).toEqual(original.rootEntities);
@@ -252,7 +255,7 @@ describe('Protobuf: operationId propagation round-trip', () => {
     expect(decoded.operationId).toBe('');
   });
 
-  it('WorkspacePublishRequest preserves operationId', () => {
+  it('SharePublishRequest preserves operationId', () => {
     const original = {
       paranetId: 'test',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
@@ -262,7 +265,7 @@ describe('Protobuf: operationId propagation round-trip', () => {
       timestampMs: Date.now(),
       operationId: OP_ID,
     };
-    const decoded = decodeWorkspacePublishRequest(encodeWorkspacePublishRequest(original));
+    const decoded = decodeSharePublishRequest(encodeSharePublishRequest(original));
     expect(decoded.operationId).toBe(OP_ID);
   });
 

@@ -11,7 +11,7 @@ export interface MetricsSource {
   getDirectPeerCount(): number;
   getRelayedPeerCount(): number;
   getMeshPeerCount(): number;
-  getParanetCount(): Promise<number>;
+  getContextGraphCount(): Promise<number>;
   getTotalTriples(): Promise<number>;
   getTotalKCs(): Promise<number>;
   getTotalKAs(): Promise<number>;
@@ -105,14 +105,14 @@ export class MetricsCollector {
     let totalKAs: number | null = null;
     let confirmedKCs: number | null = null;
     let tentativeKCs: number | null = null;
-    let paranetCount: number | null = null;
+    let contextGraphCount: number | null = null;
 
     try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
     try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
     try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
     try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
     try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
-    try { paranetCount = await this.source.getParanetCount(); } catch { /* ignore */ }
+    try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
 
     return {
       ts: Date.now(),
@@ -127,7 +127,7 @@ export class MetricsCollector {
       direct_peers: this.source.getDirectPeerCount(),
       relayed_peers: this.source.getRelayedPeerCount(),
       mesh_peers: this.source.getMeshPeerCount(),
-      paranet_count: paranetCount,
+      paranet_count: contextGraphCount,
       total_triples: totalTriples,
       total_kcs: totalKCs,
       total_kas: totalKAs,

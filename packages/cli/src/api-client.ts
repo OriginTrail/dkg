@@ -81,7 +81,7 @@ export class ApiClient {
     return this.get(`/api/messages${qs ? '?' + qs : ''}`);
   }
 
-  async publish(paranetId: string, quads: Array<{
+  async publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>, privateQuads?: Array<{
     subject: string; predicate: string; object: string; graph: string;
@@ -97,10 +97,11 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId, quads, privateQuads, ...options });
+    return this.post('/api/publish', { paranetId: contextGraphId, quads, privateQuads, ...options });
   }
 
-  async workspaceWrite(paranetId: string, quads: Array<{
+  /** Write quads to shared memory (formerly workspace). */
+  async sharedMemoryWrite(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
     workspaceOperationId: string;
@@ -109,11 +110,25 @@ export class ApiClient {
     triplesWritten: number;
     skolemizedBlankNodes?: number;
   }> {
-    return this.post('/api/workspace/write', { paranetId, quads });
+    return this.post('/api/shared-memory/write', { paranetId: contextGraphId, quads });
   }
 
-  async workspaceEnshrine(
-    paranetId: string,
+  /** @deprecated Use sharedMemoryWrite */
+  async workspaceWrite(contextGraphId: string, quads: Array<{
+    subject: string; predicate: string; object: string; graph: string;
+  }>): Promise<{
+    workspaceOperationId: string;
+    paranetId: string;
+    graph: string;
+    triplesWritten: number;
+    skolemizedBlankNodes?: number;
+  }> {
+    return this.sharedMemoryWrite(contextGraphId, quads);
+  }
+
+  /** Publish from shared memory (formerly enshrine from workspace). */
+  async publishFromSharedMemory(
+    contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
   ): Promise<{
@@ -123,11 +138,26 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.post('/api/workspace/enshrine', { paranetId, selection, clearAfter });
+    return this.post('/api/shared-memory/publish', { paranetId: contextGraphId, selection, clearAfter });
   }
 
-  async query(sparql: string, paranetId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, paranetId });
+  /** @deprecated Use publishFromSharedMemory */
+  async workspaceEnshrine(
+    contextGraphId: string,
+    selection: 'all' | { rootEntities: string[] } = 'all',
+    clearAfter = true,
+  ): Promise<{
+    kcId: string;
+    status: 'tentative' | 'confirmed';
+    kas: Array<{ tokenId: string; rootEntity: string }>;
+    txHash?: string;
+    blockNumber?: number;
+  }> {
+    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter);
+  }
+
+  async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
+    return this.post('/api/query', { sparql, paranetId: contextGraphId });
   }
 
   async queryRemote(peerId: string, request: {
@@ -153,7 +183,7 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribe(paranetId: string, options?: { includeWorkspace?: boolean }): Promise<{
+  async subscribeToContextGraph(contextGraphId: string, options?: { includeSharedMemory?: boolean }): Promise<{
     subscribed: string;
     catchup?:
       | {
@@ -169,10 +199,30 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.post('/api/subscribe', { paranetId, ...options });
+    return this.post('/api/subscribe', { paranetId: contextGraphId, includeWorkspace: options?.includeSharedMemory });
   }
 
-  async catchupStatus(paranetId: string): Promise<{
+  /** @deprecated Use subscribeToContextGraph */
+  async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
+    subscribed: string;
+    catchup?:
+      | {
+        connectedPeers: number;
+        syncCapablePeers: number;
+        peersTried: number;
+        dataSynced: number;
+        workspaceSynced: number;
+      }
+      | {
+        status: 'queued';
+        includeWorkspace: boolean;
+        jobId: string;
+      };
+  }> {
+    return this.subscribeToContextGraph(contextGraphId, { includeSharedMemory: options?.includeWorkspace });
+  }
+
+  async catchupStatus(contextGraphId: string): Promise<{
     jobId: string;
     paranetId: string;
     includeWorkspace: boolean;
@@ -189,20 +239,43 @@ export class ApiClient {
     };
     error?: string;
   }> {
-    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
+    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(contextGraphId)}`);
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {
     return this.post('/api/connect', { multiaddr });
   }
 
+  async createContextGraph(id: string, name: string, description?: string): Promise<{
+    created: string;
+    uri: string;
+  }> {
+    return this.post('/api/context-graph/create', { id, name, description });
+  }
+
+  /** @deprecated Use createContextGraph */
   async createParanet(id: string, name: string, description?: string): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.post('/api/paranet/create', { id, name, description });
+    return this.createContextGraph(id, name, description);
   }
 
+  async listContextGraphs(): Promise<{
+    paranets: Array<{
+      id: string;
+      uri: string;
+      name: string;
+      description?: string;
+      creator?: string;
+      createdAt?: string;
+      isSystem: boolean;
+    }>;
+  }> {
+    return this.get('/api/context-graph/list');
+  }
+
+  /** @deprecated Use listContextGraphs */
   async listParanets(): Promise<{
     paranets: Array<{
       id: string;
@@ -214,11 +287,16 @@ export class ApiClient {
       isSystem: boolean;
     }>;
   }> {
-    return this.get('/api/paranet/list');
+    return this.listContextGraphs();
   }
 
+  async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {
+    return this.get(`/api/context-graph/exists?id=${encodeURIComponent(id)}`);
+  }
+
+  /** @deprecated Use contextGraphExists */
   async paranetExists(id: string): Promise<{ id: string; exists: boolean }> {
-    return this.get(`/api/paranet/exists?id=${encodeURIComponent(id)}`);
+    return this.contextGraphExists(id);
   }
 
   async shutdown(): Promise<void> {

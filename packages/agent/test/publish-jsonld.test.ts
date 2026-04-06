@@ -26,7 +26,7 @@ afterEach(async () => {
 describe('publishJsonLd', () => {
   it('bare JSON-LD doc defaults to private quads', async () => {
     const agent = await createAgent('BarePrivateBot');
-    await agent.createParanet({ id: 'bare-priv', name: 'BP', description: '' });
+    await agent.createContextGraph({ id: 'bare-priv', name: 'BP', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -55,7 +55,7 @@ describe('publishJsonLd', () => {
 
   it('envelope { public } puts quads in public set', async () => {
     const agent = await createAgent('PubEnvBot');
-    await agent.createParanet({ id: 'pub-env', name: 'PE', description: '' });
+    await agent.createContextGraph({ id: 'pub-env', name: 'PE', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -82,7 +82,7 @@ describe('publishJsonLd', () => {
 
   it('envelope { public, private } splits quads correctly', async () => {
     const agent = await createAgent('SplitBot');
-    await agent.createParanet({ id: 'split-test', name: 'Split', description: '' });
+    await agent.createContextGraph({ id: 'split-test', name: 'Split', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -117,7 +117,7 @@ describe('publishJsonLd', () => {
 
   it('private-only envelope generates synthetic public anchor', async () => {
     const agent = await createAgent('PrivOnlyBot');
-    await agent.createParanet({ id: 'priv-only', name: 'PO', description: '' });
+    await agent.createContextGraph({ id: 'priv-only', name: 'PO', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -144,7 +144,7 @@ describe('publishJsonLd', () => {
 
   it('preserves typed literals in quad objects', async () => {
     const agent = await createAgent('LiteralBot');
-    await agent.createParanet({ id: 'literal-test', name: 'Lit', description: '' });
+    await agent.createContextGraph({ id: 'literal-test', name: 'Lit', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -175,7 +175,7 @@ describe('publishJsonLd', () => {
 
   it('forwards accessPolicy and allowedPeers opts', async () => {
     const agent = await createAgent('OptsBot');
-    await agent.createParanet({ id: 'opts-test', name: 'Opts', description: '' });
+    await agent.createContextGraph({ id: 'opts-test', name: 'Opts', description: '' });
 
     const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
@@ -202,7 +202,7 @@ describe('publishJsonLd', () => {
 
   it('throws on JSON-LD that produces no quads', async () => {
     const agent = await createAgent('ErrorBot');
-    await agent.createParanet({ id: 'error-test', name: 'Err', description: '' });
+    await agent.createContextGraph({ id: 'error-test', name: 'Err', description: '' });
 
     await expect(agent.publish('error-test', {})).rejects.toThrow(
       'JSON-LD document produced no RDF quads',
@@ -211,7 +211,7 @@ describe('publishJsonLd', () => {
 
   it('existing Quad[] publish still works unchanged', async () => {
     const agent = await createAgent('QuadBot');
-    await agent.createParanet({ id: 'quad-test', name: 'QT', description: '' });
+    await agent.createContextGraph({ id: 'quad-test', name: 'QT', description: '' });
 
     const result = await agent.publish('quad-test', [
       { subject: 'did:dkg:test:X', predicate: 'http://schema.org/name', object: '"X"', graph: '' },

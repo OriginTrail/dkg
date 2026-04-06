@@ -14,15 +14,16 @@ import type {
   TxResult,
   ChainEvent,
   EventFilter,
-  CreateParanetParams,
-  ParanetOnChain,
+  CreateContextGraphParams,
+  ContextGraphOnChain,
   PublishParams,
   OnChainPublishResult,
   KAUpdateVerification,
-  CreateContextGraphParams,
-  CreateContextGraphResult,
-  AddBatchToContextGraphParams,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+  VerifyParams,
   PublishToContextGraphParams,
+  V10PublishParams,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -38,7 +39,7 @@ function loadAbi(contractName: string): ethers.InterfaceAbi {
 }
 
 const ERROR_ABI_CONTRACTS = [
-  'KnowledgeAssets', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
+  'KnowledgeAssets', 'KnowledgeAssetsV10', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
   'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
   'ParanetV9Registry', 'Paranet', 'Profile', 'Identity', 'IdentityStorage',
   'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
@@ -122,6 +123,7 @@ interface ContractCache {
   askStorage?: Contract;
   contextGraphs?: Contract;
   contextGraphStorage?: Contract;
+  knowledgeAssetsV10?: Contract;
 }
 
 /**
@@ -210,7 +212,7 @@ export class EVMChainAdapter implements ChainAdapter {
     try {
       this.contracts.paranetV9Registry = await this.resolveContract('ParanetV9Registry');
     } catch {
-      // ParanetV9Registry not registered in Hub — createParanet/listParanetsFromChain unavailable
+      // ParanetV9Registry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
@@ -218,6 +220,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
     } catch {
       // ContextGraphs not deployed — context graph operations unavailable
+    }
+
+    try {
+      this.contracts.knowledgeAssetsV10 = await this.resolveContract('KnowledgeAssetsV10');
+    } catch {
+      // V10 contract not deployed — createKnowledgeAssetsV10 unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -545,7 +553,33 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     this.requireV9();
 
-    const ka = this.contracts.knowledgeAssets!;
+    let signer: Wallet | undefined;
+
+    // The contract requires the original publisher to call update.
+    // Query the on-chain batch publisher and select the matching signer.
+    const storage = this.contracts.knowledgeAssetsStorage;
+    if (storage) {
+      try {
+        const onChainPublisher: string = await storage.getBatchPublisher(params.batchId);
+        if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
+          signer = this.signerPool.find(
+            (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+          );
+        }
+      } catch {
+        // Fall through to hint-based or round-robin
+      }
+    }
+
+    // Fallback: use the hint from the publisher if chain lookup failed
+    if (!signer && params.publisherAddress) {
+      signer = this.signerPool.find(
+        (s) => s.address.toLowerCase() === params.publisherAddress!.toLowerCase(),
+      );
+    }
+    if (!signer) signer = this.nextSigner();
+
+    const ka = this.contracts.knowledgeAssets!.connect(signer) as Contract;
 
     const tx = await ka.updateKnowledgeAssets(
       params.batchId,
@@ -725,23 +759,46 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
 
-      // V8 backward compat
+      // V10/V8: KnowledgeCollectionStorage events
       if (eventType === 'KCCreated' || eventType === 'KnowledgeCollectionCreated') {
         const kcStorage = this.contracts.knowledgeCollectionStorage;
         if (kcStorage) {
-          const eventFilter = kcStorage.filters.KnowledgeCollectionCreated();
-          const logs = await kcStorage.queryFilter(eventFilter, filter.fromBlock ?? 0);
+          const fromB = filter.fromBlock ?? 0;
+          const toB = filter.toBlock ?? 'latest';
 
-          for (const log of logs) {
+          const kcFilter = kcStorage.filters.KnowledgeCollectionCreated();
+          const kcLogs = await kcStorage.queryFilter(kcFilter, fromB, toB);
+
+          const mintFilter = kcStorage.filters.KnowledgeAssetsMinted();
+          const mintLogs = await kcStorage.queryFilter(mintFilter, fromB, toB);
+          const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
+          for (const ml of mintLogs) {
+            const mp = kcStorage.interface.parseLog({ topics: [...ml.topics], data: ml.data });
+            if (mp) {
+              mintByTx.set(ml.transactionHash, {
+                publisherAddress: mp.args.to,
+                startKAId: mp.args.startId.toString(),
+                endKAId: (BigInt(mp.args.endId) - 1n).toString(),
+              });
+            }
+          }
+
+          for (const log of kcLogs) {
             const parsed = kcStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
+              const mint = mintByTx.get(log.transactionHash);
               yield {
                 type: 'KCCreated',
                 blockNumber: log.blockNumber,
                 data: {
                   kcId: parsed.args.id.toString(),
                   merkleRoot: parsed.args.merkleRoot,
+                  merkleRootBytes: parsed.args.merkleRoot,
                   byteSize: parsed.args.byteSize.toString(),
+                  txHash: log.transactionHash,
+                  publisherAddress: mint?.publisherAddress ?? '',
+                  startKAId: mint?.startKAId ?? '0',
+                  endKAId: mint?.endKAId ?? '0',
                 },
               };
             }
@@ -773,16 +830,16 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Paranets (V9: ParanetV9Registry when deployed)
+  // Context Graphs (V9: ParanetV9Registry when deployed)
   // =====================================================================
 
-  async createParanet(params: CreateParanetParams): Promise<TxResult> {
+  async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
     const name = params.name ?? params.metadata?.['name'];
     if (!registry || !name) {
       throw new Error(
-        'createParanet: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
+        'createContextGraph: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
           'Deploy ParanetV9Registry and register it in the Hub, or provide name.',
       );
     }
@@ -790,13 +847,13 @@ export class EVMChainAdapter implements ChainAdapter {
     const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
     const tx = await registry.createParanetV9(onChainId, accessPolicy);
     const receipt = await tx.wait();
-    if (!receipt) throw new Error('createParanet: no receipt');
-    let paranetIdHex: string | undefined;
+    if (!receipt) throw new Error('createContextGraph: no receipt');
+    let contextGraphIdHex: string | undefined;
     for (const log of receipt.logs) {
       try {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (parsed?.name === 'ParanetCreated') {
-          paranetIdHex = String(parsed.args.paranetId);
+          contextGraphIdHex = String(parsed.args.paranetId);
           break;
         }
       } catch { /* not this contract */ }
@@ -805,32 +862,32 @@ export class EVMChainAdapter implements ChainAdapter {
     // Optionally reveal cleartext metadata on-chain
     if (params.revealOnChain) {
       const description = params.description ?? params.metadata?.['description'] ?? '';
-      await this.revealParanetMetadata(onChainId, name, description);
+      await this.revealContextGraphMetadata(onChainId, name, description);
     }
 
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
       success: true,
-      paranetId: paranetIdHex ?? onChainId,
+      contextGraphId: contextGraphIdHex ?? onChainId,
     };
   }
 
-  async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> {
-    throw new Error('submitToParanet: not yet implemented on EVM adapter (Milestone 5)');
+  async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> {
+    throw new Error('submitToContextGraph: not yet implemented on EVM adapter (Milestone 5)');
   }
 
-  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
+  async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
-    if (!registry) throw new Error('revealParanetMetadata: ParanetV9Registry not available');
-    const tx = await registry.revealMetadata(paranetId, name, description);
+    if (!registry) throw new Error('revealContextGraphMetadata: ParanetV9Registry not available');
+    const tx = await registry.revealMetadata(contextGraphId, name, description);
     const receipt = await tx.wait();
-    if (!receipt) throw new Error('revealParanetMetadata: no receipt');
+    if (!receipt) throw new Error('revealContextGraphMetadata: no receipt');
     return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: true };
   }
 
-  async listParanetsFromChain(fromBlock?: number): Promise<ParanetOnChain[]> {
+  async listContextGraphsFromChain(fromBlock?: number): Promise<ContextGraphOnChain[]> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
     if (!registry) return [];
@@ -838,7 +895,7 @@ export class EVMChainAdapter implements ChainAdapter {
     const head = await this.provider.getBlockNumber();
     const PAGE = 9_000;
     const start = fromBlock ?? 0;
-    const results: ParanetOnChain[] = [];
+    const results: ContextGraphOnChain[] = [];
 
     // Paginate in PAGE-sized chunks to stay within RPC range limits.
     for (let lo = start; lo <= head; lo += PAGE) {
@@ -848,7 +905,7 @@ export class EVMChainAdapter implements ChainAdapter {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (!parsed || parsed.name !== 'ParanetCreated') continue;
         results.push({
-          paranetId: String(parsed.args.paranetId),
+          contextGraphId: String(parsed.args.paranetId),
           creator: String(parsed.args.creator),
           accessPolicy: Number(parsed.args.accessPolicy),
           blockNumber: log.blockNumber,
@@ -861,10 +918,10 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Context Graphs
+  // On-Chain Context Graphs (ContextGraphs contract)
   // =====================================================================
 
-  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
       throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
@@ -909,7 +966,7 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
-  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+  async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
     if (!this.contracts.contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
@@ -1024,11 +1081,168 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
+  // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
+  // =====================================================================
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+    await this.init();
+
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed.');
+    }
+
+    const txSigner = this.nextSigner();
+    const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
+
+    if (this.contracts.token && params.convictionAccountId === 0n) {
+      const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
+      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, await ka.getAddress());
+      if (currentAllowance < params.tokenAmount) {
+        const approveTx = await tokenWithSigner.approve(await ka.getAddress(), params.tokenAmount);
+        await approveTx.wait();
+      }
+    }
+
+    const identityIds = params.ackSignatures.map((s) => s.identityId);
+    const rValues = params.ackSignatures.map((s) => ethers.hexlify(s.r));
+    const vsValues = params.ackSignatures.map((s) => ethers.hexlify(s.vs));
+
+    const tx = await ka.createKnowledgeAssets(
+      params.publishOperationId,
+      params.contextGraphId,
+      ethers.hexlify(params.merkleRoot),
+      params.knowledgeAssetsAmount,
+      params.byteSize,
+      params.epochs,
+      params.tokenAmount,
+      params.isImmutable,
+      params.paymaster,
+      params.convictionAccountId,
+      params.publisherNodeIdentityId,
+      ethers.hexlify(params.publisherSignature.r),
+      ethers.hexlify(params.publisherSignature.vs),
+      identityIds,
+      rValues,
+      vsValues,
+    );
+
+    const receipt = await tx.wait();
+    if (!receipt) throw new Error('Transaction receipt is null');
+
+    let kcId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = txSigner.address;
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (!kcs) {
+      throw new Error(
+        `V10 publish tx ${receipt.hash} succeeded but KnowledgeCollectionStorage ` +
+        `contract is not available — cannot parse minted IDs from receipt`,
+      );
+    }
+    {
+      let foundKCCreated = false;
+      let foundKAMinted = false;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (parsed?.name === 'KnowledgeCollectionCreated') {
+            kcId = BigInt(parsed.args.id);
+            foundKCCreated = true;
+          }
+          if (parsed?.name === 'KnowledgeAssetsMinted') {
+            startKAId = BigInt(parsed.args.startId);
+            // KnowledgeCollectionStorage emits exclusive endId (startId + amount);
+            // convert to inclusive for consistent UAL range representation.
+            endKAId = BigInt(parsed.args.endId) - 1n;
+            publisherAddress = parsed.args.to;
+            foundKAMinted = true;
+          }
+        } catch { /* not this contract */ }
+      }
+      if (!foundKCCreated) {
+        throw new Error(
+          `V10 publish tx ${receipt.hash} succeeded but KnowledgeCollectionCreated event ` +
+          `not found in receipt logs — contract ABI may be stale`,
+        );
+      }
+      if (!foundKAMinted) {
+        throw new Error(
+          `V10 publish tx ${receipt.hash} succeeded but KnowledgeAssetsMinted event ` +
+          `not found in receipt logs — contract ABI may be stale`,
+        );
+      }
+    }
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId: kcId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+      gasUsed: receipt.gasUsed ? BigInt(receipt.gasUsed) : undefined,
+      effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
+      gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
+      tokenAmount: params.tokenAmount,
+    };
+  }
+
+  // =====================================================================
   // Utilities
   // =====================================================================
 
   getSignerAddress(): string {
     return this.signer.address;
+  }
+
+  async getMinimumRequiredSignatures(): Promise<number> {
+    await this.init();
+    if (!this.contracts.parametersStorage) return 3;
+    return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+  }
+
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    if (!identityStorage) return false;
+
+    // Match on-chain verification: keyHasPurpose(identityId, keccak256(signer), OPERATIONAL_KEY)
+    const OPERATIONAL_KEY = 2;
+    const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
+    const hasPurpose: boolean = await identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
+    if (!hasPurpose) return false;
+
+    // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked")
+    const stakingStorage = await this.resolveContract('StakingStorage');
+    if (!stakingStorage) return false;
+    const stake: bigint = await stakingStorage.getNodeStake(claimedIdentityId);
+    if (stake === 0n) return false;
+
+    return true;
+  }
+
+  async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
+    try {
+      const sig = ethers.Signature.from(await this.signer.signMessage(digest));
+      return {
+        r: ethers.getBytes(sig.r),
+        vs: ethers.getBytes(sig.yParityAndS),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  getACKSignerKey(): string | undefined {
+    return this.signer.privateKey;
+  }
+
+  isV10Ready(): boolean {
+    return !!this.contracts.knowledgeAssetsV10;
   }
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {

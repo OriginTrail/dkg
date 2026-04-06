@@ -2,12 +2,12 @@ import type { GossipSubManager, GossipMessageHandler } from '@origintrail-offici
 import type { AKAEvent } from './types.js';
 import { decodeAKAEvent } from './proto/aka-events.js';
 
-export function paranetSessionsTopic(paranetId: string): string {
-  return `dkg/context-graph/${paranetId}/sessions`;
+export function contextGraphSessionsTopic(contextGraphId: string): string {
+  return `dkg/context-graph/${contextGraphId}/sessions`;
 }
 
-export function sessionTopic(paranetId: string, sessionId: string): string {
-  return `dkg/context-graph/${paranetId}/sessions/${sessionId}`;
+export function sessionTopic(contextGraphId: string, sessionId: string): string {
+  return `dkg/context-graph/${contextGraphId}/sessions/${sessionId}`;
 }
 
 export type AKAEventHandler = (event: AKAEvent, from: string) => void;
@@ -21,23 +21,23 @@ export class AKAGossipHandler {
     this.gossip = gossip;
   }
 
-  subscribeParanet(paranetId: string): void {
-    const topic = paranetSessionsTopic(paranetId);
+  subscribeContextGraph(contextGraphId: string): void {
+    const topic = contextGraphSessionsTopic(contextGraphId);
     this.ensureTopicSubscription(topic);
   }
 
-  unsubscribeParanet(paranetId: string): void {
-    const topic = paranetSessionsTopic(paranetId);
+  unsubscribeContextGraph(contextGraphId: string): void {
+    const topic = contextGraphSessionsTopic(contextGraphId);
     this.teardownTopicSubscription(topic);
   }
 
-  subscribeSession(paranetId: string, sessionId: string): void {
-    const topic = sessionTopic(paranetId, sessionId);
+  subscribeSession(contextGraphId: string, sessionId: string): void {
+    const topic = sessionTopic(contextGraphId, sessionId);
     this.ensureTopicSubscription(topic);
   }
 
-  unsubscribeSession(paranetId: string, sessionId: string): void {
-    const topic = sessionTopic(paranetId, sessionId);
+  unsubscribeSession(contextGraphId: string, sessionId: string): void {
+    const topic = sessionTopic(contextGraphId, sessionId);
     this.teardownTopicSubscription(topic);
   }
 

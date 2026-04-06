@@ -3,7 +3,7 @@ import { handleCapture } from '../src/handlers.js';
 import type { Publisher } from '../src/types.js';
 import { VALID_OBJECT_EVENT_DOC, INVALID_DOC, EMPTY_EVENT_LIST_DOC } from './fixtures/bicycle-story.js';
 
-const PARANET_ID = 'test-paranet';
+const CONTEXT_GRAPH_ID = 'test-paranet';
 
 function mockPublisher(overrides?: Partial<Publisher>): Publisher {
   return {
@@ -17,7 +17,7 @@ describe('handleCapture', () => {
     const publisher = mockPublisher();
     const result = await handleCapture(
       { epcisDocument: VALID_OBJECT_EVENT_DOC },
-      { paranetId: PARANET_ID, publisher },
+      { contextGraphId: CONTEXT_GRAPH_ID, publisher },
     );
 
     expect(result.status).toBe('confirmed');
@@ -32,7 +32,7 @@ describe('handleCapture', () => {
     const publisher = mockPublisher();
 
     await expect(
-      handleCapture({ epcisDocument: INVALID_DOC }, { paranetId: PARANET_ID, publisher }),
+      handleCapture({ epcisDocument: INVALID_DOC }, { contextGraphId: CONTEXT_GRAPH_ID, publisher }),
     ).rejects.toThrow(/validation failed/i);
 
     expect(publisher.publish).not.toHaveBeenCalled();
@@ -42,7 +42,7 @@ describe('handleCapture', () => {
     const publisher = mockPublisher();
 
     await expect(
-      handleCapture({ epcisDocument: EMPTY_EVENT_LIST_DOC }, { paranetId: PARANET_ID, publisher }),
+      handleCapture({ epcisDocument: EMPTY_EVENT_LIST_DOC }, { contextGraphId: CONTEXT_GRAPH_ID, publisher }),
     ).rejects.toThrow(/validation failed/i);
 
     expect(publisher.publish).not.toHaveBeenCalled();
@@ -54,7 +54,7 @@ describe('handleCapture', () => {
     });
 
     await expect(
-      handleCapture({ epcisDocument: VALID_OBJECT_EVENT_DOC }, { paranetId: PARANET_ID, publisher }),
+      handleCapture({ epcisDocument: VALID_OBJECT_EVENT_DOC }, { contextGraphId: CONTEXT_GRAPH_ID, publisher }),
     ).rejects.toThrow('chain unavailable');
   });
 
@@ -62,11 +62,11 @@ describe('handleCapture', () => {
     const publisher = mockPublisher();
     await handleCapture(
       { epcisDocument: VALID_OBJECT_EVENT_DOC, publishOptions: { accessPolicy: 'ownerOnly' } },
-      { paranetId: PARANET_ID, publisher },
+      { contextGraphId: CONTEXT_GRAPH_ID, publisher },
     );
 
     expect(publisher.publish).toHaveBeenCalledWith(
-      PARANET_ID,
+      CONTEXT_GRAPH_ID,
       VALID_OBJECT_EVENT_DOC,
       expect.objectContaining({ accessPolicy: 'ownerOnly' }),
     );

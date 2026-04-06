@@ -135,7 +135,7 @@ async function benchmarkSessionList(sessionCount: number): Promise<SessionBenchR
         return { bindings: [] };
       },
       writeToWorkspace: async () => ({}),
-      enshrineFromWorkspace: async () => ({}),
+      publishFromSharedMemory: async () => ({}),
       createParanet: async () => undefined,
       listParanets: async () => [{ id: MEMORY_PARANET, name: 'Agent Memory' }],
     },

@@ -192,7 +192,7 @@ export class SessionValidator {
     const context: SigningContext = {
       domain: 'AKA-v1',
       network,
-      paranetId: session.config.paranetId,
+      contextGraphId: session.config.contextGraphId,
       sessionId: event.sessionId,
       round: event.round,
       type: event.type,

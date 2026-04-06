@@ -3,19 +3,19 @@ import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
 
 export interface MemoryToolContext {
-  query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => Promise<any>;
-  writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ workspaceOperationId: string }>;
-  enshrineFromWorkspace: (
-    paranetId: string,
+  query: (sparql: string, opts?: { contextGraphId?: string; graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean }) => Promise<any>;
+  share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean }) => Promise<{ shareOperationId: string }>;
+  publishFromSharedMemory: (
+    contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
-    opts?: { clearWorkspaceAfter?: boolean },
+    opts?: { clearSharedMemoryAfter?: boolean },
   ) => Promise<any>;
-  createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
-  listParanets: () => Promise<any[]>;
+  createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
+  listContextGraphs: () => Promise<any[]>;
 }
 
 export interface MemoryStats {
-  paranetId: string;
+  contextGraphId: string;
   initialized: boolean;
   messageCount: number;
   knowledgeTriples: number;
@@ -32,7 +32,7 @@ export interface MemoryEntity {
   sourceSession?: string;
 }
 
-export interface EnshrineResult {
+export interface PublishFromSwmResult {
   kcId?: bigint;
   ual?: string;
   status: string;
@@ -41,13 +41,13 @@ export interface EnshrineResult {
 
 export interface SessionPublicationStatus {
   sessionId: string;
-  workspaceTripleCount: number;
+  sharedMemoryTripleCount: number;
   dataTripleCount: number;
-  scope: 'workspace_only' | 'enshrined' | 'enshrined_with_pending' | 'empty';
+  scope: 'shared_memory_only' | 'published' | 'published_with_pending' | 'empty';
   rootEntityCount: number;
 }
 
-export interface SessionPublishResult extends EnshrineResult {
+export interface SessionPublishResult extends PublishFromSwmResult {
   sessionId: string;
   rootEntityCount: number;
   publication: SessionPublicationStatus;
@@ -91,7 +91,7 @@ export interface ImportResult {
   warnings?: string[];
 }
 
-const MEMORY_PARANET = 'agent-memory';
+const MEMORY_CONTEXT_GRAPH = 'agent-memory';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';
@@ -252,8 +252,8 @@ export class ChatMemoryManager {
     private llmConfig: LlmConfig,
   ) {}
 
-  get paranetId(): string {
-    return MEMORY_PARANET;
+  get contextGraphId(): string {
+    return MEMORY_CONTEXT_GRAPH;
   }
 
   updateConfig(llmConfig: LlmConfig): void {
@@ -263,13 +263,13 @@ export class ChatMemoryManager {
   async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     try {
-      const paranets = await this.tools.listParanets();
-      const exists = paranets.some(
-        (p: any) => p.id === MEMORY_PARANET || p.paranetId === MEMORY_PARANET,
+      const contextGraphs = await this.tools.listContextGraphs();
+      const exists = contextGraphs.some(
+        (p: any) => p.id === MEMORY_CONTEXT_GRAPH || p.contextGraphId === MEMORY_CONTEXT_GRAPH,
       );
       if (!exists) {
-        await this.tools.createParanet({
-          id: MEMORY_PARANET,
+        await this.tools.createContextGraph({
+          id: MEMORY_CONTEXT_GRAPH,
           name: 'Agent Memory',
           description: 'Local private memory for agent chat conversations and extracted knowledge.',
           private: true,
@@ -284,7 +284,7 @@ export class ChatMemoryManager {
     try {
       const result = await this.tools.query(
         `SELECT ?sid WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> . ?s <${DKG_ONT}sessionId> ?sid }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       for (const b of result.bindings ?? []) {
         const sid = stripRdfLiteral(b.sid ?? '');
@@ -367,7 +367,7 @@ export class ChatMemoryManager {
       }
     }
 
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
     this.knownSessions.add(sessionId);
 
     // Fire-and-forget: extract entity mentions and write them as separate triples
@@ -422,7 +422,7 @@ export class ChatMemoryManager {
     }
 
     if (quads.length > 0) {
-      await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+      await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
     }
   }
 
@@ -497,13 +497,13 @@ export class ChatMemoryManager {
         { subject: memUri, predicate: `${SCHEMA}dateCreated`, object: `"${new Date().toISOString()}"^^<${XSD_DATETIME}>`, graph: '' },
       );
     }
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
     return triples.length;
   }
 
   async recall(sparql: string): Promise<any> {
     await this.ensureInitialized();
-    return this.tools.query(sparql, { paranetId: MEMORY_PARANET, includeWorkspace: true });
+    return this.tools.query(sparql, { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true });
   }
 
   async semanticRecall(question: string): Promise<{ sparql: string; result: any }> {
@@ -530,7 +530,7 @@ export class ChatMemoryManager {
   async getStats(): Promise<MemoryStats> {
     await this.ensureInitialized();
     const base: MemoryStats = {
-      paranetId: MEMORY_PARANET,
+      contextGraphId: MEMORY_CONTEXT_GRAPH,
       initialized: true,
       messageCount: 0,
       knowledgeTriples: 0,
@@ -541,19 +541,19 @@ export class ChatMemoryManager {
     try {
       const total = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       base.totalTriples = sumBindingValues(total.bindings, 'c');
 
       const sessions = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Conversation> }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       base.sessionCount = sumBindingValues(sessions.bindings, 'c');
 
       const msgs = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Message> }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       base.messageCount = sumBindingValues(msgs.bindings, 'c');
 
@@ -565,13 +565,13 @@ export class ChatMemoryManager {
           UNION
           { ?s <${RDF_TYPE}> <${DKG_ONT}ToolInvocation> . ?s ?p ?o }
         }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const chatTripleCount = sumBindingValues(chatRelatedTriples.bindings, 'c');
 
       const entities = await this.tools.query(
         `SELECT (COUNT(DISTINCT ?e) AS ?c) WHERE { ?e <${RDF_TYPE}> ?t . FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:")) }`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       base.entityCount = sumBindingValues(entities.bindings, 'c');
 
@@ -589,14 +589,14 @@ export class ChatMemoryManager {
           OPTIONAL { ?e <${SCHEMA}name> ?label }
           FILTER(STRSTARTS(STR(?e), "urn:dkg:entity:"))
         } LIMIT ${limit}`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const entities: MemoryEntity[] = [];
       for (const b of result.bindings ?? []) {
         const uri = b.e;
         const propsResult = await this.tools.query(
           `SELECT ?p ?o WHERE { <${uri}> ?p ?o } LIMIT 20`,
-          { paranetId: MEMORY_PARANET, includeWorkspace: true },
+          { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
         );
         entities.push({
           uri,
@@ -643,7 +643,7 @@ export class ChatMemoryManager {
             ?turn <${DKG_ONT}persistenceState> ?persistenceState .
           }
         } ORDER BY ?ts LIMIT 500`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
@@ -678,7 +678,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}sessionId> ?sid .
           OPTIONAL { ?m <${SCHEMA}isPartOf> ?s . ?m <${SCHEMA}dateCreated> ?mts }
         } GROUP BY ?s ?sid ORDER BY DESC(?latest) LIMIT ${expandedLimit}`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const sessionBindings = sessionsResult.bindings ?? [];
       if (sessionBindings.length === 0) return [];
@@ -711,7 +711,7 @@ export class ChatMemoryManager {
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
         } ORDER BY ?session ?ts`,
-        { paranetId: MEMORY_PARANET, includeWorkspace: true },
+        { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
 
       const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
@@ -750,7 +750,7 @@ export class ChatMemoryManager {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
       }`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const turnCount = sumBindingValues(countResult.bindings, 'c');
     if (turnCount === 0) {
@@ -779,7 +779,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}turnId> ?tid .
         OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
       } LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
     const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
@@ -791,7 +791,7 @@ export class ChatMemoryManager {
         ?latestTurn <${DKG_ONT}turnId> ?latestTurnId .
         OPTIONAL { ?latestTurn <${SCHEMA}dateCreated> ?latestTs }
       } ORDER BY DESC(?latestTs) DESC(?latestTurnId) LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
     if (!currentTurnId || currentTurnId !== turnId) {
@@ -835,7 +835,7 @@ export class ChatMemoryManager {
         } ORDER BY DESC(?previousTurnId) LIMIT 1`;
     const previousTurnResult = await this.tools.query(
       previousTurnQuery,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const previousTurnId = stripRdfLiteral((previousTurnResult.bindings ?? [])[0]?.previousTurnId ?? '').trim() || null;
     const turnIndexResult = currentTsLiteral
@@ -850,7 +850,7 @@ export class ChatMemoryManager {
               || (?ts = ${currentTsLiteral} && ?tid <= ${currentTurnIdLiteral})
             )
           }`,
-          { paranetId: MEMORY_PARANET, includeWorkspace: true },
+          { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
         )
       : { bindings: [{ c: String(previousTurnId ? 2 : 1) }] };
     const turnIndex = Math.max(0, sumBindingValues(turnIndexResult.bindings, 'c'));
@@ -899,7 +899,7 @@ export class ChatMemoryManager {
         <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
         <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
       } LIMIT 1`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const turnMessages = (turnMessagesResult.bindings ?? [])[0];
     const userMsgUri = String(turnMessages?.user ?? '').replace(/[<>]/g, '');
@@ -936,7 +936,7 @@ export class ChatMemoryManager {
           ?s <${DKG_ONT}extractedFrom> <${sessionUri}> .
         }
       } LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
     const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
     for (const b of relatedSubjectsResult.bindings ?? []) {
@@ -952,7 +952,7 @@ export class ChatMemoryManager {
         VALUES ?s { ${values} }
         ?s ?p ?o .
       }`,
-      { paranetId: MEMORY_PARANET, includeWorkspace: true },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
     );
 
     const quads = Array.isArray(deltaResult?.quads) ? deltaResult.quads : [];
@@ -988,36 +988,36 @@ export class ChatMemoryManager {
       }
       ?s ?p ?o
     }`;
-    const workspaceCountResult = await this.tools.query(countQuery, {
-      paranetId: MEMORY_PARANET,
+    const swmCountResult = await this.tools.query(countQuery, {
+      contextGraphId: MEMORY_CONTEXT_GRAPH,
       graphSuffix: '_shared_memory',
     });
     const dataCountResult = await this.tools.query(countQuery, {
-      paranetId: MEMORY_PARANET,
+      contextGraphId: MEMORY_CONTEXT_GRAPH,
     });
 
     const rootEntityResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
 
-    const workspaceTripleCount = sumBindingValues(workspaceCountResult.bindings, 'c');
+    const sharedMemoryTripleCount = sumBindingValues(swmCountResult.bindings, 'c');
     const dataTripleCount = sumBindingValues(dataCountResult.bindings, 'c');
     const rootEntityCount = (rootEntityResult.bindings ?? []).length;
     const scope: SessionPublicationStatus['scope'] =
       dataTripleCount > 0
         ? (
-          workspaceTripleCount > dataTripleCount
-            ? 'enshrined_with_pending'
-            : 'enshrined'
+          sharedMemoryTripleCount > dataTripleCount
+            ? 'published_with_pending'
+            : 'published'
         )
-        : workspaceTripleCount > 0
-          ? 'workspace_only'
+        : sharedMemoryTripleCount > 0
+          ? 'shared_memory_only'
           : 'empty';
 
     return {
       sessionId,
-      workspaceTripleCount,
+      sharedMemoryTripleCount,
       dataTripleCount,
       scope,
       rootEntityCount,
@@ -1030,7 +1030,7 @@ export class ChatMemoryManager {
     const rootPattern = buildSessionRootPattern(sessionUri);
     const result = await this.tools.query(
       `SELECT DISTINCT ?s WHERE ${rootPattern} LIMIT 5000`,
-      { paranetId: MEMORY_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: MEMORY_CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
 
     const roots = new Set<string>();
@@ -1044,12 +1044,12 @@ export class ChatMemoryManager {
 
   async publishSession(
     sessionId: string,
-    opts?: { rootEntities?: string[]; clearWorkspaceAfter?: boolean },
+    opts?: { rootEntities?: string[]; clearSharedMemoryAfter?: boolean },
   ): Promise<SessionPublishResult> {
     await this.ensureInitialized();
     const sessionRoots = await this.getSessionRootEntities(sessionId);
     if (sessionRoots.length === 0) {
-      throw new Error(`No workspace entities found for session ${sessionId}`);
+      throw new Error(`No shared memory entities found for session ${sessionId}`);
     }
     const sessionRootSet = new Set(sessionRoots);
     const requestedRoots = (opts?.rootEntities ?? [])
@@ -1061,13 +1061,13 @@ export class ChatMemoryManager {
     if (rootEntities.length === 0) {
       throw new Error(`Selected root entities are not part of session ${sessionId}`);
     }
-    const enshrined = await this.enshrine(
+    const published = await this.publishFromSwm(
       { rootEntities },
-      { clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false },
+      { clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false },
     );
     const publication = await this.getSessionPublicationStatus(sessionId);
     return {
-      ...enshrined,
+      ...published,
       sessionId,
       rootEntityCount: rootEntities.length,
       publication,
@@ -1126,7 +1126,7 @@ export class ChatMemoryManager {
       );
     }
 
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
 
     let entityCount = 0;
     let extractionTripleCount = 0;
@@ -1256,7 +1256,7 @@ export class ChatMemoryManager {
         { subject: entity, predicate: `${DKG_ONT}extractedFrom`, object: batchUri, graph: '' },
       );
     }
-    await this.tools.writeToWorkspace(MEMORY_PARANET, quads, { localOnly: true });
+    await this.tools.share(MEMORY_CONTEXT_GRAPH, quads, { localOnly: true });
     return {
       entityCount: rootEntities.size,
       tripleCount: quads.length,
@@ -1264,13 +1264,13 @@ export class ChatMemoryManager {
     };
   }
 
-  async enshrine(
+  async publishFromSwm(
     selection: 'all' | { rootEntities: string[] } = 'all',
-    opts?: { clearWorkspaceAfter?: boolean },
-  ): Promise<EnshrineResult> {
+    opts?: { clearSharedMemoryAfter?: boolean },
+  ): Promise<PublishFromSwmResult> {
     await this.ensureInitialized();
-    const result = await this.tools.enshrineFromWorkspace(MEMORY_PARANET, selection, {
-      clearWorkspaceAfter: opts?.clearWorkspaceAfter ?? false,
+    const result = await this.tools.publishFromSharedMemory(MEMORY_CONTEXT_GRAPH, selection, {
+      clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
     });
     return {
       kcId: result?.kcId,

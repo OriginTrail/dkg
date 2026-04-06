@@ -49,7 +49,7 @@ export interface CaptureOptions {
 /** Dependency-inversion boundary: the EPCIS package needs something that can publish JSON-LD. */
 export interface Publisher {
   publish(
-    paranetId: string,
+    contextGraphId: string,
     content: unknown,
     opts?: CaptureOptions,
   ): Promise<{ ual: string; kcId: string; status: string }>;
@@ -82,7 +82,7 @@ export interface EpcisQueryParams {
 export interface QueryEngine {
   query(
     sparql: string,
-    opts?: { paranetId?: string },
+    opts?: { contextGraphId?: string },
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 

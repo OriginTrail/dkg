@@ -7,7 +7,7 @@ import {
   type Ed25519Keypair,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { computePrivateRoot } from './merkle.js';
+import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 
 export interface AccessResult {

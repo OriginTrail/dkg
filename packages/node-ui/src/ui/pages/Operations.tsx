@@ -12,7 +12,7 @@ import {
 
 const PHASE_COLORS: Record<string, string> = {
   prepare: '#3b82f6',
-  'prepare:ensureParanet': '#60a5fa',
+  'prepare:ensureContextGraph': '#60a5fa',
   'prepare:partition': '#2563eb',
   'prepare:manifest': '#93c5fd',
   'prepare:validate': '#1d4ed8',
@@ -25,7 +25,7 @@ const PHASE_COLORS: Record<string, string> = {
   broadcast: '#22c55e',
   decode: '#14b8a6',
   validate: '#2dd4bf',
-  'read-workspace': '#06b6d4',
+  'read-shared-memory': '#06b6d4',
   parse: '#3b82f6',
   execute: '#8b5cf6',
   transfer: '#60a5fa',
@@ -52,11 +52,10 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const OP_TYPE_COLORS: Record<string, string> = {
-  publish: '#3b82f6',
+  publish: '#22c55e',
   update: '#14b8a6',
   query: '#8b5cf6',
   workspace: '#f59e0b',
-  enshrine: '#22c55e',
   connect: '#06b6d4',
   sync: '#ec4899',
   gossip: '#f97316',
@@ -64,11 +63,10 @@ const OP_TYPE_COLORS: Record<string, string> = {
 };
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish: 'Create a new Knowledge Asset on the DKG',
+  publish: 'Publish a Knowledge Collection on-chain to a context graph',
   update: 'Update an existing Knowledge Asset',
   query: 'Run a SPARQL query against the knowledge graph',
-  workspace: 'Manage a local workspace for staging changes',
-  enshrine: 'Anchor a Knowledge Collection on-chain to a paranet',
+  workspace: 'Manage shared memory for staging changes',
   connect: 'Establish a connection with a network peer',
   sync: 'Synchronize knowledge data with remote peers',
   gossip: 'Propagate updates across the peer-to-peer network',
@@ -1036,7 +1034,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
           <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.paranet_id && <span><b style={{ color: 'var(--text-muted)' }}>Paranet</b> {op.paranet_id}</span>}
+          {op.paranet_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.paranet_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}

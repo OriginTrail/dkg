@@ -618,16 +618,16 @@ export async function handleNodeUIRequest(
     const rootEntities = Array.isArray(payload.rootEntities)
       ? payload.rootEntities.filter((r): r is string => typeof r === 'string')
       : undefined;
-    const clearWorkspaceAfter = payload.clearAfter === true;
+    const clearSharedMemoryAfter = payload.clearAfter === true;
     try {
       const result = await memoryManager.publishSession(sessionId, {
         rootEntities,
-        clearWorkspaceAfter,
+        clearSharedMemoryAfter,
       });
       return json(res, 200, result);
     } catch (err: any) {
       const message = err?.message ?? 'Failed to publish session';
-      const status = /No workspace entities found|Selected root entities/.test(message) ? 400 : 500;
+      const status = /No shared memory entities found|Selected root entities/.test(message) ? 400 : 500;
       return json(res, status, { error: message });
     }
   }
@@ -668,7 +668,7 @@ export async function handleNodeUIRequest(
       const stats = await memoryManager.getStats();
       return json(res, 200, stats);
     } catch (err: any) {
-      return json(res, 200, { paranetId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
+      return json(res, 200, { contextGraphId: 'agent-memory', initialized: false, messageCount: 0, knowledgeTriples: 0, totalTriples: 0, sessionCount: 0, entityCount: 0 });
     }
   }
 

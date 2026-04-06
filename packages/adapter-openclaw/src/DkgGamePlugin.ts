@@ -93,7 +93,7 @@ type ActionType = 'advance' | 'upgradeSkills' | 'syncMemory' | 'forceBottleneck'
 
 const GAME_API = '/api/apps/origin-trail-game';
 const OT = 'https://origintrail-game.dkg.io/';
-const GAME_PARANET = 'origin-trail-game';
+const GAME_CONTEXT_GRAPH = 'origin-trail-game';
 
 const VALID_ACTIONS: ActionType[] = [
   'advance', 'upgradeSkills', 'syncMemory', 'forceBottleneck', 'payToll', 'trade',
@@ -420,7 +420,7 @@ class GameService {
     ORDER BY ASC(?turn)`;
 
     try {
-      const result = await this.dkgClient.query(sparql, { paranetId: GAME_PARANET });
+      const result = await this.dkgClient.query(sparql, { contextGraphId: GAME_CONTEXT_GRAPH });
       const bindings: any[] = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
       return bindings.map((b: any) => ({
         turn: parseInt(bv(b.turn) ?? '0', 10),

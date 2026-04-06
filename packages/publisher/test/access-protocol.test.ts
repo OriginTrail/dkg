@@ -72,7 +72,7 @@ describe('Access Protocol', () => {
     });
 
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"TestBot"'),
         q(ENTITY, 'http://schema.org/description', '"A test agent"'),
@@ -268,7 +268,7 @@ describe('Access Protocol', () => {
 
     await expect(
       publisher.publish({
-        paranetId: PARANET,
+        contextGraphId: PARANET,
         quads: [q(ENTITY, 'http://schema.org/name', '"TestBot"')],
         privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
         publisherPeerId: '12D3KooWTestPublisher',

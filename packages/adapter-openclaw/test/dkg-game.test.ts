@@ -154,12 +154,12 @@ describe('DkgNodePlugin with game module', () => {
     plugin.register(api);
 
     const toolNames = tools.map(t => t.name);
-    // 11 core DKG tools + 12 game tools = 23
+    // 13 core DKG tools (11 + 2 legacy aliases) + 12 game tools = 25
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('game_lobby');
     expect(toolNames).toContain('game_leave');
     expect(toolNames).toContain('game_autopilot_start');
-    expect(tools.length).toBe(23);
+    expect(tools.length).toBe(25);
   });
 
   it('does not register game tools when game.enabled is false/missing', () => {
@@ -177,7 +177,7 @@ describe('DkgNodePlugin with game module', () => {
 
     const toolNames = tools.map(t => t.name);
     expect(toolNames).not.toContain('game_lobby');
-    expect(tools.length).toBe(11); // Only core DKG tools
+    expect(tools.length).toBe(13); // 11 core DKG tools + 2 legacy aliases
   });
 
   it('warns when game enabled but channel disabled (no autopilot)', () => {

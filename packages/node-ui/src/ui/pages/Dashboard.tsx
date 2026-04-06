@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFetch, formatDuration } from '../hooks.js';
-import { fetchStatus, fetchMetrics, fetchParanets, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, fetchOperation, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
+import { fetchStatus, fetchMetrics, fetchContextGraphs, fetchAgents, fetchOperations, fetchOperationsWithPhases, fetchErrorHotspots, fetchEconomics, fetchOperation, importMemories, IMPORT_SOURCES, type ImportSource, type ImportMemoryResult, type ImportMemoryQuad } from '../api.js';
 import { isDevModeEnabled } from '../dev-mode.js';
 import { RdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
@@ -645,7 +645,7 @@ function DashboardNetworkViz({ agents, nodeName }: { agents: AgentInfo[]; nodeNa
   );
 }
 
-const FALLBACK_PARANETS = [
+const FALLBACK_CONTEXT_GRAPHS = [
   { name: 'OriginTrail Game', assets: 847,  agents: 12, color: 'var(--green)' },
   { name: 'DeSci Research',   assets: 1203, agents: 8,  color: 'var(--blue)' },
   { name: 'Supply Chain EU',  assets: 797,  agents: 4,  color: 'var(--amber)' },
@@ -665,11 +665,11 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 };
 
 const PHASE_COLORS: Record<string, string> = {
-  prepare: '#3b82f6', 'prepare:ensureParanet': '#60a5fa', 'prepare:partition': '#2563eb',
+  prepare: '#3b82f6', 'prepare:ensureContextGraph': '#60a5fa', 'prepare:partition': '#2563eb',
   'prepare:manifest': '#93c5fd', 'prepare:validate': '#1d4ed8', 'prepare:merkle': '#7dd3fc',
   store: '#8b5cf6', chain: '#f59e0b', 'chain:sign': '#fbbf24', 'chain:submit': '#d97706',
   'chain:metadata': '#f97316', broadcast: '#22c55e', decode: '#14b8a6', validate: '#2dd4bf',
-  'read-workspace': '#06b6d4', parse: '#3b82f6', execute: '#8b5cf6', transfer: '#60a5fa',
+  'read-shared-memory': '#06b6d4', parse: '#3b82f6', execute: '#8b5cf6', transfer: '#60a5fa',
   verify: '#22c55e',
 };
 const PHASE_FALLBACK_COLOR = '#a78bfa';
@@ -851,14 +851,14 @@ function ErrorHotspotsCard() {
 
   if (hotspots.length === 0) {
     return (
-      <div className="paranet-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
+      <div className="context-graph-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 60 }}>
         <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>No errors in 7 days</span>
       </div>
     );
   }
 
   return (
-    <div className="paranet-card" style={{ padding: 12 }}>
+    <div className="context-graph-card" style={{ padding: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--red)', marginBottom: 6 }}>Error Hotspots (7d)</div>
       {hotspots.map((h: any, i: number) => (
         <div key={`${h.operation_name}-${h.phase}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, padding: '3px 0', color: 'var(--text-muted)' }}>
@@ -882,7 +882,7 @@ function SpendingCard() {
   if (!latest) return null;
 
   return (
-    <div className="paranet-card" style={{ padding: 12 }}>
+    <div className="context-graph-card" style={{ padding: 12 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--amber)', marginBottom: 6 }}>Spending ({latest.label})</div>
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
         <div>
@@ -909,21 +909,21 @@ export function DashboardPage() {
   const [importOpen, setImportOpen] = useState(false);
   const { data: status } = useFetch(fetchStatus, [], 10_000);
   const { data: metrics } = useFetch(fetchMetrics, [], 10_000);
-  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
+  const { data: contextGraphData } = useFetch(fetchContextGraphs, [], 30_000);
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
 
-  const paranets = useMemo(() => {
+  const contextGraphs = useMemo(() => {
     const colors = ['var(--green)', 'var(--blue)', 'var(--amber)', 'var(--purple)', '#f472b6', '#22d3ee'];
-    return (paranetData?.paranets ?? []).map((p: any, i: number) => ({
-      id: p.id ?? `paranet-${i}`,
-      name: p.name ?? p.id ?? `Paranet ${i + 1}`,
+    return (contextGraphData?.contextGraphs ?? []).map((p: any, i: number) => ({
+      id: p.id ?? `context-graph-${i}`,
+      name: p.name ?? p.id ?? `Context Graph ${i + 1}`,
       assets: p.assetCount ?? p.assets ?? '—',
       agents: p.agentCount ?? p.agents ?? '—',
       color: colors[i % colors.length],
     }));
-  }, [paranetData]);
-  const displayParanets = paranets.length > 0 ? paranets : FALLBACK_PARANETS;
-  const isLiveParanets = paranets.length > 0;
+  }, [contextGraphData]);
+  const displayContextGraphs = contextGraphs.length > 0 ? contextGraphs : FALLBACK_CONTEXT_GRAPHS;
+  const isLiveContextGraphs = contextGraphs.length > 0;
 
   const peerCount = status?.connectedPeers ?? (status as any)?.peerCount ?? null;
   const totalKCs = (metrics as any)?.total_kcs ?? null;
@@ -940,7 +940,7 @@ export function DashboardPage() {
         <div>
           <h1 className="page-title" style={{ marginBottom: 0 }}>Dashboard</h1>
           <p style={{ marginTop: 4 }}>
-            {status ? `Your node is live${paranets.length ? ` and participating in ${paranets.length} paranet${paranets.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
+            {status ? `Your node is live${contextGraphs.length ? ` and participating in ${contextGraphs.length} context graph${contextGraphs.length !== 1 ? 's' : ''}` : ''}` : 'Loading node status…'}
           </p>
         </div>
         <button className="dkg-btn" onClick={() => setImportOpen(true)}>
@@ -963,7 +963,7 @@ export function DashboardPage() {
             color: 'var(--green)',
           },
           { label: <>Connected Peers <InfoTip text="Other DKG nodes your node has an active network connection with" /></>, value: peerCount != null ? String(peerCount) : '—', sub: peerCount != null ? 'live' : 'loading…', color: 'var(--blue)' },
-          { label: <>Agents Discovered <InfoTip text="AI agents discovered across the paranets your node participates in" /></>, value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayParanets.length} paranet${displayParanets.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
+          { label: <>Agents Discovered <InfoTip text="AI agents discovered across the context graphs your node participates in" /></>, value: agentCount != null ? String(agentCount) : '—', sub: `Across ${displayContextGraphs.length} context graph${displayContextGraphs.length !== 1 ? 's' : ''}`, color: 'var(--amber)' },
         ] as Array<{ label: React.ReactNode; value: string; sub: React.ReactNode; color: string }>).map((s, i) => (
           <div className="stat-card" key={i}>
             <div className="accent" style={{ background: `linear-gradient(90deg,${s.color}44,transparent)` }} />
@@ -985,22 +985,22 @@ export function DashboardPage() {
         <DashboardNetworkViz agents={agentData?.agents ?? []} nodeName={status?.name ?? ''} />
       </div>
 
-      {/* Paranets — horizontal card grid */}
+      {/* Context Graphs — horizontal card grid */}
       <div style={{ marginBottom: 16 }}>
         <div className="section-title">
-          Paranets
-          {!isLiveParanets && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
+          Context Graphs
+          {!isLiveContextGraphs && <span className="mono" style={{ fontSize: 9, color: 'var(--text-dim)', fontWeight: 400 }}>DEMO</span>}
         </div>
-        <div className="paranet-list">
-          {displayParanets.map((p: any, i: number) => (
-            <div key={p.id ?? `fallback-${i}`} className="paranet-card" onClick={() => p.id && navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`)}>
+        <div className="context-graph-list">
+          {displayContextGraphs.map((p: any, i: number) => (
+            <div key={p.id ?? `fallback-${i}`} className="context-graph-card" onClick={() => p.id && navigate(`/explorer?contextGraph=${encodeURIComponent(p.id)}`)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                 <span style={{ width: 7, height: 7, borderRadius: 3, background: p.color, display: 'inline-block' }} />
                 <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>{p.name}</h3>
                 <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block', marginLeft: 'auto' }} />
               </div>
               <div className="mono" style={{ display: 'flex', gap: 14, fontSize: 10, color: 'var(--text-muted)' }}>
-                <Tooltip text="Knowledge Assets published to this paranet"><span>{p.assets.toLocaleString()} assets</span></Tooltip>
+                <Tooltip text="Knowledge Assets published to this context graph"><span>{p.assets.toLocaleString()} assets</span></Tooltip>
                 <span>{p.agents} agents</span>
               </div>
             </div>

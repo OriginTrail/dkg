@@ -40,7 +40,7 @@ describe('DKGPublisher', () => {
 
   it('publishes a single KA', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://schema.org/description', '"Analyzes images"'),
@@ -62,7 +62,7 @@ describe('DKGPublisher', () => {
 
   it('publishes multiple KAs in one KC', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY2, 'http://schema.org/name', '"TextBot"'),
@@ -78,7 +78,7 @@ describe('DKGPublisher', () => {
 
   it('publishes with blank nodes (auto-skolemized)', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://ex.org/offers', '_:o1'),
@@ -103,7 +103,7 @@ describe('DKGPublisher', () => {
 
   it('publishes with private triples', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [q(ENTITY, 'http://ex.org/apiKey', '"secret-key-123"')],
       publisherPeerId: '12D3KooWTestPublisher',
@@ -117,13 +117,13 @@ describe('DKGPublisher', () => {
 
   it('rejects duplicate entity (exclusivity)', async () => {
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
     await expect(
       publisher.publish({
-        paranetId: PARANET,
+        contextGraphId: PARANET,
         quads: [q(ENTITY, 'http://schema.org/name', '"Duplicate"')],
       }),
     ).rejects.toThrow('Validation failed');
@@ -131,12 +131,12 @@ describe('DKGPublisher', () => {
 
   it('updates an existing KC', async () => {
     const initial = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"OldName"')],
     });
 
     const updated = await publisher.update(initial.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"NewName"')],
     });
 
@@ -159,7 +159,7 @@ describe('DKGPublisher', () => {
     });
 
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"Bot"')],
     });
 
@@ -168,7 +168,7 @@ describe('DKGPublisher', () => {
 
   it('publishes with confirmed status and onChainResult', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
@@ -185,7 +185,7 @@ describe('DKGPublisher', () => {
 
   it('generates address-based UAL format', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
@@ -206,7 +206,7 @@ describe('DKGPublisher', () => {
 
   it('derives publisherAddress from private key', async () => {
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 
@@ -217,7 +217,7 @@ describe('DKGPublisher', () => {
 
   it('stores only confirmed status in meta graph on successful publish', async () => {
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
     });
 

@@ -143,8 +143,8 @@ describe('no external CDN font imports', () => {
 describe('dashboard uses runtime data', () => {
   const dashboard = readFile('pages/Dashboard.tsx');
 
-  it('imports fetchParanets and fetchAgents', () => {
-    expect(dashboard).toContain('fetchParanets');
+  it('imports fetchContextGraphs and fetchAgents', () => {
+    expect(dashboard).toContain('fetchContextGraphs');
     expect(dashboard).toContain('fetchAgents');
   });
 
@@ -183,13 +183,13 @@ describe('dashboard uses runtime data', () => {
     expect(dashboard).toMatch(/Import as Private Knowledge/);
   });
 
-  it('paranet list uses id as React key, not name', () => {
+  it('context graph list uses id as React key, not name', () => {
     expect(dashboard).toMatch(/key=\{p\.id/);
     expect(dashboard).not.toMatch(/key=\{p\.name\}/);
   });
 
-  it('status text uses live paranet count, not fallback data', () => {
-    expect(dashboard).toMatch(/paranets\.length\s*\?.*participating in/);
+  it('status text uses live context graph count, not fallback data', () => {
+    expect(dashboard).toMatch(/contextGraphs\.length\s*\?.*participating in/);
     expect(dashboard).not.toMatch(/displayParanets\.length\s*\?.*participating in/);
   });
 });
@@ -216,7 +216,7 @@ describe('sidebar uses live status', () => {
 describe('explorer graph query safety', () => {
   const explorer = readFile('pages/Explorer.tsx');
 
-  it('validates paranet URI as safe IRI before interpolating', () => {
+  it('validates context graph URI as safe IRI before interpolating', () => {
     expect(explorer).toContain('validateIri');
     expect(explorer).toContain('SAFE_IRI_RE');
   });
@@ -244,10 +244,10 @@ describe('SPARQL helper cards', () => {
     const helperBlock = helperBlockMatch?.[1] ?? '';
     expect(helperBlock).toContain("title: 'All triples + provenance'");
     expect(helperBlock).toContain("title: 'Agent Registry Snapshot'");
-    expect(helperBlock).toContain("title: 'Ontology Paranet Concepts'");
+    expect(helperBlock).toContain("title: 'Ontology Context Graph Concepts'");
   });
 
-  it('includes agents template as direct SPO query on agents paranet graph', () => {
+  it('includes agents template as direct SPO query on agents context graph graph', () => {
     expect(explorer).toContain('GRAPH <did:dkg:context-graph:agents>');
     expect(explorer).toContain('SELECT ?s ?p ?o WHERE');
   });
@@ -301,7 +301,7 @@ describe('SPARQL helper cards', () => {
 
   it('uses _shared_memory suffix when deriving companion meta graphs', () => {
     expect(explorer).toContain("g.endsWith('/_shared_memory')");
-    expect(explorer).not.toContain("g.endsWith('/workspace')");
+    expect(explorer).not.toContain("g.endsWith('/shared-memory')");
   });
 
   it('guards runQuery state updates against out-of-order responses', () => {
@@ -416,8 +416,11 @@ describe('iframe app hosting', () => {
 describe('daemon.ts app token injection', () => {
   const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
 
-  it('does not use req.socket.remoteAddress for localhost detection', () => {
-    expect(daemon).not.toContain('req.socket.remoteAddress');
+  it('does not use req.socket.remoteAddress for localhost/auth detection (rate-limit use is OK)', () => {
+    // remoteAddress must not appear in the auth/token-injection section (loopback detection).
+    // It IS allowed for rate limiting (clientIp). Verify the auth section uses config.apiHost instead.
+    const authSection = daemon.slice(daemon.indexOf('boundToLoopback'), daemon.indexOf('boundToLoopback') + 500);
+    expect(authSection).not.toContain('req.socket.remoteAddress');
   });
 
   it('checks config.apiHost for loopback, not remote address', () => {

@@ -11,17 +11,18 @@ import type {
   TxResult,
   ChainEvent,
   EventFilter,
-  CreateParanetParams,
+  CreateContextGraphParams,
   PublishParams,
   OnChainPublishResult,
   ConvictionAccountInfo,
   PermanentPublishParams,
   FairSwapPurchaseInfo,
   KAUpdateVerification,
-  CreateContextGraphParams,
-  CreateContextGraphResult,
-  AddBatchToContextGraphParams,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+  VerifyParams,
   PublishToContextGraphParams,
+  V10PublishParams,
 } from './chain-adapter.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
@@ -44,7 +45,7 @@ export class MockChainAdapter implements ChainAdapter {
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private collections = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
-  private paranets = new Map<string, Record<string, string>>();
+  private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
@@ -151,6 +152,18 @@ export class MockChainAdapter implements ChainAdapter {
       publisherNodeIdentityId: params.publisherNodeIdentityId.toString(),
       publisherAddress: this.signerAddress,
       merkleRoot: toHex(params.merkleRoot),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      kaCount: params.kaCount,
+      txHash,
+    });
+
+    // Also emit V10-style KCCreated so ChainEventPoller detects events
+    // regardless of isV10Ready() gating (mirrors real-world transition behaviour).
+    this.pushEvent('KCCreated', {
+      kcId: batchId.toString(),
+      merkleRoot: toHex(params.merkleRoot),
+      publisherAddress: this.signerAddress,
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,
@@ -340,38 +353,38 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // --- Paranets ---
+  // --- Context Graphs (V9 Registry) ---
 
-  async createParanet(params: CreateParanetParams): Promise<TxResult> {
-    const name = params.name ?? 'mock-paranet';
-    const id = params.paranetId ?? `0x${Buffer.from(name).toString('hex').padEnd(64, '0')}`;
+  async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
+    const name = params.name ?? 'mock-context-graph';
+    const id = params.contextGraphId ?? `0x${Buffer.from(name).toString('hex').padEnd(64, '0')}`;
     const meta = params.metadata ?? {
       ...(params.name && { name: params.name }),
       ...(params.description && { description: params.description }),
     };
-    if (this.paranets.has(id)) {
-      throw new Error(`Paranet "${id}" already exists on chain`);
+    if (this.contextGraphRegistry.has(id)) {
+      throw new Error(`Context graph "${id}" already exists on chain`);
     }
-    this.paranets.set(id, meta);
+    this.contextGraphRegistry.set(id, meta);
     this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
-    return { ...result, paranetId: id };
+    return { ...result, contextGraphId: id };
   }
 
-  async submitToParanet(kcId: string, paranetId: string): Promise<TxResult> {
-    this.pushEvent('KCSubmittedToParanet', { kcId, paranetId });
+  async submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult> {
+    this.pushEvent('KCSubmittedToContextGraph', { kcId, contextGraphId });
     return this.txResult(true);
   }
 
-  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
-    const meta = this.paranets.get(paranetId);
-    if (!meta) throw new Error(`Paranet "${paranetId}" not found`);
-    this.paranets.set(paranetId, { ...meta, name, description, revealed: 'true' });
-    this.pushEvent('ParanetMetadataRevealed', { paranetId, name, description });
+  async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
+    const meta = this.contextGraphRegistry.get(contextGraphId);
+    if (!meta) throw new Error(`Context graph "${contextGraphId}" not found`);
+    this.contextGraphRegistry.set(contextGraphId, { ...meta, name, description, revealed: 'true' });
+    this.pushEvent('ParanetMetadataRevealed', { paranetId: contextGraphId, name, description });
     return this.txResult(true);
   }
 
-  async listParanetsFromChain(): Promise<import('./chain-adapter.js').ParanetOnChain[]> {
+  async listContextGraphsFromChain(): Promise<import('./chain-adapter.js').ContextGraphOnChain[]> {
     return [];
   }
 
@@ -544,7 +557,7 @@ export class MockChainAdapter implements ChainAdapter {
     return { multiplier: computeConvictionMultiplier(lockEpochs) };
   }
 
-  // --- Context Graphs ---
+  // --- On-Chain Context Graphs (ContextGraphs contract) ---
 
   private contextGraphs = new Map<bigint, {
     manager: string;
@@ -556,7 +569,7 @@ export class MockChainAdapter implements ChainAdapter {
   }>();
   private nextContextGraphId = 1n;
 
-  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     if (params.requiredSignatures < 1) {
       throw new Error('Mock: requiredSignatures must be >= 1');
     }
@@ -596,7 +609,46 @@ export class MockChainAdapter implements ChainAdapter {
     return { r: new Uint8Array(32), vs: new Uint8Array(32) };
   }
 
-  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+  async getMinimumRequiredSignatures(): Promise<number> {
+    return this.minimumRequiredSignatures;
+  }
+
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    // Strict binding: recovered address must match the identity's registered address
+    const normalizedAddress = recoveredAddress.toLowerCase();
+    for (const [addr, id] of this.identities) {
+      if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private mockACKSigner?: import('ethers').Wallet;
+
+  setMockACKSigner(wallet: import('ethers').Wallet) {
+    this.mockACKSigner = wallet;
+  }
+
+  async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
+    if (!this.mockACKSigner) return undefined;
+    const { ethers: eth } = await import('ethers');
+    const sig = eth.Signature.from(await this.mockACKSigner.signMessage(digest));
+    return {
+      r: eth.getBytes(sig.r),
+      vs: eth.getBytes(sig.yParityAndS),
+    };
+  }
+
+  getACKSignerKey(): string | undefined {
+    return this.mockACKSigner?.privateKey;
+  }
+
+  isV10Ready(): boolean {
+    return true;
+  }
+
+  async verify(params: VerifyParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
       return this.txResult(false);
@@ -657,6 +709,55 @@ export class MockChainAdapter implements ChainAdapter {
 
   getContextGraph(contextGraphId: bigint) {
     return this.contextGraphs.get(contextGraphId);
+  }
+
+  // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+    if (params.ackSignatures.length < this.minimumRequiredSignatures) {
+      throw new Error('MinSignaturesRequirementNotMet');
+    }
+
+    const kcId = this.nextBatchId++;
+    this.collections.set(kcId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.knowledgeAssetsAmount,
+    });
+    // Also store in batches so verify() can find this publish
+    this.batches.set(kcId, {
+      merkleRoot: params.merkleRoot,
+      kaCount: params.knowledgeAssetsAmount,
+    });
+
+    const txHash = this.peekTxHash();
+    const startKAId = kcId * 100n + 1n;
+    const endKAId = startKAId + BigInt(params.knowledgeAssetsAmount) - 1n;
+
+    this.pushEvent('KCCreated', {
+      kcId: kcId.toString(),
+      publishOperationId: params.publishOperationId,
+      merkleRoot: toHex(params.merkleRoot),
+      byteSize: params.byteSize.toString(),
+      txHash,
+      publisherAddress: this.signerAddress,
+      startKAId: startKAId.toString(),
+      endKAId: endKAId.toString(),
+      isImmutable: params.isImmutable,
+      contextGraphId: params.contextGraphId.toString(),
+      convictionAccountId: params.convictionAccountId.toString(),
+    });
+
+    const result = this.txResult(true);
+    return {
+      batchId: kcId,
+      startKAId,
+      endKAId,
+      txHash: result.hash,
+      blockNumber: result.blockNumber,
+      blockTimestamp: Math.floor(Date.now() / 1000),
+      publisherAddress: this.signerAddress,
+      tokenAmount: params.tokenAmount,
+    };
   }
 
   // --- Test helpers ---

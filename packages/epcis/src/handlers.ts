@@ -4,7 +4,7 @@ import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js
 import type { Publisher, CaptureResult, CaptureOptions, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface CaptureConfig {
-  paranetId: string;
+  contextGraphId: string;
   publisher: Publisher;
 }
 
@@ -31,7 +31,7 @@ export class EpcisQueryError extends Error {
 }
 
 export interface EventsQueryConfig {
-  paranetId: string;
+  contextGraphId: string;
   queryEngine: QueryEngine;
   basePath: string;
 }
@@ -134,8 +134,8 @@ export async function handleEventsQuery(
   const offset = Math.max(params.offset ?? 0, 0);
 
   // Request one extra row to detect if more pages exist
-  const sparql = buildEpcisQuery({ ...params, limit: perPage + 1, offset }, config.paranetId);
-  const result = await config.queryEngine.query(sparql, { paranetId: config.paranetId });
+  const sparql = buildEpcisQuery({ ...params, limit: perPage + 1, offset }, config.contextGraphId);
+  const result = await config.queryEngine.query(sparql, { contextGraphId: config.contextGraphId });
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
@@ -198,7 +198,7 @@ export async function handleCapture(
     ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
     : undefined;
 
-  const result = await config.publisher.publish(config.paranetId, request.epcisDocument, opts);
+  const result = await config.publisher.publish(config.contextGraphId, request.epcisDocument, opts);
 
   return {
     ual: result.ual,

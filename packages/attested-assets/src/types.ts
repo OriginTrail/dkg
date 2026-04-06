@@ -23,7 +23,7 @@ export interface ReducerConfig {
 
 export interface SessionConfig {
   sessionId: string;
-  paranetId: string;
+  contextGraphId: string;
   appId: string;
   createdBy: string;
   createdAt: string;

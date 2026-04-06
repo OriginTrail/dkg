@@ -1,8 +1,92 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
-import { paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import {
+  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
+  assertSafeIri, escapeSparqlLiteral,
+  type GetView,
+} from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
+
+/**
+ * Result of resolving a V10 GET view to concrete graph targets.
+ */
+export interface ViewResolution {
+  /** Exact named-graph URIs to query directly. */
+  graphs: string[];
+  /**
+   * Graph URI prefixes — the engine discovers all named graphs matching
+   * each prefix and unions the results. Used for working-memory (multiple
+   * drafts) and verified-memory (multiple quorum graphs).
+   */
+  graphPrefixes: string[];
+  /** When true the engine merges results with VM-wins-on-conflict semantics. */
+  vmWinsOnConflict: boolean;
+}
+
+/**
+ * Resolves a V10 GetView + context graph ID to the named-graph URIs (or
+ * prefixes) that the query engine should target.
+ *
+ * Spec reference: §12 GET — Declared State Views.
+ */
+export function resolveViewGraphs(
+  view: GetView,
+  contextGraphId: string,
+  opts?: { agentAddress?: string; verifiedGraph?: string; draftName?: string },
+): ViewResolution {
+  switch (view) {
+    case 'working-memory': {
+      if (!opts?.agentAddress) {
+        throw new Error('agentAddress is required for the working-memory view');
+      }
+      if (opts.draftName) {
+        return {
+          graphs: [contextGraphDraftUri(contextGraphId, opts.agentAddress, opts.draftName)],
+          graphPrefixes: [],
+          vmWinsOnConflict: false,
+        };
+      }
+      return {
+        graphs: [],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/draft/${opts.agentAddress}/`],
+        vmWinsOnConflict: false,
+      };
+    }
+    case 'shared-working-memory':
+      return {
+        graphs: [contextGraphSharedMemoryUri(contextGraphId)],
+        graphPrefixes: [],
+        vmWinsOnConflict: false,
+      };
+    case 'long-term-memory':
+      return {
+        graphs: [contextGraphDataUri(contextGraphId)],
+        graphPrefixes: [],
+        vmWinsOnConflict: false,
+      };
+    case 'verified-memory': {
+      if (opts?.verifiedGraph) {
+        return {
+          graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
+          graphPrefixes: [],
+          vmWinsOnConflict: false,
+        };
+      }
+      return {
+        graphs: [],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
+        vmWinsOnConflict: false,
+      };
+    }
+    case 'authoritative':
+      return {
+        graphs: [contextGraphDataUri(contextGraphId)],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
+        vmWinsOnConflict: true,
+      };
+  }
+}
 
 /**
  * Local-only query engine that executes SPARQL against this node's own
@@ -25,56 +109,125 @@ export class DKGQueryEngine implements QueryEngine {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
     }
 
+    // ── V10 view-based routing ────────────────────────────────────────
+    const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+    if (options?.view) {
+      if (!effectiveContextGraphId) {
+        throw new Error(
+          `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
+        );
+      }
+      return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
+    }
+
+    // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveSparql = sparql;
 
-    if (options?.paranetId && !sparql.toLowerCase().includes('from ')) {
-      const dataGraph = paranetDataGraphUri(options.paranetId);
-      const workspaceGraph = paranetWorkspaceGraphUri(options.paranetId);
-      if (options.includeWorkspace) {
+    if (effectiveContextGraphId && !sparql.toLowerCase().includes('from ')) {
+      const dataGraph = contextGraphDataUri(effectiveContextGraphId);
+      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
+      if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);
-        const workspaceSparql = wrapWithGraph(sparql, workspaceGraph);
+        const sharedMemorySparql = wrapWithGraph(sparql, sharedMemoryGraph);
         const dataResult = await this.store.query(dataSparql);
-        const wsResult = await this.store.query(workspaceSparql);
-        return mergeWorkspaceAndDataResults(dataResult, wsResult);
+        const smResult = await this.store.query(sharedMemorySparql);
+        return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
-      if (options.graphSuffix === '_shared_memory') {
-        effectiveSparql = wrapWithGraph(sparql, workspaceGraph);
+      if (options?.graphSuffix === '_shared_memory') {
+        effectiveSparql = wrapWithGraph(sparql, sharedMemoryGraph);
       } else {
         effectiveSparql = wrapWithGraph(sparql, dataGraph);
       }
     }
 
-    const result = await this.store.query(effectiveSparql);
+    return this.execAndNormalize(effectiveSparql);
+  }
+
+  /**
+   * Execute a SPARQL query scoped to a declared V10 state view.
+   */
+  private async queryWithView(
+    sparql: string,
+    view: GetView,
+    contextGraphId: string,
+    options: QueryOptions,
+  ): Promise<QueryResult> {
+    const resolution = resolveViewGraphs(view, contextGraphId, {
+      agentAddress: options.agentAddress,
+      verifiedGraph: options.verifiedGraph,
+    });
+
+    const allGraphs = [...resolution.graphs];
+
+    for (const prefix of resolution.graphPrefixes) {
+      const discovered = await this.discoverGraphsByPrefix(prefix);
+      allGraphs.push(...discovered);
+    }
+
+    if (allGraphs.length === 0) {
+      return { bindings: [] };
+    }
+
+    if (allGraphs.length === 1) {
+      return this.execAndNormalize(wrapWithGraph(sparql, allGraphs[0]));
+    }
+
+    if (resolution.vmWinsOnConflict) {
+      const ltmGraphs = resolution.graphs;
+      const vmGraphs = allGraphs.filter((g) => !ltmGraphs.includes(g));
+      const ltmResults = await this.queryMultipleGraphs(sparql, ltmGraphs);
+      const vmResults = await this.queryMultipleGraphs(sparql, vmGraphs);
+      return mergeAuthoritativeResults(ltmResults, vmResults);
+    }
+
+    return this.queryMultipleGraphs(sparql, allGraphs);
+  }
+
+  private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
+    if (graphs.length === 0) return { bindings: [] };
+    if (graphs.length === 1) {
+      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
+    }
+    // Build a single union query so LIMIT/ORDER BY/DISTINCT/aggregates
+    // apply over the full dataset rather than per-graph.
+    const unionSparql = wrapWithGraphUnion(sparql, graphs);
+    return this.execAndNormalize(unionSparql);
+  }
+
+  private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
+    const allGraphs = await this.store.listGraphs();
+    return allGraphs.filter(
+      (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
+    );
+  }
+
+  private async execAndNormalize(sparql: string): Promise<QueryResult> {
+    const result = await this.store.query(sparql);
 
     if (result.type === 'bindings') {
       return { bindings: result.bindings };
     }
     if (result.type === 'quads') {
-      return {
-        bindings: [],
-        quads: result.quads,
-      };
+      return { bindings: [], quads: result.quads };
     }
     if (result.type === 'boolean') {
-      return {
-        bindings: [{ result: String(result.value) }],
-      };
+      return { bindings: [{ result: String(result.value) }] };
     }
     return { bindings: [] };
   }
 
   async resolveKA(ual: string): Promise<{
     rootEntity: string;
-    paranetId: string;
+    contextGraphId: string;
     quads: Quad[];
   }> {
     // Look up KA metadata across all meta graphs
     const metaResult = await this.store.query(
-      `SELECT ?rootEntity ?paranet WHERE {
+      `SELECT ?rootEntity ?ctxGraph WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
-          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?paranet .
+          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?ctxGraph .
         }
       }`,
     );
@@ -84,9 +237,9 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     const rootEntity = metaResult.bindings[0]['rootEntity'];
-    const paranetUri = metaResult.bindings[0]['paranet'];
-    const paranetId = paranetUri.replace('did:dkg:context-graph:', '');
-    const dataGraph = paranetDataGraphUri(paranetId);
+    const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
+    const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
+    const dataGraph = contextGraphDataUri(contextGraphId);
 
     // Fetch all triples for this entity
     const dataResult = await this.store.query(
@@ -111,22 +264,27 @@ export class DKGQueryEngine implements QueryEngine {
           }))
         : [];
 
-    return { rootEntity, paranetId, quads };
+    return { rootEntity, contextGraphId, quads };
   }
 
   /**
-   * Execute a query across all locally-stored paranets.
+   * Execute a query across all locally-stored context graphs.
    */
-  async queryAllParanets(sparql: string): Promise<QueryResult> {
-    const paranets = await this.graphManager.listParanets();
+  async queryAllContextGraphs(sparql: string): Promise<QueryResult> {
+    const contextGraphIds = await this.graphManager.listContextGraphs();
     const allBindings: Array<Record<string, string>> = [];
 
-    for (const paranetId of paranets) {
-      const result = await this.query(sparql, { paranetId });
+    for (const contextGraphId of contextGraphIds) {
+      const result = await this.query(sparql, { contextGraphId });
       allBindings.push(...result.bindings);
     }
 
     return { bindings: allBindings };
+  }
+
+  /** @deprecated Use queryAllContextGraphs */
+  async queryAllParanets(sparql: string): Promise<QueryResult> {
+    return this.queryAllContextGraphs(sparql);
   }
 }
 
@@ -159,27 +317,57 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
 
-function mergeWorkspaceAndDataResults(
+/**
+ * Wrap a query so it runs over a union of named graphs in a single execution,
+ * preserving LIMIT/ORDER BY/DISTINCT/aggregate semantics.
+ */
+function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
+  if (sparql.toLowerCase().includes('graph ')) return sparql;
+
+  const whereIdx = sparql.search(/WHERE\s*\{/i);
+  if (whereIdx === -1) return sparql;
+
+  const braceStart = sparql.indexOf('{', whereIdx);
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < sparql.length; i++) {
+    if (sparql[i] === '{') depth++;
+    else if (sparql[i] === '}') {
+      depth--;
+      if (depth === 0) { braceEnd = i; break; }
+    }
+  }
+  if (braceEnd === -1) return sparql;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const after = sparql.slice(braceEnd);
+
+  const valuesClause = graphUris.map((g) => `<${g}>`).join(' ');
+  return `${before} VALUES ?_viewGraph { ${valuesClause} } GRAPH ?_viewGraph { ${inner} } ${after}`;
+}
+
+function mergeSharedMemoryAndDataResults(
   dataResult: StoreQueryResult,
-  wsResult: StoreQueryResult,
+  smResult: StoreQueryResult,
 ): QueryResult {
-  if (dataResult.type === 'quads' || wsResult.type === 'quads') {
+  if (dataResult.type === 'quads' || smResult.type === 'quads') {
     const mergedQuads = dedupeQuads([
       ...(dataResult.type === 'quads' ? dataResult.quads : []),
-      ...(wsResult.type === 'quads' ? wsResult.quads : []),
+      ...(smResult.type === 'quads' ? smResult.quads : []),
     ]);
     return { bindings: [], quads: mergedQuads };
   }
 
-  if (dataResult.type === 'boolean' || wsResult.type === 'boolean') {
+  if (dataResult.type === 'boolean' || smResult.type === 'boolean') {
     const value = (dataResult.type === 'boolean' ? dataResult.value : false)
-      || (wsResult.type === 'boolean' ? wsResult.value : false);
+      || (smResult.type === 'boolean' ? smResult.value : false);
     return { bindings: [{ result: String(value) }] };
   }
 
   const mergedBindings = dedupeBindings([
     ...(dataResult.type === 'bindings' ? dataResult.bindings : []),
-    ...(wsResult.type === 'bindings' ? wsResult.bindings : []),
+    ...(smResult.type === 'bindings' ? smResult.bindings : []),
   ]);
   return { bindings: mergedBindings };
 }
@@ -213,5 +401,65 @@ function dedupeQuads(quads: Quad[]): Quad[] {
     out.push(q);
   }
   return out;
+}
+
+/**
+ * Merge LTM and VM results for the 'authoritative' view.
+ * VM wins on conflict: when the same subject+predicate appears in both
+ * result sets, the VM value is kept and the LTM one is dropped.
+ *
+ * Conflict resolution applies at two levels:
+ * 1. Binding rows — when `?s` and `?p` are projected (SELECT queries).
+ * 2. Quads — when the result contains quads (CONSTRUCT/DESCRIBE queries),
+ *    subject+predicate dedup happens directly on the triples so conflict
+ *    resolution works regardless of the projection shape.
+ */
+function mergeAuthoritativeResults(
+  ltmResult: QueryResult,
+  vmResult: QueryResult,
+): QueryResult {
+  if (vmResult.bindings.length === 0 && !vmResult.quads?.length) {
+    return ltmResult;
+  }
+
+  // --- Binding-level merge (SELECT queries with ?s/?p projection) ---
+  const vmSubjectPredicates = new Set<string>();
+  for (const row of vmResult.bindings) {
+    if (row['s'] && row['p']) {
+      vmSubjectPredicates.add(`${row['s']}\u0000${row['p']}`);
+    }
+  }
+
+  const filteredLtm = vmSubjectPredicates.size > 0
+    ? ltmResult.bindings.filter((row) => {
+        if (!row['s'] || !row['p']) return true;
+        return !vmSubjectPredicates.has(`${row['s']}\u0000${row['p']}`);
+      })
+    : ltmResult.bindings;
+
+  const mergedBindings = dedupeBindings([...filteredLtm, ...vmResult.bindings]);
+
+  // --- Quad-level merge (CONSTRUCT/DESCRIBE queries) ---
+  const ltmQuads = ltmResult.quads ?? [];
+  const vmQuads = vmResult.quads ?? [];
+  let mergedQuads: Quad[];
+
+  if (vmQuads.length > 0 && ltmQuads.length > 0) {
+    const vmQuadSP = new Set<string>();
+    for (const q of vmQuads) {
+      vmQuadSP.add(`${q.subject}\u0000${q.predicate}`);
+    }
+    const filteredLtmQuads = ltmQuads.filter(
+      (q) => !vmQuadSP.has(`${q.subject}\u0000${q.predicate}`),
+    );
+    mergedQuads = dedupeQuads([...filteredLtmQuads, ...vmQuads]);
+  } else {
+    mergedQuads = dedupeQuads([...ltmQuads, ...vmQuads]);
+  }
+
+  return {
+    bindings: mergedBindings,
+    ...(mergedQuads.length > 0 ? { quads: mergedQuads } : {}),
+  };
 }
 

@@ -20,19 +20,19 @@ export interface ValidationOptions {
 export function validatePublishRequest(
   nquads: Quad[],
   manifest: KAManifestEntry[],
-  paranetId: string,
+  contextGraphId: string,
   existingEntities: Set<string>,
   options?: ValidationOptions,
 ): ValidationResult {
   const errors: string[] = [];
-  const paranetGraph = `did:dkg:context-graph:${paranetId}`;
+  const contextGraph = `did:dkg:context-graph:${contextGraphId}`;
   const rootEntities = new Set(manifest.map((m) => m.rootEntity));
 
-  // Rule 1: Every quad's named graph MUST be the target paranet URI.
+  // Rule 1: Every quad's named graph MUST be the target context graph URI.
   for (const q of nquads) {
-    if (q.graph && q.graph !== paranetGraph) {
+    if (q.graph && q.graph !== contextGraph) {
       errors.push(
-        `Rule 1: Quad graph "${q.graph}" does not match paranet "${paranetGraph}"`,
+        `Rule 1: Quad graph "${q.graph}" does not match context graph "${contextGraph}"`,
       );
     }
   }
@@ -69,16 +69,16 @@ export function validatePublishRequest(
     }
   }
 
-  // Rule 4: Entity exclusivity — no rootEntity may already exist in this paranet.
-  // With allowUpsert, the original creator can overwrite their own workspace entities.
+  // Rule 4: Entity exclusivity — no rootEntity may already exist in this context graph.
+  // With allowUpsert, the original creator can overwrite their own shared memory entities.
   for (const m of manifest) {
     if (existingEntities.has(m.rootEntity)) {
       if (options?.allowUpsert && options.upsertableEntities?.has(m.rootEntity)) {
         continue;
       }
       errors.push(
-        `Rule 4: rootEntity "${m.rootEntity}" already exists in paranet "${paranetId}". ` +
-        `Use the update API to modify existing entities, or set allowUpsert if you are the original creator.`,
+        `Rule 4: rootEntity "${m.rootEntity}" already exists in context graph "${contextGraphId}". ` +
+        `Use /api/update with the existing kcId to modify it, or use a unique rootEntity URI.`,
       );
     }
   }

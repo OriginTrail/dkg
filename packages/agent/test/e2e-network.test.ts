@@ -151,7 +151,7 @@ describe('Network E2E (3 nodes + relay)', () => {
 
   it('system paranets are present from genesis on all nodes', async () => {
     for (const node of [nodeA, nodeB, nodeC]) {
-      const paranets = await node.listParanets();
+      const paranets = await node.listContextGraphs();
       const ids = paranets.map(p => p.id);
       expect(ids).toContain('agents');
       expect(ids).toContain('ontology');
@@ -168,16 +168,16 @@ describe('Network E2E (3 nodes + relay)', () => {
   // ── Step 5: Create a paranet ──────────────────────────────────────
 
   it('a node creates a paranet and other nodes learn about it', async () => {
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: 'memes',
       name: 'Memes Paranet',
       description: 'Rare knowledge memes',
     });
 
-    const existsA = await nodeA.paranetExists('memes');
+    const existsA = await nodeA.contextGraphExists('memes');
     expect(existsA).toBe(true);
 
-    const paranetsA = await nodeA.listParanets();
+    const paranetsA = await nodeA.listContextGraphs();
     const memes = paranetsA.find(p => p.id === 'memes')!;
     expect(memes).toBeDefined();
     expect(memes.name).toBe('Memes Paranet');
@@ -189,8 +189,8 @@ describe('Network E2E (3 nodes + relay)', () => {
 
     // B and C should have received the paranet definition via ontology GossipSub
     // and can also subscribe to the memes topic
-    nodeB.subscribeToParanet('memes');
-    nodeC.subscribeToParanet('memes');
+    nodeB.subscribeToContextGraph('memes');
+    nodeC.subscribeToContextGraph('memes');
     await sleep(500);
   }, 15000);
 
@@ -355,7 +355,7 @@ describe('Network E2E (3 nodes + relay)', () => {
   // ── Step 11: Second paranet doesn't interfere ─────────────────────
 
   it('creating a second paranet keeps data isolated', async () => {
-    await nodeB.createParanet({
+    await nodeB.createContextGraph({
       id: 'science',
       name: 'Science Paranet',
       description: 'Peer-reviewed knowledge',

@@ -44,8 +44,8 @@ export function normalizeBizStep(value: string): string {
  * - UAL provenance is resolved via OPTIONAL join to GRAPH <did:dkg:context-graph:{id}/_meta>
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
-export function buildEpcisQuery(params: EpcisQueryParams, paranetId: string): string {
-  const dataGraph = `did:dkg:context-graph:${paranetId}`;
+export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
+  const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
   const metaGraph = `${dataGraph}/_meta`;
 
   const wherePatterns: string[] = [];

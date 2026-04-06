@@ -41,7 +41,7 @@ export interface SimulationRun {
     opsPerSec: number;
     concurrency: number;
     kasPerPublish: number;
-    paranet: string;
+    contextGraphId: string;
     enabledOps: string[];
   };
 }

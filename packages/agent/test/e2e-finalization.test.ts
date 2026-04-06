@@ -5,7 +5,7 @@
  *    (real on-chain tx) → B receives FinalizationMessage → B verifies on-chain
  *    → B promotes workspace snapshot to canonical.
  * 2. Workspace enshrine cycle: write entity 1, enshrine, write entity 2, enshrine.
- * 3. Workspace cleanup after enshrine with clearWorkspaceAfter flag.
+ * 3. Workspace cleanup after enshrine with clearSharedMemoryAfter flag.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ChildProcess, spawn } from 'node:child_process';
@@ -245,9 +245,9 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Finalization Chain Test', description: '' });
-    nodeA.subscribeToParanet(PARANET);
-    nodeB.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Finalization Chain Test', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
     await sleep(1000);
   }, 30_000);
 
@@ -260,8 +260,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' as const },
     ];
 
-    const wsResult = await nodeA.writeToWorkspace(PARANET, quads);
-    expect(wsResult.workspaceOperationId).toBeDefined();
+    const wsResult = await nodeA.share(PARANET, quads);
+    expect(wsResult.shareOperationId).toBeDefined();
 
     // Poll until B has the workspace data
     const deadline = Date.now() + 15000;
@@ -269,7 +269,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
       await sleep(500);
@@ -282,7 +282,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
-    const enshrineResult = await nodeA.enshrineFromWorkspace(PARANET, {
+    const enshrineResult = await nodeA.publishFromSharedMemory(PARANET, {
       rootEntities: [ENTITY_1],
     });
 
@@ -345,7 +345,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const wsResult = await nodeB.query(
       `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsResult.bindings.length).toBe(0);
   }, 5000);
@@ -357,18 +357,18 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     const nodeA = agents[0];
 
     // Write entity 2 to workspace
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Entity Two"', graph: '' },
     ]);
 
     const ws2 = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(ws2.bindings.length).toBe(1);
 
     // Enshrine entity 2
-    const result2 = await nodeA.enshrineFromWorkspace(PARANET, { rootEntities: [ENTITY_2] });
+    const result2 = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_2] });
     expect(result2.status).toBe('confirmed');
     expect(result2.onChainResult).toBeDefined();
 
@@ -382,24 +382,24 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(names.some((n: string) => n.includes('Entity Two'))).toBe(true);
   }, 60_000);
 
-  // ── Workspace cleanup: clearWorkspaceAfter flag ────────────────────────
+  // ── Workspace cleanup: clearSharedMemoryAfter flag ────────────────────────
 
-  it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async (ctx) => {
+  it('publishFromSharedMemory with clearSharedMemoryAfter removes workspace data', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Cleanup Entity"', graph: '' },
     ]);
 
     const wsBefore = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsBefore.bindings.length).toBe(1);
 
-    const result = await nodeA.enshrineFromWorkspace(PARANET, { rootEntities: [ENTITY_3] }, {
-      clearWorkspaceAfter: true,
+    const result = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_3] }, {
+      clearSharedMemoryAfter: true,
     });
     expect(result.status).toBe('confirmed');
     expect(result.onChainResult).toBeDefined();
@@ -407,7 +407,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     // Workspace should be cleaned
     const wsAfter = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsAfter.bindings.length).toBe(0);
 

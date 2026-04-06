@@ -36,7 +36,7 @@ const ReducerConfigSchema = new Type('ReducerConfig')
 
 const SessionConfigSchema = new Type('SessionConfig')
   .add(new Field('sessionId', 1, 'string'))
-  .add(new Field('paranetId', 2, 'string'))
+  .add(new Field('contextGraphId', 2, 'string'))
   .add(new Field('appId', 3, 'string'))
   .add(new Field('createdBy', 4, 'string'))
   .add(new Field('createdAt', 5, 'string'))

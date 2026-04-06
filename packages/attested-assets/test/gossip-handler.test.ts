@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  paranetSessionsTopic,
+  contextGraphSessionsTopic,
   sessionTopic,
   AKAGossipHandler,
 } from '../src/gossip-handler.js';
@@ -31,8 +31,8 @@ function createMockGossip(): GossipSubManager & {
 }
 
 describe('gossip topic helpers', () => {
-  it('paranetSessionsTopic follows convention', () => {
-    expect(paranetSessionsTopic('oregon-trail')).toBe('dkg/context-graph/oregon-trail/sessions');
+  it('contextGraphSessionsTopic follows convention', () => {
+    expect(contextGraphSessionsTopic('oregon-trail')).toBe('dkg/context-graph/oregon-trail/sessions');
   });
 
   it('sessionTopic includes session id', () => {
@@ -42,7 +42,7 @@ describe('gossip topic helpers', () => {
   });
 
   it('handles special characters in ids', () => {
-    expect(paranetSessionsTopic('my-paranet')).toBe('dkg/context-graph/my-paranet/sessions');
+    expect(contextGraphSessionsTopic('my-paranet')).toBe('dkg/context-graph/my-paranet/sessions');
     expect(sessionTopic('p1', 's-with-dashes')).toBe('dkg/context-graph/p1/sessions/s-with-dashes');
   });
 });
@@ -56,8 +56,8 @@ describe('AKAGossipHandler', () => {
     handler = new AKAGossipHandler(mockGossip);
   });
 
-  it('subscribeParanet subscribes to the correct topic', () => {
-    handler.subscribeParanet('test-paranet');
+  it('subscribeContextGraph subscribes to the correct topic', () => {
+    handler.subscribeContextGraph('test-paranet');
     expect(mockGossip.subscribe).toHaveBeenCalledWith('dkg/context-graph/test-paranet/sessions');
     expect(mockGossip.onMessage).toHaveBeenCalledWith(
       'dkg/context-graph/test-paranet/sessions',
@@ -65,15 +65,15 @@ describe('AKAGossipHandler', () => {
     );
   });
 
-  it('subscribeParanet is idempotent — second call does not re-subscribe', () => {
-    handler.subscribeParanet('test-paranet');
-    handler.subscribeParanet('test-paranet');
+  it('subscribeContextGraph is idempotent — second call does not re-subscribe', () => {
+    handler.subscribeContextGraph('test-paranet');
+    handler.subscribeContextGraph('test-paranet');
     expect(mockGossip.subscribe).toHaveBeenCalledTimes(1);
   });
 
-  it('unsubscribeParanet removes the subscription and handler', () => {
-    handler.subscribeParanet('test-paranet');
-    handler.unsubscribeParanet('test-paranet');
+  it('unsubscribeContextGraph removes the subscription and handler', () => {
+    handler.subscribeContextGraph('test-paranet');
+    handler.unsubscribeContextGraph('test-paranet');
     expect(mockGossip.offMessage).toHaveBeenCalledWith(
       'dkg/context-graph/test-paranet/sessions',
       expect.any(Function),
@@ -124,11 +124,11 @@ describe('AKAGossipHandler', () => {
   });
 
   it('incoming gossip message dispatches to registered event handlers', () => {
-    const topic = paranetSessionsTopic('test');
+    const topic = contextGraphSessionsTopic('test');
     const eventHandler = vi.fn();
 
     handler.onEvent(topic, eventHandler);
-    handler.subscribeParanet('test');
+    handler.subscribeContextGraph('test');
 
     const registeredGossipHandler = mockGossip._handlers.get(topic);
     expect(registeredGossipHandler).toBeDefined();

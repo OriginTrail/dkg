@@ -10,7 +10,7 @@ let journal: PublishJournal;
 function makeEntry(overrides: Partial<JournalEntry> = {}): JournalEntry {
   return {
     ual: 'did:dkg:mock:31337/0xABC/42',
-    paranetId: 'test-paranet',
+    contextGraphId: 'test-paranet',
     expectedPublisherAddress: '0x1234567890abcdef1234567890abcdef12345678',
     expectedMerkleRoot: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
     expectedStartKAId: '100',

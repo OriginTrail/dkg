@@ -212,15 +212,15 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('publishes knowledge through agent (on-chain finality)', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
-    const paranetId = 'test-chain-paranet';
-    await agents[0].createParanet({
-      id: paranetId,
+    const contextGraphId = 'test-chain-paranet';
+    await agents[0].createContextGraph({
+      id: contextGraphId,
       name: 'Chain Test Paranet',
       description: 'E2E test with real blockchain',
     });
 
-    agents[0].subscribeToParanet(paranetId);
-    agents[1].subscribeToParanet(paranetId);
+    agents[0].subscribeToContextGraph(contextGraphId);
+    agents[1].subscribeToContextGraph(contextGraphId);
 
     await new Promise((r) => setTimeout(r, 1000));
 
@@ -229,17 +229,17 @@ describe('E2E: DKGAgent with real blockchain', () => {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/name',
         object: '"Alice"',
-        graph: `did:dkg:context-graph:${paranetId}`,
+        graph: `did:dkg:context-graph:${contextGraphId}`,
       },
       {
         subject: 'did:dkg:test:Alice',
         predicate: 'http://schema.org/knows',
         object: 'did:dkg:test:Bob',
-        graph: `did:dkg:context-graph:${paranetId}`,
+        graph: `did:dkg:context-graph:${contextGraphId}`,
       },
     ];
 
-    const result = await agents[0].publish(paranetId, quads);
+    const result = await agents[0].publish(contextGraphId, quads);
     expect(result).toBeDefined();
     expect(result.kaManifest).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);

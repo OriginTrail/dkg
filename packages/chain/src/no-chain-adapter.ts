@@ -11,7 +11,7 @@ import type {
   TxResult,
   ChainEvent,
   EventFilter,
-  CreateParanetParams,
+  CreateContextGraphParams,
 } from './chain-adapter.js';
 
 function noChain(): never {
@@ -40,7 +40,7 @@ export class NoChainAdapter implements ChainAdapter {
   async extendStorage(_params: ExtendStorageParams): Promise<TxResult> { noChain(); }
   async transferNamespace(_newOwner: string): Promise<TxResult> { noChain(); }
   async *listenForEvents(_filter: EventFilter): AsyncIterable<ChainEvent> { noChain(); }
-  async createParanet(_params: CreateParanetParams): Promise<TxResult> { noChain(); }
-  async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> { noChain(); }
-  async revealParanetMetadata(_paranetId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
+  async createContextGraph(_params: CreateContextGraphParams): Promise<TxResult> { noChain(); }
+  async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> { noChain(); }
+  async revealContextGraphMetadata(_contextGraphId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
 }

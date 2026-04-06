@@ -63,7 +63,7 @@ export async function fetchAgents(nodeId: number) {
 
 export async function publishKA(
   nodeId: number,
-  paranetId: string,
+  contextGraphId: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
@@ -72,36 +72,36 @@ export async function publishKA(
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/publish`, { paranetId, quads, privateQuads });
+  }>(`${nodeBase(nodeId)}/api/publish`, { contextGraphId, quads, privateQuads });
 }
 
 export async function queryNode(
   nodeId: number,
   sparql: string,
-  paranetId?: string,
-  opts?: { graphSuffix?: '_shared_memory'; includeWorkspace?: boolean },
+  contextGraphId?: string,
+  opts?: { graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean },
 ) {
   return post<{ result: unknown }>(`${nodeBase(nodeId)}/api/query`, {
     sparql,
-    paranetId,
+    contextGraphId,
     ...opts,
   });
 }
 
-export async function writeToWorkspace(
+export async function share(
   nodeId: number,
-  paranetId: string,
+  contextGraphId: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
-  return post<{ workspaceOperationId: string }>(`${nodeBase(nodeId)}/api/workspace/write`, {
-    paranetId,
+  return post<{ shareOperationId: string }>(`${nodeBase(nodeId)}/api/shared-memory/write`, {
+    contextGraphId,
     quads,
   });
 }
 
-export async function enshrineFromWorkspace(
+export async function publishFromSharedMemory(
   nodeId: number,
-  paranetId: string,
+  contextGraphId: string,
   selection: 'all' | { rootEntities: string[] } = 'all',
   clearAfter = true,
 ) {
@@ -110,8 +110,8 @@ export async function enshrineFromWorkspace(
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/workspace/enshrine`, {
-    paranetId,
+  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, {
+    contextGraphId,
     selection,
     clearAfter,
   });
@@ -134,21 +134,21 @@ export async function fetchMessages(nodeId: number, peer?: string) {
   }>(`${nodeBase(nodeId)}/api/messages${qs}`);
 }
 
-export async function fetchParanets(nodeId: number) {
-  return get<{ paranets: Array<{ id: string; name: string; uri?: string }> }>(
-    `${nodeBase(nodeId)}/api/paranet/list`,
+export async function fetchContextGraphs(nodeId: number) {
+  return get<{ contextGraphs: Array<{ id: string; name: string; uri?: string }> }>(
+    `${nodeBase(nodeId)}/api/context-graph/list`,
   );
 }
 
-export async function createParanet(nodeId: number, id: string, name: string) {
-  return post<{ created: boolean; uri: string }>(`${nodeBase(nodeId)}/api/paranet/create`, {
+export async function createContextGraph(nodeId: number, id: string, name: string) {
+  return post<{ created: boolean; uri: string }>(`${nodeBase(nodeId)}/api/context-graph/create`, {
     id,
     name,
   });
 }
 
-export async function subscribeParanet(nodeId: number, paranetId: string) {
-  return post<{ subscribed: string }>(`${nodeBase(nodeId)}/api/subscribe`, { paranetId });
+export async function subscribeContextGraph(nodeId: number, contextGraphId: string) {
+  return post<{ subscribed: string }>(`${nodeBase(nodeId)}/api/subscribe`, { contextGraphId });
 }
 
 export async function fetchWalletBalances(nodeId: number) {
@@ -161,7 +161,7 @@ export async function fetchWalletBalances(nodeId: number) {
 export async function queryRemote(
   nodeId: number,
   peerId: string,
-  opts: { lookupType: string; sparql?: string; ual?: string; paranetId?: string },
+  opts: { lookupType: string; sparql?: string; ual?: string; contextGraphId?: string },
 ) {
   return post<{
     operationId: string;
@@ -182,7 +182,7 @@ export interface MetricSnapshot {
   peer_count: number | null;
   direct_peers: number | null;
   relayed_peers: number | null;
-  paranet_count: number | null;
+  context_graph_count: number | null;
   total_triples: number | null;
   total_kcs: number | null;
   total_kas: number | null;

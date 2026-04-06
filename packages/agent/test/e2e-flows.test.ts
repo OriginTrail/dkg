@@ -41,7 +41,7 @@ describe('Publish → Query (single agent)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'pq-test', name: 'PQ', description: '' });
+    await agent.createContextGraph({ id: 'pq-test', name: 'PQ', description: '' });
 
     const result = await agent.publish('pq-test', [
       { subject: 'did:dkg:test:Alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
@@ -72,7 +72,7 @@ describe('Publish → Query (single agent)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'priv-test', name: 'Priv', description: '' });
+    await agent.createContextGraph({ id: 'priv-test', name: 'Priv', description: '' });
 
     const result = await agent.publish(
       'priv-test',
@@ -113,9 +113,9 @@ describe('Publish → Replicate → Query (two agents)', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'rep-test', name: 'Rep', description: '' });
-    agentA.subscribeToParanet('rep-test');
-    agentB.subscribeToParanet('rep-test');
+    await agentA.createContextGraph({ id: 'rep-test', name: 'Rep', description: '' });
+    agentA.subscribeToContextGraph('rep-test');
+    agentB.subscribeToContextGraph('rep-test');
     await sleep(500);
 
     await agentA.publish('rep-test', [
@@ -148,7 +148,7 @@ describe('Update flow (agent level)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'upd-test', name: 'Upd', description: '' });
+    await agent.createContextGraph({ id: 'upd-test', name: 'Upd', description: '' });
 
     const initial = await agent.publish('upd-test', [
       { subject: 'did:dkg:test:Doc', predicate: 'http://schema.org/name', object: '"Doc v1"', graph: '' },
@@ -197,7 +197,7 @@ describe('Update flow (agent level)', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'priv-upd', name: 'PrivUpd', description: '' });
+    await agent.createContextGraph({ id: 'priv-upd', name: 'PrivUpd', description: '' });
 
     const initial = await agent.publish(
       'priv-upd',
@@ -374,8 +374,8 @@ describe('Multi-paranet queries', () => {
     agents.push(agent);
     await agent.start();
 
-    await agent.createParanet({ id: 'para-a', name: 'A', description: '' });
-    await agent.createParanet({ id: 'para-b', name: 'B', description: '' });
+    await agent.createContextGraph({ id: 'para-a', name: 'A', description: '' });
+    await agent.createContextGraph({ id: 'para-b', name: 'B', description: '' });
 
     await agent.publish('para-a', [
       { subject: 'did:dkg:test:X', predicate: 'http://schema.org/name', object: '"XEntity"', graph: '' },
@@ -426,9 +426,9 @@ describe('GossipSub KC/KA metadata replication', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'meta-test', name: 'MetaTest', description: '' });
-    agentA.subscribeToParanet('meta-test');
-    agentB.subscribeToParanet('meta-test');
+    await agentA.createContextGraph({ id: 'meta-test', name: 'MetaTest', description: '' });
+    agentA.subscribeToContextGraph('meta-test');
+    agentB.subscribeToContextGraph('meta-test');
     await sleep(500);
 
     await agentA.publish('meta-test', [
@@ -466,9 +466,9 @@ describe('GossipSub KC/KA metadata replication', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'multi-pub', name: 'MultiPub', description: '' });
-    agentA.subscribeToParanet('multi-pub');
-    agentB.subscribeToParanet('multi-pub');
+    await agentA.createContextGraph({ id: 'multi-pub', name: 'MultiPub', description: '' });
+    agentA.subscribeToContextGraph('multi-pub');
+    agentB.subscribeToContextGraph('multi-pub');
     await sleep(500);
 
     // Count baseline KCs on receiver (from system paranets)
@@ -509,9 +509,9 @@ describe('GossipSub KC/KA metadata replication', () => {
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'pararef-test', name: 'ParaRef', description: '' });
-    agentA.subscribeToParanet('pararef-test');
-    agentB.subscribeToParanet('pararef-test');
+    await agentA.createContextGraph({ id: 'pararef-test', name: 'ParaRef', description: '' });
+    agentA.subscribeToContextGraph('pararef-test');
+    agentB.subscribeToContextGraph('pararef-test');
     await sleep(500);
 
     await agentA.publish('pararef-test', [

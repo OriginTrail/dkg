@@ -56,14 +56,14 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Context Graph E2E', description: '' });
-    nodeA.subscribeToParanet(PARANET);
-    nodeB.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Context Graph E2E', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
     await sleep(1500);
   }, 15_000);
 
   it('creates a context graph on the shared chain', async () => {
-    const result = await nodeA.createContextGraph({
+    const result = await nodeA.registerContextGraphOnChain({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
@@ -79,15 +79,15 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       { subject: ENTITY_CTX_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' },
     ];
 
-    const wsResult = await nodeA.writeToWorkspace(PARANET, quads);
-    expect(wsResult.workspaceOperationId).toBeDefined();
+    const wsResult = await nodeA.share(PARANET, quads);
+    expect(wsResult.shareOperationId).toBeDefined();
 
     const deadline = Date.now() + 15_000;
     let bWorkspace: any;
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
       await sleep(500);
@@ -97,10 +97,10 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   }, 25_000);
 
   it('A enshrines to context graph; A has data in context graph URI', async () => {
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_CTX_1] },
-      { contextGraphId },
+      { subContextGraphId: contextGraphId },
     );
 
     expect(result.status).toBe('confirmed');
@@ -161,13 +161,13 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
   it('B workspace is cleaned up after promotion', async () => {
     const wsResult = await nodeB.query(
       `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(wsResult.bindings.length).toBe(0);
   }, 5_000);
 
   it('second enshrine to same context graph accumulates data', async () => {
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_CTX_2, predicate: 'http://schema.org/name', object: '"Second Context Entity"', graph: '' },
     ]);
 
@@ -176,16 +176,16 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     while (Date.now() < wsDeadline) {
       const ws = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (ws.bindings.length > 0) break;
       await sleep(500);
     }
 
-    const result = await nodeA.enshrineFromWorkspace(
+    const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_CTX_2] },
-      { contextGraphId, clearWorkspaceAfter: true },
+      { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
     );
     expect(result.status).toBe('confirmed');
 
@@ -202,7 +202,7 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
     // A's workspace cleaned
     const ws = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(ws.bindings.length).toBe(0);
 

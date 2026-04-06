@@ -146,10 +146,13 @@ export function getGenesisRaw(): string {
   return GENESIS_TRIG;
 }
 
-export const SYSTEM_PARANETS = {
+export const SYSTEM_CONTEXT_GRAPHS = {
   AGENTS: 'agents',
   ONTOLOGY: 'ontology',
 } as const;
+
+/** @deprecated Use SYSTEM_CONTEXT_GRAPHS */
+export const SYSTEM_PARANETS = SYSTEM_CONTEXT_GRAPHS;
 
 export const DKG_ONTOLOGY = {
   RDF_TYPE: `${RDF}type`,
@@ -162,7 +165,11 @@ export const DKG_ONTOLOGY = {
   DKG_PUBLIC_KEY: `${DKG}publicKey`,
   DKG_NODE_ROLE: `${DKG}nodeRole`,
   DKG_RELAY_ADDRESS: `${DKG}relayAddress`,
+  DKG_CONTEXT_GRAPH: `${DKG}Paranet`,
+  DKG_SYSTEM_CONTEXT_GRAPH: `${DKG}SystemParanet`,
+  /** @deprecated Use DKG_CONTEXT_GRAPH */
   DKG_PARANET: `${DKG}Paranet`,
+  /** @deprecated Use DKG_SYSTEM_CONTEXT_GRAPH */
   DKG_SYSTEM_PARANET: `${DKG}SystemParanet`,
   DKG_NETWORK: `${DKG}Network`,
   DKG_NETWORK_ID: `${DKG}networkId`,
