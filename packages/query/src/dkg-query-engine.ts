@@ -184,17 +184,14 @@ export class DKGQueryEngine implements QueryEngine {
   }
 
   private async queryMultipleGraphs(sparql: string, graphs: string[]): Promise<QueryResult> {
-    const allBindings: Array<Record<string, string>> = [];
-    const allQuads: Quad[] = [];
-    for (const graph of graphs) {
-      const r = await this.execAndNormalize(wrapWithGraph(sparql, graph));
-      allBindings.push(...r.bindings);
-      if (r.quads) allQuads.push(...r.quads);
+    if (graphs.length === 0) return { bindings: [] };
+    if (graphs.length === 1) {
+      return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
     }
-    return {
-      bindings: dedupeBindings(allBindings),
-      ...(allQuads.length > 0 ? { quads: dedupeQuads(allQuads) } : {}),
-    };
+    // Build a single union query so LIMIT/ORDER BY/DISTINCT/aggregates
+    // apply over the full dataset rather than per-graph.
+    const unionSparql = wrapWithGraphUnion(sparql, graphs);
+    return this.execAndNormalize(unionSparql);
   }
 
   private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
@@ -320,6 +317,36 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
 
+/**
+ * Wrap a query so it runs over a union of named graphs in a single execution,
+ * preserving LIMIT/ORDER BY/DISTINCT/aggregate semantics.
+ */
+function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
+  if (sparql.toLowerCase().includes('graph ')) return sparql;
+
+  const whereIdx = sparql.search(/WHERE\s*\{/i);
+  if (whereIdx === -1) return sparql;
+
+  const braceStart = sparql.indexOf('{', whereIdx);
+  let depth = 0;
+  let braceEnd = -1;
+  for (let i = braceStart; i < sparql.length; i++) {
+    if (sparql[i] === '{') depth++;
+    else if (sparql[i] === '}') {
+      depth--;
+      if (depth === 0) { braceEnd = i; break; }
+    }
+  }
+  if (braceEnd === -1) return sparql;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const after = sparql.slice(braceEnd);
+
+  const valuesClause = graphUris.map((g) => `<${g}>`).join(' ');
+  return `${before} VALUES ?_viewGraph { ${valuesClause} } GRAPH ?_viewGraph { ${inner} } ${after}`;
+}
+
 function mergeSharedMemoryAndDataResults(
   dataResult: StoreQueryResult,
   smResult: StoreQueryResult,
@@ -379,7 +406,13 @@ function dedupeQuads(quads: Quad[]): Quad[] {
 /**
  * Merge LTM and VM results for the 'authoritative' view.
  * VM wins on conflict: when the same subject+predicate appears in both
- * result sets, the VM binding is kept and the LTM one is dropped.
+ * result sets, the VM value is kept and the LTM one is dropped.
+ *
+ * Conflict resolution applies at two levels:
+ * 1. Binding rows — when `?s` and `?p` are projected (SELECT queries).
+ * 2. Quads — when the result contains quads (CONSTRUCT/DESCRIBE queries),
+ *    subject+predicate dedup happens directly on the triples so conflict
+ *    resolution works regardless of the projection shape.
  */
 function mergeAuthoritativeResults(
   ltmResult: QueryResult,
@@ -389,6 +422,7 @@ function mergeAuthoritativeResults(
     return ltmResult;
   }
 
+  // --- Binding-level merge (SELECT queries with ?s/?p projection) ---
   const vmSubjectPredicates = new Set<string>();
   for (const row of vmResult.bindings) {
     if (row['s'] && row['p']) {
@@ -405,10 +439,23 @@ function mergeAuthoritativeResults(
 
   const mergedBindings = dedupeBindings([...filteredLtm, ...vmResult.bindings]);
 
-  const mergedQuads = dedupeQuads([
-    ...(ltmResult.quads ?? []),
-    ...(vmResult.quads ?? []),
-  ]);
+  // --- Quad-level merge (CONSTRUCT/DESCRIBE queries) ---
+  const ltmQuads = ltmResult.quads ?? [];
+  const vmQuads = vmResult.quads ?? [];
+  let mergedQuads: Quad[];
+
+  if (vmQuads.length > 0 && ltmQuads.length > 0) {
+    const vmQuadSP = new Set<string>();
+    for (const q of vmQuads) {
+      vmQuadSP.add(`${q.subject}\u0000${q.predicate}`);
+    }
+    const filteredLtmQuads = ltmQuads.filter(
+      (q) => !vmQuadSP.has(`${q.subject}\u0000${q.predicate}`),
+    );
+    mergedQuads = dedupeQuads([...filteredLtmQuads, ...vmQuads]);
+  } else {
+    mergedQuads = dedupeQuads([...ltmQuads, ...vmQuads]);
+  }
 
   return {
     bindings: mergedBindings,

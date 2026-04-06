@@ -135,8 +135,6 @@ const DEFAULT_CONFIG: DkgConfig = {
   apiPort: 9200,
   listenPort: 0,
   nodeRole: 'edge',
-  contextGraphs: [],
-  paranets: [],
 };
 
 /** Resolve context graphs from config, accepting both V10 `contextGraphs` and legacy `paranets` keys. */
