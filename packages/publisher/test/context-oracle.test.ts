@@ -93,6 +93,23 @@ describe('ContextOracle', () => {
       expect(result.verification.merkleRoots[BATCH_ID]).toMatch(/^0x[0-9a-f]{64}$/);
     });
 
+    it('drops store triples that have no entry in the proof index (same entity)', async () => {
+      const selectResult: SelectResult = {
+        type: 'bindings',
+        bindings: [
+          { s: 'did:dkg:agent:Alice', p: 'http://schema.org/name', o: '"Alice"' },
+          { s: 'did:dkg:agent:Alice', p: 'http://schema.org/nickname', o: '"Ali"' },
+        ],
+      };
+      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+
+      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+
+      expect(result.triples).toHaveLength(1);
+      expect(result.triples[0].predicate).toBe('http://schema.org/name');
+      expect(result.verification.batchIds).toEqual([BATCH_ID]);
+    });
+
     it('returns empty triples for unknown entity', async () => {
       const selectResult: SelectResult = { type: 'bindings', bindings: [] };
       (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
@@ -194,6 +211,31 @@ describe('ContextOracle', () => {
       const secondCallSparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
       expect(secondCallSparql).toContain('VALUES ?s { <did:dkg:agent:Alice> }');
     });
+
+    it('omits provenance triples that are in the store but not in the proof index', async () => {
+      const selectResult: SelectResult = {
+        type: 'bindings',
+        bindings: [{ s: 'did:dkg:agent:Zora', name: '"Zora"' }],
+      };
+      const provenanceResult: SelectResult = {
+        type: 'bindings',
+        bindings: [
+          { s: 'did:dkg:agent:Zora', p: 'http://schema.org/name', o: '"Zora"' },
+        ],
+      };
+      (store.query as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(selectResult)
+        .mockResolvedValueOnce(provenanceResult);
+
+      const result = await oracle.queryWithProofs(
+        PARANET, CG_ID,
+        'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
+      );
+
+      expect(result.bindings).toHaveLength(1);
+      expect(result.provenanceTriples).toHaveLength(0);
+      expect(result.verification.batchIds).toHaveLength(0);
+    });
   });
 
   describe('proveTriple', () => {
@@ -244,6 +286,17 @@ describe('ContextOracle', () => {
       expect(result.exists).toBe(true);
       expect(result.triple).toBeDefined();
       expect(result.proof).toBeUndefined();
+    });
+
+    it('rejects unsafe predicate IRI', async () => {
+      await expect(
+        oracle.proveTriple(
+          PARANET, CG_ID,
+          'did:dkg:agent:Alice',
+          'http://evil"> } }',
+          '"Alice"',
+        ),
+      ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('formats ASK query with correct SPARQL terms', async () => {
