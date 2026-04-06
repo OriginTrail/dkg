@@ -11,7 +11,7 @@ const Q2: Quad = { subject: 'http://parity.test/s2', predicate: 'http://parity.t
 
 describe('TripleStore adapter parity (Oxigraph vs mocked Blazegraph)', () => {
   beforeEach(() => {
-    globalThis.fetch = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {

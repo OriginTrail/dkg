@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { ChildProcess, spawn } from 'node:child_process';
 import { JsonRpcProvider } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
@@ -138,8 +138,12 @@ describe('EVMChainAdapter integration', () => {
   it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const adapter = new EVMChainAdapter(makeConfig());
+    const initSpy = vi.spyOn(adapter, 'init');
     const deployer = adapter.getSignerAddress();
     const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
-    expect(typeof owns).toBe('boolean');
+    // init() must be called to resolve KnowledgeAssetsStorage
+    expect(initSpy).toHaveBeenCalled();
+    // Fresh Hardhat node has no published ranges, so result should be false
+    expect(owns).toBe(false);
   }, 30_000);
 });
