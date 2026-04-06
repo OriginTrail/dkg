@@ -4,8 +4,8 @@ import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
-const PARANET = 'test-paranet';
-const GRAPH = `did:dkg:context-graph:${PARANET}`;
+const CONTEXT_GRAPH = 'test-paranet';
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY_A = 'did:dkg:entity:alice';
 const ENTITY_B = 'did:dkg:entity:bob';
 const SCHEMA_NAME = 'https://schema.org/name';
@@ -20,7 +20,7 @@ function makeRequest(overrides: Partial<QueryRequest> = {}): QueryRequest {
   return {
     operationId: 'test-op-1',
     lookupType: 'ENTITY_TRIPLES',
-    paranetId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     ...overrides,
   };
 }
@@ -110,18 +110,18 @@ describe('QueryHandler', () => {
       expect(response.resultCount).toBe(0);
     });
 
-    it('requires paranetId for non-UAL lookups', async () => {
+    it('requires contextGraphId for non-UAL lookups', async () => {
       const response = await handler.handle(
         makeRequest({
           lookupType: 'ENTITY_TRIPLES',
           entityUri: ENTITY_A,
-          paranetId: undefined,
+          contextGraphId: undefined,
         }),
         'peer-1',
       );
 
       expect(response.status).toBe('ERROR');
-      expect(response.error).toContain('paranetId is required');
+      expect(response.error).toContain('contextGraphId is required');
     });
 
     it('rejects mutating SPARQL', async () => {
@@ -172,8 +172,8 @@ describe('QueryHandler', () => {
     beforeEach(() => {
       handler = new QueryHandler(engine, {
         defaultPolicy: 'deny',
-        paranets: {
-          [PARANET]: {
+        contextGraphs: {
+          [CONTEXT_GRAPH]: {
             policy: 'public',
             allowedLookupTypes: ['ENTITY_TRIPLES', 'ENTITIES_BY_TYPE'],
             sparqlEnabled: false,
@@ -194,12 +194,12 @@ describe('QueryHandler', () => {
       expect(response.status).toBe('OK');
     });
 
-    it('denies unconfigured paranets', async () => {
+    it('denies unconfigured contextGraphs', async () => {
       const response = await handler.handle(
         makeRequest({
           lookupType: 'ENTITY_TRIPLES',
           entityUri: ENTITY_A,
-          paranetId: 'other-paranet',
+          contextGraphId: 'other-paranet',
         }),
         'peer-1',
       );
@@ -226,8 +226,8 @@ describe('QueryHandler', () => {
     beforeEach(() => {
       handler = new QueryHandler(engine, {
         defaultPolicy: 'deny',
-        paranets: {
-          [PARANET]: {
+        contextGraphs: {
+          [CONTEXT_GRAPH]: {
             policy: 'allowList',
             allowedPeers: ['peer-trusted'],
             allowedLookupTypes: ['ENTITY_TRIPLES'],
@@ -301,7 +301,7 @@ describe('QueryHandler', () => {
       const request: QueryRequest = {
         operationId: 'wire-test',
         lookupType: 'ENTITY_TRIPLES',
-        paranetId: PARANET,
+        contextGraphId: CONTEXT_GRAPH,
         entityUri: ENTITY_A,
       };
 

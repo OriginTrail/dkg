@@ -236,13 +236,13 @@ else
   fail "Only created $CREATED/5 swarms under burst load"
 fi
 
-# ── Phase 7: Verify workspace graph — swarm triples preserved ──────
+# ── Phase 7: Verify shared memory graph — swarm triples preserved ──────
 echo ""
-echo "Phase 7: Verify workspace graph — swarm triples preserved after CAS"
+echo "Phase 7: Verify shared memory graph — swarm triples preserved after CAS"
 
 SPARQL="SELECT ?p ?o WHERE { <https://origintrail-game.dkg.io/swarm/${SWARM_ID}> ?p ?o }"
 QUERY_RESULT=$(api "$NODE1" POST "/api/query" \
-  -d "{\"sparql\":\"$SPARQL\",\"paranetId\":\"origin-trail-game\",\"includeWorkspace\":true}" || echo '{}')
+  -d "{\"sparql\":\"$SPARQL\",\"contextGraphId\":\"origin-trail-game\",\"includeSharedMemory\":true}" || echo '{}')
 BINDING_COUNT=$(echo "$QUERY_RESULT" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
@@ -251,7 +251,7 @@ print(len(b))
 " 2>/dev/null || echo "0")
 
 if [[ "$BINDING_COUNT" -ge 4 ]]; then
-  ok "Swarm entity has $BINDING_COUNT triples in workspace (snapshot preserved)"
+  ok "Swarm entity has $BINDING_COUNT triples in shared memory (snapshot preserved)"
 else
   echo "  (query returned: $QUERY_RESULT)"
   if [[ "$BINDING_COUNT" -gt 0 ]]; then

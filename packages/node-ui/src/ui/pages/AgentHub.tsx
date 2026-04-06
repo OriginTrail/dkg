@@ -34,7 +34,7 @@ interface Message {
   data?: unknown;
   sparql?: string;
   turnId?: string;
-  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'enshrined' | 'failed' | 'skipped';
+  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'published' | 'failed' | 'skipped';
   persistError?: string;
   persistAttempts?: number;
   persistMaxAttempts?: number;
@@ -90,7 +90,7 @@ function normalizePersistStatus(
     value === 'pending'
     || value === 'in_progress'
     || value === 'stored'
-    || value === 'enshrined'
+    || value === 'published'
     || value === 'failed'
     || value === 'skipped'
   ) {
@@ -152,12 +152,12 @@ function buildTurnGraphDiff(prevTriples: Triple[], nextTriples: Triple[]) {
   };
 }
 
-function markStoredMessagesEnshrined(prevMsgs: Message[]): Message[] {
+function markStoredMessagesPublished(prevMsgs: Message[]): Message[] {
   let changed = false;
   const next = prevMsgs.map((m) => {
     if (m.role !== 'assistant' || m.persistStatus !== 'stored') return m;
     changed = true;
-    return { ...m, persistStatus: 'enshrined' as const };
+    return { ...m, persistStatus: 'published' as const };
   });
   return changed ? next : prevMsgs;
 }
@@ -224,7 +224,7 @@ function clusterKindForNode(nodeId: string, nodeType?: string): string {
   if (nodeId.includes(':tool:')) return 'ToolInvocation';
   if (nodeId.includes(':turn:')) return 'ChatTurn';
   if (nodeId.startsWith('urn:dkg:entity:')) return 'Entity';
-  if (nodeId.startsWith('did:dkg:')) return 'Paranet';
+  if (nodeId.startsWith('did:dkg:')) return 'Context Graph';
   if (nodeId.startsWith('http://schema.org/')) return 'SchemaNode';
   if (nodeId.startsWith('urn:')) return 'URN';
   if (nodeId.startsWith('http://') || nodeId.startsWith('https://')) return 'IRI';
@@ -1171,28 +1171,28 @@ function OpenClawChatView() {
                   className="mono"
                   style={{
                     borderRadius: 999,
-                    border: publicationScope === 'enshrined'
+                    border: publicationScope === 'published'
                       ? '1px solid rgba(74,222,128,.3)'
-                      : publicationScope === 'enshrined_with_pending'
+                      : publicationScope === 'published_with_pending'
                         ? '1px solid rgba(245,158,11,.35)'
                       : '1px solid var(--border)',
-                    background: publicationScope === 'enshrined'
+                    background: publicationScope === 'published'
                       ? 'rgba(74,222,128,.1)'
-                      : publicationScope === 'enshrined_with_pending'
+                      : publicationScope === 'published_with_pending'
                         ? 'rgba(245,158,11,.12)'
                       : 'var(--surface)',
-                    color: publicationScope === 'enshrined'
+                    color: publicationScope === 'published'
                       ? 'var(--green)'
-                      : publicationScope === 'enshrined_with_pending'
+                      : publicationScope === 'published_with_pending'
                         ? '#f59e0b'
                       : 'var(--text-dim)',
                     padding: '2px 8px',
                     fontSize: 10,
                   }}
                 >
-                  {publicationScope === 'enshrined' ? 'enshrined'
-                    : publicationScope === 'enshrined_with_pending' ? 'enshrined + pending'
-                    : publicationScope === 'workspace_only' ? 'workspace only'
+                  {publicationScope === 'published' ? 'published'
+                    : publicationScope === 'published_with_pending' ? 'published + pending'
+                    : publicationScope === 'shared_memory_only' ? 'shared memory only'
                     : publicationScope ? 'empty' : 'checking...'}
                 </span>
               </div>
@@ -1237,7 +1237,7 @@ function OpenClawChatView() {
               </div>
             )}
             <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
-              Publish session enshrines the OpenClaw conversation currently in view on the DKG privately. New writes remain in workspace until you publish again.
+              Publishing anchors the OpenClaw conversation currently in view on the DKG privately. New writes remain in shared memory until you publish again.
             </div>
           </div>
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
@@ -1521,8 +1521,8 @@ export function AgentHubPage() {
       const publication = await fetchMemorySessionPublication(sid);
       setSessionPublicationById((prev) => ({ ...prev, [sid]: publication }));
       const activeSid = activeSessionIdRef.current ?? sessionIdRef.current;
-      if (activeSid === sid && publication.scope === 'enshrined') {
-        setMessages((prevMsgs) => markStoredMessagesEnshrined(prevMsgs));
+      if (activeSid === sid && publication.scope === 'published') {
+        setMessages((prevMsgs) => markStoredMessagesPublished(prevMsgs));
       }
     } catch {
       /* preserve last known publication state */
@@ -1542,8 +1542,8 @@ export function AgentHubPage() {
         const nextTotalMs = nextLlmMs + nextStoreMs;
         return {
           ...m,
-          persistStatus: ((m.persistStatus === 'enshrined' && event.status === 'stored')
-            ? 'enshrined' as const
+          persistStatus: ((m.persistStatus === 'published' && event.status === 'stored')
+            ? 'published' as const
             : event.status),
           persistError: event.error,
           persistAttempts: event.attempts,
@@ -1959,8 +1959,8 @@ export function AgentHubPage() {
         const turnId = m.turnId?.trim() || undefined;
         const cachedMatch = turnId ? cachedByTurnId.get(turnId) : undefined;
         let persistStatus = normalizePersistStatus(m.persistStatus);
-        if (cachedMatch?.persistStatus === 'enshrined') {
-          persistStatus = 'enshrined';
+        if (cachedMatch?.persistStatus === 'published') {
+          persistStatus = 'published';
         }
         if (!persistStatus && role === 'assistant' && turnId) {
           persistStatus = 'stored';
@@ -1978,8 +1978,8 @@ export function AgentHubPage() {
       });
       const knownPublication = sessionPublicationById[sid];
       setMessages(
-        knownPublication?.scope === 'enshrined'
-          ? markStoredMessagesEnshrined(restored)
+        knownPublication?.scope === 'published'
+          ? markStoredMessagesPublished(restored)
           : restored,
       );
       setSessionId(sid);
@@ -2186,9 +2186,9 @@ export function AgentHubPage() {
 
   const scopeBadgeLabel = useMemo(() => {
     if (!sessionPublication) return activeGraphSessionId ? 'checking...' : 'no session';
-    if (sessionPublication.scope === 'enshrined') return 'enshrined';
-    if (sessionPublication.scope === 'enshrined_with_pending') return 'enshrined + pending';
-    if (sessionPublication.scope === 'workspace_only') return 'workspace only';
+    if (sessionPublication.scope === 'published') return 'published';
+    if (sessionPublication.scope === 'published_with_pending') return 'published + pending';
+    if (sessionPublication.scope === 'shared_memory_only') return 'shared memory only';
     return 'empty';
   }, [activeGraphSessionId, sessionPublication]);
   const isPublishingActiveGraphSession = (
@@ -2236,8 +2236,8 @@ export function AgentHubPage() {
       ]);
       setSessionPublicationById((prev) => ({ ...prev, [sid]: result.publication }));
       const activeSid = activeSessionIdRef.current ?? sessionIdRef.current;
-      if (activeSid === sid && result.publication.scope === 'enshrined') {
-        setMessages((prevMsgs) => markStoredMessagesEnshrined(prevMsgs));
+      if (activeSid === sid && result.publication.scope === 'published') {
+        setMessages((prevMsgs) => markStoredMessagesPublished(prevMsgs));
       }
       setPublishNotice({
         sessionId: sid,
@@ -2277,25 +2277,25 @@ export function AgentHubPage() {
             className="mono"
             style={{
               borderRadius: 999,
-              border: sessionPublication?.scope === 'enshrined'
+              border: sessionPublication?.scope === 'published'
                 ? '1px solid rgba(74,222,128,.3)'
-                : sessionPublication?.scope === 'enshrined_with_pending'
+                : sessionPublication?.scope === 'published_with_pending'
                   ? '1px solid rgba(245,158,11,.35)'
                 : '1px solid var(--border)',
-              background: sessionPublication?.scope === 'enshrined'
+              background: sessionPublication?.scope === 'published'
                 ? 'rgba(74,222,128,.1)'
-                : sessionPublication?.scope === 'enshrined_with_pending'
+                : sessionPublication?.scope === 'published_with_pending'
                   ? 'rgba(245,158,11,.12)'
                 : 'var(--surface)',
-              color: sessionPublication?.scope === 'enshrined'
+              color: sessionPublication?.scope === 'published'
                 ? 'var(--green)'
-                : sessionPublication?.scope === 'enshrined_with_pending'
+                : sessionPublication?.scope === 'published_with_pending'
                   ? '#f59e0b'
                 : 'var(--text-dim)',
               padding: '2px 8px',
               fontSize: 10,
             }}
-            title={`workspace triples: ${sessionPublication?.workspaceTripleCount ?? 0}, data triples: ${sessionPublication?.dataTripleCount ?? 0}`}
+            title={`shared memory triples: ${sessionPublication?.sharedMemoryTripleCount ?? 0}, data triples: ${sessionPublication?.dataTripleCount ?? 0}`}
           >
             {scopeBadgeLabel}
           </span>
@@ -2421,7 +2421,7 @@ export function AgentHubPage() {
           </div>
         )}
         <div className="mono" style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.5 }}>
-          Publish session enshrines the agent conversation currently in view on the DKG privately. New writes remain in workspace until you publish again.
+          Publishing anchors the agent conversation currently in view on the DKG privately. New writes remain in shared memory until you publish again.
         </div>
       </div>
 
@@ -2998,7 +2998,7 @@ export function AgentHubPage() {
                   const linkedNodes = messageNodeIndex.get(m.id) ?? [];
                   const showPersistAttemptCounter = (
                     m.persistStatus !== 'stored'
-                    && m.persistStatus !== 'enshrined'
+                    && m.persistStatus !== 'published'
                     && m.persistStatus !== 'skipped'
                     && m.persistAttempts != null
                     && m.persistMaxAttempts != null
@@ -3035,7 +3035,7 @@ export function AgentHubPage() {
                             <span
                               className="mono"
                               title={
-                                m.persistStatus === 'enshrined' ? 'Published to the paranet and anchored on-chain' :
+                                m.persistStatus === 'published' ? 'Published to the context graph and anchored on-chain' :
                                 m.persistStatus === 'stored' ? 'Saved to your local knowledge graph' :
                                 m.persistStatus === 'failed' ? 'Failed to persist this memory' :
                                 m.persistStatus === 'skipped' ? 'Memory persistence was skipped for this message' :
@@ -3046,17 +3046,17 @@ export function AgentHubPage() {
                                 fontSize: 10,
                                 cursor: 'help',
                                 color:
-                                  m.persistStatus === 'enshrined' ? '#22d3ee' :
+                                  m.persistStatus === 'published' ? '#22d3ee' :
                                   m.persistStatus === 'stored' ? 'var(--green)' :
                                   m.persistStatus === 'failed' ? 'var(--red)' :
                                   m.persistStatus === 'skipped' ? 'var(--text-dim)' : '#f59e0b',
                                 background:
-                                  m.persistStatus === 'enshrined' ? 'rgba(34,211,238,.1)' :
+                                  m.persistStatus === 'published' ? 'rgba(34,211,238,.1)' :
                                   m.persistStatus === 'stored' ? 'rgba(74,222,128,.1)' :
                                   m.persistStatus === 'failed' ? 'rgba(248,113,113,.08)' :
                                   m.persistStatus === 'skipped' ? 'var(--surface)' : 'rgba(245,158,11,.1)',
                                 border:
-                                  m.persistStatus === 'enshrined' ? '1px solid rgba(34,211,238,.3)' :
+                                  m.persistStatus === 'published' ? '1px solid rgba(34,211,238,.3)' :
                                   m.persistStatus === 'stored' ? '1px solid rgba(74,222,128,.3)' :
                                   m.persistStatus === 'failed' ? '1px solid rgba(248,113,113,.3)' :
                                   m.persistStatus === 'skipped' ? '1px solid var(--border)' : '1px solid rgba(245,158,11,.35)',

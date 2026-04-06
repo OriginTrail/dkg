@@ -268,7 +268,7 @@ function makeManager(store: OxigraphStore): ChatMemoryManager {
         return executeOnGraph(store, sparql, DATA_GRAPH);
       },
       writeToWorkspace: async () => ({ workspaceOperationId: 'noop' }),
-      enshrineFromWorkspace: async () => ({}),
+      publishFromSharedMemory: async () => ({}),
       createParanet: async () => undefined,
       listParanets: async () => [{ id: MEMORY_PARANET, name: 'Agent Memory' }],
     },

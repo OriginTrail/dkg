@@ -16,9 +16,12 @@ export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
 // ── V10 GossipSub Topics ───────────────────────────────────────────────
 
-export function contextGraphWorkspaceTopic(contextGraphId: string): string {
-  return `dkg/context-graph/${contextGraphId}/workspace`;
+export function contextGraphSharedMemoryTopic(contextGraphId: string): string {
+  return `dkg/context-graph/${contextGraphId}/shared-memory`;
 }
+
+/** @deprecated Use contextGraphSharedMemoryTopic */
+export const contextGraphWorkspaceTopic = contextGraphSharedMemoryTopic;
 
 export function contextGraphFinalizationTopic(contextGraphId: string): string {
   return `dkg/context-graph/${contextGraphId}/finalization`;
@@ -136,9 +139,9 @@ export function paranetAppTopic(paranetId: string): string {
   return contextGraphAppTopic(paranetId);
 }
 
-/** @deprecated Use contextGraphWorkspaceTopic */
+/** @deprecated Use contextGraphSharedMemoryTopic */
 export function paranetWorkspaceTopic(paranetId: string): string {
-  return contextGraphWorkspaceTopic(paranetId);
+  return contextGraphSharedMemoryTopic(paranetId);
 }
 
 /** @deprecated Use contextGraphUpdateTopic */

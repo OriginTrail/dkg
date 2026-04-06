@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { NS, RDF_TYPE, XSD, Class, Prop, Status, DEFAULT_PARANET } from './ontology.js';
+import { NS, RDF_TYPE, XSD, Class, Prop, Status, DEFAULT_CONTEXT_GRAPH } from './ontology.js';
 import type { DkgClientLike, ExperimentRecord } from './types.js';
 
 type Bindings = Array<Record<string, string>>;
@@ -60,23 +60,23 @@ function toTable(bindings: Bindings, columns?: string[]): string {
 export function registerTools(
   server: McpServer,
   getClient: () => Promise<DkgClientLike>,
-  paranetId: string = DEFAULT_PARANET,
+  contextGraphId: string = DEFAULT_CONTEXT_GRAPH,
 ) {
   async function sparql(query: string): Promise<Bindings> {
     const client = await getClient();
-    const result = await client.query(query, paranetId);
+    const result = await client.query(query, contextGraphId);
     return parseBindings(result.result);
   }
 
   // -----------------------------------------------------------------------
-  // autoresearch_setup — One-time paranet + subscription setup
+  // autoresearch_setup — One-time context graph + subscription setup
   // -----------------------------------------------------------------------
   server.registerTool(
     'autoresearch_setup',
     {
-      title: 'Autoresearch: Setup Paranet',
+      title: 'Autoresearch: Setup Context Graph',
       description:
-        'Create (or join) the autoresearch paranet on this DKG node. ' +
+        'Create (or join) the autoresearch context graph on this DKG node. ' +
         'Run once before publishing experiments. Idempotent.',
       inputSchema: {},
     },
@@ -84,8 +84,8 @@ export function registerTools(
       try {
         const client = await getClient();
         try {
-          await client.createParanet(
-            paranetId,
+          await client.createContextGraph(
+            contextGraphId,
             'Autoresearch',
             'Collaborative autonomous ML research — experiment results shared as Knowledge Assets',
           );
@@ -93,8 +93,8 @@ export function registerTools(
           const msg = e instanceof Error ? e.message : String(e);
           if (!(/already exists/i.test(msg) || /duplicate/i.test(msg))) throw e;
         }
-        await client.subscribe(paranetId);
-        return ok(`Paranet "${paranetId}" ready. This node is subscribed.`);
+        await client.subscribe(contextGraphId);
+        return ok(`Context Graph "${contextGraphId}" ready. This node is subscribed.`);
       } catch (e) { return err(`Setup failed: ${fmtError(e)}`); }
     },
   );
@@ -108,7 +108,7 @@ export function registerTools(
       title: 'Autoresearch: Publish Experiment',
       description:
         'Publish the results of a single autoresearch training run to the DKG. ' +
-        'The experiment becomes a Knowledge Asset queryable by all agents on the paranet.',
+        'The experiment becomes a Knowledge Asset queryable by all agents on the context graph.',
       inputSchema: {
         val_bpb: z.number().describe('Validation bits-per-byte (lower is better)'),
         peak_vram_mb: z.number().describe('Peak VRAM in MB (0 for crashes)'),
@@ -136,7 +136,7 @@ export function registerTools(
         const client = await getClient();
         const ts = new Date().toISOString();
         const id = `urn:autoresearch:exp:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const graph = `did:dkg:context-graph:${paranetId}`;
+        const graph = `did:dkg:context-graph:${contextGraphId}`;
 
         const statusUri = params.status === 'keep' ? Status.Keep
           : params.status === 'discard' ? Status.Discard
@@ -164,7 +164,7 @@ export function registerTools(
         if (params.run_tag) quads.push({ subject: id, predicate: Prop.runTag, object: `"${esc(params.run_tag)}"`, graph });
         if (params.parent_experiment) quads.push({ subject: id, predicate: Prop.parentExperiment, object: params.parent_experiment, graph });
 
-        const result = await client.publish(paranetId, quads);
+        const result = await client.publish(contextGraphId, quads);
         return ok(
           `Published experiment as Knowledge Asset.\n` +
           `  URI: ${id}\n` +
@@ -185,7 +185,7 @@ export function registerTools(
       title: 'Autoresearch: Best Results',
       description:
         'Query the DKG for the best (lowest val_bpb) experiments across all agents ' +
-        'on the autoresearch paranet. Use this before starting a new experiment to ' +
+        'on the autoresearch context graph. Use this before starting a new experiment to ' +
         'learn from the collective findings.',
       inputSchema: {
         limit: z.number().int().min(1).optional().default(20).describe('Max results to return (default 20)'),
@@ -222,7 +222,7 @@ export function registerTools(
           LIMIT ${limit ?? 20}`;
 
         const rows = await sparql(q);
-        if (rows.length === 0) return ok('No experiments found on the autoresearch paranet yet.');
+        if (rows.length === 0) return ok('No experiments found on the autoresearch context graph yet.');
 
         const summary = rows.map((r, i) => {
           const parts = [
@@ -335,14 +335,14 @@ export function registerTools(
   );
 
   // -----------------------------------------------------------------------
-  // autoresearch_query — Raw SPARQL fallback for the autoresearch paranet
+  // autoresearch_query — Raw SPARQL fallback for the autoresearch context graph
   // -----------------------------------------------------------------------
   server.registerTool(
     'autoresearch_query',
     {
       title: 'Autoresearch: SPARQL Query',
       description:
-        'Execute a raw SPARQL query against the autoresearch paranet. ' +
+        'Execute a raw SPARQL query against the autoresearch context graph. ' +
         'Use when the other autoresearch tools cannot express your query. ' +
         `Namespace: autoresearch = <${NS}>. ` +
         'Types: Experiment, AgentRun. ' +

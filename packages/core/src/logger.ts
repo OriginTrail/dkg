@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connect' | 'sync' | 'system' | 'workspace' | 'enshrine' | 'gossip' | 'ka-update' | 'reconstruct' | 'init';
+export type OperationName = 'publish' | 'update' | 'query' | 'resolve' | 'connect' | 'sync' | 'system' | 'share' | 'publishFromSWM' | 'gossip' | 'ka-update' | 'reconstruct' | 'init' | 'verify';
 
 export interface OperationContext {
   operationId: string;

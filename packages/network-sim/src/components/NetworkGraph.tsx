@@ -200,7 +200,7 @@ function drawPulse(
 function drawLegend(ctx: CanvasRenderingContext2D, w: number, h: number) {
   const entries: [string, string][] = [
     ['Publish', OP_COLORS.publish],
-    ['Workspace', OP_COLORS.workspace],
+    ['Shared Memory', OP_COLORS.workspace],
     ['Query', OP_COLORS.query],
     ['Chat', OP_COLORS.chat],
     ['Access', OP_COLORS.access],

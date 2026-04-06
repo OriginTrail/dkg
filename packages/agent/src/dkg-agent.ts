@@ -1,22 +1,25 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
+  contextGraphSharedMemoryUri,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry,
-  type DKGNodeConfig, type OperationContext,
+  type DKGNodeConfig, type OperationContext, type GetView,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateContextGraphResult } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
-  DKGPublisher, PublishHandler, WorkspaceHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
+  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  computeTripleHash, computeFlatKCRoot, autoPartition,
+  ACKCollector, StorageACKHandler,
+  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
+  type CollectedACK,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -28,7 +31,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -50,8 +53,8 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
-const DEFAULT_WORKSPACE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const WORKSPACE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
+const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
 /** Health status of a peer from the last ping round. */
 export interface PeerHealth {
@@ -62,16 +65,19 @@ export interface PeerHealth {
   lastChecked: number;
 }
 
-/** Tracks the subscription and sync state of a paranet. */
-export interface ParanetSub {
+/** Tracks the subscription and sync state of a context graph. */
+export interface ContextGraphSub {
   name?: string;
-  /** GossipSub topics are active for this paranet. */
+  /** GossipSub topics are active for this context graph. */
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
-  /** On-chain paranet ID (keccak256 hash), if known. */
+  /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
 }
+
+/** @deprecated Use ContextGraphSub */
+export type ParanetSub = ContextGraphSub;
 
 export interface DKGAgentConfig {
   name: string;
@@ -99,6 +105,8 @@ export interface DKGAgentConfig {
   nodeRole?: 'core' | 'edge';
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
+  /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
+  ackSignerKey?: string;
   /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
    * `operationalKeys` are the private keys for operational wallets.
@@ -113,10 +121,10 @@ export interface DKGAgentConfig {
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
-  /** Additional paranet IDs to sync on peer connect (beyond system paranets). */
-  syncParanets?: string[];
-  /** TTL for workspace data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
-  workspaceTtlMs?: number;
+  /** Additional context graph IDs to sync on peer connect (beyond system context graphs). */
+  syncContextGraphs?: string[];
+  /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
+  sharedMemoryTtlMs?: number;
 }
 
 /**
@@ -142,24 +150,25 @@ export class DKGAgent {
   router!: ProtocolRouter;
   readonly eventBus: TypedEventBus;
   private readonly chain: ChainAdapter;
-  /** Shared workspace-owned root entities per paranet: entity → creatorPeerId. Used by publisher and workspace handler. */
+  /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   private readonly writeLocks: Map<string, Promise<void>>;
-  private workspaceHandler?: WorkspaceHandler;
+  private sharedMemoryHandler?: SharedMemoryHandler;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
 
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
-  private workspaceCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private readonly config: DKGAgentConfig;
   private started = false;
-  private readonly subscribedParanets = new Map<string, ParanetSub>();
+  private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   private readonly gossipRegistered = new Set<string>();
   private readonly seenOnChainIds = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
+  private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
 
   private constructor(
@@ -262,7 +271,7 @@ export class DKGAgent {
       eventBus,
       keypair,
       publisherPrivateKey: opKeys?.[0],
-      workspaceOwnedEntities,
+      sharedMemoryOwnedEntities: workspaceOwnedEntities,
       writeLocks,
     });
 
@@ -270,11 +279,11 @@ export class DKGAgent {
       const restored = await publisher.reconstructWorkspaceOwnership();
       if (restored > 0) {
         const log = new Logger('DKGAgent');
-        log.info(createOperationContext('init'), `Restored ${restored} workspace ownership entries from store`);
+        log.info(createOperationContext('init'), `Restored ${restored} shared memory ownership entries from store`);
       }
     } catch (err) {
       const log = new Logger('DKGAgent');
-      log.warn(createOperationContext('init'), `Failed to reconstruct workspace ownership, continuing without: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn(createOperationContext('init'), `Failed to reconstruct shared memory ownership, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const queryEngine = new DKGQueryEngine(store);
@@ -338,7 +347,6 @@ export class DKGAgent {
         }
       } catch (err) {
         this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
-        // Profile may have been created before the error — re-check
         try {
           identityId = await this.chain.getIdentityId();
           if (identityId > 0n) {
@@ -354,24 +362,61 @@ export class DKGAgent {
       }
     }
 
+    // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
+    // Priority: explicit ackSignerKey > adapter.signACKDigest > adapter.getACKSignerKey (deprecated).
+    // chainConfig.operationalKeys is NOT consulted — when a prebuilt chainAdapter is
+    // supplied, chainConfig is conceptually ignored per the config contract.
+    const effectiveRole = this.config.nodeRole ?? 'edge';
+    // Only core nodes register the StorageACK handler — edge nodes cannot
+    // sign ACKs (the handler would reject immediately) and advertising the
+    // protocol confuses peer-role detection based on protocol support.
+    if (effectiveRole === 'core') {
+      const ackSignerKeyStr = this.config.ackSignerKey
+        ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
+      if (ackSignerKeyStr) {
+        try {
+          const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
+          const identityId = await this.chain.getIdentityId();
+          if (identityId > 0n) {
+            const ackHandler = new StorageACKHandler(this.store, {
+              nodeRole: effectiveRole,
+              nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
+              signerWallet: ackSignerWallet,
+              contextGraphSharedMemoryUri,
+            }, this.eventBus);
+            this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+            this.log.info(ctx, `Registered V10 StorageACK handler (identity=${identityId})`);
+          } else {
+            this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+          }
+        } catch (err) {
+          this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else if (typeof this.chain.signACKDigest === 'function') {
+        this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
+      }
+    } else {
+      this.log.info(ctx, `Node role is '${effectiveRole}' — skipping StorageACK handler registration (core-only)`);
+    }
+
     // Start chain event poller for trustless confirmation of tentative publishes
-    // and discovery of on-chain paranets. Only with a real chain adapter.
+    // and discovery of on-chain context graphs. Only with a real chain adapter.
     if (this.chain.chainId !== 'none') {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
-        onParanetCreated: async ({ paranetId, creator, accessPolicy, blockNumber }) => {
-          this.log.info(ctx, `Discovered on-chain paranet ${paranetId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
+        onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, blockNumber }) => {
+          this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy})`);
 
-          // Track the hash for dedup but don't pollute subscribedParanets.
+          // Track the hash for dedup but don't pollute subscribedContextGraphs.
           // Gossip topics are keyed by cleartext name, not the on-chain hash.
-          // The paranet will be fully subscribed once ontology sync or
-          // discoverParanetsFromChain resolves the cleartext name.
-          const alreadyKnown = this.seenOnChainIds.has(paranetId)
-            || [...this.subscribedParanets.values()].some(s => s.onChainId === paranetId);
+          // The context graph will be fully subscribed once ontology sync or
+          // discoverContextGraphsFromChain resolves the cleartext name.
+          const alreadyKnown = this.seenOnChainIds.has(contextGraphId)
+            || [...this.subscribedContextGraphs.values()].some(s => s.onChainId === contextGraphId);
           if (!alreadyKnown) {
-            this.seenOnChainIds.add(paranetId);
-            this.log.info(ctx, `Noted on-chain paranet ${paranetId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
+            this.seenOnChainIds.add(contextGraphId);
+            this.log.info(ctx, `Noted on-chain context graph ${contextGraphId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
           }
         },
       });
@@ -404,24 +449,24 @@ export class DKGAgent {
     }
 
     // Register sync handler: responds with a page of data + meta triples.
-    // Request format: "paranetId|offset|limit"  (offset/limit default to 0/500)
-    //   or: "workspace:paranetId|offset|limit" for workspace graph sync
+    // Request format: "contextGraphId|offset|limit"  (offset/limit default to 0/500)
+    //   or: "workspace:contextGraphId|offset|limit" for shared memory graph sync
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
     this.router.register(PROTOCOL_SYNC, async (data) => {
       const text = new TextDecoder().decode(data).trim();
-      const [paranetPart, offsetStr, limitStr] = text.split('|');
+      const [ctxGraphPart, offsetStr, limitStr] = text.split('|');
       const offset = parseInt(offsetStr, 10) || 0;
       const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
 
-      const isWorkspace = paranetPart.startsWith('workspace:');
-      const paranetId = isWorkspace ? paranetPart.slice('workspace:'.length) : (paranetPart || SYSTEM_PARANETS.AGENTS);
+      const isWorkspace = ctxGraphPart.startsWith('workspace:');
+      const contextGraphId = isWorkspace ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
       const nquads: string[] = [];
 
       if (isWorkspace) {
-        const wsGraph = paranetWorkspaceGraphUri(paranetId);
-        const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
-        const wsTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+        const wsGraph = paranetWorkspaceGraphUri(contextGraphId);
+        const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
+        const wsTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
 
         // Apply TTL/root-entity filter inside SPARQL before pagination so that
         // we return the first N non-expired triples. Only include exact root subject
@@ -476,8 +521,8 @@ export class DKGAgent {
 
         if (nquads.length === 0) return new TextEncoder().encode('');
       } else {
-        const dataGraph = paranetDataGraphUri(paranetId);
-        const metaGraph = paranetMetaGraphUri(paranetId);
+        const dataGraph = paranetDataGraphUri(contextGraphId);
+        const metaGraph = paranetMetaGraphUri(contextGraphId);
 
         const dataResult = await this.store.query(
           `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
@@ -506,9 +551,9 @@ export class DKGAgent {
       return new TextEncoder().encode(nquads.join('\n'));
     });
 
-    // Subscribe to both system paranet GossipSub topics
-    for (const systemParanet of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
-      this.subscribeToParanet(systemParanet);
+    // Subscribe to both system context graph GossipSub topics
+    for (const systemContextGraph of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
+      this.subscribeToContextGraph(systemContextGraph);
     }
 
     // Connect to bootstrap peers
@@ -522,7 +567,7 @@ export class DKGAgent {
       }
     }
 
-    // On new peer connection, request sync of system paranets so we discover
+    // On new peer connection, request sync of system context graphs so we discover
     // agents that published their profiles before we came online.
     // Wait for protocol identification to complete, then only sync with
     // peers that actually support the sync protocol (skips raw relay nodes).
@@ -552,19 +597,19 @@ export class DKGAgent {
       }, 3000);
     }
 
-    // Start periodic workspace cleanup
-    const ttl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+    // Start periodic shared memory cleanup
+    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     if (ttl > 0) {
-      this.cleanupExpiredWorkspace().catch(() => {});
-      this.workspaceCleanupTimer = setInterval(() => {
-        this.cleanupExpiredWorkspace().catch(() => {});
-      }, WORKSPACE_CLEANUP_INTERVAL_MS);
-      if (this.workspaceCleanupTimer.unref) this.workspaceCleanupTimer.unref();
+      this.cleanupExpiredSharedMemory().catch(() => {});
+      this.swmCleanupTimer = setInterval(() => {
+        this.cleanupExpiredSharedMemory().catch(() => {});
+      }, SWM_CLEANUP_INTERVAL_MS);
+      if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
     }
   }
 
   /**
-   * Pull all triples for the given paranets from a remote peer and merge
+   * Pull all triples for the given context graphs from a remote peer and merge
    * them into our local store. Used on peer:connect for initial catch-up,
    * with a per-peer guard to avoid overlapping sync storms.
    */
@@ -580,6 +625,16 @@ export class DKGAgent {
       const pid = peerIdFromString(remotePeer);
       const peer = await this.node.libp2p.peerStore.get(pid);
       const protocols = peer.protocols ?? [];
+
+      // Track which peers are core nodes by checking StorageACK protocol
+      // support. Only core nodes register this protocol, so its presence
+      // is a reliable role indicator. Used by getConnectedCorePeers().
+      if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
+        this.knownCorePeerIds.add(remotePeer);
+      } else {
+        this.knownCorePeerIds.delete(remotePeer);
+      }
+
       const hasSync = protocols.includes(PROTOCOL_SYNC);
       if (!hasSync) {
         this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
@@ -590,13 +645,13 @@ export class DKGAgent {
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
-      // After syncing ONTOLOGY, discover and auto-subscribe to any new paranets
-      await this.discoverParanetsFromStore();
+      // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
+      await this.discoverContextGraphsFromStore();
 
-      const wsParanets = this.config.syncParanets ?? [];
-      if (wsParanets.length > 0) {
-        const wsSynced = await this.syncWorkspaceFromPeer(remotePeer, wsParanets);
-        this.log.info(ctx, `Synced ${wsSynced} workspace triples from peer ${shortPeer}`);
+      const wsContextGraphIds = this.config.syncContextGraphs ?? [];
+      if (wsContextGraphIds.length > 0) {
+        const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
+        this.log.info(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
       }
     } finally {
       this.syncingPeers.delete(remotePeer);
@@ -604,13 +659,13 @@ export class DKGAgent {
   }
 
   /**
-   * Pull triples for the given paranets from a remote peer in pages,
+   * Pull triples for the given context graphs from a remote peer in pages,
    * verify merkle roots against the KC metadata, and only insert
    * triples that pass verification.
    */
   async syncFromPeer(
     remotePeerId: string,
-    paranetIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncParanets ?? [])],
+    contextGraphIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
   ): Promise<number> {
     const ctx = createOperationContext('sync');
@@ -618,13 +673,13 @@ export class DKGAgent {
     let totalSynced = 0;
 
     try {
-      for (const pid of paranetIds) {
+      for (const pid of contextGraphIds) {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
 
         const allQuads: Quad[] = [];
         let offset = 0;
-        this.log.info(ctx, `Syncing paranet "${pid}" from ${remotePeerId}`);
+        this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
         onPhase?.('fetch', 'start');
         // eslint-disable-next-line no-constant-condition
@@ -674,8 +729,8 @@ export class DKGAgent {
         const dataQuads = allQuads.filter(q => q.graph === dataGraph);
         const metaQuads = allQuads.filter(q => q.graph === metaGraph);
 
-        const isSystemParanet = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
-        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemParanet);
+        const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemContextGraph);
         onPhase?.('verify', 'end');
 
         onPhase?.('store', 'start');
@@ -703,31 +758,31 @@ export class DKGAgent {
   }
 
   /**
-   * Pull workspace graph triples for the given paranets from a remote peer.
-   * Workspace data is not merkle-verified (no chain finality) — it is
-   * accepted as-is and merged into the local workspace + workspace_meta graphs.
+   * Pull shared memory triples for the given context graphs from a remote peer.
+   * SWM data is not merkle-verified (no chain finality) — it is
+   * accepted as-is and merged into the local shared memory + SWM meta graphs.
    * The workspaceOwnedEntities set is updated so Rule 4 stays consistent.
    */
-  async syncWorkspaceFromPeer(
+  async syncSharedMemoryFromPeer(
     remotePeerId: string,
-    paranetIds: string[] = [...(this.config.syncParanets ?? [])],
+    contextGraphIds: string[] = [...(this.config.syncContextGraphs ?? [])],
   ): Promise<number> {
     const ctx = createOperationContext('sync');
     const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
     let totalSynced = 0;
 
     try {
-      for (const pid of paranetIds) {
+      for (const pid of contextGraphIds) {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
 
         const allQuads: Quad[] = [];
         let offset = 0;
-        this.log.info(ctx, `Syncing workspace for paranet "${pid}" from ${remotePeerId}`);
+        this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
         while (true) {
           if (Date.now() > deadline) {
-            this.log.warn(ctx, `Workspace sync timeout (${allQuads.length} triples received so far)`);
+            this.log.warn(ctx, `Shared memory sync timeout (${allQuads.length} triples received so far)`);
             break;
           }
 
@@ -745,7 +800,7 @@ export class DKGAgent {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
               onRetry: (attempt, delay, err) => {
-                this.log.warn(ctx, `Workspace sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} offset=${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+                this.log.warn(ctx, `SWM sync page retry ${attempt}/${SYNC_PAGE_RETRY_ATTEMPTS} offset=${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
               },
             },
           );
@@ -759,7 +814,7 @@ export class DKGAgent {
 
           const wsCount = quads.filter(q => q.graph === wsGraph).length;
           offset += wsCount;
-          this.log.info(ctx, `  workspace page: ${quads.length} triples (${allQuads.length} total)`);
+          this.log.info(ctx, `  shared memory page: ${quads.length} triples (${allQuads.length} total)`);
           if (wsCount < SYNC_PAGE_SIZE) break;
         }
 
@@ -768,7 +823,7 @@ export class DKGAgent {
         const wsQuads = allQuads.filter(q => q.graph === wsGraph);
         const wsMetaQuads = allQuads.filter(q => q.graph === wsMetaGraph);
 
-        // Only accept roots from meta subjects that are valid workspace operations (type + publishedAt).
+        // Only accept roots from meta subjects that are valid shared memory operations (type + publishedAt).
         // Rejects fake rootEntity from malicious peers that would poison workspaceOwnedEntities.
         const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
         const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -791,7 +846,7 @@ export class DKGAgent {
           }
         }
 
-        // Validate workspace quads: subject must be an allowed root or skolemized child (root + /.well-known/genid/).
+        // Validate shared memory quads: subject must be an allowed root or skolemized child (root + /.well-known/genid/).
         const SKOLEM_PREFIX = '/.well-known/genid/';
         const isValidSubject = (s: string): boolean => {
           if (allowedRoots.has(s)) return true;
@@ -803,7 +858,7 @@ export class DKGAgent {
         const validWsQuads = wsQuads.filter(q => isValidSubject(q.subject));
         const dropped = wsQuads.length - validWsQuads.length;
         if (dropped > 0) {
-          this.log.warn(ctx, `Workspace sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
+          this.log.warn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
         }
 
         const graphManager = new GraphManager(this.store);
@@ -847,36 +902,36 @@ export class DKGAgent {
           }
         }
 
-        this.log.info(ctx, `Workspace sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
+        this.log.info(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
       }
       if (totalSynced > 0) {
-        this.log.info(ctx, `Workspace sync complete: ${totalSynced} triples from ${remotePeerId}`);
+        this.log.info(ctx, `SWM sync complete: ${totalSynced} triples from ${remotePeerId}`);
       }
     } catch (err) {
-      this.log.warn(ctx, `Workspace sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(ctx, `SWM sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return totalSynced;
   }
 
   /**
-   * Catch up a single paranet from currently connected peers that advertise
+   * Catch up a single context graph from currently connected peers that advertise
    * the sync protocol. Useful after runtime subscribe so historical data is
    * backfilled immediately (not only future gossip messages).
    */
-  async syncParanetFromConnectedPeers(
-    paranetId: string,
-    options?: { includeWorkspace?: boolean },
+  async syncContextGraphFromConnectedPeers(
+    contextGraphId: string,
+    options?: { includeSharedMemory?: boolean },
   ): Promise<{
     connectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
     dataSynced: number;
-    workspaceSynced: number;
+    sharedMemorySynced: number;
   }> {
     const ctx = createOperationContext('sync');
-    const includeWorkspace = options?.includeWorkspace ?? false;
+    const includeSharedMemory = options?.includeSharedMemory ?? false;
 
-    this.trackSyncParanet(paranetId);
+    this.trackSyncContextGraph(contextGraphId);
 
     const peers = [...new Map(
       this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
@@ -884,7 +939,7 @@ export class DKGAgent {
     let syncCapablePeers = 0;
     let peersTried = 0;
     let dataSynced = 0;
-    let workspaceSynced = 0;
+    let sharedMemorySynced = 0;
 
     for (const pid of peers) {
       let hasSync = false;
@@ -899,15 +954,15 @@ export class DKGAgent {
       syncCapablePeers++;
       peersTried++;
       const remotePeerId = pid.toString();
-      dataSynced += await this.syncFromPeer(remotePeerId, [paranetId]);
-      if (includeWorkspace) {
-        workspaceSynced += await this.syncWorkspaceFromPeer(remotePeerId, [paranetId]);
+      dataSynced += await this.syncFromPeer(remotePeerId, [contextGraphId]);
+      if (includeSharedMemory) {
+        sharedMemorySynced += await this.syncSharedMemoryFromPeer(remotePeerId, [contextGraphId]);
       }
     }
 
     this.log.info(
       ctx,
-      `Catch-up sync for "${paranetId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} workspace=${workspaceSynced}`,
+      `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
     );
 
     return {
@@ -915,52 +970,52 @@ export class DKGAgent {
       syncCapablePeers,
       peersTried,
       dataSynced,
-      workspaceSynced,
+      sharedMemorySynced,
     };
   }
 
   /**
-   * Update the workspace TTL at runtime. Takes effect immediately for queries
+   * Update the shared memory TTL at runtime. Takes effect immediately for queries
    * and the next cleanup cycle without requiring a restart.
    */
-  setWorkspaceTtlMs(ttlMs: number): void {
-    const oldTtl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
-    (this.config as any).workspaceTtlMs = ttlMs;
+  setSharedMemoryTtlMs(ttlMs: number): void {
+    const oldTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
+    (this.config as any).sharedMemoryTtlMs = ttlMs;
 
-    if (oldTtl <= 0 && ttlMs > 0 && !this.workspaceCleanupTimer) {
-      this.cleanupExpiredWorkspace().catch(() => {});
-      this.workspaceCleanupTimer = setInterval(() => {
-        this.cleanupExpiredWorkspace().catch(() => {});
-      }, WORKSPACE_CLEANUP_INTERVAL_MS);
-      if (this.workspaceCleanupTimer.unref) this.workspaceCleanupTimer.unref();
-    } else if (ttlMs <= 0 && this.workspaceCleanupTimer) {
-      clearInterval(this.workspaceCleanupTimer);
-      this.workspaceCleanupTimer = null;
+    if (oldTtl <= 0 && ttlMs > 0 && !this.swmCleanupTimer) {
+      this.cleanupExpiredSharedMemory().catch(() => {});
+      this.swmCleanupTimer = setInterval(() => {
+        this.cleanupExpiredSharedMemory().catch(() => {});
+      }, SWM_CLEANUP_INTERVAL_MS);
+      if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
+    } else if (ttlMs <= 0 && this.swmCleanupTimer) {
+      clearInterval(this.swmCleanupTimer);
+      this.swmCleanupTimer = null;
     }
   }
 
   /**
-   * Remove expired workspace operations and their data.
-   * Queries workspace_meta for operations with publishedAt older than the TTL,
-   * deletes the corresponding triples from workspace and workspace_meta,
+   * Remove expired shared memory operations and their data.
+   * Queries SWM meta for operations with publishedAt older than the TTL,
+   * deletes the corresponding triples from shared memory and SWM meta,
    * and removes the root entities from workspaceOwnedEntities.
    */
-  async cleanupExpiredWorkspace(): Promise<number> {
-    const ttl = this.config.workspaceTtlMs ?? DEFAULT_WORKSPACE_TTL_MS;
+  async cleanupExpiredSharedMemory(): Promise<number> {
+    const ttl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
     if (ttl <= 0) return 0;
 
-    const ctx = createOperationContext('workspace');
+    const ctx = createOperationContext('share');
     const cutoff = new Date(Date.now() - ttl).toISOString();
     let totalDeleted = 0;
 
     try {
       const graphManager = new GraphManager(this.store);
-      const paranets = await graphManager.listParanets();
+      const contextGraphs = await graphManager.listParanets();
 
-      for (const pid of paranets) {
+      for (const pid of contextGraphs) {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
-        let paranetDeleted = 0;
+        let graphDeleted = 0;
 
         const expiredOps = await this.store.query(
           `SELECT ?op WHERE {
@@ -996,21 +1051,21 @@ export class DKGAgent {
           for (const re of rootEntities) {
             // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
             const exactDeleted = await this.store.deleteByPattern({ graph: wsGraph, subject: re });
-            paranetDeleted += exactDeleted;
+            graphDeleted += exactDeleted;
             const childPrefix = `${re}/.well-known/genid/`;
             const childDeleted = await this.store.deleteBySubjectPrefix(wsGraph, childPrefix);
-            paranetDeleted += childDeleted;
+            graphDeleted += childDeleted;
           }
 
           // Exact subject delete for this operation's metadata (prefix would match opUri that are prefixes of others, e.g. ...:ws-123 vs ...:ws-1234)
           const metaDeleted = await this.store.deleteByPattern({ graph: wsMetaGraph, subject: opUri });
-          paranetDeleted += metaDeleted;
+          graphDeleted += metaDeleted;
 
           for (const re of rootEntities) {
             const ownerDeleted = await this.store.deleteByPattern({
               graph: wsMetaGraph, subject: re, predicate: 'http://dkg.io/ontology/workspaceOwner',
             });
-            paranetDeleted += ownerDeleted;
+            graphDeleted += ownerDeleted;
           }
 
           const ownedSet = this.workspaceOwnedEntities.get(pid);
@@ -1021,13 +1076,13 @@ export class DKGAgent {
           }
         }
 
-        totalDeleted += paranetDeleted;
+        totalDeleted += graphDeleted;
         if (expiredOps.bindings.length > 0) {
-          this.log.info(ctx, `Workspace cleanup for "${pid}": evicted ${expiredOps.bindings.length} expired operation(s), ${paranetDeleted} triples`);
+          this.log.info(ctx, `SWM cleanup for "${pid}": evicted ${expiredOps.bindings.length} expired operation(s), ${graphDeleted} triples`);
         }
       }
     } catch (err) {
-      this.log.warn(ctx, `Workspace cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(ctx, `SWM cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return totalDeleted;
@@ -1056,7 +1111,7 @@ export class DKGAgent {
     const profileCtx = createOperationContext('publish');
     this.log.info(profileCtx, `Publishing agent profile`);
     const result = await this.profileManager.publishProfile(profileConfig);
-    await this.broadcastPublish(AGENT_REGISTRY_PARANET, result, profileCtx);
+    await this.broadcastPublish(AGENT_REGISTRY_CONTEXT_GRAPH, result, profileCtx);
 
     return result;
   }
@@ -1138,11 +1193,11 @@ export class DKGAgent {
   }
 
   // Overload: raw quads
-  async publish(paranetId: string, quads: Quad[], privateQuads?: Quad[], opts?: PublishOpts): Promise<PublishResult>;
+  async publish(contextGraphId: string, quads: Quad[], privateQuads?: Quad[], opts?: PublishOpts): Promise<PublishResult>;
   // Overload: JSON-LD (bare doc = private, or { public?, private? } envelope)
-  async publish(paranetId: string, content: JsonLdContent, opts?: PublishOpts): Promise<PublishResult>;
+  async publish(contextGraphId: string, content: JsonLdContent, opts?: PublishOpts): Promise<PublishResult>;
   async publish(
-    paranetId: string,
+    contextGraphId: string,
     input: Quad[] | JsonLdContent,
     thirdArg?: Quad[] | PublishOpts,
     fourthArg?: PublishOpts,
@@ -1150,11 +1205,11 @@ export class DKGAgent {
     // JSON-LD: convert to quads, then publish
     if (!Array.isArray(input)) {
       const { publicQuads, privateQuads } = await jsonLdToQuads(input);
-      return this._publish(paranetId, publicQuads, privateQuads, thirdArg as PublishOpts);
+      return this._publish(contextGraphId, publicQuads, privateQuads, thirdArg as PublishOpts);
     }
     // Quad[]: pass through directly
     return this._publish(
-      paranetId,
+      contextGraphId,
       input as Quad[],
       Array.isArray(thirdArg) ? thirdArg : undefined,
       Array.isArray(thirdArg) ? fourthArg : (thirdArg as PublishOpts),
@@ -1162,26 +1217,28 @@ export class DKGAgent {
   }
 
   private async _publish(
-    paranetId: string,
+    contextGraphId: string,
     quads: Quad[],
     privateQuads?: Quad[],
     opts?: PublishOpts,
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
-    this.log.info(ctx, `Starting publish to paranet "${paranetId}" with ${quads.length} triples`);
+    this.log.info(ctx, `Starting publish to context graph "${contextGraphId}" with ${quads.length} triples`);
 
-    const isSystem = paranetId === SYSTEM_PARANETS.AGENTS || paranetId === SYSTEM_PARANETS.ONTOLOGY;
+    const isSystem = contextGraphId === SYSTEM_PARANETS.AGENTS || contextGraphId === SYSTEM_PARANETS.ONTOLOGY;
     if (!isSystem) {
-      const exists = await this.paranetExists(paranetId);
+      const exists = await this.contextGraphExists(contextGraphId);
       if (!exists) {
         throw new Error(
-          `Paranet "${paranetId}" does not exist. Create it first with createParanet().`,
+          `Context graph "${contextGraphId}" does not exist. Create it first with createContextGraph().`,
         );
       }
     }
+    const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+
     const result = await this.publisher.publish({
-      paranetId,
+      contextGraphId,
       quads,
       privateQuads,
       publisherPeerId: this.peerId,
@@ -1189,24 +1246,26 @@ export class DKGAgent {
       allowedPeers: opts?.allowedPeers,
       operationCtx: ctx,
       onPhase,
+      v10ACKProvider,
     });
+
     onPhase?.('broadcast', 'start');
     this.log.info(ctx, `Local publish complete, broadcasting to peers`);
-    await this.broadcastPublish(paranetId, result, ctx);
+    await this.broadcastPublish(contextGraphId, result, ctx);
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kcId=${result.kcId}`);
     return result;
   }
 
   async update(
-    kcId: bigint, paranetId: string, quads: Quad[], privateQuads?: Quad[],
+    kcId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
     opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
-    this.log.info(ctx, `Starting update of kcId=${kcId} in paranet "${paranetId}" with ${quads.length} triples`);
+    this.log.info(ctx, `Starting update of kcId=${kcId} in context graph "${contextGraphId}" with ${quads.length} triples`);
     const result = await this.publisher.update(kcId, {
-      paranetId,
+      contextGraphId,
       quads,
       privateQuads,
       publisherPeerId: this.node.peerId.toString(),
@@ -1218,13 +1277,13 @@ export class DKGAgent {
     onPhase?.('broadcast', 'start');
     if (result.onChainResult && result.publicQuads) {
       try {
-        const dataGraph = `did:dkg:context-graph:${paranetId}`;
+        const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
         const nquadsStr = result.publicQuads
           .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`)
           .join('\n');
         const nquadsBytes = new TextEncoder().encode(nquadsStr);
         const message = encodeKAUpdateRequest({
-          paranetId,
+          paranetId: contextGraphId,
           batchId: kcId,
           nquads: nquadsBytes,
           manifest: result.kaManifest.map((m) => ({
@@ -1240,7 +1299,7 @@ export class DKGAgent {
           timestampMs: Date.now(),
           operationId: ctx.operationId,
         });
-        const topic = paranetUpdateTopic(paranetId);
+        const topic = paranetUpdateTopic(contextGraphId);
         await this.gossip.publish(topic, message);
         this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
       } catch (err) {
@@ -1253,82 +1312,89 @@ export class DKGAgent {
   }
 
   /**
-   * Write quads to the paranet's workspace graph (no chain, no TRAC).
-   * When localOnly is false (default), replicates via GossipSub workspace topic.
+   * Write quads to the context graph's shared memory (no chain, no TRAC).
+   * When localOnly is false (default), replicates via GossipSub shared memory topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async writeToWorkspace(paranetId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ workspaceOperationId: string }> {
-    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
-    this.log.info(ctx, `Writing ${quads.length} quads to workspace for paranet ${paranetId}${opts?.localOnly ? ' (local-only)' : ''}`);
-    const { workspaceOperationId, message } = await this.publisher.writeToWorkspace(paranetId, quads, {
+  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ shareOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('share');
+    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(paranetId);
+      const topic = paranetWorkspaceTopic(contextGraphId);
       try {
         await this.gossip.publish(topic, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
     }
-    return { workspaceOperationId };
+    return { shareOperationId };
   }
 
   /**
-   * Compare-and-swap workspace write. Verifies each condition against the
-   * current workspace graph before applying the write atomically.
+   * Compare-and-swap shared memory write. Verifies each condition against the
+   * current shared memory graph before applying the write atomically.
    * Throws StaleWriteError if any condition fails.
    */
-  async writeConditionalToWorkspace(
-    paranetId: string,
+  async conditionalShare(
+    contextGraphId: string,
     quads: Quad[],
     conditions: CASCondition[],
     opts?: { localOnly?: boolean; operationCtx?: OperationContext },
-  ): Promise<{ workspaceOperationId: string }> {
-    const ctx = opts?.operationCtx ?? createOperationContext('workspace');
-    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${paranetId}`);
-    const { workspaceOperationId, message } = await this.publisher.writeConditionalToWorkspace(paranetId, quads, {
+  ): Promise<{ shareOperationId: string }> {
+    const ctx = opts?.operationCtx ?? createOperationContext('share');
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}`);
+    const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(paranetId);
+      const topic = paranetWorkspaceTopic(contextGraphId);
       try {
         await this.gossip.publish(topic, message);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
     }
-    return { workspaceOperationId };
+    return { shareOperationId };
   }
 
   /**
-   * Enshrine workspace content: read from workspace graph and publish with full finality (data graph + chain).
+   * Publish shared memory content: read from SWM graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
-   * workspace state can promote it to canonical without re-downloading the full payload.
+   * SWM state can promote it to canonical without re-downloading the full payload.
    */
-  async enshrineFromWorkspace(
-    paranetId: string,
+  async publishFromSharedMemory(
+    contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
-      clearWorkspaceAfter?: boolean;
+      clearSharedMemoryAfter?: boolean;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;
+      /** @deprecated Use subContextGraphId */
       contextGraphId?: string | bigint;
+      subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
   ): Promise<PublishResult> {
-    const ctx = options?.operationCtx ?? createOperationContext('enshrine');
-    const ctxGraphIdStr = options?.contextGraphId != null ? String(options.contextGraphId) : undefined;
+    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+    const effectiveSubCG = options?.subContextGraphId ?? options?.contextGraphId;
+    const ctxGraphIdStr = effectiveSubCG != null ? String(effectiveSubCG) : undefined;
 
-    const result = await this.publisher.enshrineFromWorkspace(paranetId, selection, {
+    // Data is already in peers' SWM (via prior share() + gossip),
+    // so V10 ACK collection can proceed without swmReplicator.
+    const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+    const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
-      clearWorkspaceAfter: options?.clearWorkspaceAfter,
+      clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
       onPhase: options?.onPhase,
-      contextGraphId: ctxGraphIdStr,
+      publishContextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
+      v10ACKProvider,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1336,7 +1402,7 @@ export class DKGAgent {
 
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
-        paranetId,
+        paranetId: contextGraphId,
         kcMerkleRoot: result.merkleRoot,
         txHash: result.onChainResult.txHash ?? '',
         blockNumber: result.onChainResult.blockNumber ?? 0,
@@ -1350,7 +1416,7 @@ export class DKGAgent {
         contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
       };
 
-      const topic = paranetFinalizationTopic(paranetId);
+      const topic = paranetFinalizationTopic(contextGraphId);
       try {
         await this.gossip.publish(topic, encodeFinalizationMessage(msg));
         this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
@@ -1362,17 +1428,23 @@ export class DKGAgent {
     return result;
   }
 
+  /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
+  async enshrineFromWorkspace(
+    ...args: Parameters<DKGAgent['publishFromSharedMemory']>
+  ): ReturnType<DKGAgent['publishFromSharedMemory']> {
+    return this.publishFromSharedMemory(...args);
+  }
+
   /**
-   * Create a new context graph on-chain.
-   * A context graph is a bounded, M/N signature-gated subgraph within a paranet.
+   * Register a new M/N signature-gated context graph on-chain.
    */
-  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+  async registerContextGraphOnChain(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     const ctx = createOperationContext('system');
-    if (typeof this.chain.createContextGraph !== 'function') {
-      throw new Error('createContextGraph not available on chain adapter');
+    if (typeof this.chain.createOnChainContextGraph !== 'function') {
+      throw new Error('createOnChainContextGraph not available on chain adapter');
     }
-    const result = await this.chain.createContextGraph(params);
-    this.log.info(ctx, `Created context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
+    const result = await this.chain.createOnChainContextGraph(params);
+    this.log.info(ctx, `Created on-chain context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
     return result;
   }
 
@@ -1387,8 +1459,8 @@ export class DKGAgent {
     participantSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   }): Promise<{ success: boolean }> {
     const ctx = createOperationContext('system');
-    if (typeof this.chain.addBatchToContextGraph !== 'function') {
-      throw new Error('addBatchToContextGraph not available on chain adapter');
+    if (typeof this.chain.verify !== 'function') {
+      throw new Error('verify not available on chain adapter');
     }
 
     let merkleRoot = params.merkleRoot;
@@ -1403,7 +1475,7 @@ export class DKGAgent {
       merkleRoot = batch.merkleRoot;
     }
 
-    const result = await this.chain.addBatchToContextGraph({
+    const result = await this.chain.verify({
       contextGraphId: BigInt(params.contextGraphId),
       batchId: params.batchId,
       merkleRoot: merkleRoot!,
@@ -1442,15 +1514,35 @@ export class DKGAgent {
 
   async query(
     sparql: string,
-    options?: string | { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean; operationCtx?: OperationContext },
+    options?: string | {
+      contextGraphId?: string;
+      /** @deprecated Use contextGraphId */
+      paranetId?: string;
+      graphSuffix?: '_shared_memory';
+      includeSharedMemory?: boolean;
+      /** @deprecated Use includeSharedMemory */
+      includeWorkspace?: boolean;
+      operationCtx?: OperationContext;
+      view?: GetView;
+      verifiedGraph?: string;
+    },
   ) {
-    const opts = typeof options === 'string' ? { paranetId: options } : options ?? {};
+    const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
+    const opts = {
+      ...rawOpts,
+      contextGraphId: rawOpts.contextGraphId ?? rawOpts.paranetId,
+      includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
+    };
     const ctx = opts.operationCtx ?? createOperationContext('query');
-    this.log.info(ctx, `Query on paranet="${opts.paranetId ?? 'all'}" sparql="${sparql.slice(0, 80)}"`);
+    const viewLabel = opts.view ? ` view=${opts.view}` : '';
+    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
-      paranetId: opts.paranetId,
+      paranetId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
-      includeWorkspace: opts.includeWorkspace,
+      includeSharedMemory: opts.includeSharedMemory,
+      view: opts.view,
+      agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
+      verifiedGraph: opts.verifiedGraph,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -1485,33 +1577,33 @@ export class DKGAgent {
   }
 
   /**
-   * Find entities of a given RDF type on a remote peer's paranet.
+   * Find entities of a given RDF type on a remote peer's context graph.
    */
   async findEntitiesByType(
     peerId: string,
-    paranetId: string,
+    contextGraphId: string,
     rdfType: string,
     limit?: number,
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'ENTITIES_BY_TYPE',
-      paranetId,
+      paranetId: contextGraphId,
       rdfType,
       limit,
     });
   }
 
   /**
-   * Get all triples for a specific entity from a remote peer's paranet.
+   * Get all triples for a specific entity from a remote peer's context graph.
    */
   async getEntityTriples(
     peerId: string,
-    paranetId: string,
+    contextGraphId: string,
     entityUri: string,
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'ENTITY_TRIPLES',
-      paranetId,
+      paranetId: contextGraphId,
       entityUri,
     });
   }
@@ -1521,83 +1613,83 @@ export class DKGAgent {
    */
   async queryRemoteSparql(
     peerId: string,
-    paranetId: string,
+    contextGraphId: string,
     sparql: string,
     limit?: number,
     timeout?: number,
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'SPARQL_QUERY',
-      paranetId,
+      paranetId: contextGraphId,
       sparql,
       limit,
       timeout,
     });
   }
 
-  subscribeToParanet(paranetId: string, options?: { trackSyncScope?: boolean }): void {
+  subscribeToContextGraph(contextGraphId: string, options?: { trackSyncScope?: boolean }): void {
     if (options?.trackSyncScope !== false) {
-      this.trackSyncParanet(paranetId);
+      this.trackSyncContextGraph(contextGraphId);
     }
 
-    // Idempotent: skip if gossip handlers already installed for this paranet
-    if (this.gossipRegistered.has(paranetId)) {
-      const existing = this.subscribedParanets.get(paranetId);
+    // Idempotent: skip if gossip handlers already installed for this context graph
+    if (this.gossipRegistered.has(contextGraphId)) {
+      const existing = this.subscribedContextGraphs.get(contextGraphId);
       if (!existing?.subscribed) {
-        this.subscribedParanets.set(paranetId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+        this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
       return;
     }
-    this.gossipRegistered.add(paranetId);
+    this.gossipRegistered.add(contextGraphId);
 
-    const publishTopic = paranetPublishTopic(paranetId);
-    const workspaceTopic = paranetWorkspaceTopic(paranetId);
-    const appTopic = paranetAppTopic(paranetId);
+    const publishTopic = paranetPublishTopic(contextGraphId);
+    const swmTopic = paranetWorkspaceTopic(contextGraphId);
+    const appTopic = paranetAppTopic(contextGraphId);
 
     this.gossip.subscribe(publishTopic);
-    this.gossip.subscribe(workspaceTopic);
+    this.gossip.subscribe(swmTopic);
     this.gossip.subscribe(appTopic);
 
-    const existing = this.subscribedParanets.get(paranetId);
-    this.subscribedParanets.set(paranetId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
     this.gossip.onMessage(publishTopic, async (_topic, data) => {
       const gph = this.getOrCreateGossipPublishHandler();
-      await gph.handlePublishMessage(data, paranetId);
+      await gph.handlePublishMessage(data, contextGraphId);
     });
 
-    this.gossip.onMessage(workspaceTopic, async (_topic, data, from) => {
-      const wh = this.getOrCreateWorkspaceHandler();
+    this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
+      const wh = this.getOrCreateSharedMemoryHandler();
       await wh.handle(data, from);
     });
 
-    const updateTopic = paranetUpdateTopic(paranetId);
+    const updateTopic = paranetUpdateTopic(contextGraphId);
     this.gossip.subscribe(updateTopic);
     this.gossip.onMessage(updateTopic, async (_topic, data, from) => {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
 
-    const finalizationTopic = paranetFinalizationTopic(paranetId);
+    const finalizationTopic = paranetFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
     this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(data, paranetId);
+      await fh.handleFinalizationMessage(data, contextGraphId);
     });
   }
 
   /**
-   * Add a paranet to runtime sync scope so sync-on-connect includes it.
-   * System paranets are already included by default and are skipped here.
+   * Add a context graph to runtime sync scope so sync-on-connect includes it.
+   * System context graphs are already included by default and are skipped here.
    */
-  private trackSyncParanet(paranetId: string): void {
-    const systemParanets = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
-    if (systemParanets.has(paranetId)) return;
+  private trackSyncContextGraph(contextGraphId: string): void {
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
+    if (systemContextGraphs.has(contextGraphId)) return;
 
-    const syncSet = new Set<string>(this.config.syncParanets ?? []);
-    if (syncSet.has(paranetId)) return;
-    syncSet.add(paranetId);
-    this.config.syncParanets = [...syncSet];
+    const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
+    if (syncSet.has(contextGraphId)) return;
+    syncSet.add(contextGraphId);
+    this.config.syncContextGraphs = [...syncSet];
   }
 
   private getOrCreateGossipPublishHandler(): GossipPublishHandler {
@@ -1605,24 +1697,24 @@ export class DKGAgent {
       this.gossipPublishHandler = new GossipPublishHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
-        this.subscribedParanets,
+        this.subscribedContextGraphs,
         {
-          paranetExists: (id) => this.paranetExists(id),
-          subscribeToParanet: (id, options) => this.subscribeToParanet(id, options),
+          contextGraphExists: (id) => this.contextGraphExists(id),
+          subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
         },
       );
     }
     return this.gossipPublishHandler;
   }
 
-  private getOrCreateWorkspaceHandler(): WorkspaceHandler {
-    if (!this.workspaceHandler) {
-      this.workspaceHandler = new WorkspaceHandler(this.store, this.eventBus, {
-        workspaceOwnedEntities: this.workspaceOwnedEntities,
+  private getOrCreateSharedMemoryHandler(): SharedMemoryHandler {
+    if (!this.sharedMemoryHandler) {
+      this.sharedMemoryHandler = new SharedMemoryHandler(this.store, this.eventBus, {
+        sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
       });
     }
-    return this.workspaceHandler;
+    return this.sharedMemoryHandler;
   }
 
   private updateHandler?: UpdateHandler;
@@ -1630,7 +1722,7 @@ export class DKGAgent {
   private getOrCreateUpdateHandler(): UpdateHandler {
     if (!this.updateHandler) {
       this.updateHandler = new UpdateHandler(this.store, this.chain, this.eventBus, {
-        knownBatchParanets: this.publisher.knownBatchParanets,
+        knownBatchContextGraphs: this.publisher.knownBatchContextGraphs,
       });
     }
     return this.updateHandler;
@@ -1647,18 +1739,18 @@ export class DKGAgent {
   }
 
   /**
-   * Create a paranet by registering it on-chain (if a chain adapter is
+   * Create a context graph by registering it on-chain (if a chain adapter is
    * available) and publishing its definition triples into the system
-   * ontology paranet.
+   * ontology context graph.
    *
    * On-chain registration is privacy-preserving by default: only
    * keccak256(bytes(name)) is stored. Set revealOnChain to also publish
    * cleartext name and description to the contract.
    *
-   * If the paranet already exists on-chain (another node registered it
+   * If the context graph already exists on-chain (another node registered it
    * first), the local definition is created without a chain call.
    */
-  async createParanet(opts: {
+  async createContextGraph(opts: {
     id: string;
     name: string;
     description?: string;
@@ -1674,33 +1766,33 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
 
-    const exists = await this.paranetExists(opts.id);
+    const exists = await this.contextGraphExists(opts.id);
     if (exists) {
-      throw new Error(`Paranet "${opts.id}" already exists`);
+      throw new Error(`Context graph "${opts.id}" already exists`);
     }
 
     // Register on chain if a real chain adapter is configured.
-    // Private paranets skip on-chain registration and gossip entirely.
+    // Private context graphs skip on-chain registration and gossip entirely.
     let onChainId: string | undefined;
     if (opts.private) {
-      this.log.info(ctx, `Creating private paranet "${opts.id}" (local-only, no chain, no gossip)`);
+      this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no chain, no gossip)`);
     } else if (this.chain.chainId !== 'none') {
       try {
-        const result = await this.chain.createParanet({
+        const result = await this.chain.createContextGraph({
           name: opts.id,
           description: opts.description,
           accessPolicy: opts.accessPolicy ?? 0,
           revealOnChain: opts.revealOnChain,
         });
-        onChainId = result.paranetId;
-        this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
+        onChainId = result.contextGraphId;
+        this.log.info(ctx, `Context graph "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
         const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
-          this.log.info(ctx, `Paranet "${opts.id}" already registered on-chain — creating local definition`);
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+          this.log.info(ctx, `Context graph "${opts.id}" already registered on-chain — creating local definition`);
         } else {
-          this.log.warn(ctx, `On-chain paranet registration failed: ${msg} — creating locally without chain finality`);
+          this.log.warn(ctx, `On-chain context graph registration failed: ${msg} — creating locally without chain finality`);
         }
       }
     }
@@ -1733,7 +1825,7 @@ export class DKGAgent {
     }
 
     // Provenance activity
-    const activityUri = `did:dkg:activity:create-paranet:${opts.id}:${Date.now()}`;
+    const activityUri = `did:dkg:activity:create-context-graph:${opts.id}:${Date.now()}`;
     quads.push(
       { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: ontologyGraph },
       { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: ontologyGraph },
@@ -1744,10 +1836,10 @@ export class DKGAgent {
     // Insert the definition triples
     await this.store.insert(quads);
 
-    // Create the actual named graphs for the paranet
+    // Create the actual named graphs for the context graph
     await gm.ensureParanet(opts.id);
 
-    this.subscribedParanets.set(opts.id, {
+    this.subscribedContextGraphs.set(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
@@ -1755,10 +1847,10 @@ export class DKGAgent {
     });
 
     if (!opts.private) {
-      // Auto-subscribe to the new paranet's GossipSub topic
-      this.subscribeToParanet(opts.id);
+      // Auto-subscribe to the new context graph's GossipSub topic
+      this.subscribeToContextGraph(opts.id);
 
-      // Broadcast via the ontology paranet so other nodes learn about it
+      // Broadcast via the ontology context graph so other nodes learn about it
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const nquads = quads.map(q => {
         const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
@@ -1788,14 +1880,14 @@ export class DKGAgent {
   }
 
   /**
-   * Idempotent "ensure" variant of createParanet for boot-time defaults.
-   * If the paranet already exists locally, just ensures GossipSub subscription
+   * Idempotent "ensure" variant of createContextGraph for boot-time defaults.
+   * If the context graph already exists locally, just ensures GossipSub subscription
    * and registry entry. If not, inserts definition triples and optionally
    * registers on-chain (or gracefully handles "already exists" on-chain).
-   * Unlike createParanet(), this never throws for duplicates and avoids
-   * re-claiming creator if the paranet is already on-chain.
+   * Unlike createContextGraph(), this never throws for duplicates and avoids
+   * re-claiming creator if the context graph is already on-chain.
    */
-  async ensureParanetLocal(opts: {
+  async ensureContextGraphLocal(opts: {
     id: string;
     name: string;
     description?: string;
@@ -1803,15 +1895,15 @@ export class DKGAgent {
   }): Promise<void> {
     const ctx = createOperationContext('system');
 
-    const exists = await this.paranetExists(opts.id);
+    const exists = await this.contextGraphExists(opts.id);
     if (exists) {
       // Already synced locally — just make sure we're subscribed
-      this.subscribeToParanet(opts.id);
-      this.subscribedParanets.set(opts.id, {
+      this.subscribeToContextGraph(opts.id);
+      this.subscribedContextGraphs.set(opts.id, {
         name: opts.name,
         subscribed: true,
         synced: true,
-        onChainId: this.subscribedParanets.get(opts.id)?.onChainId,
+        onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
       });
       return;
     }
@@ -1821,21 +1913,21 @@ export class DKGAgent {
     let alreadyOnChain = false;
     if (this.chain.chainId !== 'none') {
       try {
-        const result = await this.chain.createParanet({
+        const result = await this.chain.createContextGraph({
           name: opts.id,
           description: opts.description,
           accessPolicy: 0,
           revealOnChain: opts.revealOnChain,
         });
-        onChainId = result.paranetId;
-        this.log.info(ctx, `Paranet "${opts.id}" registered on-chain: ${onChainId}`);
+        onChainId = result.contextGraphId;
+        this.log.info(ctx, `Context graph "${opts.id}" registered on-chain: ${onChainId}`);
       } catch (err) {
         const errorName = enrichEvmError(err);
         const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ParanetAlreadyExists' || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
           alreadyOnChain = true;
           onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
-          this.log.info(ctx, `Paranet "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
+          this.log.info(ctx, `Context graph "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
         } else {
           this.log.warn(ctx, `On-chain registration for "${opts.id}" failed: ${msg}`);
         }
@@ -1843,7 +1935,7 @@ export class DKGAgent {
     }
 
     // Insert local definition triples. Use "network" as creator when the
-    // paranet already existed on-chain (avoid every node claiming creator).
+    // context graph already existed on-chain (avoid every node claiming creator).
     const gm = new GraphManager(this.store);
     const paranetUri = paranetDataGraphUri(opts.id);
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
@@ -1880,15 +1972,15 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
-    this.subscribeToParanet(opts.id);
-    this.subscribedParanets.set(opts.id, {
+    this.subscribeToContextGraph(opts.id);
+    this.subscribedContextGraphs.set(opts.id, {
       name: opts.name,
       subscribed: true,
       synced: true,
       onChainId,
     });
 
-    this.log.info(ctx, `Ensured paranet "${opts.id}" locally (creator=${alreadyOnChain ? 'network' : 'self'})`);
+    this.log.info(ctx, `Ensured context graph "${opts.id}" locally (creator=${alreadyOnChain ? 'network' : 'self'})`);
 
     // Broadcast so peers learn about it
     const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
@@ -1919,26 +2011,26 @@ export class DKGAgent {
   }
 
   /**
-   * Check whether a paranet is registered (definition triples exist in the
+   * Check whether a context graph is registered (definition triples exist in the
    * ontology graph). Always store-backed to avoid false positives from
    * in-memory state that may not have been persisted yet.
    */
-  async paranetExists(paranetId: string): Promise<boolean> {
-    const paranetUri = paranetDataGraphUri(paranetId);
+  async contextGraphExists(contextGraphId: string): Promise<boolean> {
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?p WHERE {
-        GRAPH ?g { <${paranetUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
+        GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
       } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings.length > 0;
   }
 
   /**
-   * List all known paranets by merging the subscription registry with
+   * List all known context graphs by merging the subscription registry with
    * SPARQL-discovered definition triples. Returns enriched entries with
    * `subscribed` and `synced` flags.
    */
-  async listParanets(): Promise<Array<{
+  async listContextGraphs(): Promise<Array<{
     id: string;
     uri: string;
     name: string;
@@ -1952,24 +2044,24 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
     const result = await this.store.query(`
-      SELECT ?paranet ?name ?desc ?creator ?created ?isSystem WHERE {
+      SELECT ?ctxGraph ?name ?desc ?creator ?created ?isSystem WHERE {
         {
           GRAPH <${ontologyGraph}> {
-            ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
           }
         } UNION {
           GRAPH <${agentsGraph}> {
-            ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
-            OPTIONAL { ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
           }
         }
       }
@@ -1984,10 +2076,10 @@ export class DKGAgent {
 
     if (result.type === 'bindings') {
       for (const row of result.bindings as Record<string, string>[]) {
-        const uri = row['paranet'] ?? '';
+        const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) continue;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
-        const sub = this.subscribedParanets.get(id);
+        const sub = this.subscribedContextGraphs.get(id);
         seen.set(uri, {
           id,
           uri,
@@ -2003,7 +2095,7 @@ export class DKGAgent {
     }
 
     // Add registry entries that don't have triples yet (subscribed but not synced)
-    for (const [id, sub] of this.subscribedParanets) {
+    for (const [id, sub] of this.subscribedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
@@ -2056,9 +2148,9 @@ export class DKGAgent {
     return this.node.multiaddrs;
   }
 
-  /** Returns a snapshot of the paranet subscription registry. */
-  getSubscribedParanets(): ReadonlyMap<string, ParanetSub> {
-    return this.subscribedParanets;
+  /** Returns a snapshot of the context graph subscription registry. */
+  getSubscribedContextGraphs(): ReadonlyMap<string, ContextGraphSub> {
+    return this.subscribedContextGraphs;
   }
 
   /** Returns the latest health snapshot for all known peers. */
@@ -2119,21 +2211,21 @@ export class DKGAgent {
   }
 
   /**
-   * Scan the local ONTOLOGY graph for paranet definitions and auto-subscribe
+   * Scan the local ONTOLOGY graph for context graph definitions and auto-subscribe
    * to any that aren't yet in the subscription registry. Called after
-   * syncFromPeer to catch paranets discovered via ONTOLOGY sync.
+   * syncFromPeer to catch context graphs discovered via ONTOLOGY sync.
    */
-  async discoverParanetsFromStore(): Promise<number> {
+  async discoverContextGraphsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
     const result = await this.store.query(`
-      SELECT ?paranet ?name WHERE {
+      SELECT ?ctxGraph ?name WHERE {
         GRAPH <${ontologyGraph}> {
-          ?paranet <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
-          OPTIONAL { ?paranet <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
         }
       }
     `);
@@ -2141,17 +2233,17 @@ export class DKGAgent {
     if (result.type !== 'bindings') return 0;
 
     for (const row of result.bindings as Record<string, string>[]) {
-      const uri = row['paranet'] ?? '';
+      const uri = row['ctxGraph'] ?? '';
       const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
       if (!id) continue;
 
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
-      const existing = this.subscribedParanets.get(id);
+      const existing = this.subscribedContextGraphs.get(id);
       if (existing?.subscribed && existing?.synced) continue;
 
       const name = row['name'] ? stripLiteral(row['name']) : id;
-      this.subscribedParanets.set(id, {
+      this.subscribedContextGraphs.set(id, {
         name,
         subscribed: true,
         synced: true,
@@ -2159,72 +2251,72 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToParanet(id, { trackSyncScope: false });
+        this.subscribeToContextGraph(id, { trackSyncScope: false });
       }
 
-      this.log.info(ctx, `Discovered paranet "${name}" (${id}) from store — auto-subscribed`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
       discovered++;
     }
 
     if (discovered > 0) {
-      this.log.info(ctx, `Auto-subscribed to ${discovered} new paranet(s) from store`);
+      this.log.info(ctx, `Auto-subscribed to ${discovered} new context graph(s) from store`);
     }
     return discovered;
   }
 
   /**
-   * Query the on-chain ParanetV9Registry for all registered paranets and
+   * Query the on-chain registry for all registered context graphs and
    * auto-subscribe to any not yet in the subscription registry.
-   * Returns the number of newly discovered paranets.
+   * Returns the number of newly discovered context graphs.
    */
-  async discoverParanetsFromChain(): Promise<number> {
+  async discoverContextGraphsFromChain(): Promise<number> {
     const ctx = createOperationContext('system');
-    if (!this.chain.listParanetsFromChain) {
-      this.log.info(ctx, 'Chain adapter does not support listParanetsFromChain — skipping');
+    if (!this.chain.listContextGraphsFromChain) {
+      this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
       return 0;
     }
 
-    let onChainParanets;
+    let onChainContextGraphs;
     try {
-      onChainParanets = await this.chain.listParanetsFromChain();
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain();
     } catch (err) {
-      this.log.warn(ctx, `Chain paranet scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(ctx, `Chain context graph scan failed: ${err instanceof Error ? err.message : String(err)}`);
       return 0;
     }
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup
     const knownOnChainIds = new Set<string>();
-    for (const [localId, sub] of this.subscribedParanets) {
+    for (const [localId, sub] of this.subscribedContextGraphs) {
       if (sub.onChainId) knownOnChainIds.add(sub.onChainId);
-      // Also compute expected hash for locally-known paranet IDs
+      // Also compute expected hash for locally-known context graph IDs
       knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
     }
 
     let discovered = 0;
-    for (const p of onChainParanets) {
-      if (knownOnChainIds.has(p.paranetId)) continue;
+    for (const p of onChainContextGraphs) {
+      if (knownOnChainIds.has(p.contextGraphId)) continue;
 
       if (!p.name) {
         // Hash-only entry (metadata not revealed) — record for dedup but don't
         // subscribe to gossip topics since hash-keyed topics are unusable.
-        this.log.info(ctx, `Noted unresolved on-chain paranet ${p.paranetId.slice(0, 16)}… (no metadata)`);
-        knownOnChainIds.add(p.paranetId);
+        this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
+        knownOnChainIds.add(p.contextGraphId);
         continue;
       }
 
-      this.subscribedParanets.set(p.name, {
+      this.subscribedContextGraphs.set(p.name, {
         name: p.name,
         subscribed: true,
         synced: false,
-        onChainId: p.paranetId,
+        onChainId: p.contextGraphId,
       });
-      this.subscribeToParanet(p.name, { trackSyncScope: false });
-      this.log.info(ctx, `Discovered on-chain paranet "${p.name}" (${p.paranetId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+      this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }
 
     if (discovered > 0) {
-      this.log.info(ctx, `Discovered ${discovered} new paranet(s) from chain`);
+      this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
     return discovered;
   }
@@ -2235,9 +2327,9 @@ export class DKGAgent {
       this.chainPoller.stop();
       this.chainPoller = null;
     }
-    if (this.workspaceCleanupTimer) {
-      clearInterval(this.workspaceCleanupTimer);
-      this.workspaceCleanupTimer = null;
+    if (this.swmCleanupTimer) {
+      clearInterval(this.swmCleanupTimer);
+      this.swmCleanupTimer = null;
     }
     await this.node.stop();
     this.started = false;
@@ -2245,12 +2337,12 @@ export class DKGAgent {
 
   /**
    * Loads genesis knowledge into the triple store if not already present.
-   * Creates the system paranet graphs and inserts the genesis quads.
+   * Creates the system context graph graphs and inserts the genesis quads.
    */
   private static async loadGenesis(store: TripleStore): Promise<void> {
     const gm = new GraphManager(store);
 
-    // Ensure system paranets exist
+    // Ensure system context graphs exist
     await gm.ensureParanet(SYSTEM_PARANETS.AGENTS);
     await gm.ensureParanet(SYSTEM_PARANETS.ONTOLOGY);
 
@@ -2271,7 +2363,94 @@ export class DKGAgent {
     await store.insert(quads);
   }
 
-  private async broadcastPublish(paranetId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
+  /**
+   * Create a V10 ACK provider callback for the publisher.
+   * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
+   * via direct P2P from connected core nodes. The required number of ACKs
+   * is read from chain ParametersStorage.minimumRequiredSignatures().
+   */
+  private createV10ACKProvider(contextGraphId: string) {
+    if (!this.router || !this.gossip) return undefined;
+    if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') return undefined;
+    if (typeof this.chain.isV10Ready === 'function' && !this.chain.isV10Ready()) return undefined;
+    // Require on-chain identity verification to prevent accepting unverified ACKs
+    // that would fail on-chain and waste gas. Fall back to legacy path if unavailable.
+    if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
+
+    const collector = new ACKCollector({
+      gossipPublish: async (topic, data) => {
+        await this.gossip.publish(topic, data);
+      },
+      sendP2P: async (peerId, protocol, data) => {
+        return this.router.send(peerId, protocol, data);
+      },
+      getConnectedCorePeers: () => {
+        const peers = this.node.libp2p.getPeers();
+        const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
+        // Prefer peers confirmed as core nodes (advertise StorageACK protocol).
+        if (this.knownCorePeerIds.size > 0) {
+          const filtered = connected.filter(id => this.knownCorePeerIds.has(id));
+          if (filtered.length > 0) return filtered;
+        }
+        // Fallback: return all connected peers during early startup before
+        // protocol discovery completes. Since only core nodes register the
+        // StorageACK handler, requests to edge nodes fail at protocol
+        // negotiation (fast, no error logs on the remote side).
+        return connected;
+      },
+      verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
+        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+            try {
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+            } catch {
+              return false;
+            }
+          }
+        : undefined,
+      log: (msg) => {
+        const ctx = createOperationContext('publish');
+        this.log.info(ctx, msg);
+      },
+    });
+
+    const chain = this.chain;
+
+    return async (
+      merkleRoot: Uint8Array,
+      contextGraphId: string,
+      kaCount: number,
+      rootEntities: string[],
+      publicByteSize: bigint,
+      stagingQuads?: Uint8Array,
+    ) => {
+      let cgIdBigInt: bigint;
+      try {
+        cgIdBigInt = BigInt(contextGraphId);
+      } catch {
+        cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+      }
+
+      const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
+        ? await chain.getMinimumRequiredSignatures()
+        : undefined;
+
+      const result = await collector.collect({
+        merkleRoot,
+        contextGraphId: cgIdBigInt,
+        contextGraphIdStr: contextGraphId,
+        publisherPeerId: this.peerId,
+        publicByteSize,
+        isPrivate: false,
+        kaCount,
+        rootEntities,
+        requiredACKs,
+        stagingQuads,
+      });
+      return result.acks;
+    };
+  }
+
+  private async broadcastPublish(contextGraphId: string, result: PublishResult, ctx: OperationContext): Promise<void> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
@@ -2284,7 +2463,7 @@ export class DKGAgent {
     const msg = encodePublishRequest({
       ual: result.ual,
       nquads: new TextEncoder().encode(ntriples),
-      paranetId,
+      paranetId: contextGraphId,
       kas: result.kaManifest.map(ka => ({
         tokenId: Number(ka.tokenId),
         rootEntity: ka.rootEntity,
@@ -2303,13 +2482,37 @@ export class DKGAgent {
       operationId: ctx.operationId,
     });
 
-    const topic = paranetPublishTopic(paranetId);
+    const topic = paranetPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
       await this.gossip.publish(topic, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }
+  }
+
+  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+
+  get draft() {
+    const agent = this;
+    const agentAddress = this.peerId;
+    return {
+      async create(contextGraphId: string, draftName: string): Promise<string> {
+        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);
+      },
+      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>): Promise<void> {
+        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples);
+      },
+      async query(contextGraphId: string, draftName: string): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress);
+      },
+      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all' }): Promise<{ promotedCount: number }> {
+        return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
+      },
+      async discard(contextGraphId: string, draftName: string): Promise<void> {
+        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress);
+      },
+    };
   }
 
 }
@@ -2614,14 +2817,14 @@ function verifySyncedData(
           log.debug(ctx, `KC ${kcUal} verified via legacy flat root (without private root anchoring)`);
           verifiedKcUals.add(kcUal);
         } else if (acceptUnverified) {
-          log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+          log.debug(ctx, `Merkle mismatch for ${kcUal} (system context graph, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
           rejected++;
         } else {
           log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
           rejected++;
         }
       } else if (acceptUnverified) {
-        log.debug(ctx, `Merkle mismatch for ${kcUal} (system paranet, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
+        log.debug(ctx, `Merkle mismatch for ${kcUal} (system context graph, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;
       } else {
         log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
@@ -2641,10 +2844,10 @@ function verifySyncedData(
     }
   }
 
-  // When acceptUnverified is set (system paranets), accept all data
+  // When acceptUnverified is set (system context graphs), accept all data
   // rather than dropping profiles that fail merkle verification.
   if (acceptUnverified && rejected > 0 && verifiedKcUals.size < kcMerkleRoots.size) {
-    log.debug(ctx, `Accepting ${rejected} unverified KC(s) (system paranet)`);
+    log.debug(ctx, `Accepting ${rejected} unverified KC(s) (system context graph)`);
     return { data: dataQuads, meta: metaQuads, rejected: 0 };
   }
 

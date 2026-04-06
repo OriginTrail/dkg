@@ -6,23 +6,23 @@ import { handleNodeUIRequest } from '../src/api.js';
 
 function createMocks() {
   const mockQuery = vi.fn();
-  const mockWriteToWorkspace = vi.fn().mockResolvedValue({ workspaceOperationId: 'op-1' });
-  const mockCreateParanet = vi.fn().mockResolvedValue(undefined);
-  const mockListParanets = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
-  const mockEnshrineFromWorkspace = vi.fn().mockResolvedValue({});
+  const mockShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-1' });
+  const mockCreateContextGraph = vi.fn().mockResolvedValue(undefined);
+  const mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
+  const mockPublishFromSharedMemory = vi.fn().mockResolvedValue({});
 
   return {
     mockQuery,
-    mockWriteToWorkspace,
-    mockCreateParanet,
-    mockListParanets,
-    mockEnshrineFromWorkspace,
+    mockShare,
+    mockCreateContextGraph,
+    mockListContextGraphs,
+    mockPublishFromSharedMemory,
     tools: {
       query: mockQuery,
-      writeToWorkspace: mockWriteToWorkspace,
-      enshrineFromWorkspace: mockEnshrineFromWorkspace,
-      createParanet: mockCreateParanet,
-      listParanets: mockListParanets,
+      share: mockShare,
+      publishFromSharedMemory: mockPublishFromSharedMemory,
+      createContextGraph: mockCreateContextGraph,
+      listContextGraphs: mockListContextGraphs,
     },
   };
 }
@@ -169,8 +169,8 @@ describe('Import Memory — importMemories integration', () => {
     expect(result.batchId).toBeTruthy();
     expect(result.tripleCount).toBeGreaterThan(0);
 
-    expect(mocks.mockWriteToWorkspace).toHaveBeenCalled();
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    expect(mocks.mockShare).toHaveBeenCalled();
+    const quads = mocks.mockShare.mock.calls[0][1];
 
     const batchTriple = quads.find(
       (q: any) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' &&
@@ -189,7 +189,7 @@ describe('Import Memory — importMemories integration', () => {
   it('tags memory items with correct source', async () => {
     await manager.importMemories('- My preference', 'chatgpt');
 
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const sourceTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/importSource',
     );
@@ -200,7 +200,7 @@ describe('Import Memory — importMemories integration', () => {
   it('links memory items to their batch', async () => {
     const result = await manager.importMemories('- First item\n- Second item', 'gemini');
 
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const batchLinks = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/importBatch',
     );
@@ -212,7 +212,7 @@ describe('Import Memory — importMemories integration', () => {
   it('stores text content in schema:text', async () => {
     await manager.importMemories('- Prefers dark mode', 'other');
 
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const textTriple = quads.find(
       (q: any) => q.predicate === 'http://schema.org/text',
     );
@@ -223,7 +223,7 @@ describe('Import Memory — importMemories integration', () => {
   it('stores dateCreated on both batch and items', async () => {
     await manager.importMemories('- Something to remember', 'claude');
 
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const dateTriples = quads.filter(
       (q: any) => q.predicate === 'http://schema.org/dateCreated',
     );
@@ -235,7 +235,7 @@ describe('Import Memory — importMemories integration', () => {
     expect(result.memoryCount).toBe(0);
     expect(result.tripleCount).toBe(0);
     expect(result.batchId).toBeNull();
-    expect(mocks.mockWriteToWorkspace).not.toHaveBeenCalled();
+    expect(mocks.mockShare).not.toHaveBeenCalled();
   });
 
   it('defaults source to "other" for unknown values', async () => {
@@ -298,27 +298,27 @@ describe('Import Memory — privacy guarantees', () => {
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- Secret preference\n- Another secret', 'claude');
 
-    expect(mocks.mockWriteToWorkspace).toHaveBeenCalled();
-    for (const call of mocks.mockWriteToWorkspace.mock.calls) {
+    expect(mocks.mockShare).toHaveBeenCalled();
+    for (const call of mocks.mockShare.mock.calls) {
       expect(call[2]).toEqual({ localOnly: true });
     }
   });
 
-  it('all writes target the agent-memory paranet', async () => {
+  it('all writes target the agent-memory context graph', async () => {
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- My data', 'chatgpt');
 
-    for (const call of mocks.mockWriteToWorkspace.mock.calls) {
+    for (const call of mocks.mockShare.mock.calls) {
       expect(call[0]).toBe('agent-memory');
     }
   });
 
-  it('creates agent-memory paranet with private: true if missing', async () => {
-    mocks.mockListParanets.mockResolvedValueOnce([]);
+  it('creates agent-memory context graph with private: true if missing', async () => {
+    mocks.mockListContextGraphs.mockResolvedValueOnce([]);
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- My data', 'claude');
 
-    expect(mocks.mockCreateParanet).toHaveBeenCalledWith(
+    expect(mocks.mockCreateContextGraph).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'agent-memory', private: true }),
     );
   });
@@ -377,7 +377,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     // First call: parse memories, second call: knowledge extraction
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
 
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const catTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
@@ -397,7 +397,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Likes coffee\n- Has a cat', 'chatgpt', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const catTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
@@ -427,7 +427,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const textTriple = quads.find(
       (q: any) => q.predicate === 'http://schema.org/text' && q.object === '"Prefers dark mode"',
     );
@@ -456,7 +456,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockWriteToWorkspace.mock.calls[0][1];
+    const quads = mocks.mockShare.mock.calls[0][1];
     const catTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
@@ -483,7 +483,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
 
     expect(result.memoryCount).toBe(2);
     expect(result.source).toBe('claude');
-    expect(mocks.mockWriteToWorkspace).toHaveBeenCalled();
+    expect(mocks.mockShare).toHaveBeenCalled();
   });
 
   it('extracts knowledge entities when LLM returns N-Triples', async () => {
@@ -520,10 +520,10 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('Works at Acme Corp as an engineer', 'claude', { useLlm: true });
 
     expect(result.entityCount).toBe(1);
-    expect(mocks.mockWriteToWorkspace).toHaveBeenCalledTimes(2);
+    expect(mocks.mockShare).toHaveBeenCalledTimes(2);
 
-    const importQuads = mocks.mockWriteToWorkspace.mock.calls[0][1];
-    const entityQuads = mocks.mockWriteToWorkspace.mock.calls[1][1];
+    const importQuads = mocks.mockShare.mock.calls[0][1];
+    const entityQuads = mocks.mockShare.mock.calls[1][1];
     expect(result.tripleCount).toBe(importQuads.length + entityQuads.length);
 
     expect(result.quads.length).toBe(result.tripleCount);
@@ -539,7 +539,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     );
     expect(orgType).toBeDefined();
 
-    for (const call of mocks.mockWriteToWorkspace.mock.calls) {
+    for (const call of mocks.mockShare.mock.calls) {
       expect(call[0]).toBe('agent-memory');
       expect(call[2]).toEqual({ localOnly: true });
     }

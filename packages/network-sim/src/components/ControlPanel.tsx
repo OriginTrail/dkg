@@ -3,11 +3,11 @@ import { useStore } from '../store';
 import * as api from '../api';
 import { OP_COLORS, type OperationType } from '../types';
 
-type Tab = 'setup' | 'simulate' | 'workspace' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction';
+type Tab = 'setup' | 'simulate' | 'sharedMemory' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction';
 
 const MANUAL_TABS: { id: Tab; label: string; op: OperationType }[] = [
   { id: 'setup', label: 'Setup', op: 'connect' },
-  { id: 'workspace', label: 'Workspace', op: 'workspace' },
+  { id: 'sharedMemory', label: 'Shared Memory', op: 'workspace' },
   { id: 'publish', label: 'Publish', op: 'publish' },
   { id: 'query', label: 'Query', op: 'query' },
   { id: 'chat', label: 'Chat', op: 'chat' },
@@ -70,7 +70,7 @@ export function ControlPanel() {
       <div className="tab-content">
         {activeTab === 'setup' && <SetupTab />}
         {activeTab === 'simulate' && <SimulateTab />}
-        {activeTab === 'workspace' && <WorkspaceTab />}
+        {activeTab === 'sharedMemory' && <SharedMemoryTab />}
         {activeTab === 'publish' && <PublishTab />}
         {activeTab === 'query' && <QueryTab />}
         {activeTab === 'chat' && <ChatTab />}
@@ -83,28 +83,28 @@ export function ControlPanel() {
   );
 }
 
-function useParanets() {
+function useContextGraphIds() {
   const { state } = useStore();
-  const [paranets, setParanets] = useState<string[]>([]);
+  const [contextGraphIds, setContextGraphIds] = useState<string[]>([]);
 
   useEffect(() => {
     const firstOnline = state.nodes.find((n) => n.online);
     if (!firstOnline) return;
-    api.fetchParanets(firstOnline.id).then((r) => {
-      setParanets(r.paranets.map((p) => p.id || p.name));
+    api.fetchContextGraphs(firstOnline.id).then((r) => {
+      setContextGraphIds(r.contextGraphs.map((p: { id: string; name: string }) => p.id || p.name));
     }).catch(() => {});
   }, [state.nodes]);
 
-  return paranets;
+  return contextGraphIds;
 }
 
 function SetupTab() {
   const { state, addOperation, completeOperation } = useStore();
-  const [paranetId, setParanetId] = useState('devnet-test');
-  const [paranetName, setParanetName] = useState('Devnet Test Paranet');
+  const [contextGraphId, setContextGraphId] = useState('devnet-test');
+  const [contextGraphName, setContextGraphName] = useState('Devnet Test Context Graph');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
-  const paranets = useParanets();
+  const contextGraphIds = useContextGraphIds();
 
   const doQuickSetup = useCallback(async () => {
     setBusy(true);
@@ -118,17 +118,17 @@ function SetupTab() {
       return;
     }
 
-    const opId = addOperation('connect', firstOnline.id, `quick setup: create & subscribe "${paranetId}"`);
+    const opId = addOperation('connect', firstOnline.id, `quick setup: create & subscribe "${contextGraphId}"`);
 
     try {
       try {
-        await api.createParanet(firstOnline.id, paranetId, paranetName);
-        lines.push(`Created paranet "${paranetId}" on Node ${firstOnline.id}`);
+        await api.createContextGraph(firstOnline.id, contextGraphId, contextGraphName);
+        lines.push(`Created context graph "${contextGraphId}" on Node ${firstOnline.id}`);
       } catch (e: any) {
         if (e.message?.includes('exists') || e.message?.includes('already')) {
-          lines.push(`Paranet "${paranetId}" already exists`);
+          lines.push(`Context graph "${contextGraphId}" already exists`);
         } else {
-          lines.push(`Create paranet: ${e.message}`);
+          lines.push(`Create context graph: ${e.message}`);
         }
       }
 
@@ -138,14 +138,14 @@ function SetupTab() {
           continue;
         }
         try {
-          await api.subscribeParanet(node.id, paranetId);
+          await api.subscribeContextGraph(node.id, contextGraphId);
           lines.push(`Node ${node.id}: subscribed`);
         } catch (e: any) {
           lines.push(`Node ${node.id}: ${e.message}`);
         }
       }
 
-      completeOperation(opId, 'success', `${paranetId} ready`);
+      completeOperation(opId, 'success', `${contextGraphId} ready`);
       setResult(lines.join('\n'));
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
@@ -153,14 +153,14 @@ function SetupTab() {
     } finally {
       setBusy(false);
     }
-  }, [paranetId, paranetName, state.nodes, addOperation, completeOperation]);
+  }, [contextGraphId, contextGraphName, state.nodes, addOperation, completeOperation]);
 
-  const doCreateParanet = useCallback(async () => {
+  const doCreateContextGraph = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const opId = addOperation('connect', state.selectedNode, `create paranet "${paranetId}"`);
+    const opId = addOperation('connect', state.selectedNode, `create context graph "${contextGraphId}"`);
     try {
-      const res = await api.createParanet(state.selectedNode, paranetId, paranetName);
+      const res = await api.createContextGraph(state.selectedNode, contextGraphId, contextGraphName);
       completeOperation(opId, 'success', res.uri);
       setResult(`Created: ${res.uri}`);
     } catch (e: any) {
@@ -169,7 +169,7 @@ function SetupTab() {
     } finally {
       setBusy(false);
     }
-  }, [paranetId, paranetName, state.selectedNode, addOperation, completeOperation]);
+  }, [contextGraphId, contextGraphName, state.selectedNode, addOperation, completeOperation]);
 
   const doSubscribeAll = useCallback(async () => {
     setBusy(true);
@@ -181,22 +181,22 @@ function SetupTab() {
         continue;
       }
       try {
-        await api.subscribeParanet(node.id, paranetId);
-        lines.push(`Node ${node.id}: subscribed to "${paranetId}"`);
+        await api.subscribeContextGraph(node.id, contextGraphId);
+        lines.push(`Node ${node.id}: subscribed to "${contextGraphId}"`);
       } catch (e: any) {
         lines.push(`Node ${node.id}: ${e.message}`);
       }
     }
     setResult(lines.join('\n'));
     setBusy(false);
-  }, [paranetId, state.nodes]);
+  }, [contextGraphId, state.nodes]);
 
   return (
     <div className="tab-form">
       <div className="setup-section">
         <div className="setup-section-title">Quick Setup</div>
         <p className="setup-hint">
-          Creates a paranet and subscribes all online nodes. Run this once after starting the devnet.
+          Creates a context graph and subscribes all online nodes. Run this once after starting the devnet.
         </p>
         <button className="btn btn-primary btn-wide" disabled={busy} onClick={doQuickSetup}>
           {busy ? 'Setting up...' : 'Initialize Devnet'}
@@ -206,25 +206,25 @@ function SetupTab() {
       <div className="setup-divider" />
 
       <div className="setup-section">
-        <div className="setup-section-title">Paranet Management</div>
-        {paranets.length > 0 && (
-          <div className="paranet-list">
-            <label>Existing Paranets</label>
-            {paranets.map((p) => (
-              <div key={p} className="paranet-item">{p}</div>
+        <div className="setup-section-title">Context Graph Management</div>
+        {contextGraphIds.length > 0 && (
+          <div className="context-graph-list">
+            <label>Existing Context Graphs</label>
+            {contextGraphIds.map((p) => (
+              <div key={p} className="context-graph-item">{p}</div>
             ))}
           </div>
         )}
         <div className="form-group">
-          <label>Paranet ID</label>
-          <input value={paranetId} onChange={(e) => setParanetId(e.target.value)} />
+          <label>Context Graph ID</label>
+          <input value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} />
         </div>
         <div className="form-group">
-          <label>Paranet Name</label>
-          <input value={paranetName} onChange={(e) => setParanetName(e.target.value)} />
+          <label>Context Graph Name</label>
+          <input value={contextGraphName} onChange={(e) => setContextGraphName(e.target.value)} />
         </div>
         <div className="btn-row">
-          <button className="btn btn-primary" disabled={busy} onClick={doCreateParanet}>
+          <button className="btn btn-primary" disabled={busy} onClick={doCreateContextGraph}>
             Create
           </button>
           <button className="btn btn-secondary" disabled={busy} onClick={doSubscribeAll}>
@@ -242,7 +242,7 @@ type SimOp = 'publish' | 'workspace' | 'query' | 'chat';
 
 const SIM_OPS: { id: SimOp; label: string }[] = [
   { id: 'publish', label: 'Publish' },
-  { id: 'workspace', label: 'Workspace' },
+  { id: 'workspace', label: 'Shared Memory' },
   { id: 'query', label: 'Query' },
   { id: 'chat', label: 'Chat' },
 ];
@@ -272,12 +272,12 @@ function SimulateTab() {
   const [opsPerSec, setOpsPerSec] = useState(10);
   const [concurrency, setConcurrency] = useState(10);
   const [kasPerPublish, setKasPerPublish] = useState(1);
-  const [paranet, setParanet] = useState('devnet-test');
+  const [contextGraphId, setContextGraphId] = useState('devnet-test');
   const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
   const [running, setRunning] = useState(false);
   const [stats, setStats] = useState<SimStats | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const paranets = useParanets();
+  const contextGraphIds = useContextGraphIds();
 
   const toggleOp = useCallback((op: SimOp) => {
     setEnabledOps((prev) => {
@@ -299,7 +299,7 @@ function SimulateTab() {
       type: 'START_SIMULATION',
       id: simId,
       name: simName || `Simulation #${simCounter}`,
-      config: { opCount, opsPerSec, concurrency, kasPerPublish, paranet, enabledOps: ops },
+      config: { opCount, opsPerSec, concurrency, kasPerPublish, contextGraphId, enabledOps: ops },
     });
 
     const simStats: SimStats = { total: opCount, completed: 0, errors: 0, startedAt: Date.now() };
@@ -310,7 +310,7 @@ function SimulateTab() {
       const res = await fetch('/sim/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: simName, opCount, opsPerSec, concurrency, kasPerPublish, paranet, enabledOps: ops }),
+        body: JSON.stringify({ name: simName, opCount, opsPerSec, concurrency, kasPerPublish, contextGraph: contextGraphId, enabledOps: ops }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ error: 'Unknown error' }));
@@ -385,7 +385,7 @@ function SimulateTab() {
         dispatch({ type: 'STOP_SIMULATION' });
       }
     };
-  }, [opCount, opsPerSec, concurrency, paranet, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
+  }, [opCount, opsPerSec, concurrency, contextGraphId, enabledOps, simName, kasPerPublish, addBroadcast, addOperation, completeOperation, dispatch]);
 
   const stopSimulation = useCallback(async () => {
     eventSourceRef.current?.close();
@@ -421,14 +421,14 @@ function SimulateTab() {
       </div>
 
       <div className="form-group">
-        <label>Paranet</label>
-        {paranets.length > 0 ? (
-          <select value={paranet} onChange={(e) => setParanet(e.target.value)} disabled={running}>
-            {paranets.map((p) => <option key={p} value={p}>{p}</option>)}
-            {!paranets.includes(paranet) && <option value={paranet}>{paranet}</option>}
+        <label>Context Graph</label>
+        {contextGraphIds.length > 0 ? (
+          <select value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} disabled={running}>
+            {contextGraphIds.map((p) => <option key={p} value={p}>{p}</option>)}
+            {!contextGraphIds.includes(contextGraphId) && <option value={contextGraphId}>{contextGraphId}</option>}
           </select>
         ) : (
-          <input value={paranet} onChange={(e) => setParanet(e.target.value)} disabled={running} />
+          <input value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} disabled={running} />
         )}
       </div>
 
@@ -518,16 +518,16 @@ function SimulateTab() {
   );
 }
 
-function WorkspaceTab() {
+function SharedMemoryTab() {
   const { state, addBroadcast, completeOperation } = useStore();
-  const paranets = useParanets();
-  const [paranet, setParanet] = useState('devnet-test');
+  const contextGraphIds = useContextGraphIds();
+  const [contextGraphId, setContextGraphId] = useState('devnet-test');
   const [subject, setSubject] = useState('did:dkg:entity:ws-001');
   const [predicate, setPredicate] = useState('http://schema.org/name');
-  const [object, setObject] = useState('Workspace Draft');
+  const [object, setObject] = useState('Shared Memory Draft');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
-  const [wsContents, setWsContents] = useState('');
+  const [sharedMemoryContents, setSharedMemoryContents] = useState('');
 
   const fmtObj = (v: string) =>
     v.startsWith('http') || v.startsWith('did:') || v.startsWith('urn:') ? v : `"${v}"`;
@@ -535,46 +535,46 @@ function WorkspaceTab() {
   const doWrite = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:context-graph:${paranet}`;
+    const graph = contextGraphId.startsWith('did:') ? contextGraphId : `did:dkg:context-graph:${contextGraphId}`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
-    const opId = addBroadcast('workspace', state.selectedNode, 'workspace write');
+    const opId = addBroadcast('workspace', state.selectedNode, 'shared memory write');
     try {
-      const res = await api.writeToWorkspace(state.selectedNode, paranet, quads);
-      completeOperation(opId, 'success', res.workspaceOperationId);
-      setResult(`Written to workspace.\nOperation: ${res.workspaceOperationId}`);
+      const res = await api.share(state.selectedNode, contextGraphId, quads);
+      completeOperation(opId, 'success', res.shareOperationId);
+      setResult(`Written to shared memory.\nOperation: ${res.shareOperationId}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
       setResult(`Error: ${e.message}`);
     } finally {
       setBusy(false);
     }
-  }, [subject, predicate, object, paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [subject, predicate, object, contextGraphId, state.selectedNode, addBroadcast, completeOperation]);
 
-  const doQueryWorkspace = useCallback(async () => {
+  const doQuerySharedMemory = useCallback(async () => {
     setBusy(true);
-    setWsContents('');
+    setSharedMemoryContents('');
     const sparql = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 50`;
     try {
-      const res = await api.queryNode(state.selectedNode, sparql, paranet, {
+      const res = await api.queryNode(state.selectedNode, sparql, contextGraphId, {
         graphSuffix: '_shared_memory',
       });
-      setWsContents(JSON.stringify(res.result, null, 2));
+      setSharedMemoryContents(JSON.stringify(res.result, null, 2));
     } catch (e: any) {
-      setWsContents(`Error: ${e.message}`);
+      setSharedMemoryContents(`Error: ${e.message}`);
     } finally {
       setBusy(false);
     }
-  }, [paranet, state.selectedNode]);
+  }, [contextGraphId, state.selectedNode]);
 
-  const doEnshrine = useCallback(async () => {
+  const doPublish = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const opId = addBroadcast('publish', state.selectedNode, 'enshrine workspace');
+    const opId = addBroadcast('publish', state.selectedNode, 'publish from shared memory');
     try {
-      const res = await api.enshrineFromWorkspace(state.selectedNode, paranet, 'all', true);
+      const res = await api.publishFromSharedMemory(state.selectedNode, contextGraphId, 'all', true);
       completeOperation(opId, 'success', `KC: ${res.kcId}`);
       setResult(
-        `Enshrined to chain.\nKC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
+        `Published to chain.\nKC: ${res.kcId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
         (res.txHash ? `\nTx: ${res.txHash}` : ''),
       );
     } catch (e: any) {
@@ -583,27 +583,27 @@ function WorkspaceTab() {
     } finally {
       setBusy(false);
     }
-  }, [paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [contextGraphId, state.selectedNode, addBroadcast, completeOperation]);
 
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write draft triples to the workspace (free, no gas). When ready, enshrine them to the chain with full finality.
+        Write draft triples to shared memory (free, no gas). When ready, publish them to the chain with full finality.
       </div>
 
       <div className="form-group">
-        <label>Paranet</label>
-        {paranets.length > 0 ? (
-          <select value={paranet} onChange={(e) => setParanet(e.target.value)}>
-            {paranets.map((p) => <option key={p} value={p}>{p}</option>)}
-            {!paranets.includes(paranet) && <option value={paranet}>{paranet}</option>}
+        <label>Context Graph</label>
+        {contextGraphIds.length > 0 ? (
+          <select value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)}>
+            {contextGraphIds.map((p) => <option key={p} value={p}>{p}</option>)}
+            {!contextGraphIds.includes(contextGraphId) && <option value={contextGraphId}>{contextGraphId}</option>}
           </select>
         ) : (
-          <input value={paranet} onChange={(e) => setParanet(e.target.value)} />
+          <input value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} />
         )}
       </div>
 
-      <div className="setup-section-title">Write to Workspace</div>
+      <div className="setup-section-title">Write to Shared Memory</div>
       <div className="form-group">
         <label>Subject</label>
         <input value={subject} onChange={(e) => setSubject(e.target.value)} />
@@ -617,25 +617,25 @@ function WorkspaceTab() {
         <input value={object} onChange={(e) => setObject(e.target.value)} />
       </div>
       <button className="btn btn-primary btn-wide" disabled={busy} onClick={doWrite}>
-        {busy ? 'Writing...' : 'Write to Workspace (Free)'}
+        {busy ? 'Writing...' : 'Write to Shared Memory (Free)'}
       </button>
 
       <div className="setup-divider" />
 
-      <div className="setup-section-title">Workspace Contents</div>
-      <button className="btn btn-secondary btn-wide" disabled={busy} onClick={doQueryWorkspace}>
-        Query Workspace
+      <div className="setup-section-title">Shared Memory Contents</div>
+      <button className="btn btn-secondary btn-wide" disabled={busy} onClick={doQuerySharedMemory}>
+        Query Shared Memory
       </button>
-      {wsContents && <pre className="result-box code">{wsContents}</pre>}
+      {sharedMemoryContents && <pre className="result-box code">{sharedMemoryContents}</pre>}
 
       <div className="setup-divider" />
 
-      <div className="setup-section-title">Enshrine to Chain</div>
+      <div className="setup-section-title">Publish to Chain</div>
       <p className="setup-hint">
-        Publish all workspace content with full on-chain finality (costs TRAC + gas). Clears workspace after.
+        Publish all shared memory content with full on-chain finality (costs TRAC + gas). Clears shared memory after.
       </p>
-      <button className="btn btn-primary btn-wide" disabled={busy} onClick={doEnshrine}>
-        {busy ? 'Enshrining...' : 'Enshrine All to Chain'}
+      <button className="btn btn-primary btn-wide" disabled={busy} onClick={doPublish}>
+        {busy ? 'Publishing...' : 'Publish All to Chain'}
       </button>
 
       {result && <pre className="result-box code">{result}</pre>}
@@ -645,19 +645,19 @@ function WorkspaceTab() {
 
 function PublishTab() {
   const { state, addBroadcast, completeOperation } = useStore();
-  const paranets = useParanets();
+  const contextGraphIds = useContextGraphIds();
   const [subject, setSubject] = useState('did:dkg:entity:001');
   const [predicate, setPredicate] = useState('http://schema.org/name');
   const [object, setObject] = useState('Test Entity');
   const [privateObj, setPrivateObj] = useState('');
-  const [paranet, setParanet] = useState('devnet-test');
+  const [contextGraphId, setContextGraphId] = useState('devnet-test');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
 
   const doPublish = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const graph = paranet.startsWith('did:') ? paranet : `did:dkg:context-graph:${paranet}`;
+    const graph = contextGraphId.startsWith('did:') ? contextGraphId : `did:dkg:context-graph:${contextGraphId}`;
     const fmtObj = (v: string) =>
       v.startsWith('http') || v.startsWith('did:') || v.startsWith('urn:') ? v : `"${v}"`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
@@ -670,7 +670,7 @@ function PublishTab() {
     const opId = addBroadcast('publish', state.selectedNode, label);
 
     try {
-      const res = await api.publishKA(state.selectedNode, paranet, quads, privQuads);
+      const res = await api.publishKA(state.selectedNode, contextGraphId, quads, privQuads);
       completeOperation(opId, 'success', `KC: ${res.kcId}`);
       setResult(`KC: ${res.kcId} | Status: ${res.status} | KAs: ${res.kas?.length ?? 0}`);
     } catch (e: any) {
@@ -679,23 +679,23 @@ function PublishTab() {
     } finally {
       setBusy(false);
     }
-  }, [subject, predicate, object, privateObj, paranet, state.selectedNode, addBroadcast, completeOperation]);
+  }, [subject, predicate, object, privateObj, contextGraphId, state.selectedNode, addBroadcast, completeOperation]);
 
   return (
     <div className="tab-form">
       <div className="form-group">
-        <label>Paranet</label>
-        {paranets.length > 0 ? (
-          <select value={paranet} onChange={(e) => setParanet(e.target.value)}>
-            {paranets.map((p) => (
+        <label>Context Graph</label>
+        {contextGraphIds.length > 0 ? (
+          <select value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)}>
+            {contextGraphIds.map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
-            {!paranets.includes(paranet) && (
-              <option value={paranet}>{paranet} (custom)</option>
+            {!contextGraphIds.includes(contextGraphId) && (
+              <option value={contextGraphId}>{contextGraphId} (custom)</option>
             )}
           </select>
         ) : (
-          <input value={paranet} onChange={(e) => setParanet(e.target.value)} />
+          <input value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} />
         )}
       </div>
       <div className="form-group">
@@ -728,25 +728,25 @@ function PublishTab() {
 
 function QueryTab() {
   const { state, addOperation, completeOperation } = useStore();
-  const paranets = useParanets();
+  const contextGraphIds = useContextGraphIds();
   const [sparql, setSparql] = useState('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
-  const [paranet, setParanet] = useState('devnet-test');
-  const [graphTarget, setGraphTarget] = useState<'published' | 'workspace' | 'both'>('published');
+  const [contextGraphId, setContextGraphId] = useState('devnet-test');
+  const [graphTarget, setGraphTarget] = useState<'published' | 'sharedMemory' | 'both'>('published');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState('');
 
   const doQuery = useCallback(async () => {
     setBusy(true);
     setResult('');
-    const targetLabel = graphTarget === 'workspace' ? 'workspace' : graphTarget === 'both' ? 'published+workspace' : 'published';
+    const targetLabel = graphTarget === 'sharedMemory' ? 'shared memory' : graphTarget === 'both' ? 'published+shared memory' : 'published';
     const opId = addOperation('query', state.selectedNode, `query (${targetLabel})`);
     try {
-      const opts = graphTarget === 'workspace'
+      const opts = graphTarget === 'sharedMemory'
         ? { graphSuffix: '_shared_memory' as const }
         : graphTarget === 'both'
-          ? { includeWorkspace: true }
+          ? { includeSharedMemory: true }
           : undefined;
-      const res = await api.queryNode(state.selectedNode, sparql, paranet || undefined, opts);
+      const res = await api.queryNode(state.selectedNode, sparql, contextGraphId || undefined, opts);
       const json = JSON.stringify(res.result, null, 2);
       completeOperation(opId, 'success', `${json.length} chars`);
       setResult(json);
@@ -756,19 +756,19 @@ function QueryTab() {
     } finally {
       setBusy(false);
     }
-  }, [sparql, paranet, graphTarget, state.selectedNode, addOperation, completeOperation]);
+  }, [sparql, contextGraphId, graphTarget, state.selectedNode, addOperation, completeOperation]);
 
   return (
     <div className="tab-form">
       <div className="form-group">
-        <label>Paranet</label>
-        {paranets.length > 0 ? (
-          <select value={paranet} onChange={(e) => setParanet(e.target.value)}>
-            {paranets.map((p) => <option key={p} value={p}>{p}</option>)}
-            {!paranets.includes(paranet) && <option value={paranet}>{paranet}</option>}
+        <label>Context Graph</label>
+        {contextGraphIds.length > 0 ? (
+          <select value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)}>
+            {contextGraphIds.map((p) => <option key={p} value={p}>{p}</option>)}
+            {!contextGraphIds.includes(contextGraphId) && <option value={contextGraphId}>{contextGraphId}</option>}
           </select>
         ) : (
-          <input value={paranet} onChange={(e) => setParanet(e.target.value)} />
+          <input value={contextGraphId} onChange={(e) => setContextGraphId(e.target.value)} />
         )}
       </div>
       <div className="form-group">
@@ -776,7 +776,7 @@ function QueryTab() {
         <div className="graph-target-pills">
           {([
             ['published', 'Published'],
-            ['workspace', 'Workspace'],
+            ['sharedMemory', 'Shared Memory'],
             ['both', 'Both'],
           ] as const).map(([value, label]) => (
             <button

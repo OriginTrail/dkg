@@ -6,7 +6,7 @@
  * - Gossip-received data is always stored as tentative (never confirmed from self-reported fields)
  * - On-chain verification promotes tentative → confirmed
  * - Malformed gossip messages are handled gracefully with logging
- * - Integration: real gossip flow through subscribeToParanet triggers verification
+ * - Integration: real gossip flow through subscribeToContextGraph triggers verification
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import {
@@ -18,9 +18,9 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computePublicRootV10 as computePublicRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
   autoPartition,
   generateTentativeMetadata,
   generateKCMetadata,
@@ -43,7 +43,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -69,7 +69,7 @@ describe('I-022: PublishRequestMsg txHash and blockNumber fields', () => {
     const encoded = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0x1/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -147,7 +147,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     const kcMeta = {
       ual: 'did:dkg:mock:31337/0xAttacker/1',
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       merkleRoot,
       kaCount: kaMetadata.length,
       publisherPeerId: '0xAttacker',
@@ -337,7 +337,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 });
 
 // ---------------------------------------------------------------------------
-// Integration: gossip flow through subscribeToParanet with on-chain verification
+// Integration: gossip flow through subscribeToContextGraph with on-chain verification
 // ---------------------------------------------------------------------------
 const integrationAgents: DKGAgent[] = [];
 
@@ -373,9 +373,9 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'gossip-verify', name: 'GV', description: '' });
-    agentA.subscribeToParanet('gossip-verify');
-    agentB.subscribeToParanet('gossip-verify');
+    await agentA.createContextGraph({ id: 'gossip-verify', name: 'GV', description: '' });
+    agentA.subscribeToContextGraph('gossip-verify');
+    agentB.subscribeToContextGraph('gossip-verify');
     await sleep(500);
 
     await agentA.publish('gossip-verify', [
@@ -424,9 +424,9 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await agentB.connectTo(agentA.multiaddrs[0]);
     await sleep(1000);
 
-    await agentA.createParanet({ id: 'gossip-tent', name: 'GT', description: '' });
-    agentA.subscribeToParanet('gossip-tent', { trackSyncScope: false });
-    agentB.subscribeToParanet('gossip-tent', { trackSyncScope: false });
+    await agentA.createContextGraph({ id: 'gossip-tent', name: 'GT', description: '' });
+    agentA.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
+    agentB.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     await sleep(500);
 
     await agentA.publish('gossip-tent', [

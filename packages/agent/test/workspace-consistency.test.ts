@@ -77,7 +77,7 @@ describe('monotonicTransition', () => {
 describe('versionedWrite', () => {
   function mockAgent(overrides?: Partial<DKGAgent>) {
     return {
-      writeConditionalToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-ver-1' }),
+      conditionalShare: vi.fn().mockResolvedValue({ shareOperationId: 'ws-ver-1' }),
       ...overrides,
     } as unknown as DKGAgent;
   }
@@ -89,9 +89,9 @@ describe('versionedWrite', () => {
     const result = await versionedWrite(agent, 'test-paranet', SUBJECT, null, quads);
 
     expect(result.newVersion).toBe(1);
-    expect(result.workspaceOperationId).toBe('ws-ver-1');
+    expect(result.shareOperationId).toBe('ws-ver-1');
 
-    const call = (agent.writeConditionalToWorkspace as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[0]).toBe('test-paranet');
 
     const allQuads = call[1] as Array<{ subject: string; predicate: string; object: string }>;
@@ -118,7 +118,7 @@ describe('versionedWrite', () => {
 
     expect(result.newVersion).toBe(3);
 
-    const call = (agent.writeConditionalToWorkspace as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
     const conditions = call[2] as Array<{ expectedValue: string | null }>;
     expect(conditions[0].expectedValue).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
 
@@ -136,7 +136,7 @@ describe('versionedWrite', () => {
 
     await versionedWrite(agent, 'test-paranet', SUBJECT, 0, appQuads);
 
-    const call = (agent.writeConditionalToWorkspace as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
     const allQuads = call[1] as Array<{ predicate: string }>;
     expect(allQuads.length).toBe(4); // 2 app + version + timestamp
     expect(allQuads.some(q => q.predicate === 'http://schema.org/name')).toBe(true);
@@ -149,7 +149,7 @@ describe('versionedWrite', () => {
     const agent = mockAgent();
     await versionedWrite(agent, 'test-paranet', SUBJECT, 0, [], { localOnly: true });
 
-    const call = (agent.writeConditionalToWorkspace as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[3]).toEqual({ localOnly: true });
   });
 
@@ -157,7 +157,7 @@ describe('versionedWrite', () => {
     const err = new Error('CAS failed');
     err.name = 'StaleWriteError';
     const agent = mockAgent({
-      writeConditionalToWorkspace: vi.fn().mockRejectedValue(err),
+      conditionalShare: vi.fn().mockRejectedValue(err),
     });
 
     await expect(versionedWrite(agent, 'test-paranet', SUBJECT, 1, []))

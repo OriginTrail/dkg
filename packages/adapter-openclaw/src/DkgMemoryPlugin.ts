@@ -2,7 +2,7 @@
  * DkgMemoryPlugin — DKG-backed memory search.
  *
  * Registers `dkg_memory_search` and `dkg_memory_import` tools that query
- * the DKG daemon's agent-memory paranet via SPARQL.
+ * the DKG daemon's agent-memory context graph via SPARQL.
  *
  * Memory reads go through this plugin:
  *   search(query) → SPARQL FILTER(CONTAINS) on dkg:ImportedMemory items
@@ -22,7 +22,7 @@ import type {
   OpenClawPluginApi,
 } from './types.js';
 
-const AGENT_MEMORY_PARANET = 'agent-memory';
+const AGENT_MEMORY_CONTEXT_GRAPH = 'agent-memory';
 
 /**
  * SPARQL namespaces used in the agent-memory graph.
@@ -139,8 +139,8 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
     try {
       const result = await this.client.query(sparql, {
-        paranetId: AGENT_MEMORY_PARANET,
-        includeWorkspace: true,
+        contextGraphId: AGENT_MEMORY_CONTEXT_GRAPH,
+        includeSharedMemory: true,
       });
       return formatSearchResults(result, query);
     } catch (err: any) {
@@ -162,8 +162,8 @@ export class DkgMemoryPlugin implements OpenClawMemorySearchManager {
 
     try {
       const result = await this.client.query(sparql, {
-        paranetId: AGENT_MEMORY_PARANET,
-        includeWorkspace: true,
+        contextGraphId: AGENT_MEMORY_CONTEXT_GRAPH,
+        includeSharedMemory: true,
       });
       const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
       if (bindings.length > 0) {

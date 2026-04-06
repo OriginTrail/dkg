@@ -14,7 +14,7 @@ function createMockClient(overrides: Partial<DkgClientLike> = {}): DkgClientLike
   return {
     query: vi.fn().mockResolvedValue({ result: { bindings: [] } }),
     publish: vi.fn().mockResolvedValue({ kcId: 'kc-test-001', status: 'confirmed' }),
-    createParanet: vi.fn().mockResolvedValue({ created: 'autoresearch', uri: 'urn:paranet:autoresearch' }),
+    createContextGraph: vi.fn().mockResolvedValue({ created: 'autoresearch', uri: 'urn:context-graph:autoresearch' }),
     subscribe: vi.fn().mockResolvedValue({ subscribed: 'autoresearch' }),
     ...overrides,
   };
@@ -83,7 +83,7 @@ describe('autoresearch adapter — tool registration', () => {
 });
 
 describe('autoresearch_setup', () => {
-  it('creates paranet and subscribes', async () => {
+  it('creates context graph and subscribes', async () => {
     const mock = createMockClient();
     const { mcpClient } = await createTestHarness(mock);
 
@@ -92,7 +92,7 @@ describe('autoresearch_setup', () => {
 
     expect(text).toContain('autoresearch');
     expect(text).toContain('subscribed');
-    expect(mock.createParanet).toHaveBeenCalledWith(
+    expect(mock.createContextGraph).toHaveBeenCalledWith(
       'autoresearch',
       'Autoresearch',
       expect.any(String),
@@ -100,9 +100,9 @@ describe('autoresearch_setup', () => {
     expect(mock.subscribe).toHaveBeenCalledWith('autoresearch');
   });
 
-  it('handles paranet already existing gracefully', async () => {
+  it('handles context graph already existing gracefully', async () => {
     const mock = createMockClient({
-      createParanet: vi.fn().mockRejectedValue(new Error('already exists')),
+      createContextGraph: vi.fn().mockRejectedValue(new Error('already exists')),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -160,8 +160,8 @@ describe('autoresearch_publish_experiment', () => {
     });
 
     expect(mock.publish).toHaveBeenCalledTimes(1);
-    const [paranetId, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(paranetId).toBe('autoresearch');
+    const [contextGraphId, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(contextGraphId).toBe('autoresearch');
 
     const types = quads.filter((q: any) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
     expect(types).toHaveLength(1);
@@ -275,7 +275,7 @@ describe('autoresearch_publish_experiment', () => {
 });
 
 describe('autoresearch_best_results', () => {
-  it('returns "no experiments" when paranet is empty', async () => {
+  it('returns "no experiments" when context graph is empty', async () => {
     const { mcpClient } = await createTestHarness();
 
     const result = await mcpClient.callTool({
@@ -318,7 +318,7 @@ describe('autoresearch_best_results', () => {
     expect(text).toContain('H100');
   });
 
-  it('passes SPARQL query to client with correct paranet', async () => {
+  it('passes SPARQL query to client with correct context graph', async () => {
     const mock = createMockClient();
     const { mcpClient } = await createTestHarness(mock);
 
@@ -328,8 +328,8 @@ describe('autoresearch_best_results', () => {
     });
 
     expect(mock.query).toHaveBeenCalledTimes(1);
-    const [sparql, paranetId] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(paranetId).toBe('autoresearch');
+    const [sparql, contextGraphId] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(contextGraphId).toBe('autoresearch');
     expect(sparql).toContain(Class.Experiment);
     expect(sparql).toContain('ORDER BY ASC(?valBpb)');
     expect(sparql).toContain('LIMIT 5');
@@ -519,8 +519,8 @@ describe('autoresearch_query', () => {
   });
 });
 
-describe('custom paranet', () => {
-  it('uses custom paranet when registerTools is called with one', async () => {
+describe('custom context graph', () => {
+  it('uses custom context graph when registerTools is called with one', async () => {
     const mock = createMockClient();
     const server = new McpServer({ name: 'custom-test', version: '0.0.1' });
     registerTools(server, async () => mock, 'my-custom-paranet');
@@ -532,7 +532,7 @@ describe('custom paranet', () => {
 
     await mcpClient.callTool({ name: 'autoresearch_setup', arguments: {} });
 
-    expect(mock.createParanet).toHaveBeenCalledWith(
+    expect(mock.createContextGraph).toHaveBeenCalledWith(
       'my-custom-paranet',
       expect.any(String),
       expect.any(String),

@@ -60,26 +60,26 @@ export class DkgDaemonClient {
 
   async query(
     sparql: string,
-    opts?: { paranetId?: string; graphSuffix?: string; includeWorkspace?: boolean },
+    opts?: { contextGraphId?: string; graphSuffix?: string; includeSharedMemory?: boolean },
   ): Promise<any> {
     return this.post('/api/query', {
       sparql,
-      paranetId: opts?.paranetId,
+      contextGraphId: opts?.contextGraphId,
       graphSuffix: opts?.graphSuffix,
-      includeWorkspace: opts?.includeWorkspace,
+      includeSharedMemory: opts?.includeSharedMemory,
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Workspace write
+  // Shared memory write
   // ---------------------------------------------------------------------------
 
-  async writeToWorkspace(
-    paranetId: string,
+  async share(
+    contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { localOnly?: boolean },
-  ): Promise<{ workspaceOperationId: string }> {
-    return this.post('/api/workspace/write', { paranetId, quads, localOnly: opts?.localOnly ?? true });
+  ): Promise<{ shareOperationId: string }> {
+    return this.post('/api/shared-memory/write', { contextGraphId, quads, localOnly: opts?.localOnly ?? true });
   }
 
   // ---------------------------------------------------------------------------
@@ -183,13 +183,13 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   async publish(
-    paranetId: string,
+    contextGraphId: string,
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
   ): Promise<any> {
     return this.post('/api/publish', {
-      paranetId,
+      contextGraphId,
       quads,
       privateQuads,
       accessPolicy: opts?.accessPolicy,
@@ -198,19 +198,19 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Paranets
+  // Context Graphs
   // ---------------------------------------------------------------------------
 
-  async listParanets(): Promise<{ paranets: any[] }> {
-    return this.get('/api/paranet/list');
+  async listContextGraphs(): Promise<{ contextGraphs: any[] }> {
+    return this.get('/api/context-graph/list');
   }
 
-  async createParanet(
+  async createContextGraph(
     id: string,
     name: string,
     description?: string,
   ): Promise<{ created: string; uri: string }> {
-    return this.post('/api/paranet/create', { id, name, description });
+    return this.post('/api/context-graph/create', { id, name, description });
   }
 
   // ---------------------------------------------------------------------------
@@ -218,12 +218,12 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   async subscribe(
-    paranetId: string,
-    opts?: { includeWorkspace?: boolean },
-  ): Promise<{ subscribed: string; catchup: { jobId: string; status: string; includeWorkspace: boolean } }> {
+    contextGraphId: string,
+    opts?: { includeSharedMemory?: boolean },
+  ): Promise<{ subscribed: string; catchup: { jobId: string; status: string; includeSharedMemory: boolean } }> {
     return this.post('/api/subscribe', {
-      paranetId,
-      includeWorkspace: opts?.includeWorkspace,
+      contextGraphId,
+      includeSharedMemory: opts?.includeSharedMemory,
     });
   }
 

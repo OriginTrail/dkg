@@ -24,7 +24,7 @@ function makePublishMsg(opts?: { ual?: string; nquads?: string }): Uint8Array {
     nquads: new TextEncoder().encode(
       opts?.nquads ?? '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     ),
-    paranetId: PARANET,
+    contextGraphId: PARANET,
     kas: [{ tokenId: 1, rootEntity: 'http://example.org/s', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -41,7 +41,7 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { paranetExists: async () => false, subscribeToParanet: () => {} },
+      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
     );
 
     const { calls, fn } = recorder();
@@ -63,13 +63,13 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { paranetExists: async () => false, subscribeToParanet: () => {} },
+      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
     );
 
     const msg = encodePublishRequest({
       ual: '',
       nquads: new Uint8Array(0),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x0000000000000000000000000000000000000000',
@@ -96,7 +96,7 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { paranetExists: async () => false, subscribeToParanet: () => {} },
+      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
     );
 
     const { calls, fn } = recorder();

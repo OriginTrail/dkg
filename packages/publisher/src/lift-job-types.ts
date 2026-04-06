@@ -17,10 +17,10 @@ export interface LiftAuthorityProof {
 }
 
 export interface LiftRequest {
-  readonly workspaceId: string;
-  readonly workspaceOperationId: string;
+  readonly swmId: string;
+  readonly shareOperationId: string;
   readonly roots: readonly string[];
-  readonly paranetId: string;
+  readonly contextGraphId: string;
   readonly namespace: string;
   readonly scope: string;
   readonly transitionType: LiftTransitionType;
@@ -29,10 +29,10 @@ export interface LiftRequest {
 }
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
-  'workspaceId',
-  'workspaceOperationId',
+  'swmId',
+  'shareOperationId',
   'roots',
-  'paranetId',
+  'contextGraphId',
   'namespace',
   'scope',
   'transitionType',
@@ -106,7 +106,7 @@ export interface LiftJobClaimMetadata {
 export interface LiftJobValidationMetadata {
   readonly canonicalRoots: readonly string[];
   readonly canonicalRootMap: Readonly<Record<string, string>>;
-  readonly workspaceQuadCount: number;
+  readonly swmQuadCount: number;
   readonly authorityProofRef: string;
   readonly transitionType: LiftTransitionType;
   readonly priorVersion?: string;

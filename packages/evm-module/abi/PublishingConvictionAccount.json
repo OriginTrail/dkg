@@ -471,7 +471,13 @@
       }
     ],
     "name": "coverPublishingCost",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },

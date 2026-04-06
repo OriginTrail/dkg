@@ -2,8 +2,8 @@
  * OriginTrail Game gossipsub message protocol.
  *
  * All game coordination messages are serialized as JSON and sent over
- * the paranet's app coordination topic (dkg/paranet/{paranetId}/app).
- * This ensures every node subscribed to the paranet — including relays
+ * the context graph's app coordination topic (dkg/context-graph/{contextGraphId}/app).
+ * This ensures every node subscribed to the context graph — including relays
  * and nodes without the game installed — relays game messages through
  * the gossipsub mesh.
  */
@@ -11,11 +11,11 @@
 export const APP_ID = 'origin-trail-game';
 
 /**
- * Returns the paranet-scoped app topic. This is the same topic the DKG core
- * subscribes to in subscribeToParanet(), so all paranet nodes relay it.
+ * Returns the context-graph-scoped app topic. This is the same topic the DKG core
+ * subscribes to in subscribeToContextGraph(), so all context graph nodes relay it.
  */
-export function appTopic(paranetId: string): string {
-  return `dkg/context-graph/${paranetId}/app`;
+export function appTopic(contextGraphId: string): string {
+  return `dkg/context-graph/${contextGraphId}/app`;
 }
 
 export type MessageType =

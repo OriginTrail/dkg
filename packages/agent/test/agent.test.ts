@@ -10,7 +10,7 @@ import {
   ed25519ToX25519Public,
   x25519SharedSecret,
   DKGAgent,
-  AGENT_REGISTRY_PARANET,
+  AGENT_REGISTRY_CONTEXT_GRAPH,
 } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
@@ -162,12 +162,12 @@ describe('Profile Builder', () => {
     }
   });
 
-  it('includes hosting profile when paranetsServed is set', () => {
+  it('includes hosting profile when contextGraphsServed is set', () => {
     const { quads } = buildAgentProfile({
       peerId: 'QmHost',
       name: 'HostBot',
       skills: [],
-      paranetsServed: ['agent-skills', 'climate'],
+      contextGraphsServed: ['agent-skills', 'climate'],
     });
 
     const hostingQuads = quads.filter(q =>
@@ -175,11 +175,11 @@ describe('Profile Builder', () => {
     );
     expect(hostingQuads).toHaveLength(1);
 
-    const paranetsQuad = quads.find(q =>
-      q.predicate === 'https://dkg.origintrail.io/skill#paranetsServed',
+    const contextGraphsQuad = quads.find(q =>
+      q.predicate === 'https://dkg.origintrail.io/skill#contextGraphsServed',
     );
-    expect(paranetsQuad).toBeDefined();
-    expect(paranetsQuad!.object).toContain('agent-skills,climate');
+    expect(contextGraphsQuad).toBeDefined();
+    expect(contextGraphsQuad!.object).toContain('agent-skills,climate');
   });
 
   it('omits optional fields when not provided', () => {
@@ -693,12 +693,12 @@ describe('Node Roles', () => {
   });
 });
 
-describe('DKGAgent config — syncParanets and queryAccess warning', () => {
-  it('DKGAgentConfig accepts syncParanets array', async () => {
+describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => {
+  it('DKGAgentConfig accepts syncContextGraphs array', async () => {
     const agent = await DKGAgent.create({
       name: 'SyncConfigTest',
       chainAdapter: new MockChainAdapter(),
-      syncParanets: ['my-custom-paranet', 'another-paranet'],
+      syncContextGraphs: ['my-custom-paranet', 'another-paranet'],
     });
     expect(agent).toBeDefined();
     await agent.stop().catch(() => {});
@@ -713,11 +713,11 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
 
     try {
       await agent.start();
-      expect((agent as any).config.syncParanets ?? []).not.toContain('runtime-paranet');
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('runtime-paranet');
 
-      agent.subscribeToParanet('runtime-paranet');
+      agent.subscribeToContextGraph('runtime-paranet');
 
-      expect((agent as any).config.syncParanets ?? []).toContain('runtime-paranet');
+      expect((agent as any).config.syncContextGraphs ?? []).toContain('runtime-paranet');
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -732,17 +732,17 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
 
     try {
       await agent.start();
-      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-paranet');
 
-      agent.subscribeToParanet('discovered-paranet', { trackSyncScope: false });
+      agent.subscribeToContextGraph('discovered-paranet', { trackSyncScope: false });
 
-      expect((agent as any).config.syncParanets ?? []).not.toContain('discovered-paranet');
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-paranet');
     } finally {
       await agent.stop().catch(() => {});
     }
   });
 
-  it('syncParanetFromConnectedPeers returns empty stats without peers', async () => {
+  it('syncContextGraphFromConnectedPeers returns empty stats without peers', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoPeers',
       listenHost: '127.0.0.1',
@@ -751,16 +751,16 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
 
     try {
       await agent.start();
-      agent.subscribeToParanet('runtime-paranet');
-      const result = await agent.syncParanetFromConnectedPeers('runtime-paranet', {
-        includeWorkspace: true,
+      agent.subscribeToContextGraph('runtime-paranet');
+      const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
+        includeSharedMemory: true,
       });
 
       expect(result.connectedPeers).toBe(0);
       expect(result.syncCapablePeers).toBe(0);
       expect(result.peersTried).toBe(0);
       expect(result.dataSynced).toBe(0);
-      expect(result.workspaceSynced).toBe(0);
+      expect(result.sharedMemorySynced).toBe(0);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -790,8 +790,8 @@ describe('DKGAgent config — syncParanets and queryAccess warning', () => {
         protocols: [PROTOCOL_SYNC],
       } as any);
       (agent as any).syncFromPeer = syncFromPeer;
-      (agent as any).discoverParanetsFromStore = vi.fn(async () => {});
-      (agent as any).syncWorkspaceFromPeer = vi.fn(async () => 0);
+      (agent as any).discoverContextGraphsFromStore = vi.fn(async () => {});
+      (agent as any).syncSharedMemoryFromPeer = vi.fn(async () => 0);
 
       const first = (agent as any).trySyncFromPeer(remotePeer);
       const second = (agent as any).trySyncFromPeer(remotePeer);

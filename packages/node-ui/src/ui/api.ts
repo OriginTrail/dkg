@@ -146,14 +146,14 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
   return get<{ lines: string[]; totalSize: number }>(`/api/node-log${q ? '?' + q : ''}`);
 };
 
-// --- Paranets ---
-export const fetchParanets = () => get<{ paranets: any[] }>('/api/paranet/list');
+// --- Context Graphs ---
+export const fetchContextGraphs = () => get<{ contextGraphs: any[] }>('/api/context-graph/list');
 
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
   jobId: string;
-  paranetId: string;
-  includeWorkspace: boolean;
+  contextGraphId: string;
+  includeSharedMemory: boolean;
   status: 'queued' | 'running' | 'done' | 'failed';
   queuedAt: number;
   startedAt?: number;
@@ -163,21 +163,21 @@ export interface CatchupStatusResponse {
     syncCapablePeers: number;
     peersTried: number;
     dataSynced: number;
-    workspaceSynced: number;
+    sharedMemorySynced: number;
   };
   error?: string;
 }
 
-export const fetchCatchupStatus = (paranetId: string) =>
-  get<CatchupStatusResponse>(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
+export const fetchCatchupStatus = (contextGraphId: string) =>
+  get<CatchupStatusResponse>(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
 
 // --- Query ---
-export const executeQuery = (sparql: string, paranetId?: string, includeWorkspace?: boolean, graphSuffix?: '_shared_memory') =>
-  post<{ result: any }>('/api/query', { sparql, paranetId, includeWorkspace, graphSuffix });
+export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>
+  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix });
 
 // --- Publish ---
-export const publishTriples = (paranetId: string, quads: any[]) =>
-  post<any>('/api/publish', { paranetId, quads });
+export const publishTriples = (contextGraphId: string, quads: any[]) =>
+  post<any>('/api/publish', { contextGraphId, quads });
 
 // --- Query history ---
 export const fetchQueryHistory = (limit = 50, offset = 0) =>
@@ -441,9 +441,9 @@ export interface MemorySession {
 }
 export interface MemorySessionPublicationStatus {
   sessionId: string;
-  workspaceTripleCount: number;
+  sharedMemoryTripleCount: number;
   dataTripleCount: number;
-  scope: 'workspace_only' | 'enshrined' | 'enshrined_with_pending' | 'empty';
+  scope: 'shared_memory_only' | 'published' | 'published_with_pending' | 'empty';
   rootEntityCount: number;
 }
 export interface MemorySessionPublishResult {
@@ -494,7 +494,7 @@ export const publishMemorySession = (
 ) =>
   post<MemorySessionPublishResult>(`/api/memory/sessions/${encodeURIComponent(sessionId)}/publish`, opts);
 export const fetchMemoryStats = () =>
-  get<{ paranetId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
+  get<{ contextGraphId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
 export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
@@ -770,9 +770,9 @@ export const shutdownNode = () =>
 
 // --- Integrations ---
 export const fetchIntegrations = () =>
-  get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; paranets: any[] }>('/api/integrations');
-export const subscribeToParanet = (paranetId: string) =>
-  post<{ subscribed: string }>('/api/subscribe', { paranetId });
+  get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; contextGraphs: any[] }>('/api/integrations');
+export const subscribeToContextGraph = (contextGraphId: string) =>
+  post<{ subscribed: string }>('/api/subscribe', { contextGraphId });
 
 // --- Notifications ---
 

@@ -6,7 +6,7 @@ import { Logger, createOperationContext, DKGEvent, sparqlInt } from '@origintrai
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { autoPartition } from './auto-partition.js';
-import { computeTripleHash, computeFlatKCRoot } from './merkle.js';
+import { computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { updateMetaMerkleRoot } from './metadata.js';
 
 const SKOLEM_INFIX = '/.well-known/genid/';
@@ -31,30 +31,30 @@ export class UpdateHandler {
   private readonly log = new Logger('UpdateHandler');
 
   /**
-   * Track the highest applied (blockNumber, txIndex) per (paranetId:batchId).
+   * Track the highest applied (blockNumber, txIndex) per (contextGraphId:batchId).
    * Uses canonical chain ordering: accepts if (blockNumber, txIndex) is strictly
    * higher than the last applied update, ensuring deterministic state across nodes.
    */
   private readonly appliedUpdates = new Map<string, AppliedUpdate>();
 
   /**
-   * Batch-to-paranet binding from trusted sources (local publish, metadata store).
+   * Batch-to-context-graph binding from trusted sources (local publish, metadata store).
    * Shared with the publisher so bindings established at publish time are immediately
    * available, preventing first-message-wins attacks from gossip.
    */
-  private readonly knownBatchParanets: Map<string, string>;
+  private readonly knownBatchContextGraphs: Map<string, string>;
 
   constructor(
     store: TripleStore,
     chain: ChainAdapter,
     eventBus: EventBus,
-    options?: { knownBatchParanets?: Map<string, string> },
+    options?: { knownBatchContextGraphs?: Map<string, string> },
   ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
     this.chain = chain;
     this.eventBus = eventBus;
-    this.knownBatchParanets = options?.knownBatchParanets ?? new Map();
+    this.knownBatchContextGraphs = options?.knownBatchContextGraphs ?? new Map();
   }
 
   async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
@@ -65,7 +65,7 @@ export class UpdateHandler {
         ctx = createOperationContext('ka-update', request.operationId);
       }
       const {
-        paranetId,
+        paranetId: contextGraphId,
         batchId,
         nquads,
         manifest,
@@ -75,20 +75,20 @@ export class UpdateHandler {
 
       this.log.info(
         ctx,
-        `KA update from ${fromPeerId} for paranet ${paranetId} batchId=${batchId} tx=${txHash}`,
+        `KA update from ${fromPeerId} for context graph ${contextGraphId} batchId=${batchId} tx=${txHash}`,
       );
 
-      // Paranet binding: check trusted sources first (local publish, store metadata).
+      // Context graph binding: check trusted sources first (local publish, store metadata).
       const batchKey = String(batchId);
-      let knownParanet = this.knownBatchParanets.get(batchKey);
+      let knownContextGraph = this.knownBatchContextGraphs.get(batchKey);
 
-      if (!knownParanet) {
-        knownParanet = await this.lookupBatchParanet(BigInt(batchId));
-        if (knownParanet) this.knownBatchParanets.set(batchKey, knownParanet);
+      if (!knownContextGraph) {
+        knownContextGraph = await this.lookupBatchContextGraph(BigInt(batchId));
+        if (knownContextGraph) this.knownBatchContextGraphs.set(batchKey, knownContextGraph);
       }
 
-      if (knownParanet && knownParanet !== paranetId) {
-        this.log.warn(ctx, `KA update rejected: batchId=${batchId} is bound to paranet "${knownParanet}", not "${paranetId}"`);
+      if (knownContextGraph && knownContextGraph !== contextGraphId) {
+        this.log.warn(ctx, `KA update rejected: batchId=${batchId} is bound to context graph "${knownContextGraph}", not "${contextGraphId}"`);
         return;
       }
 
@@ -116,7 +116,7 @@ export class UpdateHandler {
       // Ordering: use canonical (blockNumber, txIndex) for deterministic state across nodes.
       if (verifiedBlockNumber !== undefined) {
         const txIdx = verifiedTxIndex ?? 0;
-        const orderKey = `${paranetId}:${batchId}`;
+        const orderKey = `${contextGraphId}:${batchId}`;
         const last = this.appliedUpdates.get(orderKey);
         if (last) {
           if (verifiedBlockNumber < last.blockNumber) {
@@ -131,8 +131,8 @@ export class UpdateHandler {
       }
 
       // Merkle root integrity: recompute from the received payload (flat mode)
-      await this.graphManager.ensureParanet(paranetId);
-      const dataGraph = this.graphManager.dataGraphUri(paranetId);
+      await this.graphManager.ensureContextGraph(contextGraphId);
+      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
 
@@ -171,19 +171,19 @@ export class UpdateHandler {
       }
       await this.store.insert(authenticatedQuads);
 
-      // Record applied update for ordering + paranet binding
+      // Record applied update for ordering + context graph binding
       if (verifiedBlockNumber !== undefined) {
-        const orderKey = `${paranetId}:${batchId}`;
+        const orderKey = `${contextGraphId}:${batchId}`;
         this.appliedUpdates.set(orderKey, {
           blockNumber: verifiedBlockNumber,
           txIndex: verifiedTxIndex ?? 0,
         });
       }
       // Binding was already established from a trusted source (local publish or metadata lookup).
-      // Do NOT set from gossip — that would allow first-message-wins paranet spoofing.
+      // Do NOT set from gossip — that would allow first-message-wins context graph spoofing.
 
       try {
-        await updateMetaMerkleRoot(this.store, this.graphManager, paranetId, BigInt(batchId), computedRoot);
+        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, BigInt(batchId), computedRoot);
       } catch (err) {
         this.log.warn(
           ctx,
@@ -194,7 +194,7 @@ export class UpdateHandler {
       this.log.info(ctx, `Applied KA update: ${authenticatedQuads.length} triples for batchId=${batchId}`);
 
       this.eventBus.emit(DKGEvent.KA_UPDATED, {
-        paranetId,
+        contextGraphId,
         batchId: BigInt(batchId),
         rootEntities: manifest.map((m) => m.rootEntity),
         txHash,
@@ -209,10 +209,10 @@ export class UpdateHandler {
   }
 
   /**
-   * Look up the paranet a batch was originally published on by querying local
+   * Look up the context graph a batch was originally published on by querying local
    * KC metadata. Returns undefined if the batch is unknown to this node.
    */
-  private async lookupBatchParanet(batchId: bigint): Promise<string | undefined> {
+  private async lookupBatchContextGraph(batchId: bigint): Promise<string | undefined> {
     const DKG = 'http://dkg.io/ontology/';
     const XSD = 'http://www.w3.org/2001/XMLSchema#';
     const result = await this.store.query(

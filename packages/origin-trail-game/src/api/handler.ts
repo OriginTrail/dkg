@@ -33,8 +33,8 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
   let coordinator: OriginTrailGameCoordinator | null = null;
 
   if (agent && typeof agent.peerId === 'string' && agent.gossip) {
-    const paranetId = 'origin-trail-game';
-    coordinator = new OriginTrailGameCoordinator(agent, { paranetId }, (msg: string) => {
+    const contextGraphId = 'origin-trail-game';
+    coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId }, (msg: string) => {
       console.log(`[OriginTrailGame] ${msg}`);
     });
   }

@@ -6,8 +6,8 @@
  *
  *  1. Identity IDs propagate through gossip and appear in swarm state
  *  2. A context graph is created on-chain during expedition launch
- *  3. Turn resolution enshrines data to the context graph (not plain publish)
- *  4. Workspace writes use the normalized paranet graph URI
+ *  3. Turn resolution publishes data to the context graph (not plain publish)
+ *  4. Shared memory writes use the normalized context graph URI
  *  5. Follower nodes store the context graph ID
  *  6. The fallback path works when context graph creation fails
  */
@@ -95,7 +95,7 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
     expect(swarmB.contextGraphId).toBe(swarmC.contextGraphId);
   });
 
-  it('turn 1: votes resolve and data is enshrined to context graph', async () => {
+  it('turn 1: votes resolve and data is published to context graph', async () => {
     await apiA.vote(swarmId, 'advance', { pace: 2 });
     await sleep(500);
     await apiB.vote(swarmId, 'advance', { pace: 2 });
@@ -109,12 +109,12 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
     expect(swarm.lastTurn.winningAction).toBe('advance');
 
     const leaderLog = readNodeLog(nodes[0]);
-    expect(leaderLog).toContain('enshrined to context graph');
+    expect(leaderLog).toContain('published to context graph');
     expect(leaderLog).not.toContain('published (no context graph)');
     expect(leaderLog).not.toContain('Parser error');
   });
 
-  it('workspace writes use normalized paranet graph URI', async () => {
+  it('shared memory writes use normalized context graph URI', async () => {
     const leaderLog = readNodeLog(nodes[0]);
     // The old bug: quads had graph "did:dkg:context-graph:origin-trail-game/context/swarm-..."
     // which caused "Workspace validation failed: Rule 1"
@@ -155,7 +155,7 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
     const swarm = await apiA.swarm(swarmId);
     expect(swarm.currentTurn).toBe(4);
 
-    // Force-resolve uses plain publish, not context graph enshrinement
+    // Force-resolve uses plain publish, not context graph publication
     const leaderLog = readNodeLog(nodes[0]);
     expect(leaderLog).toContain('published (plain, no context graph)');
   });
@@ -177,11 +177,11 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
     // 2. Context graph creation on-chain with M value
     expect(leaderLog).toMatch(/Context graph.*created.*M=/);
 
-    // 3. Successful enshrinement for consensus turns
-    const enshrinements = leaderLog.split('enshrined to context graph').length - 1;
-    expect(enshrinements).toBeGreaterThanOrEqual(2);
+    // 3. Successful publication for consensus turns
+    const publications = leaderLog.split('published to context graph').length - 1;
+    expect(publications).toBeGreaterThanOrEqual(2);
 
-    // 4. Force-resolve uses plain publish (not enshrinement)
+    // 4. Force-resolve uses plain publish (not publication)
     expect(leaderLog).toContain('published (plain, no context graph)');
 
     // 5. No parser errors (the literal escaping fix works)

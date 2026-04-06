@@ -146,7 +146,7 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
      * @notice Called by KnowledgeAssets contract to cover publishing cost at a discount.
      * Only authorized keys of the account can trigger this.
      */
-    function coverPublishingCost(uint256 accountId, uint96 baseCost, address caller) external onlyContracts {
+    function coverPublishingCost(uint256 accountId, uint96 baseCost, address caller) external onlyContracts returns (uint96) {
         Account storage acct = _requireAccount(accountId);
         if (!authorizedKeys[accountId][caller]) revert NotAuthorized(accountId, caller);
 
@@ -163,6 +163,7 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
         }
 
         emit CostCovered(accountId, baseCost, discountedCost);
+        return discountedCost;
     }
 
     function withdraw(uint256 accountId, uint96 amount) external {

@@ -37,8 +37,8 @@ describe('DkgNodePlugin', () => {
     const toolNames = registeredTools.map(t => t.name);
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
-    expect(toolNames).toContain('dkg_list_paranets');
-    expect(toolNames).toContain('dkg_paranet_create');
+    expect(toolNames).toContain('dkg_list_context_graphs');
+    expect(toolNames).toContain('dkg_context_graph_create');
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
@@ -46,7 +46,9 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    expect(registeredTools.length).toBe(11);
+    expect(toolNames).toContain('dkg_list_paranets');
+    expect(toolNames).toContain('dkg_paranet_create');
+    expect(registeredTools.length).toBe(13);
   });
 
   it('all tools have name, description, parameters, and execute', () => {

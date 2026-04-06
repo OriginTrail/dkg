@@ -119,7 +119,7 @@ describe('SessionManager', () => {
     );
 
     expect(config.sessionId).toHaveLength(64);
-    expect(config.paranetId).toBe('paranet-1');
+    expect(config.contextGraphId).toBe('paranet-1');
     expect(config.appId).toBe('test-app');
     expect(config.status).toBe('proposed');
     expect(config.membership).toHaveLength(2);
@@ -171,13 +171,13 @@ describe('SessionManager', () => {
     expect(session!.currentRound).toBe(0);
   });
 
-  it('listSessions filters by paranetId', async () => {
+  it('listSessions filters by contextGraphId', async () => {
     await manager.createSession('paranet-1', 'app', membership, quorumPolicy, reducerConfig, 30000, null);
     await manager.createSession('paranet-2', 'app', membership, quorumPolicy, reducerConfig, 30000, null);
 
     const list = manager.listSessions('paranet-1');
     expect(list).toHaveLength(1);
-    expect(list[0].paranetId).toBe('paranet-1');
+    expect(list[0].contextGraphId).toBe('paranet-1');
   });
 
   it('listSessions filters by status', async () => {
@@ -328,7 +328,7 @@ describe('SessionManager', () => {
     function fakeProposalEvent(overrides: Partial<AKAEvent & { config: any }> = {}): AKAEvent {
       const config = overrides.config ?? {
         sessionId: 'fake-session-id-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcde',
-        paranetId: 'paranet-1',
+        contextGraphId: 'paranet-1',
         appId: 'test-app',
         createdBy: 'peer-1',
         membership,
@@ -361,7 +361,7 @@ describe('SessionManager', () => {
       const event = fakeProposalEvent();
       const config = {
         sessionId: event.sessionId,
-        paranetId: 'paranet-1',
+        contextGraphId: 'paranet-1',
         appId: 'test-app',
         createdBy: 'peer-1',
         membership,
@@ -507,7 +507,7 @@ describe('SessionManager', () => {
         {
           domain: 'AKA-v1',
           network: 'test-net',
-          paranetId: 'paranet-1',
+          contextGraphId: 'paranet-1',
           sessionId,
           round: 0,
           type: 'SessionActivated',
@@ -545,7 +545,7 @@ describe('SessionManager', () => {
         {
           domain: 'AKA-v1',
           network: 'test-net',
-          paranetId: 'paranet-1',
+          contextGraphId: 'paranet-1',
           sessionId,
           round: 0,
           type: 'SessionActivated',
@@ -608,7 +608,7 @@ describe('SessionManager', () => {
         {
           domain: 'AKA-v1',
           network: 'test-net',
-          paranetId: 'paranet-1',
+          contextGraphId: 'paranet-1',
           sessionId: config.sessionId,
           round: 2,
           type: 'RoundAck',
@@ -667,7 +667,7 @@ describe('SessionManager', () => {
         {
           domain: 'AKA-v1',
           network: 'test-net',
-          paranetId: 'paranet-1',
+          contextGraphId: 'paranet-1',
           sessionId: config.sessionId,
           round: 2,
           type: 'RoundFinalized',

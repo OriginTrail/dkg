@@ -23,6 +23,32 @@ export type ReceiverSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 /**
+ * V10 core node ACK signature collected via /dkg/10.0.0/storage-ack.
+ * Spec §9.0.3: ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ */
+export interface V10CoreNodeACK {
+  peerId: string;
+  signatureR: Uint8Array;
+  signatureVS: Uint8Array;
+  nodeIdentityId: bigint;
+}
+
+/**
+ * Callback that collects V10 StorageACKs from 3 core nodes.
+ * Called AFTER merkle root computation, BEFORE on-chain tx.
+ * stagingQuads: optional N-Quads bytes to send inline to core nodes
+ * so they can verify the merkle root without needing SWM pre-positioning.
+ */
+export type V10ACKProvider = (
+  merkleRoot: Uint8Array,
+  contextGraphId: string,
+  kaCount: number,
+  rootEntities: string[],
+  publicByteSize: bigint,
+  stagingQuads?: Uint8Array,
+) => Promise<V10CoreNodeACK[]>;
+
+/**
  * Callback that collects participant signatures for context graph governance.
  */
 export type ParticipantSignatureProvider = (
@@ -31,7 +57,7 @@ export type ParticipantSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 export interface PublishOptions {
-  paranetId: string;
+  contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
   /** Publisher peer ID used for KC ownership/access metadata. */
@@ -51,9 +77,9 @@ export interface PublishOptions {
   entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
-  /** Override the data graph URI (used for context graph enshrinement). */
+  /** Override the data graph URI (used for context graph publishing). */
   targetGraphUri?: string;
-  /** Override the meta graph URI (used for context graph enshrinement). */
+  /** Override the meta graph URI (used for context graph publishing). */
   targetMetaGraphUri?: string;
   /**
    * If provided, publisher calls this to collect receiver signatures
@@ -61,6 +87,22 @@ export interface PublishOptions {
    * If absent, falls back to self-signing (legacy behavior).
    */
   receiverSignatureProvider?: ReceiverSignatureProvider;
+  /**
+   * V10 ACK provider: collects core node StorageACKs via P2P.
+   * When provided, ACKs are collected and stored in the result.
+   */
+  v10ACKProvider?: V10ACKProvider;
+  /**
+   * When publishing into a specific context graph (publishFromSharedMemory),
+   * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
+   */
+  publishContextGraphId?: string;
+  /**
+   * When true, the data is already in peers' SWM via shared memory gossip.
+   * V10 ACK collection will NOT send inline staging quads — core nodes
+   * verify against their local SWM copy (storage-attestation guarantee).
+   */
+  fromSharedMemory?: boolean;
 }
 
 export interface PublishResult {
@@ -75,6 +117,8 @@ export interface PublishResult {
   publicQuads?: Quad[];
   /** Set when KC is confirmed on-chain but context-graph registration failed. */
   contextGraphError?: string;
+  /** V10: Core node ACK signatures collected before chain TX (spec §9.0.3). */
+  v10ACKs?: V10CoreNodeACK[];
 }
 
 export interface Publisher {

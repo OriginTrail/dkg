@@ -10,11 +10,11 @@ import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   UpdateHandler,
-  WorkspaceHandler,
+  SharedMemoryHandler,
   autoPartition,
-  computePublicRoot,
-  computeKARoot,
-  computeKCRoot,
+  computePublicRootV10 as computePublicRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 
@@ -51,7 +51,7 @@ function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; 
 // =====================================================================
 
 describe('Prefix deletion safety', () => {
-  describe('DKGPublisher.writeToWorkspace', () => {
+  describe('DKGPublisher.share', () => {
     let store: OxigraphStore;
     let publisher: DKGPublisher;
 
@@ -67,16 +67,16 @@ describe('Prefix deletion safety', () => {
     });
 
     it('upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(PARANET, [
         q('urn:x:foo', 'http://schema.org/name', '"Foo"'),
       ], { publisherPeerId: 'peer1' });
 
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(PARANET, [
         q('urn:x:foobar', 'http://schema.org/name', '"Foobar"'),
       ], { publisherPeerId: 'peer1' });
 
       // Upsert urn:x:foo — urn:x:foobar must survive
-      await publisher.writeToWorkspace(PARANET, [
+      await publisher.share(PARANET, [
         q('urn:x:foo', 'http://schema.org/name', '"Foo Updated"'),
       ], { publisherPeerId: 'peer1' });
 
@@ -100,14 +100,14 @@ describe('Prefix deletion safety', () => {
     });
   });
 
-  describe('WorkspaceHandler', () => {
+  describe('SharedMemoryHandler', () => {
     let store: OxigraphStore;
-    let handler: WorkspaceHandler;
+    let handler: SharedMemoryHandler;
 
     beforeEach(async () => {
       store = new OxigraphStore();
       const owned = new Map<string, Map<string, string>>();
-      handler = new WorkspaceHandler(store, new TypedEventBus(), { workspaceOwnedEntities: owned });
+      handler = new SharedMemoryHandler(store, new TypedEventBus(), { sharedMemoryOwnedEntities: owned });
     });
 
     it('gossip upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
@@ -118,7 +118,7 @@ describe('Prefix deletion safety', () => {
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-1',
+        shareOperationId: 'ws-prefix-1',
         timestampMs: Date.now(),
       });
       await handler.handle(msg1, peerId);
@@ -128,7 +128,7 @@ describe('Prefix deletion safety', () => {
         nquads: new TextEncoder().encode(`<urn:x:foobar> <http://schema.org/name> "Foobar" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foobar', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-2',
+        shareOperationId: 'ws-prefix-2',
         timestampMs: Date.now(),
       });
       await handler.handle(msg2, peerId);
@@ -139,7 +139,7 @@ describe('Prefix deletion safety', () => {
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo Updated" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
-        workspaceOperationId: 'ws-prefix-3',
+        shareOperationId: 'ws-prefix-3',
         timestampMs: Date.now(),
       });
       await handler.handle(msg3, peerId);
@@ -181,11 +181,11 @@ describe('Prefix deletion safety', () => {
       const fooQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo"')];
       const foobarQuads = [q('urn:x:foobar', 'http://schema.org/name', '"Foobar"')];
 
-      await publisher.publish({ paranetId: PARANET, quads: [...fooQuads, ...foobarQuads] });
+      await publisher.publish({ contextGraphId: PARANET, quads: [...fooQuads, ...foobarQuads] });
 
       const updateQuads = [q('urn:x:foo', 'http://schema.org/name', '"Foo Updated"')];
       const updateResult = await publisher.update(1n, {
-        paranetId: PARANET,
+        contextGraphId: PARANET,
         quads: updateQuads,
       });
 
@@ -239,7 +239,7 @@ describe('Workspace metadata precision', () => {
     const entityB = 'urn:test:meta:b';
 
     // Write both roots in a single operation
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(entityA, 'http://schema.org/name', '"A"'),
       q(entityB, 'http://schema.org/name', '"B"'),
     ], { publisherPeerId: 'peer1' });
@@ -251,7 +251,7 @@ describe('Workspace metadata precision', () => {
     const opCountBefore = metaBefore.type === 'bindings' ? metaBefore.bindings.length : 0;
 
     // Upsert only entityA
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(entityA, 'http://schema.org/name', '"A Updated"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -292,7 +292,7 @@ describe('chainId=none validation', () => {
 
   it('rejects gossip with wrong merkle root even without chain verification', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(PARANET);
     const dataGraph = gm.dataGraphUri(PARANET);
 
     // Insert some existing data
@@ -327,7 +327,7 @@ describe('chainId=none validation', () => {
 
   it('accepts gossip with correct merkle root on chainId=none', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(PARANET);
     const dataGraph = gm.dataGraphUri(PARANET);
 
     const quads = [q('urn:new:entity', 'http://schema.org/name', '"Hello"')];
@@ -360,7 +360,7 @@ describe('chainId=none validation', () => {
 
   it('rejects gossip with empty merkle root on chainId=none', async () => {
     const gm = new GraphManager(store);
-    await gm.ensureParanet(PARANET);
+    await gm.ensureContextGraph(PARANET);
 
     const quads = [q('urn:new', 'http://schema.org/name', '"Should not apply"')];
     const msg = encodeKAUpdateRequest({
@@ -494,19 +494,19 @@ describe('Same-block ordering', () => {
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:same:block', 'http://schema.org/name', '"Original"')],
     });
 
     const update1Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 1"')];
     const update1 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: update1Quads,
     });
 
     const update2Quads = [q('urn:same:block', 'http://schema.org/name', '"Update 2"')];
     const update2 = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: update2Quads,
     });
 
@@ -560,13 +560,13 @@ describe('Same-block ordering', () => {
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:replay', 'http://schema.org/name', '"Original"')],
     });
 
     const updateQuads = [q('urn:replay', 'http://schema.org/name', '"Updated"')];
     const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: updateQuads,
     });
 
@@ -614,13 +614,13 @@ describe('publisher.update() atomicity', () => {
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Original"')],
     });
 
     // Attempt to update a non-existent batch — chain tx will fail
     const result = await publisher.update(999n, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:atomic', 'http://schema.org/name', '"Should not appear"')],
     });
     expect(result.status).toBe('failed');
@@ -675,12 +675,12 @@ describe('MockChainAdapter.verifyKAUpdate txIndex', () => {
 
 describe('Workspace peerId spoofing', () => {
   let store: OxigraphStore;
-  let handler: WorkspaceHandler;
+  let handler: SharedMemoryHandler;
 
   beforeEach(async () => {
     store = new OxigraphStore();
     const owned = new Map<string, Map<string, string>>();
-    handler = new WorkspaceHandler(store, new TypedEventBus(), { workspaceOwnedEntities: owned });
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), { sharedMemoryOwnedEntities: owned });
   });
 
   it('rejects message where publisherPeerId does not match fromPeerId', async () => {
@@ -692,7 +692,7 @@ describe('Workspace peerId spoofing', () => {
       nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
       publisherPeerId: victimPeerId,
-      workspaceOperationId: 'ws-spoof-1',
+      shareOperationId: 'ws-spoof-1',
       timestampMs: Date.now(),
     });
 
@@ -717,7 +717,7 @@ describe('Workspace peerId spoofing', () => {
       nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
       publisherPeerId: peerId,
-      workspaceOperationId: 'ws-legit-1',
+      shareOperationId: 'ws-legit-1',
       timestampMs: Date.now(),
     });
 
@@ -747,27 +747,27 @@ describe('Cross-paranet binding (trusted source)', () => {
     const chain = new MockChainAdapter('mock:31337', wallet.address);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
-    const knownBatchParanets = new Map<string, string>();
+    const knownBatchContextGraphs = new Map<string, string>();
 
     const publisher = new DKGPublisher({
       store, chain, eventBus, keypair,
       publisherPrivateKey: wallet.privateKey,
       publisherNodeIdentityId: 1n,
-      knownBatchParanets,
+      knownBatchContextGraphs,
     });
-    const handler = new UpdateHandler(store, chain, eventBus, { knownBatchParanets });
+    const handler = new UpdateHandler(store, chain, eventBus, { knownBatchContextGraphs });
 
     // Publish on the correct paranet — binding is registered automatically
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:trusted:bind', 'http://schema.org/name', '"Original"')],
     });
-    expect(knownBatchParanets.get(String(original.kcId))).toBe(PARANET);
+    expect(knownBatchContextGraphs.get(String(original.kcId))).toBe(PARANET);
 
     // Attacker tries to replay the same batchId on a different paranet
     const updateQuads = [q('urn:trusted:bind', 'http://schema.org/name', '"Hacked"')];
     const updateResult = await publisher.update(original.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: updateQuads,
     });
 
@@ -788,7 +788,7 @@ describe('Cross-paranet binding (trusted source)', () => {
 
     // Verify the attacker's paranet graph is empty
     const gm = new GraphManager(store);
-    await gm.ensureParanet('attacker-paranet');
+    await gm.ensureContextGraph('attacker-paranet');
     const result = await store.query(
       `ASK { GRAPH <${gm.dataGraphUri('attacker-paranet')}> { <urn:trusted:bind> ?p ?o } }`,
     );
@@ -861,7 +861,7 @@ describe('Mock same-block txIndex ordering', () => {
     });
 
     const original = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:txidx', 'http://schema.org/name', '"Original"')],
     });
 
@@ -869,10 +869,10 @@ describe('Mock same-block txIndex ordering', () => {
     chain.autoMine = false;
 
     const q1 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=0"')];
-    const update1 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q1 });
+    const update1 = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q1 });
 
     const q2 = [q('urn:txidx', 'http://schema.org/name', '"Update txIdx=1"')];
-    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update2 = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
 
     chain.autoMine = true;
     chain.advanceBlock();
@@ -942,14 +942,14 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     publisher.setIdentityId(1n);
 
     const quads = [q('urn:typed-lit', 'http://schema.org/name', '"Typed"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: PARANET, quads });
     expect(original.status).toBe('confirmed');
 
     // UpdateHandler without pre-registered binding — should discover it via SPARQL lookup
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:typed-lit', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
@@ -990,14 +990,14 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     publisher.setIdentityId(1n);
 
     const quads = [q('urn:xpara-lookup', 'http://schema.org/name', '"Original"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: PARANET, quads });
     expect(original.status).toBe('confirmed');
 
     const evilParanet = 'evil-paranet';
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:xpara-lookup', 'http://schema.org/name', '"Evil"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
@@ -1044,11 +1044,11 @@ describe('MockChainAdapter address case normalization', () => {
     publisher.setIdentityId(1n);
 
     const quads = [q('urn:addr-case', 'http://schema.org/name', '"CaseTest"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: PARANET, quads });
     expect(original.status).toBe('confirmed');
 
     const q2 = [q('urn:addr-case', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     // Verify with address in all lowercase
@@ -1088,14 +1088,14 @@ describe('Gossip-only batch→paranet binding rejected', () => {
     publisher.setIdentityId(1n);
 
     const quads = [q('urn:gossip-bind', 'http://schema.org/name', '"Original"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: PARANET, quads });
     expect(original.status).toBe('confirmed');
 
-    // Handler with separate knownBatchParanets (empty) — no trusted binding
+    // Handler with separate knownBatchContextGraphs (empty) — no trusted binding
     const handler = new UpdateHandler(store, chain, eventBus);
 
     const q2 = [q('urn:gossip-bind', 'http://schema.org/name', '"Updated"')];
-    const update = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const update = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
     expect(update.status).toBe('confirmed');
 
     // First update on correct paranet should go through (discovered via SPARQL lookup)
@@ -1115,7 +1115,7 @@ describe('Gossip-only batch→paranet binding rejected', () => {
 
     // Now send a second message on a DIFFERENT paranet with a new valid chain tx
     const q3 = [q('urn:gossip-bind', 'http://schema.org/name', '"Spoofed"')];
-    const update2 = await publisher.update(original.kcId, { paranetId: PARANET, quads: q3 });
+    const update2 = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q3 });
     expect(update2.status).toBe('confirmed');
 
     const evilParanet = 'evil-gossip';
@@ -1163,13 +1163,13 @@ describe('Update provenance shape', () => {
     publisher.setIdentityId(1n);
 
     const quads = [q('urn:prov-shape', 'http://schema.org/name', '"V1"')];
-    const original = await publisher.publish({ paranetId: PARANET, quads });
+    const original = await publisher.publish({ contextGraphId: PARANET, quads });
     expect(original.status).toBe('confirmed');
     expect(original.onChainResult!.startKAId).toBeDefined();
     expect(original.onChainResult!.endKAId).toBeDefined();
 
     const q2 = [q('urn:prov-shape', 'http://schema.org/name', '"V2"')];
-    const updated = await publisher.update(original.kcId, { paranetId: PARANET, quads: q2 });
+    const updated = await publisher.update(original.kcId, { contextGraphId: PARANET, quads: q2 });
     expect(updated.status).toBe('confirmed');
     expect(updated.onChainResult).toBeDefined();
     expect(updated.onChainResult!.txHash).toBeTruthy();
@@ -1202,7 +1202,7 @@ describe('parseCountLiteral robustness', () => {
       q('urn:count-a', 'http://schema.org/name', '"CountA"'),
       q('urn:count-b', 'http://schema.org/name', '"CountB"'),
     ];
-    await publisher.writeToWorkspace(PARANET, wsQuads, {
+    await publisher.share(PARANET, wsQuads, {
       publisherPeerId: 'test-peer',
     });
 
@@ -1210,7 +1210,7 @@ describe('parseCountLiteral robustness', () => {
     const wsQuads2 = [
       q('urn:count-a', 'http://schema.org/name', '"CountA-v2"'),
     ];
-    await publisher.writeToWorkspace(PARANET, wsQuads2, {
+    await publisher.share(PARANET, wsQuads2, {
       publisherPeerId: 'test-peer',
     });
 

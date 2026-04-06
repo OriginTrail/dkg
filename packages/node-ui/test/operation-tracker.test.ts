@@ -28,7 +28,7 @@ afterEach(() => {
 describe('OperationTracker', () => {
   it('tracks start → complete lifecycle', () => {
     const c = ctx('publish', 'op-1');
-    tracker.start(c, { peerId: 'peer-abc', paranetId: 'testing' });
+    tracker.start(c, { peerId: 'peer-abc', contextGraphId: 'testing' });
 
     let op = db.getOperation('op-1').operation;
     expect(op).toBeDefined();
@@ -65,7 +65,7 @@ describe('OperationTracker', () => {
 
   it('stores details as JSON', () => {
     const c = ctx('publish', 'op-4');
-    tracker.start(c, { details: { quads: 100, paranet: 'testing' } });
+    tracker.start(c, { details: { quads: 100, contextGraph: 'testing' } });
 
     const op = db.getOperation('op-4').operation;
     const details = JSON.parse(op!.details!);
@@ -93,7 +93,7 @@ describe('OperationTracker', () => {
 
   it('tracks phase lifecycle (startPhase → completePhase)', async () => {
     const c = ctx('publish', 'op-phases');
-    tracker.start(c, { paranetId: 'testing' });
+    tracker.start(c, { contextGraphId: 'testing' });
 
     tracker.startPhase(c, 'prepare');
     await new Promise(r => setTimeout(r, 10));
@@ -156,7 +156,7 @@ describe('OperationTracker', () => {
 
   it('fail() cleans up ALL active phases, not just one', async () => {
     const c = ctx('publish', 'op-nested-fail');
-    tracker.start(c, { paranetId: 'testing' });
+    tracker.start(c, { contextGraphId: 'testing' });
 
     // Start nested phases: prepare > prepare:merkle (both active)
     tracker.startPhase(c, 'prepare');

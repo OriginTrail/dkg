@@ -58,7 +58,7 @@ export {
 
 export {
   AKAGossipHandler,
-  paranetSessionsTopic,
+  contextGraphSessionsTopic,
   sessionTopic,
   type AKAEventHandler,
 } from './gossip-handler.js';

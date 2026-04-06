@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent } from '../src/handlers.js';
 import type { QueryEngine } from '../src/types.js';
 
-const PARANET_ID = 'test-paranet';
+const CONTEXT_GRAPH_ID = 'test-paranet';
 const BASE_PATH = '/api/epcis/events';
 
 function mockQueryEngine(bindings: Record<string, string>[] = []): QueryEngine {
@@ -32,7 +32,7 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
-  const defaultConfig = { paranetId: PARANET_ID, queryEngine: mockQueryEngine(), basePath: BASE_PATH };
+  const defaultConfig = { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: mockQueryEngine(), basePath: BASE_PATH };
 
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
     const engine = mockQueryEngine([makeBindings()]);
@@ -62,11 +62,11 @@ describe('handleEventsQuery', () => {
     expect(event.readPoint).toEqual({ id: 'urn:epc:id:sgln:4012345.00001.0' });
     expect(event.bizLocation).toEqual({ id: 'urn:epc:id:sgln:4012345.00001.0' });
 
-    // Verify the query engine was called with paranetId
+    // Verify the query engine was called with contextGraphId
     expect(engine.query).toHaveBeenCalledOnce();
     const [sparql, opts] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(sparql).toContain('GRAPH <did:dkg:context-graph:test-paranet>');
-    expect(opts).toEqual({ paranetId: PARANET_ID });
+    expect(opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID });
   });
 
   it('returns multiple events in eventList', async () => {
@@ -410,7 +410,7 @@ describe('handleEventsQuery — validation', () => {
     await expect(
       handleEventsQuery(
         new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
-        { paranetId: PARANET_ID, queryEngine: engine, basePath: BASE_PATH },
+        { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
       ),
     ).rejects.toThrow();
 

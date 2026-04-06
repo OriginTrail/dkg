@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { NS, RDF_TYPE, XSD, Class, Prop, Status, DEFAULT_PARANET } from '../src/ontology.js';
+import { NS, RDF_TYPE, XSD, Class, Prop, Status, DEFAULT_CONTEXT_GRAPH } from '../src/ontology.js';
 
 describe('ontology constants', () => {
   it('namespace is a valid URI', () => {
@@ -66,8 +66,8 @@ describe('ontology constants', () => {
     expect(Status.Crash).toBe(`${NS}crash`);
   });
 
-  it('has a default paranet name', () => {
-    expect(DEFAULT_PARANET).toBe('autoresearch');
+  it('has a default context graph name', () => {
+    expect(DEFAULT_CONTEXT_GRAPH).toBe('autoresearch');
   });
 
   it('property and class names are unique', () => {

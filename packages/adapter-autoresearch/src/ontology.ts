@@ -56,4 +56,4 @@ export const Status = {
   Crash: `${NS}crash`,
 } as const;
 
-export const DEFAULT_PARANET = 'autoresearch';
+export const DEFAULT_CONTEXT_GRAPH = 'autoresearch';

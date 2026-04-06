@@ -1,6 +1,6 @@
 import type { QueryEngine, QueryResult } from '@origintrail-official/dkg-query';
 import { DKG_ONTOLOGY, escapeSparqlLiteral, assertSafeIri } from '@origintrail-official/dkg-core';
-import { AGENT_REGISTRY_PARANET } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
 const DKG = 'https://dkg.network/ontology#';
@@ -35,7 +35,7 @@ export interface SkillSearchOptions {
 
 /**
  * Discovers agents and skill offerings by querying the local Agent Registry
- * paranet. All queries are strictly local (Spec §1.6 Store Isolation).
+ * context graph. All queries are strictly local (Spec §1.6 Store Isolation).
  */
 export class DiscoveryClient {
   private readonly engine: QueryEngine;
@@ -64,7 +64,7 @@ export class DiscoveryClient {
       ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_PARANET });
+    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
 
     return result.bindings.map((row) => ({
       agentUri: row['agent'],
@@ -114,7 +114,7 @@ export class DiscoveryClient {
       ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_PARANET });
+    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
 
     return result.bindings.map((row) => ({
       agentUri: row['agent'],
@@ -140,7 +140,7 @@ export class DiscoveryClient {
       LIMIT 1
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_PARANET });
+    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
     if (result.bindings.length === 0) return null;
 
     const row = result.bindings[0];

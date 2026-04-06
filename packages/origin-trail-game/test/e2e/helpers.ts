@@ -220,7 +220,7 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
       apiPort,
       listenPort: libp2pPort,
       nodeRole: isRelay ? 'core' : 'edge',
-      paranets: ['origin-trail-game'],
+      contextGraphs: ['origin-trail-game'],
       auth: { enabled: true, tokens: [authToken] },
     };
 
@@ -419,5 +419,5 @@ export function readNodeLog(node: TestNode): string {
 export function gameLogLines(node: TestNode): string[] {
   return readNodeLog(node)
     .split('\n')
-    .filter(l => l.includes('[OriginTrailGame]') || l.includes('Context graph') || l.includes('enshrine') || l.includes('identityId'));
+    .filter(l => l.includes('[OriginTrailGame]') || l.includes('Context graph') || l.includes('publish') || l.includes('identityId'));
 }

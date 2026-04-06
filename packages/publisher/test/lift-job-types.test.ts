@@ -24,10 +24,10 @@ describe('LiftJob request and record types', () => {
     expect(LIFT_TRANSITION_TYPES).toEqual(['CREATE', 'MUTATE', 'REVOKE']);
     expect(LIFT_AUTHORITY_TYPES).toEqual(['owner', 'multisig', 'quorum', 'capability']);
     expect(LIFT_REQUEST_IMMUTABLE_FIELDS).toEqual([
-      'workspaceId',
-      'workspaceOperationId',
+      'swmId',
+      'shareOperationId',
       'roots',
-      'paranetId',
+      'contextGraphId',
       'namespace',
       'scope',
       'transitionType',
@@ -66,10 +66,10 @@ describe('LiftJob request and record types', () => {
 
   it('models accepted jobs with immutable request data and retry metadata', () => {
     const request: LiftRequest = {
-      workspaceId: 'ws-1',
-      workspaceOperationId: 'op-1',
+      swmId: 'ws-1',
+      shareOperationId: 'op-1',
       roots: ['urn:local:/rihana'],
-      paranetId: 'music-social',
+      contextGraphId: 'music-social',
       namespace: 'aloha',
       scope: 'person-profile',
       transitionType: 'CREATE',
@@ -92,10 +92,10 @@ describe('LiftJob request and record types', () => {
     const job: LiftJobBroadcast = {
       jobId: 'job-2',
       request: {
-        workspaceId: 'ws-2',
-        workspaceOperationId: 'op-2',
+        swmId: 'ws-2',
+        shareOperationId: 'op-2',
         roots: ['urn:local:/rihana'],
-        paranetId: 'music-social',
+        contextGraphId: 'music-social',
         namespace: 'aloha',
         scope: 'person-profile',
         transitionType: 'MUTATE',
@@ -125,10 +125,10 @@ describe('LiftJob request and record types', () => {
     const finalized: LiftJobFinalized = {
       jobId: 'job-3',
       request: {
-        workspaceId: 'ws-3',
-        workspaceOperationId: 'op-3',
+        swmId: 'ws-3',
+        shareOperationId: 'op-3',
         roots: ['urn:local:/rihana'],
-        paranetId: 'music-social',
+        contextGraphId: 'music-social',
         namespace: 'aloha',
         scope: 'person-profile',
         transitionType: 'CREATE',
@@ -203,10 +203,10 @@ describe('LiftJob request and record types', () => {
     const failed: LiftJobFailedFromIncluded = {
       jobId: 'job-5',
       request: {
-        workspaceId: 'ws-5',
-        workspaceOperationId: 'op-5',
+        swmId: 'ws-5',
+        shareOperationId: 'op-5',
         roots: ['urn:local:/rihana'],
-        paranetId: 'music-social',
+        contextGraphId: 'music-social',
         namespace: 'aloha',
         scope: 'person-profile',
         transitionType: 'CREATE',
@@ -253,10 +253,10 @@ describe('LiftJob request and record types', () => {
 
   it('rejects impossible recovery combinations at compile time', () => {
     const baseRequest: LiftRequest = {
-      workspaceId: 'ws-x',
-      workspaceOperationId: 'op-x',
+      swmId: 'ws-x',
+      shareOperationId: 'op-x',
       roots: ['urn:local:/rihana'],
-      paranetId: 'music-social',
+      contextGraphId: 'music-social',
       namespace: 'aloha',
       scope: 'person-profile',
       transitionType: 'CREATE',

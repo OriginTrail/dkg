@@ -16,13 +16,16 @@ export {
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,
   type DKGPublisherConfig,
+  type ShareOptions,
   type WriteToWorkspaceOptions,
+  type ShareResult,
   type WriteToWorkspaceResult,
+  type ConditionalShareOptions,
   type WriteConditionalToWorkspaceOptions,
   type CASCondition,
 } from './dkg-publisher.js';
@@ -104,8 +107,10 @@ export {
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
-export { WorkspaceHandler } from './workspace-handler.js';
+export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
-export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
+export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated, type OnParanetCreated, type OnCollectionUpdated, type OnAllowListUpdated, type OnProfileEvent, type CursorPersistence } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
+export { ACKCollector, type ACKCollectorDeps, type CollectedACK, type ACKCollectionResult } from './ack-collector.js';
+export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';

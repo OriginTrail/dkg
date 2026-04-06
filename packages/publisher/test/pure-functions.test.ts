@@ -6,11 +6,11 @@ import {
   isSkolemizedUri,
   rootEntityFromSkolemized,
   autoPartition,
-  computeTripleHash,
-  computePublicRoot,
-  computePrivateRoot,
-  computeKARoot,
-  computeKCRoot,
+  computeTripleHashV10 as computeTripleHash,
+  computePublicRootV10 as computePublicRoot,
+  computePrivateRootV10 as computePrivateRoot,
+  computeKARootV10 as computeKARoot,
+  computeKCRootV10 as computeKCRoot,
   validatePublishRequest,
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';

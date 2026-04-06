@@ -29,8 +29,9 @@ export const dkgPublish: Action = {
       const agent = requireAgent();
       const text = message.content.text;
 
-      const paranetMatch = text.match(/paranet[:\s]+["']?([^\s"']+)/i);
-      const paranetId = paranetMatch?.[1] ?? 'default';
+      const contextGraphMatch = text.match(/context[- ]?graph[:\s]+["']?([^\s"']+)/i)
+        ?? text.match(/paranet[:\s]+["']?([^\s"']+)/i);
+      const contextGraphId = contextGraphMatch?.[1] ?? 'default';
 
       const nquadsMatch = text.match(/```(?:nquads|n-quads|turtle)?\s*([\s\S]*?)```/i);
       if (!nquadsMatch) {
@@ -44,9 +45,9 @@ export const dkgPublish: Action = {
         return false;
       }
 
-      const result = await agent.publish(paranetId, quads as any);
+      const result = await agent.publish(contextGraphId, quads as any);
       callback({
-        text: `Published ${quads.length} triple(s) to paranet "${paranetId}". KC ID: ${result.kcId}, KAs: ${result.kaManifest.length}`,
+        text: `Published ${quads.length} triple(s) to context graph "${contextGraphId}". KC ID: ${result.kcId}, KAs: ${result.kaManifest.length}`,
       });
       return true;
     } catch (err: any) {
@@ -58,7 +59,7 @@ export const dkgPublish: Action = {
   examples: [
     [
       { user: '{{user1}}', content: { text: 'publish this to DKG:\n```nquads\n<http://ex.org/alice> <http://schema.org/name> "Alice" .\n```', action: 'DKG_PUBLISH' } },
-      { user: '{{user2}}', content: { text: 'Published 1 triple(s) to paranet "default".' } },
+      { user: '{{user2}}', content: { text: 'Published 1 triple(s) to context graph "default".' } },
     ],
   ],
 };

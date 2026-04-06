@@ -76,7 +76,7 @@ describe('discoverAgentName', () => {
 const fakeNetwork = {
   networkName: 'Test Network',
   relays: ['/ip4/1.2.3.4/tcp/9090/p2p/12D3test'],
-  defaultParanets: ['testing'],
+  defaultContextGraphs: ['testing'],
   defaultNodeRole: 'edge' as const,
   chain: {
     type: 'evm' as const,
@@ -99,7 +99,7 @@ describe('writeDkgConfig', () => {
       expect(config.name).toBe('test-agent');
       expect(config.apiPort).toBe(9200);
       expect(config.nodeRole).toBe('edge');
-      expect(config.paranets).toEqual(['testing']);
+      expect(config.contextGraphs).toEqual(['testing']);
       expect(config.chain.rpcUrl).toBe('https://rpc.test');
       expect(config.openclawAdapter).toBe(true);
       expect(config.relay).toBe('/ip4/1.2.3.4/tcp/9090/p2p/12D3test');
@@ -115,7 +115,7 @@ describe('writeDkgConfig', () => {
       name: 'existing-node',
       apiPort: 9300,
       nodeRole: 'core',
-      paranets: ['custom'],
+      contextGraphs: ['custom'],
       relay: '/ip4/5.6.7.8/tcp/9090/p2p/existing',
       chain: { type: 'evm', rpcUrl: 'https://custom.rpc', hubAddress: '0xCUSTOM', chainId: 'custom:2' },
     }));
@@ -131,7 +131,7 @@ describe('writeDkgConfig', () => {
       expect(config.name).toBe('existing-node');
       expect(config.apiPort).toBe(9300);
       expect(config.nodeRole).toBe('core');
-      expect(config.paranets).toEqual(['custom']);
+      expect(config.contextGraphs).toEqual(['custom']);
       expect(config.relay).toBe('/ip4/5.6.7.8/tcp/9090/p2p/existing');
       expect(config.chain.rpcUrl).toBe('https://custom.rpc');
       // But openclawAdapter is always set

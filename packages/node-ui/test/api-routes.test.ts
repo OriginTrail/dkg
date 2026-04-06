@@ -194,7 +194,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
         sessionId: 'session-1',
         workspaceTripleCount: 12,
         dataTripleCount: 3,
-        scope: 'enshrined',
+        scope: 'published',
         rootEntityCount: 4,
       }),
     } as any;
@@ -223,7 +223,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSessionPublicationStatus).toHaveBeenCalledWith('session-1');
     expect(parseJsonBody(state.body)).toMatchObject({
       sessionId: 'session-1',
-      scope: 'enshrined',
+      scope: 'published',
     });
   });
 
@@ -238,7 +238,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
           sessionId: 'session-1',
           workspaceTripleCount: 5,
           dataTripleCount: 5,
-          scope: 'enshrined',
+          scope: 'published',
           rootEntityCount: 1,
         },
       }),
@@ -272,7 +272,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(state.statusCode).toBe(200);
     expect(memoryManager.publishSession).toHaveBeenCalledWith('session-1', {
       rootEntities: ['urn:dkg:chat:msg:m-1'],
-      clearWorkspaceAfter: true,
+      clearSharedMemoryAfter: true,
     });
     expect(parseJsonBody(state.body)).toMatchObject({
       sessionId: 'session-1',

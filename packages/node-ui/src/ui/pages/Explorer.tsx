@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Routes, Route, Navigate, NavLink, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useFetch, formatTime, shortId } from '../hooks.js';
-import { executeQuery, fetchParanets } from '../api.js';
+import { executeQuery, fetchContextGraphs } from '../api.js';
 import { RdfGraph, useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import type { ViewConfig } from '@origintrail-official/dkg-graph-viz';
 import { EditorState, type Extension } from '@codemirror/state';
@@ -17,12 +17,12 @@ export function ExplorerPage() {
       <div className="tab-group">
         <NavLink to="/explorer" end className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Graph</NavLink>
         <NavLink to="/explorer/sparql" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>SPARQL</NavLink>
-        <NavLink to="/explorer/paranets" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Paranets</NavLink>
+        <NavLink to="/explorer/context-graphs" className={({ isActive }) => `tab-item ${isActive ? 'active' : ''}`}>Context Graphs</NavLink>
       </div>
       <Routes>
         <Route path="/" element={<GraphTab />} />
         <Route path="/sparql" element={<SparqlTab />} />
-        <Route path="/paranets" element={<ParanetsTab />} />
+        <Route path="/context-graphs" element={<ContextGraphsTab />} />
         {/* Redirects for retired sub-routes */}
         <Route path="/publish" element={<Navigate to="/explorer" replace />} />
         <Route path="/history" element={<Navigate to="/explorer" replace />} />
@@ -39,8 +39,7 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 type Triple = { subject: string; predicate: string; object: string };
 
-// Distinct hues for per-paranet coloring
-const PARANET_PALETTE = [
+const CONTEXT_GRAPH_PALETTE = [
   { h: 25, s: 85, l: 55 },   // orange
   { h: 210, s: 80, l: 55 },  // blue
   { h: 150, s: 70, l: 45 },  // green
@@ -55,14 +54,14 @@ function hslColor(h: number, s: number, l: number): string {
   return `hsl(${h}, ${s}%, ${l}%)`;
 }
 
-function graphVariantColor(paranetIndex: number, graphIndex: number): string {
-  const base = PARANET_PALETTE[paranetIndex % PARANET_PALETTE.length];
+function graphVariantColor(contextGraphIndex: number, graphIndex: number): string {
+  const base = CONTEXT_GRAPH_PALETTE[contextGraphIndex % CONTEXT_GRAPH_PALETTE.length];
   const lShift = ((graphIndex % 5) - 2) * 6;
   return hslColor(base.h, base.s, Math.max(30, Math.min(75, base.l + lShift)));
 }
 
-function paranetBaseColorHex(index: number): string {
-  const base = PARANET_PALETTE[index % PARANET_PALETTE.length];
+function contextGraphBaseColorHex(index: number): string {
+  const base = CONTEXT_GRAPH_PALETTE[index % CONTEXT_GRAPH_PALETTE.length];
   return hslColor(base.h, base.s, base.l);
 }
 
@@ -111,7 +110,7 @@ interface PredicateStat {
   count: number;
 }
 
-interface ParanetLegendEntry {
+interface ContextGraphLegendEntry {
   name: string;
   color: string;
 }
@@ -182,44 +181,44 @@ function buildPredicateStats(triples: Triple[], maxItems = 12): PredicateStat[] 
 
 /**
  * Build per-graph color assignments from a SELECT DISTINCT ?s ?g query.
- * Each paranet gets a base hue; named graphs within a paranet get slight
- * lightness variations so they remain visually grouped.
+ * Each context graph gets a base hue; named graphs within a context graph get
+ * slight lightness variations so they remain visually grouped.
  */
 function buildGraphColorsFromMembership(
   rows: Array<{ s: string; g: string }>,
-  paranets: Array<{ id: string; uri: string; name: string }>,
+  contextGraphs: Array<{ id: string; uri: string; name: string }>,
 ): {
   classColors: Record<string, string>;
   nodeGraphMap: Map<string, string>;
-  legend: ParanetLegendEntry[];
+  legend: ContextGraphLegendEntry[];
 } {
-  const graphToParanetUri = new Map<string, string>();
-  const paranetToGraphs = new Map<string, string[]>();
+  const graphToContextGraphUri = new Map<string, string>();
+  const contextGraphToGraphs = new Map<string, string[]>();
 
   for (const row of rows) {
     const g = String(row.g ?? '');
-    if (!g || graphToParanetUri.has(g)) continue;
-    const match = paranets.find((p) => g === p.uri || g.startsWith(p.uri + '/'));
+    if (!g || graphToContextGraphUri.has(g)) continue;
+    const match = contextGraphs.find((p) => g === p.uri || g.startsWith(p.uri + '/'));
     if (match) {
-      graphToParanetUri.set(g, match.uri);
-      if (!paranetToGraphs.has(match.uri)) paranetToGraphs.set(match.uri, []);
-      paranetToGraphs.get(match.uri)!.push(g);
+      graphToContextGraphUri.set(g, match.uri);
+      if (!contextGraphToGraphs.has(match.uri)) contextGraphToGraphs.set(match.uri, []);
+      contextGraphToGraphs.get(match.uri)!.push(g);
     }
   }
 
-  const paranetUris = Array.from(paranetToGraphs.keys());
+  const contextGraphUris = Array.from(contextGraphToGraphs.keys());
   const classColors: Record<string, string> = {};
-  const legend: ParanetLegendEntry[] = [];
+  const legend: ContextGraphLegendEntry[] = [];
 
-  for (let pi = 0; pi < paranetUris.length; pi++) {
-    const pUri = paranetUris[pi];
-    const pInfo = paranets.find((p) => p.uri === pUri);
+  for (let pi = 0; pi < contextGraphUris.length; pi++) {
+    const pUri = contextGraphUris[pi];
+    const pInfo = contextGraphs.find((p) => p.uri === pUri);
     legend.push({
       name: pInfo?.name ?? shortLabel(pUri),
-      color: paranetBaseColorHex(pi),
+      color: contextGraphBaseColorHex(pi),
     });
 
-    const graphs = paranetToGraphs.get(pUri)!;
+    const graphs = contextGraphToGraphs.get(pUri)!;
     for (let gi = 0; gi < graphs.length; gi++) {
       classColors[graphs[gi]] = graphVariantColor(pi, gi);
     }
@@ -237,19 +236,19 @@ function buildGraphColorsFromMembership(
 }
 
 function GraphTab() {
-  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
-  const paranetKey = useMemo(
+  const { data: contextGraphData } = useFetch(fetchContextGraphs, [], 30_000);
+  const contextGraphKey = useMemo(
     () => JSON.stringify(
-      (paranetData?.paranets ?? [])
+      (contextGraphData?.contextGraphs ?? [])
         .map((p: any) => ({ id: p.id, uri: p.uri, name: p.name }))
         .sort((a: any, b: any) => String(a.id).localeCompare(String(b.id))),
     ),
-    [paranetData],
+    [contextGraphData],
   );
-  // Only produce a new reference when paranet metadata actually changes,
+  // Only produce a new reference when context graph metadata actually changes,
   // not on every 30-second poll cycle.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const paranets = useMemo(() => paranetData?.paranets ?? [], [paranetKey]);
+  const contextGraphs = useMemo(() => contextGraphData?.contextGraphs ?? [], [contextGraphKey]);
 
   const [triples, setTriples] = useState<Triple[] | null>(null);
   const [allTriples, setAllTriples] = useState<Triple[] | null>(null);
@@ -264,25 +263,24 @@ function GraphTab() {
   const [selectedPredicates, setSelectedPredicates] = useState<Set<string>>(new Set());
   const [graphClassColors, setGraphClassColors] = useState<Record<string, string>>({});
   const [nodeGraphMap, setNodeGraphMap] = useState<Map<string, string>>(new Map());
-  const [paranetLegend, setParanetLegend] = useState<ParanetLegendEntry[]>([]);
+  const [contextGraphLegend, setContextGraphLegend] = useState<ContextGraphLegendEntry[]>([]);
   const [realTripleCount, setRealTripleCount] = useState(0);
 
   const location = useLocation();
-  const [paranetFilter, setParanetFilter] = useState(
-    () => new URLSearchParams(location.search).get('paranet') ?? '',
+  const [contextGraphFilter, setContextGraphFilter] = useState(
+    () => new URLSearchParams(location.search).get('contextGraph') ?? '',
   );
 
-  // Keep paranetFilter in sync when ?paranet= changes while component stays mounted
   useEffect(() => {
-    const fromUrl = new URLSearchParams(location.search).get('paranet') ?? '';
-    setParanetFilter(fromUrl);
+    const fromUrl = new URLSearchParams(location.search).get('contextGraph') ?? '';
+    setContextGraphFilter(fromUrl);
   }, [location.search]);
   const [showLiterals, setShowLiterals] = useState(true);
   const [selectedNode, setSelectedNode] = useState<NodeDetails | null>(null);
 
-  const selectedParanet = useMemo(
-    () => paranets.find((p: any) => p.id === paranetFilter) ?? null,
-    [paranets, paranetFilter],
+  const selectedContextGraph = useMemo(
+    () => contextGraphs.find((p: any) => p.id === contextGraphFilter) ?? null,
+    [contextGraphs, contextGraphFilter],
   );
 
   const graphViewConfig = useMemo<ViewConfig>(() => ({
@@ -312,10 +310,10 @@ function GraphTab() {
     setSelectedNode(null);
     try {
       let sparql: string;
-      if (selectedParanet?.uri) {
-        const safeIri = validateIri(selectedParanet.uri);
+      if (selectedContextGraph?.uri) {
+        const safeIri = validateIri(selectedContextGraph.uri);
         if (!safeIri) {
-          setError('Invalid paranet URI');
+          setError('Invalid context graph URI');
           setLoading(false);
           return;
         }
@@ -328,13 +326,13 @@ function GraphTab() {
         sparql = `CONSTRUCT { ?s ?p ?o } WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT ${limit}`;
       }
 
-      const res = await executeQuery(sparql, selectedParanet?.id);
+      const res = await executeQuery(sparql, selectedContextGraph?.id);
       const quads = Array.isArray(res?.result?.quads) ? res.result.quads : [];
 
       try {
         let countSparql: string;
-        if (selectedParanet?.uri) {
-          const safeIri = validateIri(selectedParanet.uri);
+        if (selectedContextGraph?.uri) {
+          const safeIri = validateIri(selectedContextGraph.uri);
           const escapedUri = safeIri ? escapeSparqlString(safeIri) : '';
           countSparql = safeIri
             ? `SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${safeIri}> || STRSTARTS(STR(?g), "${escapedUri}/")) }`
@@ -342,7 +340,7 @@ function GraphTab() {
         } else {
           countSparql = `SELECT (COUNT(*) AS ?count) WHERE { SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } }`;
         }
-        const countRes = await executeQuery(countSparql, selectedParanet?.id);
+        const countRes = await executeQuery(countSparql, selectedContextGraph?.id);
         setGraphTotalCount(extractCountFromQueryResult(countRes?.result));
       } catch {
         setGraphTotalCount(null);
@@ -359,8 +357,8 @@ function GraphTab() {
         let graphMembershipRows: any[] = [];
         try {
           let membershipSparql: string;
-          if (selectedParanet?.uri) {
-            const safeIri = validateIri(selectedParanet.uri);
+          if (selectedContextGraph?.uri) {
+            const safeIri = validateIri(selectedContextGraph.uri);
             const escapedUri = safeIri ? escapeSparqlString(safeIri) : '';
             membershipSparql = safeIri
               ? `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <${safeIri}> || STRSTARTS(STR(?g), "${escapedUri}/")) } LIMIT ${limit}`
@@ -368,7 +366,7 @@ function GraphTab() {
           } else {
             membershipSparql = `SELECT DISTINCT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT ${limit}`;
           }
-          const membershipRes = await executeQuery(membershipSparql, selectedParanet?.id);
+          const membershipRes = await executeQuery(membershipSparql, selectedContextGraph?.id);
           graphMembershipRows = Array.isArray(membershipRes?.result?.bindings)
             ? membershipRes.result.bindings
             : (Array.isArray(membershipRes?.result) ? membershipRes.result : []);
@@ -376,10 +374,10 @@ function GraphTab() {
           // Non-fatal: coloring will fall back to default
         }
 
-        const { classColors, nodeGraphMap: ngMap, legend } = buildGraphColorsFromMembership(graphMembershipRows, paranets);
+        const { classColors, nodeGraphMap: ngMap, legend } = buildGraphColorsFromMembership(graphMembershipRows, contextGraphs);
         setGraphClassColors(classColors);
         setNodeGraphMap(ngMap);
-        setParanetLegend(legend);
+        setContextGraphLegend(legend);
 
         setAllTriples(rawTriples);
         setTypeMap(buildTypeMap(rawTriples));
@@ -394,9 +392,9 @@ function GraphTab() {
         setSelectedPredicates(new Set());
         setGraphClassColors({});
         setNodeGraphMap(new Map());
-        setParanetLegend([]);
-        if (selectedParanet) {
-          setEmptyReason('No triples found for this paranet. It may not be synced on this node yet.');
+        setContextGraphLegend([]);
+        if (selectedContextGraph) {
+          setEmptyReason('No triples found for this context graph. It may not be synced on this node yet.');
         } else {
           setEmptyReason('No triples found in any named graph on this node.');
         }
@@ -410,7 +408,7 @@ function GraphTab() {
     } finally {
       setLoading(false);
     }
-  }, [limit, refreshKey, selectedParanet?.id, selectedParanet?.uri, paranets]);
+  }, [limit, refreshKey, selectedContextGraph?.id, selectedContextGraph?.uri, contextGraphs]);
 
   // Re-filter when predicates or literals toggle changes
   useEffect(() => {
@@ -479,12 +477,12 @@ function GraphTab() {
             <div className="graph-toolbar-row">
               <select
                 className="input"
-                value={paranetFilter}
-                onChange={(e) => { setParanetFilter(e.target.value); setRefreshKey(k => k + 1); }}
+                value={contextGraphFilter}
+                onChange={(e) => { setContextGraphFilter(e.target.value); setRefreshKey(k => k + 1); }}
                 style={{ width: 'auto', minWidth: 200 }}
               >
-                <option value="">All Paranets</option>
-                {paranets.map((p: any) => (
+                <option value="">All Context Graphs</option>
+                {contextGraphs.map((p: any) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </select>
@@ -523,10 +521,10 @@ function GraphTab() {
             </div>
           </div>
 
-          {/* Paranet color legend */}
-          {paranetLegend.length > 0 && (
+          {/* Context graph color legend */}
+          {contextGraphLegend.length > 0 && (
             <div className="graph-legend">
-              {paranetLegend.map((entry) => (
+              {contextGraphLegend.map((entry) => (
                 <span key={entry.name} className="graph-legend-item">
                   <span className="graph-legend-dot" style={{ background: entry.color }} />
                   {entry.name}
@@ -577,7 +575,7 @@ function GraphTab() {
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="14.5" y1="9.5" x2="17.5" y2="6.5"/><line x1="9.5" y1="14.5" x2="6.5" y2="17.5"/></svg>
               </div>
               <div className="empty-state-title">{emptyReason ? 'No triples found' : 'No matching triples'}</div>
-              <div className="empty-state-desc">{emptyReason || 'Try adjusting the filters or selecting a different paranet.'}</div>
+              <div className="empty-state-desc">{emptyReason || 'Try adjusting the filters or selecting a different context graph.'}</div>
             </div>
           )}
           {triples && triples.length > 0 && (
@@ -700,7 +698,7 @@ const QUERY_HELPERS: Array<{ title: string; description: string; query: string }
   },
   {
     title: 'OriginTrail Game Events',
-    description: 'Explore gameplay/activity triples from the game paranet.',
+    description: 'Explore gameplay/activity triples from the game context graph.',
     query: `SELECT ?s ?p ?o ?g WHERE {
   GRAPH ?g {
     ?s ?p ?o .
@@ -710,7 +708,7 @@ const QUERY_HELPERS: Array<{ title: string; description: string; query: string }
   },
   {
     title: 'Agent Registry Snapshot',
-    description: 'Raw triples from the agents paranet graph.',
+    description: 'Raw triples from the agents context graph.',
     query: `SELECT ?s ?p ?o WHERE {
   GRAPH <did:dkg:context-graph:agents> {
     ?s ?p ?o
@@ -718,7 +716,7 @@ const QUERY_HELPERS: Array<{ title: string; description: string; query: string }
 } LIMIT 100`,
   },
   {
-    title: 'Ontology Paranet Concepts',
+    title: 'Ontology Context Graph Concepts',
     description: 'Browse classes/properties and related ontology triples.',
     query: `SELECT ?s ?p ?o ?g WHERE {
   GRAPH ?g {
@@ -750,7 +748,7 @@ function SparqlTab() {
     o: string;
     g: string;
     graphType: string;
-    paranet: string;
+    contextGraph: string;
     source: string;
     ual: string;
     txHash: string;
@@ -898,15 +896,15 @@ ${values}
         setProvenanceRows(rows.map((r: any) => {
           const g = String(r.g ?? '');
           const meta = graphMeta.get(g) ?? { source: '', ual: '', txHash: '', timestamp: '' };
-          const paranet = g.startsWith('did:dkg:context-graph:') ? g.replace('did:dkg:context-graph:', '').split('/')[0] : 'unknown';
+          const contextGraph = g.startsWith('did:dkg:context-graph:') ? g.replace('did:dkg:context-graph:', '').split('/')[0] : 'unknown';
           const source = meta.source || 'unknown';
           return {
             s: String(r.s ?? ''),
             p: String(r.p ?? ''),
             o: String(r.o ?? ''),
             g,
-            graphType: g.endsWith('/_shared_memory') || g.includes('_shared_memory') ? 'workspace' : 'data',
-            paranet,
+            graphType: g.endsWith('/_shared_memory') || g.includes('_shared_memory') ? 'shared memory' : 'data',
+            contextGraph,
             source,
             ual: meta.ual,
             txHash: meta.txHash,
@@ -1012,7 +1010,7 @@ function ResultTriples({
     o: string;
     g: string;
     graphType: string;
-    paranet: string;
+    contextGraph: string;
     source: string;
     ual: string;
     txHash: string;
@@ -1048,7 +1046,7 @@ function ResultTriples({
             <th>Object</th>
             <th>Graph</th>
             <th>Graph Type</th>
-            <th>Paranet</th>
+            <th>Context Graph</th>
             <th>Source</th>
             <th>UAL</th>
             <th>Transaction Hash</th>
@@ -1063,7 +1061,7 @@ function ResultTriples({
               <CellWithCopy value={t.o} />
               <CellWithCopy value={t.g} />
               <td style={{ fontSize: 12 }}>{t.graphType || '-'}</td>
-              <CellWithCopy value={t.paranet} />
+              <CellWithCopy value={t.contextGraph} />
               <CellWithCopy value={t.source} />
               <CellWithCopy value={t.ual} />
               <CellWithCopy value={t.txHash} />
@@ -1452,26 +1450,26 @@ function ResultGraph({ result, sparql, focusedSubject }: { result: any; sparql: 
   );
 }
 
-function ParanetsTab() {
-  const { data } = useFetch(fetchParanets, [], 30_000);
-  const paranets = data?.paranets ?? [];
+function ContextGraphsTab() {
+  const { data } = useFetch(fetchContextGraphs, [], 30_000);
+  const contextGraphs = data?.contextGraphs ?? [];
   const navigate = useNavigate();
 
   return (
     <div>
-      {paranets.length === 0 ? (
+      {contextGraphs.length === 0 ? (
         <div className="empty-state empty-state--rich">
           <div className="empty-state-icon">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
           </div>
-          <div className="empty-state-title">No paranets found</div>
-          <div className="empty-state-desc">Subscribe to a paranet in the Integrations page, then its data will be explorable here.</div>
+          <div className="empty-state-title">No context graphs found</div>
+          <div className="empty-state-desc">Subscribe to a context graph in the Integrations page, then its data will be explorable here.</div>
         </div>
       ) : (
-        <div className="paranet-list">
-          {paranets.map((p: any) => (
-            <div key={p.id} className="paranet-card" onClick={() => {
-              navigate(`/explorer?paranet=${encodeURIComponent(p.id)}`);
+        <div className="context-graph-list">
+          {contextGraphs.map((p: any) => (
+            <div key={p.id} className="context-graph-card" onClick={() => {
+              navigate(`/explorer?contextGraph=${encodeURIComponent(p.id)}`);
             }}>
               <h3>{p.name}</h3>
               <p>{p.description || p.uri}</p>

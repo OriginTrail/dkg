@@ -138,7 +138,7 @@ describe('Two-Agent E2E', () => {
     agents.push(agentA);
     await agentA.start();
 
-    await agentA.createParanet({
+    await agentA.createContextGraph({
       id: 'test-paranet',
       name: 'Test Paranet',
       description: 'E2E test paranet',

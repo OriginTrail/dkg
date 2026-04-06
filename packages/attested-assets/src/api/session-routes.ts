@@ -19,7 +19,7 @@ export interface RouteResponse {
 }
 
 interface CreateSessionBody {
-  paranetId: string;
+  contextGraphId: string;
   appId: string;
   membership: Array<{
     peerId: string;
@@ -53,7 +53,7 @@ export function createSessionRoutes(manager: SessionManager): SessionRouteHandle
           }));
 
           const config = await manager.createSession(
-            body.paranetId,
+            body.contextGraphId,
             body.appId,
             membership,
             body.quorumPolicy,
@@ -76,7 +76,7 @@ export function createSessionRoutes(manager: SessionManager): SessionRouteHandle
       method: 'GET',
       path: '/api/sessions',
       handler: async (req) => {
-        const sessions = manager.listSessions(req.query.paranetId, req.query.status);
+        const sessions = manager.listSessions(req.query.contextGraphId, req.query.status);
         return {
           status: 200,
           body: sessions.map(serializeConfig),

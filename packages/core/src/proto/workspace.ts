@@ -2,7 +2,7 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-/** Manifest entry for one root entity in a workspace write (no tokenId). */
+/** Manifest entry for one root entity in a shared memory write (no tokenId). */
 export const WorkspaceManifestEntrySchema = new Type('WorkspaceManifestEntry')
   .add(new Field('rootEntity', 1, 'string'))
   .add(new Field('privateMerkleRoot', 2, 'bytes'))
@@ -70,3 +70,10 @@ export function decodeWorkspacePublishRequest(buf: Uint8Array): WorkspacePublish
     timestampMs: typeof ts === 'bigint' ? Number(ts) : (ts as number),
   };
 }
+
+// ── V10 aliases (Workspace → SharedMemory / Share) ──────────────────────
+export type ShareManifestEntryMsg = WorkspaceManifestEntryMsg;
+export type ShareCASConditionMsg = WorkspaceCASConditionMsg;
+export type SharePublishRequestMsg = WorkspacePublishRequestMsg;
+export const encodeSharePublishRequest = encodeWorkspacePublishRequest;
+export const decodeSharePublishRequest = decodeWorkspacePublishRequest;

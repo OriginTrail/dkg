@@ -3,10 +3,10 @@ import type { TripleStore, Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
 /**
- * Manages private (publisher-only) triples. These live in the same paranet
- * data graph as public triples, but are only stored on the publisher's node.
- * The meta graph records which KAs have private triples (via privateMerkleRoot
- * and privateTripleCount).
+ * Manages private (publisher-only) triples. These live in the same context
+ * graph data graph as public triples, but are only stored on the publisher's
+ * node. The meta graph records which KAs have private triples (via
+ * privateMerkleRoot and privateTripleCount).
  */
 export class PrivateContentStore {
   private readonly store: TripleStore;
@@ -20,29 +20,29 @@ export class PrivateContentStore {
   }
 
   async storePrivateTriples(
-    paranetId: string,
+    contextGraphId: string,
     rootEntity: string,
     quads: Quad[],
   ): Promise<void> {
     if (quads.length === 0) return;
 
-    const graphUri = this.graphManager.privateGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
     const normalized = quads.map((q) => ({ ...q, graph: graphUri }));
     await this.store.insert(normalized);
 
-    let entities = this.privateEntities.get(paranetId);
+    let entities = this.privateEntities.get(contextGraphId);
     if (!entities) {
       entities = new Set();
-      this.privateEntities.set(paranetId, entities);
+      this.privateEntities.set(contextGraphId, entities);
     }
     entities.add(rootEntity);
   }
 
   async getPrivateTriples(
-    paranetId: string,
+    contextGraphId: string,
     rootEntity: string,
   ): Promise<Quad[]> {
-    const graphUri = this.graphManager.privateGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
     const sparql = `
       SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(graphUri)}> {
@@ -65,8 +65,8 @@ export class PrivateContentStore {
     }));
   }
 
-  hasPrivateTriples(paranetId: string, rootEntity: string): boolean {
-    const entities = this.privateEntities.get(paranetId);
+  hasPrivateTriples(contextGraphId: string, rootEntity: string): boolean {
+    const entities = this.privateEntities.get(contextGraphId);
     return entities?.has(rootEntity) ?? false;
   }
 
@@ -76,20 +76,20 @@ export class PrivateContentStore {
    * different instance than the one that originally stored the triples).
    */
   async hasPrivateTriplesInStore(
-    paranetId: string,
+    contextGraphId: string,
     rootEntity: string,
   ): Promise<boolean> {
-    const quads = await this.getPrivateTriples(paranetId, rootEntity);
+    const quads = await this.getPrivateTriples(contextGraphId, rootEntity);
     return quads.length > 0;
   }
 
   async deletePrivateTriples(
-    paranetId: string,
+    contextGraphId: string,
     rootEntity: string,
   ): Promise<void> {
-    const graphUri = this.graphManager.privateGraphUri(paranetId);
+    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
     await this.store.deleteBySubjectPrefix(graphUri, rootEntity);
-    const entities = this.privateEntities.get(paranetId);
+    const entities = this.privateEntities.get(contextGraphId);
     if (entities) entities.delete(rootEntity);
   }
 }
