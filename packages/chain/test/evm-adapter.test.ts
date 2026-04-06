@@ -126,4 +126,20 @@ describe('EVMChainAdapter integration', () => {
     const address = adapter.getSignerAddress();
     expect(address.toLowerCase()).toBe('0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266');
   });
+
+  it('getBlockNumber reads from the live Hardhat node (no contract init required)', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
+    const adapter = new EVMChainAdapter(makeConfig());
+    const bn = await adapter.getBlockNumber();
+    expect(typeof bn).toBe('number');
+    expect(bn).toBeGreaterThanOrEqual(0);
+  }, 15_000);
+
+  it('verifyPublisherOwnsRange resolves KnowledgeAssetsStorage after init', async (ctx) => {
+    if (skipSuite) { ctx.skip(); return; }
+    const adapter = new EVMChainAdapter(makeConfig());
+    const deployer = adapter.getSignerAddress();
+    const owns = await adapter.verifyPublisherOwnsRange(deployer, 1n, 1n);
+    expect(typeof owns).toBe('boolean');
+  }, 30_000);
 });
