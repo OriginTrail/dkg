@@ -2086,11 +2086,12 @@ export class DKGAgent {
   async endorse(opts: {
     contextGraphId: string;
     knowledgeAssetUal: string;
-    agentAddress: string;
+    agentAddress?: string;
   }): Promise<PublishResult> {
+    const endorser = `did:dkg:agent:${this.peerId}`;
     const { buildEndorsementQuads } = await import('./endorse.js');
     const quads = buildEndorsementQuads(
-      opts.agentAddress,
+      endorser,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );
@@ -2165,13 +2166,16 @@ export class DKGAgent {
     const prefixedHash = ethers.hashMessage(digest);
     const signingKey = new ethers.SigningKey(signerKey);
     const proposerSig = signingKey.sign(prefixedHash);
+    const proposerAddress = ethers.computeAddress(signingKey.publicKey);
 
     // 5. Collect M-of-N approvals
     const collector = new VerifyCollector({
       sendP2P: async (peerId, protocol, data) => this.router.send(peerId, protocol, data),
-      getParticipantPeers: () => {
-        // Return all connected peers (participants filter via signature recovery)
-        return this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
+      getParticipantPeers: (cgId?: string) => {
+        const allPeers = this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
+        // TODO: Filter by on-chain participant set once getContextGraphParticipants() is available.
+        // Currently relies on signature recovery + identityId resolution to reject non-participants.
+        return allPeers;
       },
       log: (msg) => this.log.info(ctx, msg),
     });
@@ -2234,7 +2238,7 @@ export class DKGAgent {
       opts.batchId,
       txResult.hash,
       txResult.blockNumber,
-      result.approvals.map(a => a.approverAddress),
+      [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
     );
 
     this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
@@ -2243,7 +2247,7 @@ export class DKGAgent {
       txHash: txResult.hash,
       blockNumber: txResult.blockNumber,
       verifiedMemoryId: opts.verifiedMemoryId,
-      signers: result.approvals.map(a => a.approverAddress),
+      signers: [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
     };
   }
 
@@ -2267,7 +2271,7 @@ export class DKGAgent {
     // We use FILTER with STRSTARTS to capture the full closure instead of
     // an exact VALUES match, which would miss child/blank-node subjects.
     const filterClauses = rootEntities
-      .map(e => `STRSTARTS(STR(?s), ${JSON.stringify(e)})`)
+      .map(e => `(STR(?s) = ${JSON.stringify(e)} || STRSTARTS(STR(?s), ${JSON.stringify(e + '/.well-known/genid/')}))`)
       .join(' || ');
     const result = await this.store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o . FILTER(${filterClauses}) } }`,
@@ -2420,6 +2424,7 @@ export class DKGAgent {
       revoker: `did:dkg:agent:${this.peerId}`,
       graph: ontologyGraph,
       revokedAt,
+      paranetUri: `did:dkg:context-graph:${opts.paranetId}`,
     });
 
     await this.store.insert(quads);

@@ -141,11 +141,13 @@ export function buildPolicyRevocationQuads(opts: {
   revoker: string;
   graph: string;
   revokedAt: string;
+  paranetUri: string;
 }): Quad[] {
   return [
     { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_BINDING_STATUS, object: sparqlString('revoked'), graph: opts.graph },
     { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_REVOKED_BY, object: opts.revoker, graph: opts.graph },
     { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_REVOKED_AT, object: sparqlString(opts.revokedAt), graph: opts.graph },
+    { subject: opts.bindingUri, predicate: DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET, object: opts.paranetUri, graph: opts.graph },
   ];
 }
 

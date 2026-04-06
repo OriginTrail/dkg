@@ -61,15 +61,16 @@ function parseBlock(lines, startIndex, indent) {
     const line = raw.trim();
 
     if (line.startsWith('count_distinct ')) {
-      const match = line.match(/^count_distinct\s+(\w+)\s+where$/);
+      const match = line.match(/^count_distinct\s+([\w]+(?:\s*,\s*[\w]+)*)\s+where$/);
       if (!match) throw new Error(`Invalid count_distinct syntax: ${line}`);
+      const vars = match[1].split(/\s*,\s*/);
       const nested = parseBlock(lines, index + 1, indent + 2);
       const compareLine = lines[nested.nextIndex]?.trim();
       const compareMatch = compareLine?.match(/^(>=|<=|==|>|<)\s+(\d+)$/);
       if (!compareMatch) throw new Error(`Expected comparator after count_distinct: ${compareLine ?? '<eof>'}`);
       conditions.push({
         count_distinct: {
-          vars: [match[1]],
+          vars,
           where: nested.conditions,
           op: compareMatch[1],
           value: Number(compareMatch[2]),

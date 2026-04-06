@@ -86,12 +86,14 @@ export function buildTurnFacts(params: {
 }): Array<[string, ...unknown[]]> {
   const { swarmId, turn, winningAction, votes, alivePlayerCount, requiredSignatures, gameStatus, resolution } = params;
 
-  // The caller (coordinator) already ran tallyVotes() with the full
-  // tie-breaking logic (leader preference, alphabetical fallback).
-  // We emit the caller's winningAction as majority_winner — both leader
-  // and follower run tallyVotes() on the same votes, so they will produce
-  // the same winner. The CCL policy then just checks winning_action matches.
+  // Independently compute majority from votes to prevent a dishonest leader
+  // from claiming an arbitrary winner. Uses the same deterministic tie-break
+  // as tallyVotes: highest vote count wins; ties broken alphabetically.
   const distinctVoters = new Set(votes.map(v => v.peerId)).size;
+  const tally = new Map<string, number>();
+  for (const v of votes) tally.set(v.action, (tally.get(v.action) ?? 0) + 1);
+  const computedWinner = Array.from(tally.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? winningAction;
   const facts: Array<[string, ...unknown[]]> = [
     ['turn_proposal', swarmId, turn],
     ['game_status', swarmId, gameStatus],
@@ -99,7 +101,7 @@ export function buildTurnFacts(params: {
     ['required_signatures', swarmId, requiredSignatures],
     ['vote_count', swarmId, turn, votes.length],
     ['winning_action', swarmId, turn, winningAction],
-    ['majority_winner', swarmId, turn, winningAction],
+    ['majority_winner', swarmId, turn, computedWinner],
     ['resolution_type', swarmId, turn, resolution],
   ];
 

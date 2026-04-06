@@ -822,7 +822,6 @@ export class OriginTrailGameCoordinator {
         // evaluateCclPolicy will be called later and followers will independently
         // attempt to resolve the policy. If it's absent, they reject all turns.
         if (this.agent.evaluateCclPolicy) {
-          swarm.status = 'idle';
           this.swarms.delete(swarmId);
           throw new Error(
             `Expedition startup aborted: CCL policy installation failed (${err.message}). ` +

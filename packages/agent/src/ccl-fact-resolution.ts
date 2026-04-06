@@ -109,6 +109,7 @@ export async function resolveFactsFromSnapshot(
   const endorsementFacts = await resolveEndorsementFacts(store, graph, {
     snapshotId: opts.snapshotId,
     scopeUal: opts.scopeUal,
+    view: opts.view,
   });
   for (const ef of endorsementFacts) {
     deduped.set(JSON.stringify(ef), ef);
@@ -172,9 +173,13 @@ function parseArgIndex(argPredicate: string): number {
 }
 
 function materializeArgs(args: Map<number, unknown>): unknown[] {
-  return Array.from(args.entries())
-    .sort((a, b) => a[0] - b[0])
-    .map(([, value]) => value);
+  const sorted = Array.from(args.entries()).sort((a, b) => a[0] - b[0]);
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i][0] !== i) {
+      throw new Error(`Non-contiguous CCL fact argument indices: expected arg${i} but found arg${sorted[i][0]}`);
+    }
+  }
+  return sorted.map(([, value]) => value);
 }
 
 function parseFactArg(value: string): unknown {
@@ -229,12 +234,13 @@ function unescapeLiteralContent(value: string): string {
 async function resolveEndorsementFacts(
   store: TripleStore,
   graph: string,
-  scope?: { snapshotId?: string; scopeUal?: string },
+  scope?: { snapshotId?: string; scopeUal?: string; view?: string },
 ): Promise<CclFactTuple[]> {
   // Build optional FILTER clauses to scope endorsements to the snapshot.
   // If scopeUal is given, only include endorsements for that specific UAL.
   // If snapshotId is given, only include endorsements where the endorsed
   // UAL has a snapshotId matching the requested snapshot.
+  // If view is given, restrict to endorsements whose UAL exists in that view graph.
   const filters: string[] = [];
   if (scope?.scopeUal) {
     filters.push(`FILTER(?ual = <${scope.scopeUal}>)`);
@@ -242,6 +248,9 @@ async function resolveEndorsementFacts(
   const snapshotJoin = scope?.snapshotId
     ? `?ual <${DKG_ONTOLOGY.DKG_SNAPSHOT_ID}> ?sid . FILTER(STR(?sid) = ${JSON.stringify(scope.snapshotId)})`
     : '';
+  if (scope?.view) {
+    filters.push(`FILTER(EXISTS { GRAPH <${graph}${scope.view}> { ?ual ?_vp ?_vo } })`);
+  }
   const query = `
     SELECT ?endorser ?ual WHERE {
       GRAPH <${graph}> {
