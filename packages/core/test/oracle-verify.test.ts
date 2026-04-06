@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { MerkleTree, hashTriple } from '../src/index.js';
 import {
   verifyOracleResponse,
+  hexToBytes,
   type OracleProvedTriple,
   type OracleVerificationInfo,
 } from '../src/crypto/oracle-verify.js';
@@ -58,6 +59,20 @@ function buildOraclePayload(
 
   return { provedTriples, verification };
 }
+
+describe('hexToBytes (oracle-verify)', () => {
+  it('parses 0x-prefixed hex', () => {
+    expect(hexToBytes('0x00ff')).toEqual(new Uint8Array([0, 255]));
+  });
+
+  it('rejects odd-length hex', () => {
+    expect(() => hexToBytes('0xabc')).toThrow(/Invalid hex string/);
+  });
+
+  it('rejects non-hex characters', () => {
+    expect(() => hexToBytes('0xgg')).toThrow(/Invalid hex string/);
+  });
+});
 
 describe('verifyOracleResponse', () => {
   const testTriples = [
@@ -157,6 +172,21 @@ describe('verifyOracleResponse', () => {
       expect(result.tripleResults[0].proofValid).toBe(false);
     });
 
+    it('detects wrong leaf index for an otherwise valid proof', () => {
+      const { provedTriples, verification } = buildOraclePayload(testTriples, '5');
+      const i = provedTriples.findIndex((p) => p.subject === 'did:dkg:agent:Alice' && p.predicate.includes('name'));
+      expect(i).toBeGreaterThanOrEqual(0);
+      const correctIdx = provedTriples[i].proof.leafIndex;
+      const wrongIdx = correctIdx === 0 ? 1 : 0;
+      provedTriples[i] = {
+        ...provedTriples[i],
+        proof: { ...provedTriples[i].proof, leafIndex: wrongIdx },
+      };
+      const result = verifyOracleResponse(provedTriples, verification);
+      expect(result.valid).toBe(false);
+      expect(result.tripleResults[i].proofValid).toBe(false);
+    });
+
     it('detects when proof merkle root does not match verification merkle root', () => {
       const { provedTriples, verification } = buildOraclePayload(testTriples, '5');
 
@@ -215,12 +245,3 @@ describe('verifyOracleResponse', () => {
     });
   });
 });
-
-function hexToBytes(h: string): Uint8Array {
-  const clean = h.startsWith('0x') ? h.slice(2) : h;
-  const bytes = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}

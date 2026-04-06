@@ -160,6 +160,22 @@ describe('validatePublishRequest', () => {
     expect(result.errors[0]).toContain('Rule 2');
   });
 
+  it('fails Rule 3: manifest root with no public triples and not fully private', () => {
+    const root = 'urn:entity:orphan';
+    const quads = [q('urn:other', 'http://ex.org/p', '"o"')];
+    const manifest = [{ tokenId: 1n, rootEntity: root }];
+    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('Rule 3'))).toBe(true);
+  });
+
+  it('Rule 3: allows fully private KA with no public triples', () => {
+    const root = 'urn:entity:private';
+    const manifest = [{ tokenId: 1n, rootEntity: root, privateTripleCount: 3 }];
+    const result = validatePublishRequest([], manifest, PARANET, new Set());
+    expect(result.valid).toBe(true);
+  });
+
   it('fails Rule 4: entity exclusivity', () => {
     const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
