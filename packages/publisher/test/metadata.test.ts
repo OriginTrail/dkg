@@ -6,13 +6,13 @@ import {
   getConfirmedStatusQuad,
   generateConfirmedMetadata,
   generateConfirmedFullMetadata,
-  generateWorkspaceMetadata,
+  generateShareMetadata,
   generateAuthorshipProof,
   generateShareTransitionMetadata,
   type KCMetadata,
   type KAMetadata,
   type OnChainProvenance,
-  type WorkspaceMetadata,
+  type ShareMetadata,
   type AuthorshipProof,
   type ShareTransitionMetadata,
 } from '../src/metadata.js';
@@ -27,7 +27,7 @@ const UAL = 'did:dkg:kc:test-kc-001';
 function makeMeta(overrides?: Partial<KCMetadata>): KCMetadata {
   return {
     ual: UAL,
-    paranetId: PARANET,
+    contextGraphId: PARANET,
     merkleRoot: new Uint8Array([0xab, 0xcd, 0xef]),
     kaCount: 2,
     publisherPeerId: '12D3KooWTestPeer',
@@ -182,10 +182,10 @@ describe('generateConfirmedFullMetadata', () => {
   });
 });
 
-describe('generateWorkspaceMetadata', () => {
-  const wsMeta: WorkspaceMetadata = {
-    workspaceOperationId: 'op-123',
-    paranetId: PARANET,
+describe('generateShareMetadata', () => {
+  const wsMeta: ShareMetadata = {
+    shareOperationId: 'op-123',
+    contextGraphId: PARANET,
     rootEntities: ['did:dkg:entity:alice', 'did:dkg:entity:bob'],
     publisherPeerId: '12D3KooWTestPeer',
     timestamp: new Date('2026-03-01T00:00:00Z'),
@@ -193,7 +193,7 @@ describe('generateWorkspaceMetadata', () => {
   const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
 
   it('generates correct workspace operation quads', () => {
-    const quads = generateWorkspaceMetadata(wsMeta, wsGraph);
+    const quads = generateShareMetadata(wsMeta, wsGraph);
     const typeQuad = quads.find(q => q.predicate === RDF_TYPE);
     expect(typeQuad).toBeDefined();
     expect(typeQuad!.object).toBe(`${DKG}WorkspaceOperation`);
@@ -201,7 +201,7 @@ describe('generateWorkspaceMetadata', () => {
   });
 
   it('includes a rootEntity quad for each entity', () => {
-    const quads = generateWorkspaceMetadata(wsMeta, wsGraph);
+    const quads = generateShareMetadata(wsMeta, wsGraph);
     const rootQuads = quads.filter(q => q.predicate === `${DKG}rootEntity`);
     expect(rootQuads).toHaveLength(2);
     const objects = rootQuads.map(q => q.object);
@@ -210,7 +210,7 @@ describe('generateWorkspaceMetadata', () => {
   });
 
   it('includes publishedAt and attribution', () => {
-    const quads = generateWorkspaceMetadata(wsMeta, wsGraph);
+    const quads = generateShareMetadata(wsMeta, wsGraph);
     const preds = quads.map(q => q.predicate);
     expect(preds).toContain(`${DKG}publishedAt`);
     expect(preds).toContain('http://www.w3.org/ns/prov#wasAttributedTo');
@@ -220,7 +220,7 @@ describe('generateWorkspaceMetadata', () => {
 describe('generateAuthorshipProof', () => {
   const proof: AuthorshipProof = {
     kcUal: UAL,
-    paranetId: PARANET,
+    contextGraphId: PARANET,
     agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
     signature: '0xdeadbeef01234567',
     signedHash: '0xabcdef1234567890',

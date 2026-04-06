@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
-const SAMPLE_PARANETS = [
+const SAMPLE_CONTEXT_GRAPHS = [
   { id: 'paranet-1', name: 'Research', subscribed: true, synced: true },
   { id: 'paranet-2', name: 'Testing', subscribed: false, synced: false },
 ];
@@ -26,7 +26,7 @@ function findTool(name: string, daemonUrl = 'http://localhost:9200') {
   return tools.find(t => t.name === name)!;
 }
 
-describe('dkg_list_paranets tool', () => {
+describe('dkg_list_context_graphs tool', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -41,30 +41,30 @@ describe('dkg_list_paranets tool', () => {
   it('is present in the registered tools list', () => {
     const plugin = new DkgNodePlugin();
     const tools = collectTools(plugin);
-    const tool = tools.find(t => t.name === 'dkg_list_paranets');
+    const tool = tools.find(t => t.name === 'dkg_list_context_graphs');
     expect(tool).toBeDefined();
-    expect(tool!.description).toContain('paranets');
+    expect(tool!.description).toContain('contextGraphs');
     expect(tool!.parameters.required).toEqual([]);
   });
 
-  it('returns paranets array and count on success', async () => {
+  it('returns contextGraphs array and count on success', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ paranets: SAMPLE_PARANETS }), { status: 200 }),
+      new Response(JSON.stringify({ contextGraphs: SAMPLE_CONTEXT_GRAPHS }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_list_paranets');
+    const tool = findTool('dkg_list_context_graphs');
     const result = await tool.execute('call-1', {});
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.paranets).toEqual(SAMPLE_PARANETS);
+    expect(parsed.contextGraphs).toEqual(SAMPLE_CONTEXT_GRAPHS);
     expect(parsed.count).toBe(2);
-    expect(fetchSpy.mock.calls[1][0]).toBe('http://localhost:9200/api/paranet/list');
+    expect(fetchSpy.mock.calls[1][0]).toBe('http://localhost:9200/api/context-graph/list');
   });
 
   it('returns error when daemon request fails', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('network failure'));
 
-    const tool = findTool('dkg_list_paranets');
+    const tool = findTool('dkg_list_context_graphs');
     const result = await tool.execute('call-2', {});
     const parsed = JSON.parse(result.content[0].text);
 
@@ -74,7 +74,7 @@ describe('dkg_list_paranets tool', () => {
   it('returns helpful error when daemon is not running', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
 
-    const tool = findTool('dkg_list_paranets');
+    const tool = findTool('dkg_list_context_graphs');
     const result = await tool.execute('call-3', {});
     const parsed = JSON.parse(result.content[0].text);
 
@@ -162,7 +162,7 @@ describe('dkg_publish tool', () => {
       { subject: 'https://example.org/wine', predicate: 'https://schema.org/name', object: 'Cabernet Sauvignon' },
       { subject: 'https://example.org/wine', predicate: 'https://schema.org/description', object: 'Full-bodied red wine' },
     ];
-    const result = await tool.execute('call-1', { paranet_id: 'testing', quads });
+    const result = await tool.execute('call-1', { context_graph_id: 'testing', quads });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.kcId).toBe('kc-123');
@@ -170,7 +170,7 @@ describe('dkg_publish tool', () => {
     expect(parsed.quadsPublished).toBe(2);
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.paranetId).toBe('testing');
+    expect(body.contextGraphId).toBe('testing');
     expect(body.quads).toHaveLength(2);
     expect(body.quads[0].subject).toBe('https://example.org/wine');
     expect(body.quads[0].object).toBe('"Cabernet Sauvignon"');
@@ -185,7 +185,7 @@ describe('dkg_publish tool', () => {
     const quads = [
       { subject: 'https://example.org/wine', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://schema.org/Product' },
     ];
-    const result = await tool.execute('call-uri', { paranet_id: 'testing', quads });
+    const result = await tool.execute('call-uri', { context_graph_id: 'testing', quads });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.quads[0].object).toBe('https://schema.org/Product');
@@ -202,7 +202,7 @@ describe('dkg_publish tool', () => {
       { subject: 'https://example.org/wine', predicate: 'https://schema.org/name', object: 'Cabernet' },
       { subject: 'https://example.org/wine', predicate: 'https://schema.org/knows', object: 'urn:winemaker:alice' },
     ];
-    const result = await tool.execute('call-mix', { paranet_id: 'testing', quads });
+    const result = await tool.execute('call-mix', { context_graph_id: 'testing', quads });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.quadsPublished).toBe(3);
@@ -215,7 +215,7 @@ describe('dkg_publish tool', () => {
 
   it('returns error for empty quads array', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-empty', { paranet_id: 'testing', quads: [] });
+    const result = await tool.execute('call-empty', { context_graph_id: 'testing', quads: [] });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('non-empty array');
@@ -224,7 +224,7 @@ describe('dkg_publish tool', () => {
 
   it('returns error for missing quads', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-missing', { paranet_id: 'testing' });
+    const result = await tool.execute('call-missing', { context_graph_id: 'testing' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('non-empty array');
@@ -239,7 +239,7 @@ describe('dkg_publish tool', () => {
     const quads = [
       { subject: 'urn:a', predicate: 'urn:b', object: 'She said "hello"' },
     ];
-    const result = await tool.execute('call-esc', { paranet_id: 'testing', quads });
+    const result = await tool.execute('call-esc', { context_graph_id: 'testing', quads });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.quads[0].object).toBe('"She said \\"hello\\""');
@@ -254,7 +254,7 @@ describe('dkg_publish tool', () => {
     const quads = [
       { subject: 'urn:a', predicate: 'urn:b', object: 'hello', graph: 'urn:my-graph' },
     ];
-    const result = await tool.execute('call-graph', { paranet_id: 'testing', quads });
+    const result = await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.quads[0].graph).toBe('urn:my-graph');
@@ -273,23 +273,23 @@ describe('dkg_query tool', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends SPARQL query with optional paranet_id', async () => {
+  it('sends SPARQL query with optional context_graph_id', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ result: { bindings: [{ s: 'urn:x' }] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
-    const result = await tool.execute('call-1', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', paranet_id: 'testing' });
+    const result = await tool.execute('call-1', { sparql: 'SELECT ?s WHERE { ?s ?p ?o }', context_graph_id: 'testing' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.result.bindings).toHaveLength(1);
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.sparql).toContain('SELECT');
-    expect(body.paranetId).toBe('testing');
+    expect(body.contextGraphId).toBe('testing');
   });
 
-  it('omits paranetId when not provided', async () => {
+  it('omits contextGraphId when not provided', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
@@ -298,22 +298,22 @@ describe('dkg_query tool', () => {
     await tool.execute('call-2', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.paranetId).toBeUndefined();
+    expect(body.contextGraphId).toBeUndefined();
   });
 
-  it('passes includeWorkspace when include_workspace is "true"', async () => {
+  it('passes includeSharedMemory when include_shared_memory is "true"', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
-    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_workspace: 'true' });
+    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: 'true' });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.includeWorkspace).toBe(true);
+    expect(body.includeSharedMemory).toBe(true);
   });
 
-  it('omits includeWorkspace when include_workspace is not set', async () => {
+  it('omits includeSharedMemory when include_shared_memory is not set', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
@@ -322,11 +322,11 @@ describe('dkg_query tool', () => {
     await tool.execute('call-4', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.includeWorkspace).toBeUndefined();
+    expect(body.includeSharedMemory).toBeUndefined();
   });
 });
 
-describe('dkg_paranet_create tool', () => {
+describe('dkg_context_graph_create tool', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -341,18 +341,18 @@ describe('dkg_paranet_create tool', () => {
   it('is present with required param name only', () => {
     const plugin = new DkgNodePlugin();
     const tools = collectTools(plugin);
-    const tool = tools.find(t => t.name === 'dkg_paranet_create');
+    const tool = tools.find(t => t.name === 'dkg_context_graph_create');
     expect(tool).toBeDefined();
     expect(tool!.parameters.required).toEqual(['name']);
   });
 
-  it('creates a paranet with explicit id', async () => {
+  it('creates a context graph with explicit id', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_paranet_create');
-    const result = await tool.execute('call-1', { id: 'my-research', name: 'My Research', description: 'A paranet' });
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-1', { id: 'my-research', name: 'My Research', description: 'A context graph' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.created).toBe('my-research');
@@ -361,7 +361,7 @@ describe('dkg_paranet_create tool', () => {
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
-    expect(body.description).toBe('A paranet');
+    expect(body.description).toBe('A context graph');
   });
 
   it('auto-generates id from name when id is omitted', async () => {
@@ -369,7 +369,7 @@ describe('dkg_paranet_create tool', () => {
       new Response(JSON.stringify({ created: 'my-research-paranet', uri: 'did:dkg:context-graph:my-research-paranet' }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-auto', { name: 'My Research Paranet' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -385,7 +385,7 @@ describe('dkg_paranet_create tool', () => {
       new Response(JSON.stringify({ created: 'alice-s-data-2024', uri: 'did:dkg:context-graph:alice-s-data-2024' }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     await tool.execute('call-special', { name: "Alice's Data (2024)" });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
@@ -393,7 +393,7 @@ describe('dkg_paranet_create tool', () => {
   });
 
   it('returns error when name is missing', async () => {
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-3', {});
     const parsed = JSON.parse(result.content[0].text);
 
@@ -401,7 +401,7 @@ describe('dkg_paranet_create tool', () => {
   });
 
   it('returns error when name produces empty slug and no explicit id', async () => {
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-empty-slug', { name: '!!@#$%' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -413,7 +413,7 @@ describe('dkg_paranet_create tool', () => {
       new Response(JSON.stringify({ created: 'test', uri: 'did:dkg:context-graph:test' }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-ws-id', { id: '   ', name: 'Test' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -423,19 +423,19 @@ describe('dkg_paranet_create tool', () => {
   });
 
   it('returns error for invalid explicit ID format (uppercase)', async () => {
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-4', { id: 'My-Paranet', name: 'Test' });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.error).toContain('Invalid paranet ID');
+    expect(parsed.error).toContain('Invalid context graph ID');
   });
 
   it('returns error for explicit ID starting with hyphen', async () => {
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-6', { id: '-bad-id', name: 'Test' });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.error).toContain('Invalid paranet ID');
+    expect(parsed.error).toContain('Invalid context graph ID');
   });
 
   it('accepts single-character explicit ID', async () => {
@@ -443,7 +443,7 @@ describe('dkg_paranet_create tool', () => {
       new Response(JSON.stringify({ created: 'x', uri: 'did:dkg:context-graph:x' }), { status: 200 }),
     );
 
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-7', { id: 'x', name: 'X Paranet' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -453,7 +453,7 @@ describe('dkg_paranet_create tool', () => {
   it('returns daemon error on failure', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
 
-    const tool = findTool('dkg_paranet_create');
+    const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-8', { name: 'Test' });
     const parsed = JSON.parse(result.content[0].text);
 
@@ -473,48 +473,48 @@ describe('dkg_subscribe tool', () => {
     vi.restoreAllMocks();
   });
 
-  it('is present with required param paranet_id', () => {
+  it('is present with required param context_graph_id', () => {
     const plugin = new DkgNodePlugin();
     const tools = collectTools(plugin);
     const tool = tools.find(t => t.name === 'dkg_subscribe');
     expect(tool).toBeDefined();
-    expect(tool!.parameters.required).toEqual(['paranet_id']);
+    expect(tool!.parameters.required).toEqual(['context_graph_id']);
   });
 
   it('subscribes and returns catchup job info', async () => {
     fetchSpy.mockResolvedValueOnce(
       new Response(JSON.stringify({
         subscribed: 'my-paranet',
-        catchup: { jobId: 'job-1', status: 'queued', includeWorkspace: true },
+        catchup: { jobId: 'job-1', status: 'queued', includeSharedMemory: true },
       }), { status: 200 }),
     );
 
     const tool = findTool('dkg_subscribe');
-    const result = await tool.execute('call-1', { paranet_id: 'my-paranet' });
+    const result = await tool.execute('call-1', { context_graph_id: 'my-paranet' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.subscribed).toBe('my-paranet');
     expect(parsed.catchup.jobId).toBe('job-1');
   });
 
-  it('returns error when paranet_id is missing', async () => {
+  it('returns error when context_graph_id is missing', async () => {
     const tool = findTool('dkg_subscribe');
     const result = await tool.execute('call-2', {});
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.error).toContain('paranet_id');
+    expect(parsed.error).toContain('context_graph_id');
   });
 
-  it('passes includeWorkspace false when specified', async () => {
+  it('passes includeSharedMemory false when specified', async () => {
     fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeWorkspace: false } }), { status: 200 }),
+      new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeSharedMemory: false } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_subscribe');
-    await tool.execute('call-3', { paranet_id: 'p1', include_workspace: 'false' });
+    await tool.execute('call-3', { context_graph_id: 'p1', include_shared_memory: 'false' });
 
     const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.includeWorkspace).toBe(false);
+    expect(body.includeSharedMemory).toBe(false);
   });
 });
 
@@ -587,7 +587,7 @@ describe('dkg_publish access_policy', () => {
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-1', { paranet_id: 'testing', quads: VALID_QUADS });
+    const result = await tool.execute('call-1', { context_graph_id: 'testing', quads: VALID_QUADS });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.accessPolicy).toBe('ownerOnly');
@@ -601,7 +601,7 @@ describe('dkg_publish access_policy', () => {
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-2', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
+    const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.accessPolicy).toBe('public');
@@ -611,7 +611,7 @@ describe('dkg_publish access_policy', () => {
 
   it('rejects invalid access_policy', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-3', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'bogus' });
+    const result = await tool.execute('call-3', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'bogus' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('Invalid access_policy');
@@ -624,7 +624,7 @@ describe('dkg_publish access_policy', () => {
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-4', {
-      paranet_id: 'testing',
+      context_graph_id: 'testing',
       quads: VALID_QUADS,
       access_policy: 'allowList',
       allowed_peers: '12D3peer1, 12D3peer2',
@@ -637,7 +637,7 @@ describe('dkg_publish access_policy', () => {
 
   it('rejects allowList without allowed_peers', async () => {
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-5', { paranet_id: 'testing', quads: VALID_QUADS, access_policy: 'allowList' });
+    const result = await tool.execute('call-5', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'allowList' });
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('allowList');
@@ -647,7 +647,7 @@ describe('dkg_publish access_policy', () => {
   it('rejects allowed_peers without allowList policy', async () => {
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-6', {
-      paranet_id: 'testing',
+      context_graph_id: 'testing',
       quads: VALID_QUADS,
       access_policy: 'public',
       allowed_peers: '12D3peer1',

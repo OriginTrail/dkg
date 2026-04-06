@@ -16,7 +16,7 @@ export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
 interface KAMeta {
   rootEntity: string;
-  paranetId: string;
+  contextGraphId: string;
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
   accessPolicy?: AccessPolicy;
@@ -72,8 +72,8 @@ export class AccessHandler {
       }
 
       const hasPrivate =
-        this.privateStore.hasPrivateTriples(meta.paranetId, meta.rootEntity) ||
-        (await this.privateStore.hasPrivateTriplesInStore(meta.paranetId, meta.rootEntity));
+        this.privateStore.hasPrivateTriples(meta.contextGraphId, meta.rootEntity) ||
+        (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, meta.rootEntity));
 
       if (!hasPrivate) {
         return this.deny('No private triples available for this KA');
@@ -131,7 +131,7 @@ export class AccessHandler {
       }
 
       const privateQuads = await this.privateStore.getPrivateTriples(
-        meta.paranetId,
+        meta.contextGraphId,
         meta.rootEntity,
       );
 
@@ -173,17 +173,17 @@ export class AccessHandler {
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const safeUal = assertSafeIri(kaUal);
     const result = await this.store.query(
-      `SELECT ?rootEntity ?paranet ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
+      `SELECT ?rootEntity ?contextGraph ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
         GRAPH ?g {
           <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
           <${safeUal}> <${DKG_NS}partOf> ?kc .
-          ?kc <${DKG_NS}paranet> ?paranet .
+          ?kc <${DKG_NS}paranet> ?contextGraph .
           OPTIONAL { <${safeUal}> <${DKG_NS}privateMerkleRoot> ?privateMerkleRoot }
           OPTIONAL { <${safeUal}> <${DKG_NS}privateTripleCount> ?privateTripleCount }
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
           OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
           OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
-          BIND(CONCAT(STR(?paranet), '/_meta') AS ?expectedMetaGraph)
+          BIND(CONCAT(STR(?contextGraph), '/_meta') AS ?expectedMetaGraph)
           FILTER(STR(?g) = ?expectedMetaGraph)
         }
       } LIMIT 1`,
@@ -195,8 +195,8 @@ export class AccessHandler {
 
     const row = result.bindings[0];
     const rootEntity = row['rootEntity'];
-    const paranetUri = row['paranet'];
-    const paranetId = paranetUri.replace('did:dkg:context-graph:', '');
+    const contextGraphUri = row['contextGraph'];
+    const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
     const kcUal = row['kc'];
 
     let privateMerkleRoot: Uint8Array | undefined;
@@ -227,7 +227,7 @@ export class AccessHandler {
         ? stripLiteral(row['attributedTo'])
         : undefined;
 
-    const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const allowedPeerRes = await this.store.query(
       `SELECT ?allowedPeer WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> {
@@ -247,7 +247,7 @@ export class AccessHandler {
 
     return {
       rootEntity,
-      paranetId,
+      contextGraphId,
       privateMerkleRoot,
       privateTripleCount,
       accessPolicy,

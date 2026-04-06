@@ -43,7 +43,7 @@ export function sha256String(str: string): string {
 export function computeConfigHash(config: Omit<SessionConfig, 'configHash' | 'status'>): string {
   const hashable = {
     sessionId: config.sessionId,
-    paranetId: config.paranetId,
+    contextGraphId: config.contextGraphId,
     appId: config.appId,
     createdBy: config.createdBy,
     createdAt: config.createdAt,
@@ -77,12 +77,12 @@ export function computeMembershipRoot(members: SessionMember[]): string {
 }
 
 export function computeSessionId(
-  paranetId: string,
+  contextGraphId: string,
   creatorPeerId: string,
   createdAt: string,
   nonce: string,
 ): string {
-  return sha256String(`${paranetId}${creatorPeerId}${createdAt}${nonce}`);
+  return sha256String(`${contextGraphId}${creatorPeerId}${createdAt}${nonce}`);
 }
 
 export function computeInputSetHash(inputs: Uint8Array[]): string {
@@ -111,7 +111,7 @@ export function computeTurnCommitment(
 export interface SigningContext {
   domain: string;
   network: string;
-  paranetId: string;
+  contextGraphId: string;
   sessionId: string;
   round: number;
   type: AKAEventType;
@@ -121,7 +121,7 @@ function buildSigningPayload(context: SigningContext, payload: unknown): Uint8Ar
   const canonical = canonicalJsonEncode({
     domain: context.domain,
     network: context.network,
-    paranetId: context.paranetId,
+    contextGraphId: context.contextGraphId,
     payload,
     round: context.round,
     sessionId: context.sessionId,

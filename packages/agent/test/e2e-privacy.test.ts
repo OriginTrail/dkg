@@ -56,21 +56,21 @@ describe('Private data isolation (2 nodes)', () => {
   }, 10000);
 
   it('private paranet is not discoverable by other nodes', async () => {
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: PRIVATE_PARANET,
       name: 'Private Agent Memory',
       description: 'Should never leave node A',
       private: true,
     });
 
-    const existsOnA = await nodeA.paranetExists(PRIVATE_PARANET);
+    const existsOnA = await nodeA.contextGraphExists(PRIVATE_PARANET);
     expect(existsOnA).toBe(true);
 
     // Give gossip time to propagate (if it were going to)
     await sleep(2000);
 
     // Node B should NOT know about the private paranet
-    const existsOnB = await nodeB.paranetExists(PRIVATE_PARANET);
+    const existsOnB = await nodeB.contextGraphExists(PRIVATE_PARANET);
     expect(existsOnB).toBe(false);
   }, 10000);
 
@@ -80,13 +80,13 @@ describe('Private data isolation (2 nodes)', () => {
       { subject: PRIVATE_ENTITY, predicate: 'http://schema.org/author', object: '"user"', graph: '' as const },
     ];
 
-    const result = await nodeA.writeToWorkspace(PRIVATE_PARANET, secretQuads, { localOnly: true });
-    expect(result.workspaceOperationId).toBeDefined();
+    const result = await nodeA.share(PRIVATE_PARANET, secretQuads, { localOnly: true });
+    expect(result.shareOperationId).toBeDefined();
 
     // Verify data exists on node A
     const onA = await nodeA.query(
       `SELECT ?text WHERE { <${PRIVATE_ENTITY}> <http://schema.org/text> ?text }`,
-      { paranetId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
     expect(onA.bindings[0]['text']).toBe('"This is my secret chat message"');
@@ -97,26 +97,26 @@ describe('Private data isolation (2 nodes)', () => {
     // Node B should NOT have the data — it doesn't even know the paranet
     const onB = await nodeB.query(
       `SELECT ?text WHERE { <${PRIVATE_ENTITY}> <http://schema.org/text> ?text }`,
-      { paranetId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PRIVATE_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onB.bindings.length).toBe(0);
 
-    // Also check with includeWorkspace and broad query
+    // Also check with includeSharedMemory and broad query
     const broadB = await nodeB.query(
       `SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(CONTAINS(STR(?o), "secret")) }`,
-      { includeWorkspace: true },
+      { includeSharedMemory: true },
     );
     expect(broadB.bindings.length).toBe(0);
   }, 15000);
 
   it('normal (non-private) workspace writes DO replicate as a control test', async () => {
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: PUBLIC_PARANET,
       name: 'Public E2E Paranet',
     });
 
     // Node B subscribes to the public paranet
-    nodeB.subscribeToParanet(PUBLIC_PARANET);
+    nodeB.subscribeToContextGraph(PUBLIC_PARANET);
     await sleep(2000);
 
     const publicQuads = [
@@ -124,21 +124,21 @@ describe('Private data isolation (2 nodes)', () => {
     ];
 
     // Write WITHOUT localOnly — this should broadcast
-    await nodeA.writeToWorkspace(PUBLIC_PARANET, publicQuads);
+    await nodeA.share(PUBLIC_PARANET, publicQuads);
 
     await sleep(5000);
 
     // Node A should have it
     const onA = await nodeA.query(
       `SELECT ?name WHERE { <${PUBLIC_ENTITY}> <http://schema.org/name> ?name }`,
-      { paranetId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
     );
     expect(onA.bindings.length).toBe(1);
 
     // Node B should also have it (replicated via gossip)
     const onB = await nodeB.query(
       `SELECT ?name WHERE { <${PUBLIC_ENTITY}> <http://schema.org/name> ?name }`,
-      { paranetId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PUBLIC_PARANET, graphSuffix: '_shared_memory' },
     );
     // GossipSub mesh may not form in time, so we check but don't hard-fail
     if (onB.bindings.length > 0) {
@@ -149,7 +149,7 @@ describe('Private data isolation (2 nodes)', () => {
   it('node B cannot query private data even with explicit paranet ID', async () => {
     const attempt = await nodeB.query(
       `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10`,
-      { paranetId: PRIVATE_PARANET, includeWorkspace: true },
+      { contextGraphId: PRIVATE_PARANET, includeSharedMemory: true },
     );
     expect(attempt.bindings.length).toBe(0);
   }, 5000);

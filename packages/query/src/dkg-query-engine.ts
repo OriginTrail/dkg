@@ -2,7 +2,6 @@ import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origin
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
-  paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri,
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
   assertSafeIri, escapeSparqlLiteral,
   type GetView,
@@ -111,25 +110,31 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     // ── V10 view-based routing ────────────────────────────────────────
-    if (options?.view && options.paranetId) {
-      return this.queryWithView(sparql, options.view, options.paranetId, options);
+    const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+    if (options?.view) {
+      if (!effectiveContextGraphId) {
+        throw new Error(
+          `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
+        );
+      }
+      return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
 
     // ── Legacy routing (V9 compat) ────────────────────────────────────
     let effectiveSparql = sparql;
 
-    if (options?.paranetId && !sparql.toLowerCase().includes('from ')) {
-      const dataGraph = paranetDataGraphUri(options.paranetId);
-      const workspaceGraph = paranetWorkspaceGraphUri(options.paranetId);
-      if (options.includeWorkspace) {
+    if (effectiveContextGraphId && !sparql.toLowerCase().includes('from ')) {
+      const dataGraph = contextGraphDataUri(effectiveContextGraphId);
+      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
+      if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);
-        const workspaceSparql = wrapWithGraph(sparql, workspaceGraph);
+        const sharedMemorySparql = wrapWithGraph(sparql, sharedMemoryGraph);
         const dataResult = await this.store.query(dataSparql);
-        const wsResult = await this.store.query(workspaceSparql);
-        return mergeWorkspaceAndDataResults(dataResult, wsResult);
+        const smResult = await this.store.query(sharedMemorySparql);
+        return mergeSharedMemoryAndDataResults(dataResult, smResult);
       }
-      if (options.graphSuffix === '_shared_memory') {
-        effectiveSparql = wrapWithGraph(sparql, workspaceGraph);
+      if (options?.graphSuffix === '_shared_memory') {
+        effectiveSparql = wrapWithGraph(sparql, sharedMemoryGraph);
       } else {
         effectiveSparql = wrapWithGraph(sparql, dataGraph);
       }
@@ -194,7 +199,9 @@ export class DKGQueryEngine implements QueryEngine {
 
   private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
     const allGraphs = await this.store.listGraphs();
-    return allGraphs.filter((g) => g.startsWith(prefix));
+    return allGraphs.filter(
+      (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
+    );
   }
 
   private async execAndNormalize(sparql: string): Promise<QueryResult> {
@@ -214,16 +221,16 @@ export class DKGQueryEngine implements QueryEngine {
 
   async resolveKA(ual: string): Promise<{
     rootEntity: string;
-    paranetId: string;
+    contextGraphId: string;
     quads: Quad[];
   }> {
     // Look up KA metadata across all meta graphs
     const metaResult = await this.store.query(
-      `SELECT ?rootEntity ?paranet WHERE {
+      `SELECT ?rootEntity ?ctxGraph WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
-          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?paranet .
+          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?ctxGraph .
         }
       }`,
     );
@@ -233,9 +240,9 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     const rootEntity = metaResult.bindings[0]['rootEntity'];
-    const paranetUri = metaResult.bindings[0]['paranet'];
-    const paranetId = paranetUri.replace('did:dkg:context-graph:', '');
-    const dataGraph = paranetDataGraphUri(paranetId);
+    const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
+    const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
+    const dataGraph = contextGraphDataUri(contextGraphId);
 
     // Fetch all triples for this entity
     const dataResult = await this.store.query(
@@ -260,22 +267,27 @@ export class DKGQueryEngine implements QueryEngine {
           }))
         : [];
 
-    return { rootEntity, paranetId, quads };
+    return { rootEntity, contextGraphId, quads };
   }
 
   /**
-   * Execute a query across all locally-stored paranets.
+   * Execute a query across all locally-stored context graphs.
    */
-  async queryAllParanets(sparql: string): Promise<QueryResult> {
-    const paranets = await this.graphManager.listParanets();
+  async queryAllContextGraphs(sparql: string): Promise<QueryResult> {
+    const contextGraphIds = await this.graphManager.listContextGraphs();
     const allBindings: Array<Record<string, string>> = [];
 
-    for (const paranetId of paranets) {
-      const result = await this.query(sparql, { paranetId });
+    for (const contextGraphId of contextGraphIds) {
+      const result = await this.query(sparql, { contextGraphId });
       allBindings.push(...result.bindings);
     }
 
     return { bindings: allBindings };
+  }
+
+  /** @deprecated Use queryAllContextGraphs */
+  async queryAllParanets(sparql: string): Promise<QueryResult> {
+    return this.queryAllContextGraphs(sparql);
   }
 }
 
@@ -308,27 +320,27 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
 
-function mergeWorkspaceAndDataResults(
+function mergeSharedMemoryAndDataResults(
   dataResult: StoreQueryResult,
-  wsResult: StoreQueryResult,
+  smResult: StoreQueryResult,
 ): QueryResult {
-  if (dataResult.type === 'quads' || wsResult.type === 'quads') {
+  if (dataResult.type === 'quads' || smResult.type === 'quads') {
     const mergedQuads = dedupeQuads([
       ...(dataResult.type === 'quads' ? dataResult.quads : []),
-      ...(wsResult.type === 'quads' ? wsResult.quads : []),
+      ...(smResult.type === 'quads' ? smResult.quads : []),
     ]);
     return { bindings: [], quads: mergedQuads };
   }
 
-  if (dataResult.type === 'boolean' || wsResult.type === 'boolean') {
+  if (dataResult.type === 'boolean' || smResult.type === 'boolean') {
     const value = (dataResult.type === 'boolean' ? dataResult.value : false)
-      || (wsResult.type === 'boolean' ? wsResult.value : false);
+      || (smResult.type === 'boolean' ? smResult.value : false);
     return { bindings: [{ result: String(value) }] };
   }
 
   const mergedBindings = dedupeBindings([
     ...(dataResult.type === 'bindings' ? dataResult.bindings : []),
-    ...(wsResult.type === 'bindings' ? wsResult.bindings : []),
+    ...(smResult.type === 'bindings' ? smResult.bindings : []),
   ]);
   return { bindings: mergedBindings };
 }

@@ -22,7 +22,9 @@ export interface NetworkConfig {
   networkId: string;
   genesisVersion: number;
   relays: string[];
-  defaultParanets: string[];
+  /** V10: context graphs (backward-compat alias: defaultParanets) */
+  defaultContextGraphs?: string[];
+  defaultParanets?: string[];
   defaultNodeRole: 'core' | 'edge';
   autoUpdate?: {
     enabled: boolean;
@@ -78,6 +80,8 @@ export interface DkgConfig {
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
+  /** V10: context graphs to subscribe. Accepts both `contextGraphs` and legacy `paranets`. */
+  contextGraphs?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
   chain?: ChainConfig;
@@ -102,10 +106,12 @@ export interface DkgConfig {
   auth?: { enabled?: boolean; tokens?: string[] };
   /** Opt-in telemetry streaming to central network dashboard. */
   telemetry?: { enabled?: boolean };
-  /** Workspace data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
+  /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
+  sharedMemoryTtlMs?: number;
+  /** @deprecated Legacy alias for sharedMemoryTtlMs */
   workspaceTtlMs?: number;
   /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
-  epcis?: { paranetId: string };
+  epcis?: { contextGraphId?: string; /** @deprecated */ paranetId?: string };
 }
 
 /**
@@ -129,8 +135,24 @@ const DEFAULT_CONFIG: DkgConfig = {
   apiPort: 9200,
   listenPort: 0,
   nodeRole: 'edge',
+  contextGraphs: [],
   paranets: [],
 };
+
+/** Resolve context graphs from config, accepting both V10 `contextGraphs` and legacy `paranets` keys. */
+export function resolveContextGraphs(config: DkgConfig): string[] {
+  return config.contextGraphs ?? config.paranets ?? [];
+}
+
+/** Resolve context graphs from network config, accepting both V10 and legacy keys. */
+export function resolveNetworkDefaultContextGraphs(network: NetworkConfig | null | undefined): string[] {
+  return network?.defaultContextGraphs ?? network?.defaultParanets ?? [];
+}
+
+/** Resolve shared memory TTL from config, accepting both V10 and legacy keys. */
+export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined {
+  return config.sharedMemoryTtlMs ?? config.workspaceTtlMs;
+}
 
 let _networkConfig: NetworkConfig | null = null;
 

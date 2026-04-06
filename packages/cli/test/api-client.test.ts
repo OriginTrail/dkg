@@ -59,17 +59,17 @@ describe('ApiClient', () => {
       expect(result.skills).toEqual([]);
     });
 
-    it('listParanets() calls /api/paranet/list', async () => {
-      const body = { paranets: [{ id: 'p1', uri: 'urn:p1', name: 'Test', isSystem: false }] };
+    it('listContextGraphs() calls /api/context-graph/list', async () => {
+      const body = { contextGraphs: [{ id: 'p1', uri: 'urn:p1', name: 'Test', isSystem: false }] };
       globalThis.fetch = mockFetchOk(body);
-      const result = await client.listParanets();
-      expect(result.paranets).toHaveLength(1);
+      const result = await client.listContextGraphs();
+      expect(result.contextGraphs).toHaveLength(1);
     });
 
-    it('paranetExists() calls correct URL with encoded id', async () => {
+    it('contextGraphExists() calls correct URL with encoded id', async () => {
       const body = { id: 'my paranet', exists: true };
       globalThis.fetch = mockFetchOk(body);
-      await client.paranetExists('my paranet');
+      await client.contextGraphExists('my paranet');
 
       const [url] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
       expect(url).toContain('my%20paranet');
@@ -89,7 +89,7 @@ describe('ApiClient', () => {
       expect(body).toEqual({ to: 'peer1', text: 'hello' });
     });
 
-    it('publish() sends paranetId and quads', async () => {
+    it('publish() sends context graph id and quads', async () => {
       const expected = { kcId: 'kc1', status: 'tentative', kas: [] };
       globalThis.fetch = mockFetchOk(expected);
       const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
@@ -101,7 +101,7 @@ describe('ApiClient', () => {
       expect(body.quads).toHaveLength(1);
     });
 
-    it('query() sends sparql and optional paranetId', async () => {
+    it('query() sends sparql and optional context graph id', async () => {
       globalThis.fetch = mockFetchOk({ result: [] });
       await client.query('SELECT * { ?s ?p ?o }', 'my-paranet');
 
@@ -152,8 +152,8 @@ describe('ApiClient', () => {
 
   describe('error handling', () => {
     it('throws error message from response body', async () => {
-      globalThis.fetch = mockFetchError(400, { error: 'Bad request: missing paranetId' });
-      await expect(client.status()).rejects.toThrow('Bad request: missing paranetId');
+      globalThis.fetch = mockFetchError(400, { error: 'Bad request: missing contextGraphId' });
+      await expect(client.status()).rejects.toThrow('Bad request: missing contextGraphId');
     });
 
     it('falls back to HTTP status text when body has no error', async () => {

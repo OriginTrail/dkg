@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # dkg-claude — wrapper around `claude` that publishes session telemetry
-# to the DKG dev-coordination paranet after each session.
+# to the DKG dev-coordination context graph after each session.
 #
 # Usage:
 #   dkg-claude "fix the staking tests"
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-PARANET_ID="${DKG_DEV_PARANET:-dev-coordination}"
+CONTEXT_GRAPH_ID="${DKG_DEV_CONTEXT_GRAPH:-${DKG_DEV_PARANET:-dev-coordination}}"
 DEVGRAPH_NS="https://ontology.dkg.io/devgraph#"
 RDF_NS="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 
@@ -58,7 +58,7 @@ SESSION_FILE_BEFORE=$(get_latest_session)
 # ---------------------------------------------------------------------------
 # Run claude
 # ---------------------------------------------------------------------------
-echo "🔗 DKG session tracking active (paranet: $PARANET_ID)"
+echo "🔗 DKG session tracking active (context graph: $CONTEXT_GRAPH_ID)"
 echo ""
 
 set +e
@@ -140,7 +140,7 @@ COST=$(echo "scale=2; ($INPUT_TOKENS * 15 + $OUTPUT_TOKENS * 75 + $CACHE_TOKENS 
 # Publish session telemetry to DKG
 # ---------------------------------------------------------------------------
 SESSION_URI="urn:session:${START_TIME}"
-GRAPH_URI="urn:paranet:${PARANET_ID}"
+GRAPH_URI="did:dkg:context-graph:${CONTEXT_GRAPH_ID}"
 
 build_quads() {
   local quads="["
@@ -186,11 +186,11 @@ echo "   Time:   ${DURATION_SECS}s"
 if command -v dkg &>/dev/null; then
   QUADS=$(build_quads)
   echo ""
-  echo "📤 Publishing to DKG paranet '${PARANET_ID}'..."
+  echo "📤 Publishing to DKG context graph '${CONTEXT_GRAPH_ID}'..."
 
   # Use the DKG CLI's API to publish
   set +e
-  RESULT=$(dkg publish --paranet "$PARANET_ID" --quads "$QUADS" 2>&1)
+  RESULT=$(dkg publish "$CONTEXT_GRAPH_ID" --triples "$QUADS" 2>&1)
   PUBLISH_EXIT=$?
   set -e
 

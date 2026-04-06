@@ -179,10 +179,10 @@ describe('ChatAssistant', () => {
     it('falls back to blocking tool loop when streamed response requests tool calls', async () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
-        writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
+        share: vi.fn().mockResolvedValue({ shareOperationId: 'ws-test' }),
         publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
-        createParanet: vi.fn().mockResolvedValue(undefined),
-        listParanets: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
+        createContextGraph: vi.fn().mockResolvedValue(undefined),
+        listContextGraphs: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
       };
       const toolAssistant = new ChatAssistant(
         db,
@@ -197,7 +197,7 @@ describe('ChatAssistant', () => {
             tool_calls: [{
               id: 'c1',
               type: 'function',
-              function: { name: 'dkg_list_paranets', arguments: '{}' },
+              function: { name: 'dkg_list_context_graphs', arguments: '{}' },
             }],
           },
         }],
@@ -209,7 +209,7 @@ describe('ChatAssistant', () => {
         .mockResolvedValueOnce(new Response(JSON.stringify(toolCallResponse), { status: 200 }))
         // Blocking tool loop second round response (final text)
         .mockResolvedValueOnce(new Response(JSON.stringify({
-          choices: [{ message: { content: 'Found 1 paranet: Testing.' } }],
+          choices: [{ message: { content: 'Found 1 context graph: Testing.' } }],
         }), { status: 200 }));
 
       const events: any[] = [];
@@ -217,9 +217,9 @@ describe('ChatAssistant', () => {
         events.push(ev);
       }
 
-      expect(mockTools.listParanets).toHaveBeenCalledTimes(1);
+      expect(mockTools.listContextGraphs).toHaveBeenCalledTimes(1);
       const final = events.find(e => e.type === 'final');
-      expect(final?.response.reply).toContain('Found 1 paranet');
+      expect(final?.response.reply).toContain('Found 1 context graph');
       expect(final?.responseMode).toBe('blocking');
       expect(fetchSpy).toHaveBeenCalledTimes(3);
       fetchSpy.mockRestore();
@@ -376,10 +376,10 @@ describe('ChatAssistant', () => {
     it('routes action messages to LLM when LLM + tools configured', async () => {
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
-        writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test-123' }),
+        share: vi.fn().mockResolvedValue({ shareOperationId: 'ws-test-123' }),
         publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
-        createParanet: vi.fn().mockResolvedValue(undefined),
-        listParanets: vi.fn().mockResolvedValue([]),
+        createContextGraph: vi.fn().mockResolvedValue(undefined),
+        listContextGraphs: vi.fn().mockResolvedValue([]),
       };
       const llmConfig = { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' };
       const toolAssistant = new ChatAssistant(db, mockQuery, llmConfig, mockTools);
@@ -395,7 +395,7 @@ describe('ChatAssistant', () => {
                 function: {
                   name: 'dkg_write_to_shared_memory',
                   arguments: JSON.stringify({
-                    paranetId: 'testing',
+                    contextGraphId: 'testing',
                     quads: [
                       { subject: 'http://example.org/Tesla', predicate: 'http://schema.org/name', object: 'Tesla', graph: '' },
                       { subject: 'http://example.org/Tesla', predicate: 'http://schema.org/founder', object: 'http://example.org/ElonMusk', graph: '' },
@@ -408,14 +408,14 @@ describe('ChatAssistant', () => {
         }), { status: 200 }),
       ).mockResolvedValueOnce(
         new Response(JSON.stringify({
-          choices: [{ message: { content: 'Done! I wrote 2 triples about Tesla to the testing workspace.' } }],
+          choices: [{ message: { content: 'Done! I wrote 2 triples about Tesla to the testing shared memory.' } }],
         }), { status: 200 }),
       );
 
-      const res = await toolAssistant.answer({ message: 'Create a knowledge asset about Tesla in the testing paranet' });
+      const res = await toolAssistant.answer({ message: 'Create a knowledge asset about Tesla in the testing context graph' });
 
       expect(fetchSpy).toHaveBeenCalledTimes(2);
-      expect(mockTools.writeToWorkspace).toHaveBeenCalledWith('testing', [
+      expect(mockTools.share).toHaveBeenCalledWith('testing', [
         { subject: 'http://example.org/Tesla', predicate: 'http://schema.org/name', object: 'Tesla', graph: '' },
         { subject: 'http://example.org/Tesla', predicate: 'http://schema.org/founder', object: 'http://example.org/ElonMusk', graph: '' },
       ]);
@@ -431,10 +431,10 @@ describe('ChatAssistant', () => {
       seedMetrics();
       const mockTools: MemoryToolContext = {
         query: vi.fn().mockResolvedValue({ bindings: [] }),
-        writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-test' }),
+        share: vi.fn().mockResolvedValue({ shareOperationId: 'ws-test' }),
         publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed' }),
-        createParanet: vi.fn().mockResolvedValue(undefined),
-        listParanets: vi.fn().mockResolvedValue([]),
+        createContextGraph: vi.fn().mockResolvedValue(undefined),
+        listContextGraphs: vi.fn().mockResolvedValue([]),
       };
       const llmConfig = { apiKey: 'test-key' };
       const toolAssistant = new ChatAssistant(db, mockQuery, llmConfig, mockTools);
@@ -455,10 +455,10 @@ describe('ChatAssistant', () => {
     beforeEach(() => {
       mockTools = {
         query: vi.fn().mockResolvedValue({ bindings: [{ s: 'x', p: 'y', o: 'z' }] }),
-        writeToWorkspace: vi.fn().mockResolvedValue({ workspaceOperationId: 'ws-abc' }),
+        share: vi.fn().mockResolvedValue({ shareOperationId: 'ws-abc' }),
         publishFromSharedMemory: vi.fn().mockResolvedValue({ status: 'confirmed', kcId: 42n }),
-        createParanet: vi.fn().mockResolvedValue(undefined),
-        listParanets: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
+        createContextGraph: vi.fn().mockResolvedValue(undefined),
+        listContextGraphs: vi.fn().mockResolvedValue([{ id: 'testing', name: 'Testing' }]),
       };
       const llmConfig = { apiKey: 'test-key', model: 'gpt-4o-mini', baseURL: 'https://api.openai.com/v1' };
       toolAssistant = new ChatAssistant(db, mockQuery, llmConfig, mockTools);
@@ -477,37 +477,37 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Generate a SPARQL query to find all subjects' });
-      expect(mockTools.query).toHaveBeenCalledWith('SELECT ?s WHERE { ?s ?p ?o } LIMIT 5', expect.objectContaining({ includeWorkspace: false }));
+      expect(mockTools.query).toHaveBeenCalledWith('SELECT ?s WHERE { ?s ?p ?o } LIMIT 5', expect.objectContaining({ includeSharedMemory: false }));
       expect(res.toolCalls).toHaveLength(1);
       expect(res.toolCalls![0].name).toBe('dkg_query');
       fetchSpy.mockRestore();
     });
 
-    it('executes dkg_list_paranets tool', async () => {
+    it('executes dkg_list_context_graphs tool', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_list_paranets', arguments: '{}' },
+            function: { name: 'dkg_list_context_graphs', arguments: '{}' },
           }] } }],
         }), { status: 200 }))
         .mockResolvedValueOnce(new Response(JSON.stringify({
-          choices: [{ message: { content: 'Found 1 paranet: Testing.' } }],
+          choices: [{ message: { content: 'Found 1 context graph: Testing.' } }],
         }), { status: 200 }));
 
       // "generate" is an action verb → bypasses rule-based matchers
       const res = await toolAssistant.answer({ message: 'Generate a list of my knowledge graphs' });
-      expect(mockTools.listParanets).toHaveBeenCalled();
+      expect(mockTools.listContextGraphs).toHaveBeenCalled();
       expect(res.toolCalls![0].result).toEqual([{ id: 'testing', name: 'Testing' }]);
       fetchSpy.mockRestore();
     });
 
-    it('executes dkg_create_paranet tool', async () => {
+    it('executes dkg_create_context_graph tool', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_create_paranet', arguments: JSON.stringify({ id: 'my-data', name: 'My Data', description: 'test' }) },
+            function: { name: 'dkg_create_context_graph', arguments: JSON.stringify({ id: 'my-data', name: 'My Data', description: 'test' }) },
           }] } }],
         }), { status: 200 }))
         .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -515,38 +515,38 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Build a new knowledge graph called My Data' });
-      expect(mockTools.createParanet).toHaveBeenCalledWith({ id: 'my-data', name: 'My Data', description: 'test' });
-      expect(res.toolCalls![0].name).toBe('dkg_create_paranet');
+      expect(mockTools.createContextGraph).toHaveBeenCalledWith({ id: 'my-data', name: 'My Data', description: 'test' });
+      expect(res.toolCalls![0].name).toBe('dkg_create_context_graph');
       fetchSpy.mockRestore();
     });
 
-    it('executes dkg_enshrine tool', async () => {
+    it('executes dkg_publish_from_swm tool', async () => {
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
-            function: { name: 'dkg_enshrine', arguments: JSON.stringify({ paranetId: 'testing', selection: 'all' }) },
+            function: { name: 'dkg_publish_from_swm', arguments: JSON.stringify({ contextGraphId: 'testing', selection: 'all' }) },
           }] } }],
         }), { status: 200 }))
         .mockResolvedValueOnce(new Response(JSON.stringify({
-          choices: [{ message: { content: 'Enshrined workspace to chain.' } }],
+          choices: [{ message: { content: 'Published shared memory to chain.' } }],
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Finalize everything on chain now' });
       expect(mockTools.publishFromSharedMemory).toHaveBeenCalledWith('testing', 'all');
-      expect(res.toolCalls![0].name).toBe('dkg_enshrine');
+      expect(res.toolCalls![0].name).toBe('dkg_publish_from_swm');
       fetchSpy.mockRestore();
     });
 
     it('handles tool execution errors gracefully', async () => {
-      (mockTools.writeToWorkspace as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Workspace validation failed'));
+      (mockTools.share as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Workspace validation failed'));
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(new Response(JSON.stringify({
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
             function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
-              paranetId: 'testing',
+              contextGraphId: 'testing',
               quads: [{ subject: 'http://x', predicate: 'http://y', object: 'z', graph: '' }],
             }) },
           }] } }],
@@ -567,7 +567,7 @@ describe('ChatAssistant', () => {
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
             function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
-              paranetId: 'agent-memo',
+              contextGraphId: 'agent-memo',
               quads: '[{"subject":"http://example.org/A","predicate":"http://schema.org/name","object":"Alpha","graph":""}]',
             }) },
           }] } }],
@@ -577,7 +577,7 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Save Alpha to my notes' });
-      expect(mockTools.writeToWorkspace).toHaveBeenCalledWith('agent-memo', [
+      expect(mockTools.share).toHaveBeenCalledWith('agent-memo', [
         { subject: 'http://example.org/A', predicate: 'http://schema.org/name', object: 'Alpha', graph: '' },
       ]);
       expect(res.toolCalls![0].result).toHaveProperty('tripleCount', 1);
@@ -590,7 +590,7 @@ describe('ChatAssistant', () => {
           choices: [{ message: { content: null, tool_calls: [{
             id: 'c1', type: 'function',
             function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
-              paranetId: 'testing',
+              contextGraphId: 'testing',
               quads: 'this is not valid json at all',
             }) },
           }] } }],
@@ -600,7 +600,7 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Insert some broken data' });
-      expect(mockTools.writeToWorkspace).not.toHaveBeenCalled();
+      expect(mockTools.share).not.toHaveBeenCalled();
       expect(res.toolCalls![0].result).toHaveProperty('error', 'No valid quads to write');
       fetchSpy.mockRestore();
     });
@@ -611,12 +611,12 @@ describe('ChatAssistant', () => {
           choices: [{ message: { content: null, tool_calls: [
             {
               id: 'c1', type: 'function',
-              function: { name: 'dkg_create_paranet', arguments: JSON.stringify({ id: 'new-data', name: 'New Data' }) },
+              function: { name: 'dkg_create_context_graph', arguments: JSON.stringify({ id: 'new-data', name: 'New Data' }) },
             },
             {
               id: 'c2', type: 'function',
               function: { name: 'dkg_write_to_shared_memory', arguments: JSON.stringify({
-                paranetId: 'new-data',
+                contextGraphId: 'new-data',
                 quads: [{ subject: 'http://example.org/X', predicate: 'http://schema.org/name', object: 'X', graph: '' }],
               }) },
             },
@@ -627,8 +627,8 @@ describe('ChatAssistant', () => {
         }), { status: 200 }));
 
       const res = await toolAssistant.answer({ message: 'Build a new-data graph and add X to it' });
-      expect(mockTools.createParanet).toHaveBeenCalledWith({ id: 'new-data', name: 'New Data', description: undefined });
-      expect(mockTools.writeToWorkspace).toHaveBeenCalled();
+      expect(mockTools.createContextGraph).toHaveBeenCalledWith({ id: 'new-data', name: 'New Data', description: undefined });
+      expect(mockTools.share).toHaveBeenCalled();
       expect(res.toolCalls).toHaveLength(2);
       expect(res.reply).toContain('new-data');
       fetchSpy.mockRestore();

@@ -57,7 +57,7 @@ export type ParticipantSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 export interface PublishOptions {
-  paranetId: string;
+  contextGraphId: string;
   quads: Quad[];
   privateQuads?: Quad[];
   /** Publisher peer ID used for KC ownership/access metadata. */
@@ -77,9 +77,9 @@ export interface PublishOptions {
   entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
-  /** Override the data graph URI (used for context graph enshrinement). */
+  /** Override the data graph URI (used for context graph publishing). */
   targetGraphUri?: string;
-  /** Override the meta graph URI (used for context graph enshrinement). */
+  /** Override the meta graph URI (used for context graph publishing). */
   targetMetaGraphUri?: string;
   /**
    * If provided, publisher calls this to collect receiver signatures
@@ -94,11 +94,11 @@ export interface PublishOptions {
   v10ACKProvider?: V10ACKProvider;
   /**
    * When publishing into a specific context graph (publishFromSharedMemory),
-   * this overrides paranetId as the ACK domain and on-chain contextGraphId.
+   * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
    */
-  contextGraphId?: string;
+  publishContextGraphId?: string;
   /**
-   * When true, the data is already in peers' SWM via workspace gossip.
+   * When true, the data is already in peers' SWM via shared memory gossip.
    * V10 ACK collection will NOT send inline staging quads — core nodes
    * verify against their local SWM copy (storage-attestation guarantee).
    */

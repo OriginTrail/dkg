@@ -1,52 +1,53 @@
 import { describe, it, expect } from 'vitest';
 import {
+  contextGraphSharedMemoryTopic,
+  contextGraphFinalizationTopic,
+  contextGraphAppTopic,
+  contextGraphDataUri,
+  contextGraphSessionsTopic,
   paranetPublishTopic,
   paranetWorkspaceTopic,
-  paranetAppTopic,
-  paranetDataGraphUri,
-  paranetSessionsTopic,
-  paranetFinalizationTopic,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
 
-describe('paranet topic helpers (V10 — deprecated aliases use context-graph prefix)', () => {
-  it('paranetPublishTopic returns V10 finalization topic', () => {
+describe('context graph topic helpers (V10)', () => {
+  it('contextGraphFinalizationTopic matches deprecated paranetPublishTopic', () => {
+    expect(paranetPublishTopic('testing')).toBe(contextGraphFinalizationTopic('testing'));
     expect(paranetPublishTopic('testing')).toBe('dkg/context-graph/testing/finalization');
   });
 
-  it('paranetWorkspaceTopic returns V10 workspace topic', () => {
-    expect(paranetWorkspaceTopic('testing')).toBe('dkg/context-graph/testing/workspace');
+  it('contextGraphSharedMemoryTopic matches deprecated paranetWorkspaceTopic', () => {
+    expect(paranetWorkspaceTopic('testing')).toBe(contextGraphSharedMemoryTopic('testing'));
+    expect(contextGraphSharedMemoryTopic('testing')).toBe('dkg/context-graph/testing/shared-memory');
   });
 
-  it('paranetAppTopic returns V10 app topic', () => {
-    expect(paranetAppTopic('origin-trail-game')).toBe('dkg/context-graph/origin-trail-game/app');
-    expect(paranetAppTopic('testing')).toBe('dkg/context-graph/testing/app');
+  it('contextGraphAppTopic returns V10 app topic', () => {
+    expect(contextGraphAppTopic('origin-trail-game')).toBe('dkg/context-graph/origin-trail-game/app');
+    expect(contextGraphAppTopic('testing')).toBe('dkg/context-graph/testing/app');
   });
 
-  it('paranetDataGraphUri returns V10 data URI', () => {
-    expect(paranetDataGraphUri('agents')).toBe('did:dkg:context-graph:agents');
+  it('contextGraphDataUri returns V10 data URI', () => {
+    expect(contextGraphDataUri('agents')).toBe('did:dkg:context-graph:agents');
   });
 
-  it('paranetSessionsTopic returns V10 sessions topic', () => {
-    expect(paranetSessionsTopic('testing')).toBe('dkg/context-graph/testing/sessions');
+  it('contextGraphSessionsTopic returns V10 sessions topic', () => {
+    expect(contextGraphSessionsTopic('testing')).toBe('dkg/context-graph/testing/sessions');
   });
 
-  it('paranetFinalizationTopic returns V10 finalization topic', () => {
-    expect(paranetFinalizationTopic('testing')).toBe('dkg/context-graph/testing/finalization');
+  it('handles empty string context graph ID (V10 format)', () => {
+    expect(contextGraphFinalizationTopic('')).toBe('dkg/context-graph//finalization');
+    expect(contextGraphDataUri('')).toBe('did:dkg:context-graph:');
   });
 
-  it('handles empty string paranet ID (deprecated aliases use V10 format)', () => {
-    expect(paranetPublishTopic('')).toBe('dkg/context-graph//finalization');
-    expect(paranetDataGraphUri('')).toBe('did:dkg:context-graph:');
+  it('preserves context graph IDs with special characters (V10 format)', () => {
+    expect(contextGraphFinalizationTopic('my-context-graph')).toBe(
+      'dkg/context-graph/my-context-graph/finalization',
+    );
+    expect(contextGraphFinalizationTopic('cg_v2')).toBe('dkg/context-graph/cg_v2/finalization');
   });
 
-  it('preserves paranet IDs with special characters (V10 format)', () => {
-    expect(paranetPublishTopic('my-paranet')).toBe('dkg/context-graph/my-paranet/finalization');
-    expect(paranetPublishTopic('paranet_v2')).toBe('dkg/context-graph/paranet_v2/finalization');
-  });
-
-  it('does not sanitize slashes in paranet IDs (caller responsibility)', () => {
-    const result = paranetPublishTopic('a/b');
+  it('does not sanitize slashes in context graph IDs (caller responsibility)', () => {
+    const result = contextGraphFinalizationTopic('a/b');
     expect(result).toBe('dkg/context-graph/a/b/finalization');
   });
 });

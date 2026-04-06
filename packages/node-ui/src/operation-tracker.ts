@@ -14,7 +14,7 @@ export class OperationTracker {
 
   start(ctx: OperationContext, meta?: {
     peerId?: string;
-    paranetId?: string;
+    contextGraphId?: string;
     details?: Record<string, unknown>;
   }): void {
     if (!this.db) return;
@@ -26,7 +26,7 @@ export class OperationTracker {
         operation_name: ctx.operationName,
         started_at: now,
         peer_id: meta?.peerId,
-        paranet_id: meta?.paranetId,
+        paranet_id: meta?.contextGraphId,
         details: meta?.details ? JSON.stringify(meta.details) : null,
       });
     } catch {

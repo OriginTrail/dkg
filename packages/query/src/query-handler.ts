@@ -1,5 +1,5 @@
 import type { PeerId } from '@origintrail-official/dkg-core';
-import { paranetDataGraphUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, assertSafeIri, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import { validateReadOnlySparql } from './sparql-guard.js';
 import type { DKGQueryEngine } from './dkg-query-engine.js';
@@ -7,7 +7,7 @@ import type {
   QueryRequest,
   QueryResponse,
   QueryAccessConfig,
-  ParanetQueryPolicy,
+  ContextGraphQueryPolicy,
   LookupType,
   QueryStatus,
 } from './query-types.js';
@@ -69,14 +69,14 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing lookupType');
     }
 
-    // Resolve paranet (ENTITY_BY_UAL doesn't need it upfront)
-    const paranetId = request.paranetId;
-    if (request.lookupType !== 'ENTITY_BY_UAL' && !paranetId) {
-      return errorResponse(opId, 'ERROR', 'Invalid request: paranetId is required for this lookup type');
+    // Resolve context graph (ENTITY_BY_UAL doesn't need it upfront)
+    const contextGraphId = request.contextGraphId ?? request.paranetId;
+    if (request.lookupType !== 'ENTITY_BY_UAL' && !contextGraphId) {
+      return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId is required for this lookup type');
     }
 
     // Access policy check
-    const accessResult = this.checkAccess(request.lookupType, paranetId, peerId);
+    const accessResult = this.checkAccess(request.lookupType, contextGraphId, peerId);
     if (accessResult) return { ...accessResult, operationId: opId };
 
     // Rate limit check
@@ -95,13 +95,13 @@ export class QueryHandler {
           response = await this.lookupByUAL(opId, request.ual!);
           break;
         case 'ENTITIES_BY_TYPE':
-          response = await this.lookupByType(opId, paranetId!, request.rdfType!, limit);
+          response = await this.lookupByType(opId, contextGraphId!, request.rdfType!, limit);
           break;
         case 'ENTITY_TRIPLES':
-          response = await this.lookupEntityTriples(opId, paranetId!, request.entityUri!);
+          response = await this.lookupEntityTriples(opId, contextGraphId!, request.entityUri!);
           break;
         case 'SPARQL_QUERY':
-          response = await this.executeSparql(opId, paranetId!, request.sparql!, limit, timeout);
+          response = await this.executeSparql(opId, contextGraphId!, request.sparql!, limit, timeout);
           break;
         default:
           response = errorResponse(opId, 'UNSUPPORTED_LOOKUP', `Unknown lookup type: ${request.lookupType}`);
@@ -115,57 +115,59 @@ export class QueryHandler {
 
   private checkAccess(
     lookupType: LookupType,
-    paranetId: string | undefined,
+    contextGraphId: string | undefined,
     peerId: string,
   ): QueryResponse | null {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
 
-    // For ENTITY_BY_UAL, we skip paranet-level check (UAL resolves internally)
+    // For ENTITY_BY_UAL, we skip context-graph-level check (UAL resolves internally)
     if (lookupType === 'ENTITY_BY_UAL') {
-      if (defaultPolicy === 'deny' && !this.hasAnyPublicParanet()) {
-        return errorResponse('', 'ACCESS_DENIED', 'No paranets are queryable on this node');
+      if (defaultPolicy === 'deny' && !this.hasAnyPublicContextGraph()) {
+        return errorResponse('', 'ACCESS_DENIED', 'No context graphs are queryable on this node');
       }
       return null;
     }
 
-    const paranetConfig = this.config.paranets?.[paranetId!];
-    if (!paranetConfig) {
+    const cgConfigs = this.config.contextGraphs ?? this.config.paranets;
+    const cgConfig = cgConfigs?.[contextGraphId!];
+    if (!cgConfig) {
       if (defaultPolicy === 'deny') {
-        return errorResponse('', 'ACCESS_DENIED', `Paranet '${paranetId}' is not queryable`);
+        return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
       }
       // defaultPolicy is 'public' — allow with default lookup types
       return null;
     }
 
     // Check peer access
-    if (paranetConfig.policy === 'deny') {
-      return errorResponse('', 'ACCESS_DENIED', `Paranet '${paranetId}' is not queryable`);
+    if (cgConfig.policy === 'deny') {
+      return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
     }
-    if (paranetConfig.policy === 'allowList') {
-      if (!paranetConfig.allowedPeers?.includes(peerId)) {
+    if (cgConfig.policy === 'allowList') {
+      if (!cgConfig.allowedPeers?.includes(peerId)) {
         return errorResponse('', 'ACCESS_DENIED', 'Your peer ID is not in the allow list');
       }
     }
 
     // Check lookup type
-    if (paranetConfig.allowedLookupTypes?.length) {
-      if (!paranetConfig.allowedLookupTypes.includes(lookupType)) {
-        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for paranet '${paranetId}'`);
+    if (cgConfig.allowedLookupTypes?.length) {
+      if (!cgConfig.allowedLookupTypes.includes(lookupType)) {
+        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for context graph '${contextGraphId}'`);
       }
     }
 
     // Check SPARQL specifically
-    if (lookupType === 'SPARQL_QUERY' && !paranetConfig.sparqlEnabled) {
-      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for paranet '${paranetId}'`);
+    if (lookupType === 'SPARQL_QUERY' && !cgConfig.sparqlEnabled) {
+      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for context graph '${contextGraphId}'`);
     }
 
     return null;
   }
 
-  private hasAnyPublicParanet(): boolean {
+  private hasAnyPublicContextGraph(): boolean {
     if (this.config.defaultPolicy === 'public') return true;
-    if (!this.config.paranets) return false;
-    return Object.values(this.config.paranets).some(p => p.policy === 'public');
+    const cgConfigs = this.config.contextGraphs ?? this.config.paranets;
+    if (!cgConfigs) return false;
+    return Object.values(cgConfigs).some(p => p.policy === 'public');
   }
 
   private checkRateLimit(peerId: string): QueryResponse | null {
@@ -221,7 +223,7 @@ export class QueryHandler {
 
   private async lookupByType(
     opId: string,
-    paranetId: string,
+    contextGraphId: string,
     rdfType: string,
     limit: number,
   ): Promise<QueryResponse> {
@@ -229,7 +231,7 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing rdfType');
     }
 
-    const dataGraph = paranetDataGraphUri(paranetId);
+    const dataGraph = contextGraphDataUri(contextGraphId);
     const sparql = `SELECT DISTINCT ?entity WHERE { GRAPH <${assertSafeIri(dataGraph)}> { ?entity a <${assertSafeIri(rdfType)}> } } LIMIT ${limit}`;
 
     const result = await this.queryEngine.query(sparql);
@@ -246,14 +248,14 @@ export class QueryHandler {
 
   private async lookupEntityTriples(
     opId: string,
-    paranetId: string,
+    contextGraphId: string,
     entityUri: string,
   ): Promise<QueryResponse> {
     if (!entityUri) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing entityUri');
     }
 
-    const dataGraph = paranetDataGraphUri(paranetId);
+    const dataGraph = contextGraphDataUri(contextGraphId);
     const sparql = `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(dataGraph)}> { <${assertSafeIri(entityUri)}> ?p ?o } }`;
     const result = await this.queryEngine.query(sparql);
 
@@ -272,7 +274,7 @@ export class QueryHandler {
 
   private async executeSparql(
     opId: string,
-    paranetId: string,
+    contextGraphId: string,
     sparql: string,
     limit: number,
     timeout: number,
@@ -290,11 +292,11 @@ export class QueryHandler {
     }
 
     if (/\bGRAPH\s+/i.test(stripped)) {
-      return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
+      return errorResponse(opId, 'ERROR', 'Explicit GRAPH clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
     if (/\bFROM\s+/i.test(stripped)) {
-      return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target paranet');
+      return errorResponse(opId, 'ERROR', 'FROM/FROM NAMED clauses are not allowed in remote queries — queries are automatically scoped to the target context graph');
     }
 
     const guard = validateReadOnlySparql(sparql);
@@ -304,7 +306,7 @@ export class QueryHandler {
 
     // Execute with timeout
     const result = await Promise.race([
-      this.queryEngine.query(sparql, { paranetId }),
+      this.queryEngine.query(sparql, { contextGraphId }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('timeout')), timeout),
       ),

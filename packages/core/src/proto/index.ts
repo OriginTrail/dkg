@@ -47,6 +47,11 @@ export {
   type WorkspaceCASConditionMsg,
   encodeWorkspacePublishRequest,
   decodeWorkspacePublishRequest,
+  type SharePublishRequestMsg,
+  type ShareManifestEntryMsg,
+  type ShareCASConditionMsg,
+  encodeSharePublishRequest,
+  decodeSharePublishRequest,
 } from './workspace.js';
 
 export {

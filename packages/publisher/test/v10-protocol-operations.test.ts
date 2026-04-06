@@ -223,7 +223,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       }
     });
 
-    it('contextGraphId derived from paranetId via keccak256', () => {
+    it('contextGraphId derived from contextGraphId via keccak256', () => {
       const derived = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
       expect(derived).toBe(cgIdBigInt);
       expect(derived).toBeGreaterThan(0n);
@@ -257,12 +257,12 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
 describe('V10 SHARE Protocol (spec §7.0)', () => {
   describe('promote triples from WM to SWM', () => {
     it('WM triples get correct graph URI in SWM', () => {
-      const paranetId = 'paranet-123';
-      const swmUri = `did:dkg:context-graph:${paranetId}/_shared_memory`;
+      const contextGraphId = 'paranet-123';
+      const swmUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
       const wmTriples = multiEntityQuads.map(q => ({
         ...q,
-        graph: `did:dkg:context-graph:${paranetId}/_working_memory`,
+        graph: `did:dkg:context-graph:${contextGraphId}/_working_memory`,
       }));
       const promoted = wmTriples.map(q => ({ ...q, graph: swmUri }));
 
@@ -298,9 +298,9 @@ describe('V10 SHARE Protocol (spec §7.0)', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 GET Protocol (spec §12)', () => {
-  const paranetId = 'research-net';
-  const ltmGraph = `did:dkg:context-graph:${paranetId}/_data`;
-  const swmGraph = `did:dkg:context-graph:${paranetId}/_shared_memory`;
+  const contextGraphId = 'research-net';
+  const ltmGraph = `did:dkg:context-graph:${contextGraphId}/_data`;
+  const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
   const ltmQuads: Quad[] = [
     makeQuad('urn:entity:x', 'http://schema.org/name', '"LTM Name"', ltmGraph),

@@ -8,7 +8,7 @@ const PARANET = 'test-paranet';
 function makeFinalizationMsg(overrides?: Partial<FinalizationMessageMsg>): FinalizationMessageMsg {
   return {
     ual: 'did:dkg:evm:31337/0xABC/1',
-    paranetId: PARANET,
+    contextGraphId: PARANET,
     kcMerkleRoot: new Uint8Array(32),
     txHash: '0x' + 'ab'.repeat(32),
     blockNumber: 100,
@@ -56,7 +56,7 @@ describe('FinalizationHandler', () => {
     const wrongTypeData = encodePublishRequest({
       ual: 'did:dkg:test/1',
       nquads: new TextEncoder().encode('<urn:s> <urn:p> <urn:o> .'),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'urn:s', privateTripleCount: 0, privateMerkleRoot: new Uint8Array(0) }],
       txHash: '',
       blockNumber: 0,
@@ -71,8 +71,8 @@ describe('FinalizationHandler', () => {
     await handler.handleFinalizationMessage(garbage, PARANET);
   });
 
-  it('ignores messages with mismatched paranetId', async () => {
-    const msg = makeFinalizationMsg({ paranetId: 'wrong-paranet' });
+  it('ignores messages with mismatched contextGraphId', async () => {
+    const msg = makeFinalizationMsg({ contextGraphId: 'wrong-paranet' });
     const data = encodeFinalizationMessage(msg);
     await handler.handleFinalizationMessage(data, PARANET);
   });

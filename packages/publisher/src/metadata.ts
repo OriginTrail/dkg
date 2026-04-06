@@ -14,7 +14,7 @@ export function toHex(bytes: Uint8Array): string {
 
 export interface KCMetadata {
   ual: string;
-  paranetId: string;
+  contextGraphId: string;
   merkleRoot: Uint8Array;
   kaCount: number;
   publisherPeerId: string;
@@ -41,11 +41,10 @@ export interface OnChainProvenance {
   chainId: string;
 }
 
-function assertSafeParanetIdForSparql(paranetId: string): void {
+function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
   // Reject characters that can break GRAPH <...> IRI delimiters and enable injection.
-  // Keep "/" allowed because existing paranets may use path-like IDs.
-  if (/[<>"{}|^`\\\s]/.test(paranetId)) {
-    throw new Error(`Unsafe paranetId for SPARQL graph IRI: "${paranetId}"`);
+  if (/[<>"{}|^`\\\s]/.test(contextGraphId)) {
+    throw new Error(`Unsafe contextGraphId for SPARQL graph IRI: "${contextGraphId}"`);
   }
 }
 
@@ -58,13 +57,13 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
 
 /**
  * Generate RDF metadata triples for a Knowledge Collection.
- * These go into the paranet's meta graph.
+ * These go into the context graph's meta graph.
  */
 export function generateKCMetadata(
   meta: KCMetadata,
   kaEntries: KAMetadata[],
 ): Quad[] {
-  const metaGraph = `did:dkg:context-graph:${meta.paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   const quads: Quad[] = [];
 
   // KC metadata
@@ -86,7 +85,7 @@ export function generateKCMetadata(
       dateLit(meta.timestamp),
       metaGraph,
     ),
-    mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.paranetId}`, metaGraph),
+    mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
   );
 
   if (meta.allowedPeers?.length) {
@@ -147,7 +146,7 @@ export function generateTentativeMetadata(
   kaEntries: KAMetadata[],
 ): Quad[] {
   const quads = generateKCMetadata(meta, kaEntries);
-  const metaGraph = `did:dkg:context-graph:${meta.paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
   quads.push(
     mq(meta.ual, `${DKG}status`, lit('tentative'), metaGraph),
   );
@@ -158,8 +157,8 @@ export function generateTentativeMetadata(
  * Returns the single quad that marks a KC as tentative in the meta graph.
  * Used when promoting to confirmed: delete this quad before inserting confirmed metadata.
  */
-export function getTentativeStatusQuad(ual: string, paranetId: string): Quad {
-  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
+export function getTentativeStatusQuad(ual: string, contextGraphId: string): Quad {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   return mq(ual, `${DKG}status`, lit('tentative'), metaGraph);
 }
 
@@ -167,8 +166,8 @@ export function getTentativeStatusQuad(ual: string, paranetId: string): Quad {
  * Returns the single quad that marks a KC as confirmed (minimal, no chain provenance).
  * Used by receivers when promoting tentative → confirmed after seeing the chain event.
  */
-export function getConfirmedStatusQuad(ual: string, paranetId: string): Quad {
-  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
+export function getConfirmedStatusQuad(ual: string, contextGraphId: string): Quad {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   return mq(ual, `${DKG}status`, lit('confirmed'), metaGraph);
 }
 
@@ -178,10 +177,10 @@ export function getConfirmedStatusQuad(ual: string, paranetId: string): Quad {
  */
 export function generateConfirmedMetadata(
   ual: string,
-  paranetId: string,
+  contextGraphId: string,
   provenance: OnChainProvenance,
 ): Quad[] {
-  const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   const quads: Quad[] = [
     mq(ual, `${DKG}status`, lit('confirmed'), metaGraph),
     mq(ual, `${DKG}transactionHash`, lit(provenance.txHash), metaGraph),
@@ -210,7 +209,7 @@ export function generateConfirmedFullMetadata(
 ): Quad[] {
   return [
     ...generateKCMetadata(meta, kaEntries),
-    ...generateConfirmedMetadata(meta.ual, meta.paranetId, provenance),
+    ...generateConfirmedMetadata(meta.ual, meta.contextGraphId, provenance),
   ];
 }
 
@@ -236,14 +235,14 @@ function dateLit(d: Date): string {
  */
 export interface AuthorshipProof {
   kcUal: string;
-  paranetId: string;
+  contextGraphId: string;
   agentAddress: string;
   signature: string;
   signedHash: string;
 }
 
 export function generateAuthorshipProof(proof: AuthorshipProof): Quad[] {
-  const metaGraph = `did:dkg:context-graph:${proof.paranetId}/_meta`;
+  const metaGraph = `did:dkg:context-graph:${proof.contextGraphId}/_meta`;
   const blankNode = `_:authorship_${proof.kcUal.replace(/[^a-zA-Z0-9]/g, '_')}`;
   return [
     mq(proof.kcUal, `${DKG}authoredBy`, blankNode, metaGraph),
@@ -282,62 +281,68 @@ export function generateShareTransitionMetadata(meta: ShareTransitionMetadata): 
   return quads;
 }
 
-/** Workspace metadata: no UAL; stored in _workspace_meta graph. */
-export interface WorkspaceMetadata {
-  workspaceOperationId: string;
-  paranetId: string;
+/** Shared memory metadata: no UAL; stored in _shared_memory_meta graph. */
+export interface ShareMetadata {
+  shareOperationId: string;
+  contextGraphId: string;
   rootEntities: string[];
   publisherPeerId: string;
   timestamp: Date;
 }
 
+/** @deprecated Use ShareMetadata */
+export type WorkspaceMetadata = ShareMetadata;
+
 /**
- * Generate RDF metadata triples for a workspace write.
- * Stored in paranet's _workspace_meta graph (not _meta).
+ * Generate RDF metadata triples for a shared memory write.
+ * Stored in context graph's _shared_memory_meta graph (not _meta).
  */
-export function generateWorkspaceMetadata(
-  meta: WorkspaceMetadata,
-  workspaceMetaGraph: string,
+export function generateShareMetadata(
+  meta: ShareMetadata,
+  swmMetaGraph: string,
 ): Quad[] {
   const quads: Quad[] = [];
-  const subject = `urn:dkg:workspace:${meta.paranetId}:${meta.workspaceOperationId}`;
+  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
 
   quads.push(
-    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, workspaceMetaGraph),
+    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
     mq(
       subject,
       `${PROV}wasAttributedTo`,
       lit(meta.publisherPeerId),
-      workspaceMetaGraph,
+      swmMetaGraph,
     ),
     mq(
       subject,
       `${DKG}publishedAt`,
       dateLit(meta.timestamp),
-      workspaceMetaGraph,
+      swmMetaGraph,
     ),
   );
 
   for (const rootEntity of meta.rootEntities) {
     quads.push(
-      mq(subject, `${DKG}rootEntity`, rootEntity, workspaceMetaGraph),
+      mq(subject, `${DKG}rootEntity`, rootEntity, swmMetaGraph),
     );
   }
 
   return quads;
 }
 
+/** @deprecated Use generateShareMetadata */
+export const generateWorkspaceMetadata = generateShareMetadata;
+
 /**
- * Generate ownership triples for workspace root entities.
- * Each triple: `<rootEntity> dkg:workspaceOwner "creatorPeerId"` in workspace_meta.
- * Used to persist the in-memory workspaceOwnedEntities map so it survives restarts.
+ * Generate ownership triples for shared memory root entities.
+ * Each triple: `<rootEntity> dkg:sharedMemoryOwner "creatorPeerId"` in SWM meta.
+ * Used to persist the in-memory sharedMemoryOwnedEntities map so it survives restarts.
  */
 export function generateOwnershipQuads(
   rootEntities: { rootEntity: string; creatorPeerId: string }[],
-  workspaceMetaGraph: string,
+  swmMetaGraph: string,
 ): Quad[] {
   return rootEntities.map((entry) =>
-    mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), workspaceMetaGraph),
+    mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), swmMetaGraph),
   );
 }
 
@@ -365,12 +370,12 @@ export async function resolveUalByBatchId(
 export async function updateMetaMerkleRoot(
   store: TripleStore,
   graphManager: GraphManager,
-  paranetId: string,
+  contextGraphId: string,
   batchId: bigint,
   newMerkleRoot: Uint8Array,
 ): Promise<void> {
-  assertSafeParanetIdForSparql(paranetId);
-  const metaGraph = graphManager.metaGraphUri(paranetId);
+  assertSafeContextGraphIdForSparql(contextGraphId);
+  const metaGraph = graphManager.metaGraphUri(contextGraphId);
   const ual = await resolveUalByBatchId(store, metaGraph, batchId);
   if (!ual) return;
   assertSafeGraphIriForSparql(ual);

@@ -32,30 +32,30 @@ describe('Workspace Sync E2E (2 nodes)', () => {
       name: 'WsSyncA',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: [PARANET],
+      syncContextGraphs: [PARANET],
     });
 
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: PARANET,
       name: 'Workspace Sync Test',
       description: 'Testing workspace sync on connect',
     });
 
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Entity One"', graph: '' },
       { subject: ENTITY_1, predicate: 'http://schema.org/description', object: '"First entity"', graph: '' },
     ]);
 
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Entity Two"', graph: '' },
     ]);
 
     const result = await nodeA.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(result.bindings.length).toBe(2);
   }, 15000);
@@ -65,13 +65,13 @@ describe('Workspace Sync E2E (2 nodes)', () => {
       name: 'WsSyncC',
       listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: [PARANET],
+      syncContextGraphs: [PARANET],
     });
 
     await nodeC.start();
     await sleep(500);
 
-    nodeC.subscribeToParanet(PARANET);
+    nodeC.subscribeToContextGraph(PARANET);
     await sleep(200);
 
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
@@ -83,7 +83,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     while (Date.now() < deadline) {
       result = await nodeC.query(
         'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       );
       if (result.bindings.length >= 2) break;
       await sleep(500);
@@ -96,23 +96,23 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     expect(names).toContain('"Entity Two"');
   }, 20000);
 
-  it('explicit syncWorkspaceFromPeer returns synced triple count', async () => {
-    const synced = await nodeC.syncWorkspaceFromPeer(
+  it('explicit syncSharedMemoryFromPeer returns synced triple count', async () => {
+    const synced = await nodeC.syncSharedMemoryFromPeer(
       nodeA.peerId,
       [PARANET],
     );
     expect(synced).toBeGreaterThan(0);
     const result = await nodeC.query(
       'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(result.bindings.length).toBeGreaterThanOrEqual(2);
   }, 10000);
 
-  it('synced workspace data is queryable via includeWorkspace', async () => {
+  it('synced workspace data is queryable via includeSharedMemory', async () => {
     const result = await nodeC.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET, includeWorkspace: true },
+      { contextGraphId: PARANET, includeSharedMemory: true },
     );
     expect(result.bindings.length).toBeGreaterThanOrEqual(2);
   }, 5000);
@@ -139,16 +139,16 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     nodeA = await DKGAgent.create({
       name: '3NodeA', listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: [PARANET_3],
+      syncContextGraphs: [PARANET_3],
     });
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createParanet({
+    await nodeA.createContextGraph({
       id: PARANET_3, name: '3-Node Sync', description: 'Chained workspace sync',
     });
 
-    await nodeA.writeToWorkspace(PARANET_3, [
+    await nodeA.share(PARANET_3, [
       { subject: ENTITY_A, predicate: 'http://schema.org/name', object: '"From A"', graph: '' },
     ]);
 
@@ -156,11 +156,11 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     nodeB = await DKGAgent.create({
       name: '3NodeB', listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: [PARANET_3],
+      syncContextGraphs: [PARANET_3],
     });
     await nodeB.start();
     await sleep(500);
-    nodeB.subscribeToParanet(PARANET_3);
+    nodeB.subscribeToContextGraph(PARANET_3);
     await sleep(200);
 
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
@@ -170,12 +170,12 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     // B should have A's data
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:ws-3node:fromA> <http://schema.org/name> ?name }',
-      { paranetId: PARANET_3, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET_3, graphSuffix: '_shared_memory' },
     );
     expect(onB.bindings.length).toBe(1);
 
     // B writes its own entity
-    await nodeB.writeToWorkspace(PARANET_3, [
+    await nodeB.share(PARANET_3, [
       { subject: ENTITY_B, predicate: 'http://schema.org/name', object: '"From B"', graph: '' },
     ]);
 
@@ -183,11 +183,11 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     nodeC = await DKGAgent.create({
       name: '3NodeC', listenPort: 0,
       chainAdapter: new MockChainAdapter('mock:31337'),
-      syncParanets: [PARANET_3],
+      syncContextGraphs: [PARANET_3],
     });
     await nodeC.start();
     await sleep(500);
-    nodeC.subscribeToParanet(PARANET_3);
+    nodeC.subscribeToContextGraph(PARANET_3);
     await sleep(200);
 
     const addrB = nodeB.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
@@ -196,7 +196,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
 
     const onC = await nodeC.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET_3, graphSuffix: '_shared_memory' },
+      { contextGraphId: PARANET_3, graphSuffix: '_shared_memory' },
     );
     expect(onC.bindings.length).toBe(2);
 

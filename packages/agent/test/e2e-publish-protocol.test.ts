@@ -5,7 +5,7 @@
  *
  * 1. Paranet publish: write → replicate → collect receiver sigs → on-chain → finalization
  * 2. Context graph publish: same + collect participant sigs → publishToContextGraph
- * 3. addBatchToContextGraph for already-published KCs
+ * 3. verify for already-published KCs
  * 4. Negative: insufficient receiver signatures → publish rejected
  * 5. Negative: insufficient participant signatures → context graph registration rejected
  * 6. Edge node as context graph participant
@@ -88,10 +88,10 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
 
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Publish Protocol E2E', description: '' });
-    nodeA.subscribeToParanet(PARANET);
-    nodeB.subscribeToParanet(PARANET);
-    nodeC.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Publish Protocol E2E', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
+    nodeC.subscribeToContextGraph(PARANET);
     await sleep(1500);
   }, 20_000);
 
@@ -101,12 +101,12 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' },
     ];
 
-    await nodeA.writeToWorkspace(PARANET, quads);
+    await nodeA.share(PARANET, quads);
 
     const bBindings = await pollUntil(
       () => nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -116,7 +116,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     const cBindings = await pollUntil(
       () => nodeC.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { paranetId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
       ),
       (b) => b.length > 0,
       15_000,
@@ -232,13 +232,13 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await nodeB.connectTo(addrA);
     await sleep(2000);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Context Graph Protocol E2E', description: '' });
-    nodeA.subscribeToParanet(PARANET);
-    nodeB.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Context Graph Protocol E2E', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
     await sleep(1500);
 
     // Both A and B are participants
-    const result = await nodeA.createContextGraph({
+    const result = await nodeA.registerContextGraphOnChain({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
@@ -251,7 +251,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"', graph: '' },
     ];
 
-    await nodeA.writeToWorkspace(PARANET, quads);
+    await nodeA.share(PARANET, quads);
     await sleep(5000);
 
     /**
@@ -266,7 +266,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
       PARANET,
       { rootEntities: [ENTITY_2] },
       {
-        contextGraphId,
+        subContextGraphId: contextGraphId,
         contextGraphSignatures: [{
           identityId: 1n,
           r: new Uint8Array(32),
@@ -309,7 +309,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
 });
 
 // ========================================================================
-// 3. addBatchToContextGraph for Already-Published KCs
+// 3. verify for Already-Published KCs
 // ========================================================================
 
 describe('E2E: Link existing published KC to context graph', () => {
@@ -346,13 +346,13 @@ describe('E2E: Link existing published KC to context graph', () => {
     await nodeB.connectTo(addrA);
     await sleep(2000);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Link KC E2E', description: '' });
-    nodeA.subscribeToParanet(PARANET);
-    nodeB.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Link KC E2E', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(PARANET);
     await sleep(1500);
 
     // Write and enshrine to paranet data graph (standard publish)
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Already Published"', graph: '' },
     ]);
     await sleep(3000);
@@ -362,21 +362,21 @@ describe('E2E: Link existing published KC to context graph', () => {
     publishedBatchId = result.onChainResult!.batchId;
 
     // Now create context graph
-    const cgResult = await nodeA.createContextGraph({
+    const cgResult = await nodeA.registerContextGraphOnChain({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
     contextGraphId = cgResult.contextGraphId;
   }, 30_000);
 
-  it('links existing KC batch to context graph via addBatchToContextGraph', async () => {
+  it('links existing KC batch to context graph via verify', async () => {
     /**
-     * addBatchToContextGraph is used when:
+     * verify is used when:
      * - A KC was already published to the paranet
      * - We want to ALSO register it in a context graph
      *
      * Flow: collect participant signatures over (contextGraphId, merkleRoot),
-     * then call addBatchToContextGraph with the existing batchId.
+     * then call verify with the existing batchId.
      */
     const result = await nodeA.addBatchToContextGraph({
       contextGraphId,
@@ -422,10 +422,10 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Lonely Paranet', description: '' });
-    nodeA.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Lonely Paranet', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
 
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"', graph: '' },
     ]);
 
@@ -467,24 +467,24 @@ describe('E2E: Context graph registration rejected with insufficient participant
     await nodeA.start();
     await sleep(500);
 
-    await nodeA.createParanet({ id: PARANET, name: 'Participant Test', description: '' });
-    nodeA.subscribeToParanet(PARANET);
+    await nodeA.createContextGraph({ id: PARANET, name: 'Participant Test', description: '' });
+    nodeA.subscribeToContextGraph(PARANET);
 
     // Context graph requires 2 signatures, but only 1 node available
-    const cgResult = await nodeA.createContextGraph({
+    const cgResult = await nodeA.registerContextGraphOnChain({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 2,
     });
     const contextGraphId = cgResult.contextGraphId;
 
-    await nodeA.writeToWorkspace(PARANET, [
+    await nodeA.share(PARANET, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"', graph: '' },
     ]);
 
     const result = await nodeA.publishFromSharedMemory(
       PARANET,
       { rootEntities: [ENTITY_1] },
-      { contextGraphId },
+      { subContextGraphId: contextGraphId },
     );
 
     // KC publish succeeds, but context graph on-chain registration should fail.
@@ -540,23 +540,23 @@ describe('E2E: Edge node participates in context graph governance', () => {
     await edgeNode.connectTo(addrCore);
     await sleep(2000);
 
-    await coreNode.createParanet({ id: PARANET, name: 'Edge Participant E2E', description: '' });
-    coreNode.subscribeToParanet(PARANET);
-    edgeNode.subscribeToParanet(PARANET);
+    await coreNode.createContextGraph({ id: PARANET, name: 'Edge Participant E2E', description: '' });
+    coreNode.subscribeToContextGraph(PARANET);
+    edgeNode.subscribeToContextGraph(PARANET);
     await sleep(1500);
 
     // Both core and edge are participants
     const coreIdentity = await sharedChain.getIdentityId();
     expect(coreIdentity).toBeGreaterThan(0n);
 
-    const cgResult = await coreNode.createContextGraph({
+    const cgResult = await coreNode.registerContextGraphOnChain({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 2,
     });
     contextGraphId = cgResult.contextGraphId;
 
     // Core writes data
-    await coreNode.writeToWorkspace(PARANET, [
+    await coreNode.share(PARANET, [
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Edge Governed Data"', graph: '' },
     ]);
     await sleep(5000);
@@ -574,7 +574,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
       PARANET,
       { rootEntities: [ENTITY_1] },
       {
-        contextGraphId,
+        subContextGraphId: contextGraphId,
         contextGraphSignatures: [
           { identityId: 1n, r: new Uint8Array(32), vs: new Uint8Array(32) },
           { identityId: 2n, r: new Uint8Array(32), vs: new Uint8Array(32) },

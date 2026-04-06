@@ -44,7 +44,7 @@ async function setupStoreWithPolicy(
 ): Promise<OxigraphStore> {
   const store = new OxigraphStore();
   const gm = new GraphManager(store);
-  await gm.ensureParanet(PARANET);
+  await gm.ensureContextGraph(PARANET);
 
   // KA metadata in meta graph
   await store.insert([

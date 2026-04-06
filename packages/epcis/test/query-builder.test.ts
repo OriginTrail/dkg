@@ -1,13 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { buildEpcisQuery, escapeSparql, normalizeBizStep, normalizeGs1Vocabulary } from '../src/query-builder.js';
 
-const PARANET_ID = 'test-paranet';
-const DATA_GRAPH = `did:dkg:context-graph:${PARANET_ID}`;
+const CONTEXT_GRAPH_ID = 'test-paranet';
+const DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}`;
 const META_GRAPH = `${DATA_GRAPH}/_meta`;
 
 describe('buildEpcisQuery', () => {
   it('generates SPARQL with explicit GRAPH for a single EPC filter', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:epc:id:sgtin:4012345.011111.1001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:epc:id:sgtin:4012345.011111.1001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain(`GRAPH <${DATA_GRAPH}>`);
     expect(sparql).not.toContain('GRAPH ?');
@@ -19,7 +19,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by bizStep with shorthand normalization', () => {
-    const sparql = buildEpcisQuery({ bizStep: 'assembling' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ bizStep: 'assembling' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('?event epcis:bizStep ?bizStep');
     expect(sparql).toContain('https://ref.gs1.org/cbv/BizStep-assembling');
@@ -28,13 +28,13 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by bizStep with full URI', () => {
-    const sparql = buildEpcisQuery({ bizStep: 'https://ref.gs1.org/cbv/BizStep-receiving' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ bizStep: 'https://ref.gs1.org/cbv/BizStep-receiving' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('https://ref.gs1.org/cbv/BizStep-receiving');
   });
 
   it('filters by bizLocation', () => {
-    const sparql = buildEpcisQuery({ bizLocation: 'urn:epc:id:sgln:4012345.00001.0' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ bizLocation: 'urn:epc:id:sgln:4012345.00001.0' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:bizLocation <urn:epc:id:sgln:4012345.00001.0>');
   });
@@ -42,7 +42,7 @@ describe('buildEpcisQuery', () => {
   it('filters by date range (from and to) with strict < for to', () => {
     const sparql = buildEpcisQuery(
       { from: '2024-01-01T00:00:00Z', to: '2024-12-31T23:59:59Z', epc: 'urn:test' },
-      PARANET_ID,
+      CONTEXT_GRAPH_ID,
     );
 
     expect(sparql).toContain('?event epcis:eventTime ?eventTime');
@@ -55,7 +55,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by from date only', () => {
-    const sparql = buildEpcisQuery({ from: '2024-06-01T00:00:00Z', epc: 'urn:test' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ from: '2024-06-01T00:00:00Z', epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('>=');
     expect(sparql).toContain('2024-06-01T00:00:00Z');
@@ -63,7 +63,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by to date only with strict <', () => {
-    const sparql = buildEpcisQuery({ to: '2024-06-01T00:00:00Z', epc: 'urn:test' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ to: '2024-06-01T00:00:00Z', epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toMatch(/< xsd:dateTime\("2024-06-01/);
     expect(sparql).not.toMatch(/<= xsd:dateTime\("2024-06-01/);
@@ -71,31 +71,31 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by parentID', () => {
-    const sparql = buildEpcisQuery({ parentID: 'urn:epc:id:sscc:4012345.0000000001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ parentID: 'urn:epc:id:sscc:4012345.0000000001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:parentID "urn:epc:id:sscc:4012345.0000000001"');
   });
 
   it('filters by childEPC', () => {
-    const sparql = buildEpcisQuery({ childEPC: 'urn:epc:id:sgtin:4012345.099999.9001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ childEPC: 'urn:epc:id:sgtin:4012345.099999.9001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:childEPCs "urn:epc:id:sgtin:4012345.099999.9001"');
   });
 
   it('filters by inputEPC', () => {
-    const sparql = buildEpcisQuery({ inputEPC: 'urn:epc:id:sgtin:4012345.011111.1001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ inputEPC: 'urn:epc:id:sgtin:4012345.011111.1001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:inputEPCList "urn:epc:id:sgtin:4012345.011111.1001"');
   });
 
   it('filters by outputEPC', () => {
-    const sparql = buildEpcisQuery({ outputEPC: 'urn:epc:id:sgtin:4012345.099999.9001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ outputEPC: 'urn:epc:id:sgtin:4012345.099999.9001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:outputEPCList "urn:epc:id:sgtin:4012345.099999.9001"');
   });
 
   it('epc filter UNIONs epcList + childEPCs per EPCIS 2.0 Section 8.2.7.1', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:epc:id:sgtin:4012345.011111.1001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:epc:id:sgtin:4012345.011111.1001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('UNION');
     expect(sparql).toContain('epcis:epcList "urn:epc:id:sgtin:4012345.011111.1001"');
@@ -107,7 +107,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('anyEPC generates 5-way UNION across all EPC fields', () => {
-    const sparql = buildEpcisQuery({ anyEPC: 'urn:epc:id:sgtin:4012345.011111.1001' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ anyEPC: 'urn:epc:id:sgtin:4012345.011111.1001' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:epcList "urn:epc:id:sgtin:4012345.011111.1001"');
     expect(sparql).toContain('epcis:childEPCs "urn:epc:id:sgtin:4012345.011111.1001"');
@@ -122,7 +122,7 @@ describe('buildEpcisQuery', () => {
   it('combines multiple filters', () => {
     const sparql = buildEpcisQuery(
       { epc: 'urn:test', bizStep: 'receiving', bizLocation: 'urn:loc:1' },
-      PARANET_ID,
+      CONTEXT_GRAPH_ID,
     );
 
     // epc now UNIONs epcList + childEPCs
@@ -134,39 +134,39 @@ describe('buildEpcisQuery', () => {
   });
 
   it('uses default pagination (limit 100, offset 0)', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('LIMIT 100');
     expect(sparql).toContain('OFFSET 0');
   });
 
   it('respects custom pagination', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 50, offset: 200 }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 50, offset: 200 }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('LIMIT 50');
     expect(sparql).toContain('OFFSET 200');
   });
 
   it('caps limit at 1000', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 5000 }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 5000 }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('LIMIT 1000');
   });
 
   it('clamps limit minimum to 1', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 0 }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test', limit: 0 }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('LIMIT 1');
   });
 
   it('clamps negative offset to 0', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test', offset: -5 }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test', offset: -5 }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('OFFSET 0');
   });
 
   it('includes GROUP_CONCAT for array fields', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList');
     expect(sparql).toContain('GROUP_CONCAT(DISTINCT ?childEPCs; SEPARATOR=", ") AS ?childEPCList');
@@ -175,7 +175,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by disposition with shorthand normalization', () => {
-    const sparql = buildEpcisQuery({ disposition: 'in_transit' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ disposition: 'in_transit' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('?event epcis:disposition ?disposition');
     expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_transit');
@@ -184,19 +184,19 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by disposition with full URI passthrough', () => {
-    const sparql = buildEpcisQuery({ disposition: 'https://ref.gs1.org/cbv/Disp-in_progress' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ disposition: 'https://ref.gs1.org/cbv/Disp-in_progress' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_progress');
   });
 
   it('filters by readPoint — uses angle bracket URI match', () => {
-    const sparql = buildEpcisQuery({ readPoint: 'urn:epc:id:sgln:4012345.00001.0' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ readPoint: 'urn:epc:id:sgln:4012345.00001.0' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('filters by action — moves from OPTIONAL to required WHERE with FILTER', () => {
-    const sparql = buildEpcisQuery({ action: 'OBSERVE' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ action: 'OBSERVE' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('?event epcis:action ?action');
     expect(sparql).toContain('FILTER(STR(?action) = "OBSERVE")');
@@ -205,7 +205,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('filters by eventType with full EPCIS URI', () => {
-    const sparql = buildEpcisQuery({ eventType: 'ObjectEvent' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
   });
@@ -213,7 +213,7 @@ describe('buildEpcisQuery', () => {
   it('combines new filters with existing filters', () => {
     const sparql = buildEpcisQuery(
       { eventType: 'ObjectEvent', action: 'OBSERVE', bizStep: 'shipping', disposition: 'in_transit' },
-      PARANET_ID,
+      CONTEXT_GRAPH_ID,
     );
 
     expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
@@ -227,7 +227,7 @@ describe('buildEpcisQuery', () => {
   });
 
   it('orders by eventTime descending with secondary sort on ?event for deterministic pagination', () => {
-    const sparql = buildEpcisQuery({ epc: 'urn:test' }, PARANET_ID);
+    const sparql = buildEpcisQuery({ epc: 'urn:test' }, CONTEXT_GRAPH_ID);
 
     expect(sparql).toContain('ORDER BY DESC(?eventTime) ?event');
   });

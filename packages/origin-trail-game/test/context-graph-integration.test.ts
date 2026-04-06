@@ -17,8 +17,8 @@ function uid(prefix = 'p') {
 
 function makeMockAgent(peerId: string, identityId = 1n) {
   const published: any[] = [];
-  const workspaceWrites: any[] = [];
-  const enshrined: any[] = [];
+  const shareWrites: any[] = [];
+  const publishedFromSwm: any[] = [];
   const contextGraphs: any[] = [];
   const broadcasts: any[] = [];
   const messageHandlers = new Map<string, Function[]>();
@@ -38,17 +38,17 @@ function makeMockAgent(peerId: string, identityId = 1n) {
       },
       offMessage() {},
     },
-    writeToWorkspace: async (_paranetId: string, quads: any[]) => {
-      workspaceWrites.push(quads);
-      return { workspaceOperationId: `ws-op-${workspaceWrites.length}` };
+    share: async (_contextGraphId: string, quads: any[]) => {
+      shareWrites.push(quads);
+      return { shareOperationId: `ws-op-${shareWrites.length}` };
     },
-    publish: async (_paranetId: string, quads: any[]) => {
+    publish: async (_contextGraphId: string, quads: any[]) => {
       published.push(quads);
       return { onChainResult: { txHash: '0xpublish123' }, ual: 'did:dkg:test:ual' };
     },
-    publishFromSharedMemory: async (_paranetId: string, selection: any, options?: any) => {
-      enshrined.push({ selection, options });
-      return { onChainResult: { txHash: '0xenshrine123', blockNumber: 100 }, ual: 'did:dkg:test:enshrined' };
+    publishFromSharedMemory: async (_contextGraphId: string, selection: any, options?: any) => {
+      publishedFromSwm.push({ selection, options });
+      return { onChainResult: { txHash: '0xpublish123', blockNumber: 100 }, ual: 'did:dkg:test:published' };
     },
     createContextGraph: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
@@ -62,8 +62,8 @@ function makeMockAgent(peerId: string, identityId = 1n) {
     }),
     query: async () => ({ bindings: [] }),
     _published: published,
-    _workspaceWrites: workspaceWrites,
-    _enshrined: enshrined,
+    _shareWrites: shareWrites,
+    _publishedFromSwm: publishedFromSwm,
     _contextGraphs: contextGraphs,
     _broadcasts: broadcasts,
     _messageHandlers: messageHandlers,
@@ -78,7 +78,7 @@ type MockAgent = ReturnType<typeof makeMockAgent>;
 function createCoordinator(agent: MockAgent) {
   return new OriginTrailGameCoordinator(
     agent as any,
-    { paranetId: 'origin-trail-game' },
+    { contextGraphId: 'origin-trail-game' },
     () => {},
   );
 }
@@ -298,7 +298,7 @@ describe('Context Graph Integration', () => {
   });
 
   describe('publishFromSharedMemory on turn resolution', () => {
-    it('enshrines turn quads to context graph when contextGraphId is set', async () => {
+    it('publishes turn quads to context graph when contextGraphId is set', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 
@@ -332,14 +332,14 @@ describe('Context Graph Integration', () => {
         await new Promise(r => setTimeout(r, 200));
       }
 
-      // Verify enshrinement happened with collected signatures
-      expect(agent._enshrined.length).toBeGreaterThanOrEqual(1);
-      const enshrinement = agent._enshrined[0];
-      expect(enshrinement.options.contextGraphId).toBe('1');
-      expect(enshrinement.options.contextGraphSignatures).toBeTruthy();
-      expect(enshrinement.options.contextGraphSignatures.length).toBeGreaterThanOrEqual(2);
-      expect(enshrinement.selection.rootEntities).toBeTruthy();
-      expect(enshrinement.selection.rootEntities.length).toBeGreaterThan(0);
+      // Verify publication happened with collected signatures
+      expect(agent._publishedFromSwm.length).toBeGreaterThanOrEqual(1);
+      const publication = agent._publishedFromSwm[0];
+      expect(publication.options.contextGraphId).toBe('1');
+      expect(publication.options.contextGraphSignatures).toBeTruthy();
+      expect(publication.options.contextGraphSignatures.length).toBeGreaterThanOrEqual(2);
+      expect(publication.selection.rootEntities).toBeTruthy();
+      expect(publication.selection.rootEntities.length).toBeGreaterThan(0);
 
       coord.destroy();
     });
@@ -356,25 +356,25 @@ describe('Context Graph Integration', () => {
       await coord.forceResolveTurn(swarmId);
       await new Promise(r => setTimeout(r, 100));
 
-      // Should have used plain publish, not enshrine
-      expect(noCtxAgent._enshrined.length).toBe(0);
+      // Should have used plain publish, not publishFromSharedMemory
+      expect(noCtxAgent._publishedFromSwm.length).toBe(0);
       expect(noCtxAgent._published.length).toBeGreaterThanOrEqual(1);
 
       coord.destroy();
     });
 
-    it('force-resolved turns use plain publish (not context graph enshrinement)', async () => {
+    it('force-resolved turns use plain publish (not context graph publication)', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 
-      const enshrinedBefore = agent._enshrined.length;
       const publishedBefore = agent._published.length;
+      const publishedFromSwmBefore = agent._publishedFromSwm.length;
 
       await coord.forceResolveTurn(swarmId);
       await new Promise(r => setTimeout(r, 100));
 
       // Force-resolve lacks multi-party consensus, so it uses plain publish
-      expect(agent._enshrined.length).toBe(enshrinedBefore);
+      expect(agent._publishedFromSwm.length).toBe(publishedFromSwmBefore);
       expect(agent._published.length).toBeGreaterThan(publishedBefore);
 
       coord.destroy();
@@ -425,8 +425,8 @@ describe('Context Graph Integration', () => {
     });
   });
 
-  describe('workspace graph normalization', () => {
-    it('consensus turn writes quads with workspace graph, not context graph URI', async () => {
+  describe('shared memory graph normalization', () => {
+    it('consensus turn writes quads with shared memory graph, not context graph URI', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 
@@ -458,10 +458,10 @@ describe('Context Graph Integration', () => {
         await new Promise(r => setTimeout(r, 200));
       }
 
-      // All quads in workspace writes must use the workspace graph
-      expect(agent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
+      // All quads in shared memory writes must use the shared memory graph
+      expect(agent._shareWrites.length).toBeGreaterThanOrEqual(1);
       const wsGraph = 'did:dkg:context-graph:origin-trail-game';
-      for (const writeCall of agent._workspaceWrites) {
+      for (const writeCall of agent._shareWrites) {
         for (const quad of writeCall) {
           expect(quad.graph).toBe(wsGraph);
           expect(quad.graph).not.toContain('/context/');
@@ -471,17 +471,17 @@ describe('Context Graph Integration', () => {
       coord.destroy();
     });
 
-    it('force-resolve publishes quads directly (plain publish, no workspace)', async () => {
+    it('force-resolve publishes quads directly (plain publish, no shared memory)', async () => {
       const { coord, swarmId } = await setupThreePlayerGame(agent);
       await coord.launchExpedition(swarmId);
 
-      const enshrinedBefore = agent._enshrined.length;
+      const publishedFromSwmBefore = agent._publishedFromSwm.length;
 
       await coord.forceResolveTurn(swarmId);
       await new Promise(r => setTimeout(r, 100));
 
-      // Force-resolve uses plain publish, no new enshrinement
-      expect(agent._enshrined.length).toBe(enshrinedBefore);
+      // Force-resolve uses plain publish, no new context graph publication
+      expect(agent._publishedFromSwm.length).toBe(publishedFromSwmBefore);
       expect(agent._published.length).toBeGreaterThanOrEqual(1);
 
       coord.destroy();
@@ -498,19 +498,19 @@ describe('Context Graph Integration', () => {
       await new Promise(r => setTimeout(r, 100));
 
       expect(noCtxAgent._published.length).toBeGreaterThanOrEqual(1);
-      expect(noCtxAgent._enshrined.length).toBe(0);
+      expect(noCtxAgent._publishedFromSwm.length).toBe(0);
 
       coord.destroy();
     });
 
-    it('expedition launch quads also use workspace graph', async () => {
+    it('expedition launch quads also use shared memory graph', async () => {
       const freshAgent = makeMockAgent('peer-A', 1n);
       const { coord, swarmId } = await setupThreePlayerGame(freshAgent);
 
       await coord.launchExpedition(swarmId);
 
-      expect(freshAgent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
-      const launchWrite = freshAgent._workspaceWrites[0];
+      expect(freshAgent._shareWrites.length).toBeGreaterThanOrEqual(1);
+      const launchWrite = freshAgent._shareWrites[0];
       for (const quad of launchWrite) {
         expect(quad.graph).toBe('did:dkg:context-graph:origin-trail-game');
       }
@@ -576,7 +576,7 @@ describe('Context Graph Integration', () => {
       const swarm = coord.getSwarm(swarmId);
       if (!swarm?.pendingProposal) {
         // Already resolved via threshold — turn progressed on approvals alone
-        const totalPublished = agent._published.length + agent._enshrined.length;
+        const totalPublished = agent._published.length + agent._publishedFromSwm.length;
         expect(totalPublished).toBeGreaterThan(0);
         coord.destroy();
         return;
@@ -592,8 +592,8 @@ describe('Context Graph Integration', () => {
       await new Promise(r => setTimeout(r, 200));
 
       // Turn should resolve once approval threshold is met, regardless of signatures.
-      // With insufficient crypto sigs, enshrinement falls back to plain publish.
-      const totalPublished = agent._published.length + agent._enshrined.length;
+      // With insufficient crypto sigs, publication falls back to plain publish.
+      const totalPublished = agent._published.length + agent._publishedFromSwm.length;
       expect(totalPublished).toBeGreaterThan(0);
 
       coord.destroy();
@@ -631,8 +631,8 @@ describe('Context Graph Integration', () => {
         await new Promise(r => setTimeout(r, 200));
       }
 
-      expect(agent._enshrined.length).toBeGreaterThanOrEqual(1);
-      const sigs = agent._enshrined[0].options.contextGraphSignatures;
+      expect(agent._publishedFromSwm.length).toBeGreaterThanOrEqual(1);
+      const sigs = agent._publishedFromSwm[0].options.contextGraphSignatures;
       expect(sigs).toBeTruthy();
       expect(sigs.length).toBeGreaterThanOrEqual(2);
 
@@ -764,8 +764,8 @@ describe('Context Graph Integration', () => {
       await new Promise(r => setTimeout(r, 50));
 
       // Should have fallen back to plain publish since insufficient sigs
-      // (agent._enshrined may be empty if it used plain publish instead)
-      const totalPublished = agent._published.length + agent._enshrined.length;
+      // (agent._publishedFromSwm may be empty if it used plain publish instead)
+      const totalPublished = agent._published.length + agent._publishedFromSwm.length;
       expect(totalPublished).toBeGreaterThan(0);
 
       coord.destroy();

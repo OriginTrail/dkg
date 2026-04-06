@@ -5,9 +5,9 @@ import { EventEmitter } from 'node:events';
 
 function makeMockAgent(peerId = 'test-peer-1') {
   const published: any[] = [];
-  const workspaceWrites: any[] = [];
+  const shareWrites: any[] = [];
   const conditionalWrites: any[] = [];
-  const enshrined: any[] = [];
+  const publishedFromSwm: any[] = [];
   const contextGraphs: any[] = [];
   const subscriptions = new Set<string>();
   const messageHandlers = new Map<string, Function[]>();
@@ -24,22 +24,22 @@ function makeMockAgent(peerId = 'test-peer-1') {
       },
       offMessage(_topic: string, _handler: Function) {},
     },
-    writeToWorkspace: async (_paranetId: string, quads: any[]) => {
-      workspaceWrites.push(quads);
-      return { workspaceOperationId: 'test-op' };
+    share: async (_contextGraphId: string, quads: any[]) => {
+      shareWrites.push(quads);
+      return { shareOperationId: 'test-op' };
     },
-    writeConditionalToWorkspace: async (_paranetId: string, quads: any[], conditions: any[]) => {
-      workspaceWrites.push(quads);
+    shareConditional: async (_contextGraphId: string, quads: any[], conditions: any[]) => {
+      shareWrites.push(quads);
       conditionalWrites.push({ quads, conditions });
-      return { workspaceOperationId: 'test-op-cas' };
+      return { shareOperationId: 'test-op-cas' };
     },
-    publish: async (_paranetId: string, quads: any[]): Promise<any> => {
+    publish: async (_contextGraphId: string, quads: any[]): Promise<any> => {
       published.push(quads);
       return { onChainResult: { txHash: '0xabc123' }, ual: 'did:dkg:test:ual' };
     },
-    publishFromSharedMemory: async (_paranetId: string, selection: any, options?: any) => {
-      enshrined.push({ selection, options });
-      return { onChainResult: { txHash: '0xenshrine123', blockNumber: 100 }, ual: 'did:dkg:test:enshrined' };
+    publishFromSharedMemory: async (_contextGraphId: string, selection: any, options?: any) => {
+      publishedFromSwm.push({ selection, options });
+      return { onChainResult: { txHash: '0xpublish123', blockNumber: 100 }, ual: 'did:dkg:test:published' };
     },
     createContextGraph: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
@@ -53,9 +53,9 @@ function makeMockAgent(peerId = 'test-peer-1') {
     }),
     query: async () => ({ bindings: [] }),
     _published: published,
-    _workspaceWrites: workspaceWrites,
+    _shareWrites: shareWrites,
     _conditionalWrites: conditionalWrites,
-    _enshrined: enshrined,
+    _publishedFromSwm: publishedFromSwm,
     _contextGraphs: contextGraphs,
     _subscriptions: subscriptions,
     _messageHandlers: messageHandlers,
@@ -91,7 +91,7 @@ describe('OriginTrail Game API handler', () => {
 
   beforeEach(() => {
     agent = makeMockAgent();
-    handler = createHandler(agent, { paranets: ['test'] });
+    handler = createHandler(agent, { contextGraphs: ['test'] });
   });
 
   it('GET /info returns app info with DKG enabled', async () => {
@@ -213,7 +213,7 @@ describe('OriginTrail Game API handler', () => {
     expect(mock.status).toBe(503);
   });
 
-  it('coordinator subscribes to the dedicated game paranet app topic', () => {
+  it('coordinator subscribes to the dedicated game context graph app topic', () => {
     expect(agent._subscriptions.has('dkg/context-graph/origin-trail-game/app')).toBe(true);
   });
 
@@ -221,7 +221,7 @@ describe('OriginTrail Game API handler', () => {
     let capturedData: Uint8Array | null = null;
     const captureAgent = makeMockAgent('capture-peer');
     captureAgent.gossip.publish = async (_topic: string, data: Uint8Array) => { capturedData = data; };
-    const captureHandler = createHandler(captureAgent, { paranets: ['test'] });
+    const captureHandler = createHandler(captureAgent, { contextGraphs: ['test'] });
 
     const req = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Eve', swarmName: 'Capture Swarm' });
     const mock = createMockRes();
@@ -243,7 +243,7 @@ describe('OriginTrail Game API handler', () => {
     expect(decode(ours)!.type).toBe('swarm:created');
   });
 
-  it('POST /create writes player profile to workspace', async () => {
+  it('POST /create writes player profile to shared memory', async () => {
     const req = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Zara', swarmName: 'Profile Swarm' });
     const mock = createMockRes();
     await handler(req, mock.res, new URL(req.url, 'http://localhost'));
@@ -251,8 +251,8 @@ describe('OriginTrail Game API handler', () => {
 
     await new Promise(r => setTimeout(r, 50));
 
-    expect(agent._workspaceWrites.length).toBeGreaterThanOrEqual(1);
-    const profileQuads = agent._workspaceWrites.find((batch: any[]) =>
+    expect(agent._shareWrites.length).toBeGreaterThanOrEqual(1);
+    const profileQuads = agent._shareWrites.find((batch: any[]) =>
       batch.some((q: any) => q.object?.includes('Player')),
     );
     expect(profileQuads).toBeDefined();
@@ -284,12 +284,12 @@ describe('OriginTrail Game API handler', () => {
     expect(quads.every((q: any) => q.graph === 'did:dkg:context-graph:test-paranet')).toBe(true);
   });
 
-  it('launchExpedition writes game state to workspace (C3)', async () => {
+  it('launchExpedition writes game state to shared memory (C3)', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
     const testAgent = makeMockAgent('launch-test-peer');
     testAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-launch' });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { contextGraphId: 'test-launch' });
 
     const swarm = await coordinator.createSwarm('Leader', 'Launch Test');
     const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-launch/app');
@@ -307,10 +307,10 @@ describe('OriginTrail Game API handler', () => {
     }
     expect(swarm.players.length).toBe(3);
 
-    const beforeWrites = testAgent._workspaceWrites.length;
+    const beforeWrites = testAgent._shareWrites.length;
     await coordinator.launchExpedition(swarm.id);
 
-    const wsWritesAfter = testAgent._workspaceWrites.slice(beforeWrites);
+    const wsWritesAfter = testAgent._shareWrites.slice(beforeWrites);
     expect(wsWritesAfter.length).toBeGreaterThanOrEqual(1);
     const launchQuads = wsWritesAfter.find((batch: any[]) =>
       batch.some((q: any) => q.predicate.includes('gameState')),
@@ -318,12 +318,12 @@ describe('OriginTrail Game API handler', () => {
     expect(launchQuads).toBeDefined();
   });
 
-  it('launchExpedition uses writeConditionalToWorkspace with CAS condition', async () => {
+  it('launchExpedition uses conditionalShare with CAS condition', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
     const testAgent = makeMockAgent('cas-launch-peer');
     testAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-launch' });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { contextGraphId: 'test-cas-launch' });
 
     const swarm = await coordinator.createSwarm('Leader', 'CAS Launch Test');
     const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-cas-launch/app');
@@ -368,9 +368,9 @@ describe('OriginTrail Game API handler', () => {
 
     const staleErr = new Error('CAS failed: status expected "recruiting", found "traveling"');
     staleErr.name = 'StaleWriteError';
-    testAgent.writeConditionalToWorkspace = async () => { throw staleErr; };
+    testAgent.shareConditional = async () => { throw staleErr; };
 
-    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-cas-abort' });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { contextGraphId: 'test-cas-abort' });
     const swarm = await coordinator.createSwarm('Leader', 'Abort Test');
     const handlers = testAgent._messageHandlers.get('dkg/context-graph/test-cas-abort/app');
     const handle = handlers![0];
@@ -390,14 +390,14 @@ describe('OriginTrail Game API handler', () => {
     expect(swarm.status).toBe('recruiting');
   });
 
-  it('onRemoteExpeditionLaunched updates in-memory state without workspace write (C3)', async () => {
+  it('onRemoteExpeditionLaunched updates in-memory state without shared memory write (C3)', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
     const { GameEngine } = await import('../src/engine/game-engine.js');
     const leaderPeerId = 'remote-leader-c3';
     const followerAgent = makeMockAgent('follower-c3');
     followerAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch' });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'test-remote-launch' });
 
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch/app');
     const handle = handlers![0];
@@ -416,13 +416,13 @@ describe('OriginTrail Game API handler', () => {
       gameStateJson: JSON.stringify(gs),
     });
 
-    const beforeWrites = followerAgent._workspaceWrites.length;
+    const beforeWrites = followerAgent._shareWrites.length;
     handle('dkg/context-graph/test-remote-launch/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
-    // Follower should NOT write to workspace (Rule 4: leader owns swarm root);
-    // launch state is replicated via leader's workspace gossip instead
-    expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
+    // Follower should NOT write to shared memory (Rule 4: leader owns swarm root);
+    // launch state is replicated via leader's shared memory gossip instead
+    expect(followerAgent._shareWrites.length).toBe(beforeWrites);
 
     const swarm = coordinator.getSwarm('swarm-c3');
     expect(swarm).not.toBeNull();
@@ -442,7 +442,7 @@ describe('OriginTrail Game API handler', () => {
     const leaderPeerId = 'leader-backfill';
     const followerAgent = makeMockAgent('follower-backfill');
     followerAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-backfill' });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'test-remote-launch-backfill' });
 
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch-backfill/app');
     const handle = handlers![0];
@@ -463,11 +463,11 @@ describe('OriginTrail Game API handler', () => {
       partyOrder: [leaderPeerId, 'p2-missed-join', 'p3-missed-join'],
     });
 
-    const beforeWrites = followerAgent._workspaceWrites.length;
+    const beforeWrites = followerAgent._shareWrites.length;
     handle('dkg/context-graph/test-remote-launch-backfill/app', launchMsg, leaderPeerId);
     await new Promise(r => setTimeout(r, 100));
 
-    expect(followerAgent._workspaceWrites.length).toBe(beforeWrites);
+    expect(followerAgent._shareWrites.length).toBe(beforeWrites);
     const swarm = coordinator.getSwarm('swarm-backfill');
     expect(swarm).not.toBeNull();
     expect(swarm!.status).toBe('traveling');
@@ -485,7 +485,7 @@ describe('OriginTrail Game API handler', () => {
     const leaderPeerId = 'leader-malformed';
     const followerAgent = makeMockAgent('follower-malformed');
     followerAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test-remote-launch-malformed' });
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'test-remote-launch-malformed' });
 
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test-remote-launch-malformed/app');
     const handle = handlers![0];
@@ -559,7 +559,7 @@ describe('OriginTrail Game API handler', () => {
     const { encode } = await import('../src/dkg/protocol.js');
     const testAgent = makeMockAgent('coord-fmt-peer');
     testAgent.query = async () => ({ bindings: [] });
-    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { paranetId: 'test-fmt' });
+    const coordinator = new OriginTrailGameCoordinator(testAgent as any, { contextGraphId: 'test-fmt' });
 
     const swarm = await coordinator.createSwarm('Leader', 'Fmt Swarm');
 
@@ -651,33 +651,33 @@ describe('Entity exclusivity — no duplicate root entities', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(profileAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(profileAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await coordinator.publishPlayerProfile('ExistingPlayer');
 
     expect(queryCallCount).toBeGreaterThanOrEqual(1);
-    expect(profileAgent._workspaceWrites.length).toBe(0);
+    expect(profileAgent._shareWrites.length).toBe(0);
   });
 
-  it('publishPlayerProfile writes to workspace when profile does not exist', async () => {
+  it('publishPlayerProfile writes to shared memory when profile does not exist', async () => {
     const freshAgent = makeMockAgent('new-peer');
     freshAgent.query = async () => {
       return { bindings: [] };
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(freshAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(freshAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await coordinator.publishPlayerProfile('NewPlayer');
 
-    expect(freshAgent._workspaceWrites.length).toBe(1);
-    expect(freshAgent._workspaceWrites[0].some((q: any) => q.object.includes('Player'))).toBe(true);
+    expect(freshAgent._shareWrites.length).toBe(1);
+    expect(freshAgent._shareWrites[0].some((q: any) => q.object.includes('Player'))).toBe(true);
   });
 
-  it('creating a swarm writes workspace quads without Rule 4 risk for the player', async () => {
+  it('creating a swarm writes shared memory quads without Rule 4 risk for the player', async () => {
     const wsAgent = makeMockAgent('ws-peer');
     wsAgent.query = async () => ({ bindings: [{ result: 'false' }] });
-    const wsHandler = createHandler(wsAgent, { paranets: ['test'] });
+    const wsHandler = createHandler(wsAgent, { contextGraphs: ['test'] });
 
     // Create first swarm
     const req1 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm 1' });
@@ -691,17 +691,17 @@ describe('Entity exclusivity — no duplicate root entities', () => {
     const mockLeave = createMockRes();
     await wsHandler(reqLeave, mockLeave.res, new URL(reqLeave.url, 'http://localhost'));
 
-    // Create second swarm — workspace writes should have unique root entities
+    // Create second swarm — shared memory writes should have unique root entities
     const req2 = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Alice', swarmName: 'Swarm 2' });
     const mock2 = createMockRes();
     await wsHandler(req2, mock2.res, new URL(req2.url, 'http://localhost'));
     expect(mock2.status).toBe(200);
 
-    // Collect all root entities from all workspace writes
-    const allRoots = wsAgent._workspaceWrites.flatMap((quads: any[]) => quads.map((q: any) => q.subject));
+    // Collect all root entities from all shared memory writes
+    const allRoots = wsAgent._shareWrites.flatMap((quads: any[]) => quads.map((q: any) => q.subject));
     const uniqueRoots = new Set(allRoots);
     // No root entity should appear in more than one batch
-    const batchRoots = wsAgent._workspaceWrites.map((quads: any[]) => new Set(quads.map((q: any) => q.subject)));
+    const batchRoots = wsAgent._shareWrites.map((quads: any[]) => new Set(quads.map((q: any) => q.subject)));
     for (let i = 0; i < batchRoots.length; i++) {
       for (let j = i + 1; j < batchRoots.length; j++) {
         for (const root of batchRoots[i]) {
@@ -713,7 +713,7 @@ describe('Entity exclusivity — no duplicate root entities', () => {
 });
 
 describe('Chain provenance in turn results (C4)', () => {
-  it('turnProvenanceQuads uses workspace graph and distinct root entity', async () => {
+  it('turnProvenanceQuads uses shared memory graph and distinct root entity', async () => {
     const { turnProvenanceQuads, turnUri } = await import('../src/dkg/rdf.js');
     const quads = turnProvenanceQuads('test-paranet', 'swarm-1', 1, {
       txHash: '0xabc123',
@@ -791,12 +791,12 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(ualQuad!.object).toContain('some-plain-string');
   });
 
-  it('forceResolveTurn writes provenance to workspace (not a second publish) when on-chain result is available', async () => {
+  it('forceResolveTurn writes provenance to shared memory (not a second publish) when on-chain result is available', async () => {
     const leaderPeerId = 'leader-prov-1';
     const logs: string[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       leaderAgent._published.push(quads);
       return {
         ual: 'did:dkg:test/ual/turn-1',
@@ -807,7 +807,7 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'prov-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvenanceSwarm', 4);
 
@@ -827,10 +827,10 @@ describe('Chain provenance in turn results (C4)', () => {
     const publishCountBefore = leaderAgent._published.length;
     await coordinator.forceResolveTurn(swarm.id);
 
-    // Only ONE publish call for the turn data — provenance goes to workspace
+    // Only ONE publish call for the turn data — provenance goes to shared memory
     expect(leaderAgent._published.length).toBe(publishCountBefore + 1);
 
-    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    const provenanceWrite = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
     expect(provenanceWrite).toBeDefined();
@@ -841,7 +841,7 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('100');
 
-    // Workspace graph (not context graph)
+    // Shared memory graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
     expect([...wsGraphs][0]).toBe('did:dkg:context-graph:prov-test');
@@ -871,7 +871,7 @@ describe('Chain provenance in turn results (C4)', () => {
     const logs: string[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       leaderAgent._published.push(quads);
       return {};
     };
@@ -879,7 +879,7 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-test2' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'prov-test2' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'NoProvSwarm', 4);
 
@@ -898,7 +898,7 @@ describe('Chain provenance in turn results (C4)', () => {
 
     await coordinator.forceResolveTurn(swarm.id);
 
-    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    const provenanceWrite = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
     expect(provenanceWrite).toBeUndefined();
@@ -907,7 +907,7 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(provLogs).toHaveLength(0);
   });
 
-  it('checkProposalThreshold (consensus path) writes provenance to workspace, not a second publish', async () => {
+  it('checkProposalThreshold (consensus path) writes provenance to shared memory, not a second publish', async () => {
     const leaderPeerId = 'leader-consensus-1';
     const logs: string[] = [];
     const broadcasts: any[] = [];
@@ -916,7 +916,7 @@ describe('Chain provenance in turn results (C4)', () => {
     leaderAgent.gossip.publish = async (_topic: string, data: Uint8Array) => {
       broadcasts.push(JSON.parse(new TextDecoder().decode(data)));
     };
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       leaderAgent._published.push(quads);
       return {
         ual: 'did:dkg:test/ual/consensus-1',
@@ -927,7 +927,7 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'consensus-prov' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'consensus-prov' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm', 3);
 
@@ -972,8 +972,8 @@ describe('Chain provenance in turn results (C4)', () => {
     // Exactly one publish for the turn data (not two)
     expect(leaderAgent._published.length).toBe(publishCountBefore + 1);
 
-    // Provenance should be in workspace writes
-    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    // Provenance should be in shared memory writes
+    const provenanceWrite = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
     expect(provenanceWrite).toBeDefined();
@@ -984,7 +984,7 @@ describe('Chain provenance in turn results (C4)', () => {
     expect(blockQuad).toBeDefined();
     expect(blockQuad.object).toContain('200');
 
-    // Workspace graph (not context graph)
+    // Shared memory graph (not context graph)
     const wsGraphs = new Set(provenanceWrite.map((q: any) => q.graph));
     expect(wsGraphs.size).toBe(1);
     expect([...wsGraphs][0]).toBe('did:dkg:context-graph:consensus-prov');
@@ -1017,7 +1017,7 @@ describe('Chain provenance in turn results (C4)', () => {
     leaderAgent.gossip.publish = async (_topic: string, data: Uint8Array) => {
       broadcasts.push(JSON.parse(new TextDecoder().decode(data)));
     };
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       leaderAgent._published.push(quads);
       return {
         ual: 'did:dkg:test/ual/consensus-2',
@@ -1028,7 +1028,7 @@ describe('Chain provenance in turn results (C4)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'consensus-noblock' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'consensus-noblock' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'NoBlockSwarm', 3);
 
@@ -1068,7 +1068,7 @@ describe('Chain provenance in turn results (C4)', () => {
     }), 'nb-p2');
     await new Promise(r => setTimeout(r, 200));
 
-    const provenanceWrite = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    const provenanceWrite = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.predicate?.includes('transactionHash')),
     );
     expect(provenanceWrite).toBeDefined();
@@ -1147,7 +1147,7 @@ describe('Consensus attestation triples (V1)', () => {
     const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       publishCalls.push(quads);
       return {};
     };
@@ -1155,7 +1155,7 @@ describe('Consensus attestation triples (V1)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'att-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'att-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'AttestSwarm', 4);
 
@@ -1201,7 +1201,7 @@ describe('Consensus attestation triples (V1)', () => {
     const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       publishCalls.push(quads);
       return {};
     };
@@ -1209,7 +1209,7 @@ describe('Consensus attestation triples (V1)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'cons-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'cons-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'ConsensusSwarm');
 
@@ -1356,14 +1356,14 @@ describe('Publish provenance chain (V2)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const logs: string[] = [];
-    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { paranetId: 'fb-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { contextGraphId: 'fb-test' }, (msg) => logs.push(msg));
 
     await coordinator.publishProvenanceChain('did:dkg:entity:test', {
       kcId: 42,
       onChainResult: { txHash: '0xfallback', blockNumber: 5 },
     });
 
-    const provQuads = agentProv._workspaceWrites.find((batch: any[]) =>
+    const provQuads = agentProv._shareWrites.find((batch: any[]) =>
       batch.some((q: any) => q.predicate?.includes('sourceEntity')),
     );
     expect(provQuads).toBeDefined();
@@ -1376,11 +1376,11 @@ describe('Publish provenance chain (V2)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const logs: string[] = [];
-    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { paranetId: 'skip-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(agentProv as any, { contextGraphId: 'skip-test' }, (msg) => logs.push(msg));
 
     await coordinator.publishProvenanceChain('did:dkg:entity:skip', {});
 
-    expect(agentProv._workspaceWrites.length).toBe(0);
+    expect(agentProv._shareWrites.length).toBe(0);
   });
 
   it('forceResolveTurn publishes provenance chain when on-chain data is available', async () => {
@@ -1389,7 +1389,7 @@ describe('Publish provenance chain (V2)', () => {
     const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       publishCalls.push(quads);
       return {
         ual: 'did:dkg:test/ual/turn-chain',
@@ -1400,7 +1400,7 @@ describe('Publish provenance chain (V2)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-chain-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'prov-chain-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvChainSwarm', 4);
 
@@ -1418,13 +1418,13 @@ describe('Publish provenance chain (V2)', () => {
     await coordinator.castVote(swarm.id, 'advance');
     await coordinator.forceResolveTurn(swarm.id);
 
-    const provenanceChainPublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    const provenanceChainPublish = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.object?.includes('PublishedEntity')),
     );
     expect(provenanceChainPublish).toBeDefined();
     expect(provenanceChainPublish.some((q: any) => q.predicate?.includes('publisherDID'))).toBe(true);
 
-    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to shared memory'));
     expect(chainLogs.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1436,7 +1436,7 @@ describe('Publish provenance chain (V2)', () => {
     const publishCalls: any[] = [];
 
     const leaderAgent = makeMockAgent(leaderPeerId);
-    leaderAgent.publish = async (_paranetId: string, quads: any[]) => {
+    leaderAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       publishCalls.push(quads);
       return {
         ual: 'did:dkg:test/ual/consensus-chain',
@@ -1447,7 +1447,7 @@ describe('Publish provenance chain (V2)', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { paranetId: 'prov-cons-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(leaderAgent as any, { contextGraphId: 'prov-cons-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'ProvConsSwarm');
 
@@ -1482,12 +1482,12 @@ describe('Publish provenance chain (V2)', () => {
     }), followerPeerId);
     await new Promise(r => setTimeout(r, 100));
 
-    const provenancePublish = leaderAgent._workspaceWrites.find((quads: any[]) =>
+    const provenancePublish = leaderAgent._shareWrites.find((quads: any[]) =>
       quads.some((q: any) => q.object?.includes('PublishedEntity')),
     );
     expect(provenancePublish).toBeDefined();
 
-    const chainLogs = logs.filter(l => l.includes('Provenance chain written to workspace'));
+    const chainLogs = logs.filter(l => l.includes('Provenance chain written to shared memory'));
     expect(chainLogs.length).toBeGreaterThanOrEqual(1);
 
     expect(swarm.currentTurn).toBe(2);
@@ -1549,7 +1549,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await new Promise(r => setTimeout(r, 6_000));
 
@@ -1588,7 +1588,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await new Promise(r => setTimeout(r, 6_000));
 
@@ -1626,7 +1626,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
     await (coordinator as any).loadLobbyFromGraph();
 
     // Simulate leave via gossip so local state removes member and records tombstone.
@@ -1675,7 +1675,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
     await (coordinator as any).loadLobbyFromGraph();
 
     (coordinator as any).onRemotePlayerLeft({
@@ -1725,7 +1725,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
     await (coordinator as any).loadLobbyFromGraph();
 
     const swarm = coordinator.getSwarm('swarm-order');
@@ -1763,7 +1763,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
     await (coordinator as any).loadLobbyFromGraph();
     await (coordinator as any).loadLobbyFromGraph();
 
@@ -1805,7 +1805,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     // Initial sync: swarm is created as recruiting
     await (coordinator as any).loadLobbyFromGraph();
@@ -1871,7 +1871,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await (coordinator as any).loadLobbyFromGraph();
     const swarm = coordinator.getSwarm('swarm-launch-window');
@@ -1923,7 +1923,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     await (coordinator as any).loadLobbyFromGraph();
     const swarm = coordinator.getSwarm('swarm-fwd');
@@ -1964,7 +1964,7 @@ describe('Graph-based lobby sync', () => {
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { paranetId: 'origin-trail-game' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent as any, { contextGraphId: 'origin-trail-game' });
 
     // Seed the swarm as recruiting, then advance to finished locally
     await (coordinator as any).loadLobbyFromGraph();
@@ -2042,14 +2042,14 @@ describe('Network topology hints (V3)', () => {
     expect(quads[0].object).toContain('NetworkSnapshot');
   });
 
-  it('coordinator publishNetworkTopology writes topology quads to workspace', async () => {
+  it('coordinator publishNetworkTopology writes topology quads to shared memory', async () => {
     const topoAgent = makeMockAgent('topo-peer');
     topoAgent.query = async () => ({ bindings: [] });
 
     const logs: string[] = [];
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(topoAgent as any, { paranetId: 'topo-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(topoAgent as any, { contextGraphId: 'topo-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'TopoSwarm');
 
@@ -2067,16 +2067,16 @@ describe('Network topology hints (V3)', () => {
 
     await new Promise(r => setTimeout(r, 200));
     await coordinator.publishNetworkTopology();
-    expect(topoAgent._workspaceWrites.length).toBeGreaterThan(0);
+    expect(topoAgent._shareWrites.length).toBeGreaterThan(0);
     coordinator.destroy();
   });
 });
 
 describe('Workspace lineage quads', () => {
-  it('generates enshrined quads when confirmed is true', async () => {
-    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
-    const quads = workspaceLineageQuads('origin-trail-game', [{
-      workspaceOperationId: 'op-123',
+  it('generates published quads when confirmed is true', async () => {
+    const { sharedMemoryLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = sharedMemoryLineageQuads('origin-trail-game', [{
+      shareOperationId: 'op-123',
       rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-abc',
       publishedUal: 'did:dkg:test-ual',
       publishedTxHash: '0xabcdef',
@@ -2100,10 +2100,10 @@ describe('Workspace lineage quads', () => {
     expect(ualQuad?.object).toContain('did:dkg:test-ual');
   });
 
-  it('generates workspace-only quads when not confirmed', async () => {
-    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
-    const quads = workspaceLineageQuads('origin-trail-game', [{
-      workspaceOperationId: 'op-456',
+  it('generates shared-memory-only quads when not confirmed', async () => {
+    const { sharedMemoryLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = sharedMemoryLineageQuads('origin-trail-game', [{
+      shareOperationId: 'op-456',
       rootEntity: 'https://origintrail-game.dkg.io/swarm/swarm-def/vote/peer-1',
     }]);
 
@@ -2119,10 +2119,10 @@ describe('Workspace lineage quads', () => {
   });
 
   it('handles multiple entries with distinct subjects', async () => {
-    const { workspaceLineageQuads } = await import('../src/dkg/rdf.js');
-    const quads = workspaceLineageQuads('origin-trail-game', [
-      { workspaceOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1', confirmed: true },
-      { workspaceOperationId: 'op-b', rootEntity: 'https://example.com/e2' },
+    const { sharedMemoryLineageQuads } = await import('../src/dkg/rdf.js');
+    const quads = sharedMemoryLineageQuads('origin-trail-game', [
+      { shareOperationId: 'op-a', rootEntity: 'https://example.com/e1', publishedUal: 'ual-1', confirmed: true },
+      { shareOperationId: 'op-b', rootEntity: 'https://example.com/e2' },
     ]);
 
     const subjects = new Set(quads.map((q: any) => q.subject));
@@ -2130,9 +2130,9 @@ describe('Workspace lineage quads', () => {
     expect([...subjects].some(s => s.includes('op-a'))).toBe(true);
     expect([...subjects].some(s => s.includes('op-b'))).toBe(true);
 
-    const enshrined = quads.filter((q: any) => q.object?.includes?.('published'));
+    const published = quads.filter((q: any) => q.object?.includes?.('published'));
     const wsOnly = quads.filter((q: any) => q.object?.includes?.('workspace'));
-    expect(enshrined.length).toBe(1);
+    expect(published.length).toBe(1);
     expect(wsOnly.length).toBe(1);
   });
 });
@@ -2142,18 +2142,18 @@ describe.skip('Workspace lineage tracking', () => {
     const leaderPeerId = 'lineage-leader';
     let opCounter = 0;
     const lineageAgent = makeMockAgent(leaderPeerId);
-    lineageAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
-      lineageAgent._workspaceWrites.push(quads);
-      return { workspaceOperationId: `op-${++opCounter}` };
+    lineageAgent.share = async (_contextGraphId: string, quads: any[]) => {
+      lineageAgent._shareWrites.push(quads);
+      return { shareOperationId: `op-${++opCounter}` };
     };
-    lineageAgent.publish = async (_paranetId: string, quads: any[]) => {
+    lineageAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       lineageAgent._published.push(quads);
       return { ual: 'did:dkg:published-ual', onChainResult: { txHash: '0xabc123' } };
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const logs: string[] = [];
-    const coordinator = new OriginTrailGameCoordinator(lineageAgent as any, { paranetId: 'lineage-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(lineageAgent as any, { contextGraphId: 'lineage-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'Lineage Swarm');
 
@@ -2169,11 +2169,11 @@ describe.skip('Workspace lineage tracking', () => {
     }
     await new Promise(r => setTimeout(r, 50));
 
-    const writesBefore = lineageAgent._workspaceWrites.length;
+    const writesBefore = lineageAgent._shareWrites.length;
     await coordinator.publishNetworkTopology();
 
-    expect(lineageAgent._workspaceWrites.length).toBeGreaterThan(writesBefore);
-    const lastWrite = lineageAgent._workspaceWrites[lineageAgent._workspaceWrites.length - 1];
+    expect(lineageAgent._shareWrites.length).toBeGreaterThan(writesBefore);
+    const lastWrite = lineageAgent._shareWrites[lineageAgent._shareWrites.length - 1];
     expect(lastWrite.some((q: any) => q.object?.includes('NetworkSnapshot'))).toBe(true);
     expect(lastWrite.some((q: any) => q.predicate?.includes('connectionType'))).toBe(true);
 
@@ -2190,13 +2190,13 @@ describe.skip('Workspace lineage tracking', () => {
 
     const logs: string[] = [];
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(emptyAgent as any, { paranetId: 'empty-topo' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(emptyAgent as any, { contextGraphId: 'empty-topo' }, (msg) => logs.push(msg));
 
-    const writesBefore = emptyAgent._workspaceWrites.length;
+    const writesBefore = emptyAgent._shareWrites.length;
     await coordinator.publishNetworkTopology();
 
-    expect(emptyAgent._workspaceWrites.length).toBe(writesBefore + 1);
-    const lastWrite = emptyAgent._workspaceWrites[emptyAgent._workspaceWrites.length - 1];
+    expect(emptyAgent._shareWrites.length).toBe(writesBefore + 1);
+    const lastWrite = emptyAgent._shareWrites[emptyAgent._shareWrites.length - 1];
     expect(lastWrite.some((q: any) => q.object?.includes('NetworkSnapshot'))).toBe(true);
     expect(lastWrite).toHaveLength(3);
 
@@ -2208,7 +2208,7 @@ describe.skip('Workspace lineage tracking', () => {
     timerAgent.query = async () => ({ bindings: [] });
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(timerAgent as any, { paranetId: 'timer-test' });
+    const coordinator = new OriginTrailGameCoordinator(timerAgent as any, { contextGraphId: 'timer-test' });
 
     coordinator.destroy();
     expect(true).toBe(true);
@@ -2220,18 +2220,18 @@ describe.skip('Workspace lineage tracking', () => {
     const p3 = 'consensus-p3';
     let opCounter = 0;
     const consensusAgent = makeMockAgent(leaderPeerId);
-    consensusAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
-      consensusAgent._workspaceWrites.push(quads);
-      return { workspaceOperationId: `op-${++opCounter}` };
+    consensusAgent.share = async (_contextGraphId: string, quads: any[]) => {
+      consensusAgent._shareWrites.push(quads);
+      return { shareOperationId: `op-${++opCounter}` };
     };
-    consensusAgent.publish = async (_paranetId: string, quads: any[]) => {
+    consensusAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       consensusAgent._published.push(quads);
       return { ual: 'did:dkg:consensus-ual', onChainResult: { txHash: '0xconsensus' } };
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const logs: string[] = [];
-    const coordinator = new OriginTrailGameCoordinator(consensusAgent as any, { paranetId: 'consensus-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(consensusAgent as any, { contextGraphId: 'consensus-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'Consensus Swarm');
 
@@ -2258,7 +2258,7 @@ describe.skip('Workspace lineage tracking', () => {
     }
     await new Promise(r => setTimeout(r, 50));
 
-    const writesBeforeConsensus = consensusAgent._workspaceWrites.length;
+    const writesBeforeConsensus = consensusAgent._shareWrites.length;
 
     // Leader votes last — triggers proposeTurnResolution (all 3 voted)
     await coordinator.castVote(swarm.id, 'advance');
@@ -2274,7 +2274,7 @@ describe.skip('Workspace lineage tracking', () => {
     }), p2);
     await new Promise(r => setTimeout(r, 100));
 
-    const lineageWrites = consensusAgent._workspaceWrites.slice(writesBeforeConsensus).filter((quads: any[]) =>
+    const lineageWrites = consensusAgent._shareWrites.slice(writesBeforeConsensus).filter((quads: any[]) =>
       quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
     );
     expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
@@ -2288,21 +2288,21 @@ describe.skip('Workspace lineage tracking', () => {
     expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('lineage entries are workspace-only when publish returns no UAL', async () => {
+  it('lineage entries are shared-memory-only when publish returns no UAL', async () => {
     const leaderPeerId = 'lineage-noul-leader';
     let opCounter = 0;
     const noUalAgent = makeMockAgent(leaderPeerId);
-    noUalAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
-      noUalAgent._workspaceWrites.push(quads);
-      return { workspaceOperationId: `op-${++opCounter}` };
+    noUalAgent.share = async (_contextGraphId: string, quads: any[]) => {
+      noUalAgent._shareWrites.push(quads);
+      return { shareOperationId: `op-${++opCounter}` };
     };
-    noUalAgent.publish = async (_paranetId: string, quads: any[]) => {
+    noUalAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       noUalAgent._published.push(quads);
       return {};
     };
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(noUalAgent as any, { paranetId: 'lineage-noul' });
+    const coordinator = new OriginTrailGameCoordinator(noUalAgent as any, { contextGraphId: 'lineage-noul' });
 
     const swarm = await coordinator.createSwarm('Leader', 'No-UAL Swarm');
 
@@ -2322,13 +2322,13 @@ describe.skip('Workspace lineage tracking', () => {
     await coordinator.castVote(swarm.id, 'advance');
     await coordinator.forceResolveTurn(swarm.id);
 
-    const lineageWrites = noUalAgent._workspaceWrites.filter((quads: any[]) =>
+    const lineageWrites = noUalAgent._shareWrites.filter((quads: any[]) =>
       quads.some((q: any) => q.object?.includes?.('WorkspaceLineage'))
     );
     expect(lineageWrites.length).toBeGreaterThanOrEqual(1);
 
     const lineageQuads = lineageWrites[0];
-    expect(lineageQuads.some((q: any) => q.object?.includes?.('workspace'))).toBe(true);
+    expect(lineageQuads.some((q: any) => q.object?.includes?.('shared-memory'))).toBe(true);
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
   });
 
@@ -2339,12 +2339,12 @@ describe.skip('Workspace lineage tracking', () => {
     let wsOpCounter = 0;
 
     const failAgent = makeMockAgent(leaderPeerId);
-    failAgent.writeToWorkspace = async (_paranetId: string, quads: any[]) => {
-      failAgent._workspaceWrites.push(quads);
+    failAgent.share = async (_contextGraphId: string, quads: any[]) => {
+      failAgent._shareWrites.push(quads);
       wsOpCounter++;
-      return { workspaceOperationId: `ws-op-${wsOpCounter}` };
+      return { shareOperationId: `ws-op-${wsOpCounter}` };
     };
-    failAgent.publish = async (_paranetId: string, quads: any[]) => {
+    failAgent.publish = async (_contextGraphId: string, quads: any[]) => {
       publishCallCount++;
       if (publishCallCount === 1) throw new Error('publish failed');
       failAgent._published.push(quads);
@@ -2354,7 +2354,7 @@ describe.skip('Workspace lineage tracking', () => {
 
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const { encode } = await import('../src/dkg/protocol.js');
-    const coordinator = new OriginTrailGameCoordinator(failAgent as any, { paranetId: 'lineage-fail' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(failAgent as any, { contextGraphId: 'lineage-fail' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 4);
     const handlers = failAgent._messageHandlers.get('dkg/context-graph/lineage-fail/app');
@@ -2373,7 +2373,7 @@ describe.skip('Workspace lineage tracking', () => {
     const firstTurnOpIds = new Set<string>();
     for (let i = 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
 
-    const writesBeforeFail = failAgent._workspaceWrites.length;
+    const writesBeforeFail = failAgent._shareWrites.length;
     await coordinator.forceResolveTurn(swarm.id);
 
     for (let i = firstTurnOpIds.size + 1; i <= wsOpCounter; i++) firstTurnOpIds.add(`ws-op-${i}`);
@@ -2381,23 +2381,23 @@ describe.skip('Workspace lineage tracking', () => {
     const failLogs = logs.filter(l => l.includes('Failed to publish'));
     expect(failLogs.length).toBeGreaterThanOrEqual(1);
 
-    const failedLineage = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+    const failedLineage = failAgent._shareWrites.slice(writesBeforeFail).filter((quads: any[]) =>
       quads.some((q: any) => q.object?.includes?.('failed')),
     );
     expect(failedLineage.length).toBeGreaterThanOrEqual(1);
 
-    const successLineageAfterFail = failAgent._workspaceWrites.slice(writesBeforeFail).filter((quads: any[]) =>
+    const successLineageAfterFail = failAgent._shareWrites.slice(writesBeforeFail).filter((quads: any[]) =>
       quads.some((q: any) => q.object?.includes?.('published')),
     );
     expect(successLineageAfterFail).toHaveLength(0);
 
     await coordinator.castVote(swarm.id, 'advance');
     const secondTurnOpsStart = wsOpCounter + 1;
-    const writesBeforeSecond = failAgent._workspaceWrites.length;
+    const writesBeforeSecond = failAgent._shareWrites.length;
     await coordinator.forceResolveTurn(swarm.id);
 
-    const lineageAfterSecond = failAgent._workspaceWrites.slice(writesBeforeSecond).filter((quads: any[]) =>
-      quads.some((q: any) => q.object?.includes?.('published') || q.object?.includes?.('workspace')),
+    const lineageAfterSecond = failAgent._shareWrites.slice(writesBeforeSecond).filter((quads: any[]) =>
+      quads.some((q: any) => q.object?.includes?.('published') || q.object?.includes?.('shared-memory')),
     );
     expect(lineageAfterSecond.length).toBeGreaterThanOrEqual(1);
 
@@ -2419,7 +2419,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const logs: string[] = [];
     const followerAgent = makeMockAgent(followerPeerId);
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'test' }, (msg) => logs.push(msg));
 
     // Simulate: leader creates swarm, follower + third player join
     const { encode } = await import('../src/dkg/protocol.js');
@@ -2524,7 +2524,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const logs: string[] = [];
     const followerAgent = makeMockAgent(followerPeerId);
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'test2' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'test2' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/test2/app');
@@ -2602,7 +2602,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const logs: string[] = [];
     const followerAgent = makeMockAgent(followerPeerId);
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'force-test' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/force-test/app');
@@ -2665,7 +2665,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
     const logs: string[] = [];
     const followerAgent = makeMockAgent('observer-force-2');
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
-    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { paranetId: 'force-test2' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(followerAgent as any, { contextGraphId: 'force-test2' }, (msg) => logs.push(msg));
 
     const { encode } = await import('../src/dkg/protocol.js');
     const handlers = followerAgent._messageHandlers.get('dkg/context-graph/force-test2/app');
@@ -2719,7 +2719,7 @@ describe('Turn proposal accepts non-deterministic state', () => {
 
 describe('V5: Strategy pattern RDF quads', () => {
   it('strategyPatternQuads generates correct RDF structure', async () => {
-    const { strategyPatternQuads, workspaceGraph } = await import('../src/dkg/rdf.js');
+    const { strategyPatternQuads, sharedMemoryGraph } = await import('../src/dkg/rdf.js');
     const stats = {
       totalVotes: 5,
       actionCounts: { advance: 3, syncMemory: 1, upgradeSkills: 1 } as Record<string, number>,
@@ -2728,7 +2728,7 @@ describe('V5: Strategy pattern RDF quads', () => {
     };
     const quads = strategyPatternQuads('origin-trail-game', 'swarm-abc', 'peer-1', stats);
 
-    const expectedGraph = workspaceGraph('origin-trail-game');
+    const expectedGraph = sharedMemoryGraph('origin-trail-game');
     expect(quads.every(q => q.graph === expectedGraph)).toBe(true);
 
     const subject = quads[0].subject;
@@ -2779,7 +2779,7 @@ describe('V5: Strategy computation from turn history', () => {
     const p2 = 'strat-p2';
     const p3 = 'strat-p3';
     const agent = makeMockAgent(leaderPeerId);
-    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'strat-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { contextGraphId: 'strat-test' });
 
     const swarm = await coordinator.createSwarm('Leader', 'StratSwarm');
     const handlers = agent._messageHandlers.get('dkg/context-graph/strat-test/app');
@@ -2835,7 +2835,7 @@ describe('V5: Strategy computation from turn history', () => {
   it('getPlayerStrategies returns null for unknown swarm', async () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
     const agent = makeMockAgent('strat-null-peer');
-    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'strat-null' });
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { contextGraphId: 'strat-null' });
     expect(coordinator.getPlayerStrategies('nonexistent')).toBeNull();
   });
 });
@@ -2850,7 +2850,7 @@ describe('V5: Strategy patterns published when game finishes', () => {
     const p3 = 'finish-p3';
     const logs: string[] = [];
     const agent = makeMockAgent(leaderPeerId);
-    const coordinator = new OriginTrailGameCoordinator(agent as any, { paranetId: 'finish-test' }, (msg) => logs.push(msg));
+    const coordinator = new OriginTrailGameCoordinator(agent as any, { contextGraphId: 'finish-test' }, (msg) => logs.push(msg));
 
     const swarm = await coordinator.createSwarm('Leader', 'FinishSwarm');
     const handlers = agent._messageHandlers.get('dkg/context-graph/finish-test/app');
@@ -2903,7 +2903,7 @@ describe('Leaderboard', () => {
         { player: '"peer-bob"', displayName: '"Bob"', score: '"0"', outcome: '"lost"', epochs: '"800"', survivors: '"0"', partySize: '"3"', swarmId: '"swarm-2"', finishedAt: '"1700001000000"' },
       ],
     });
-    const lbHandler = createHandler(leaderboardAgent, { paranets: ['test'] });
+    const lbHandler = createHandler(leaderboardAgent, { contextGraphs: ['test'] });
 
     const req = createMockReq('GET', '/api/apps/origin-trail-game/leaderboard');
     const mock = createMockRes();
@@ -2920,7 +2920,7 @@ describe('Leaderboard', () => {
 
   it('GET /leaderboard returns empty array when no data', async () => {
     const agent2 = makeMockAgent('empty-peer');
-    const handler2 = createHandler(agent2, { paranets: ['test'] });
+    const handler2 = createHandler(agent2, { contextGraphs: ['test'] });
     const req = createMockReq('GET', '/api/apps/origin-trail-game/leaderboard');
     const mock = createMockRes();
     await handler2(req, mock.res, new URL(req.url, 'http://localhost'));
@@ -2986,7 +2986,7 @@ describe('Sync Memory via DKG', () => {
 
     const leaderPeerId = 'sync-leader';
     const syncAgent = makeMockAgent(leaderPeerId);
-    const coordinator = new OriginTrailGameCoordinator(syncAgent, { paranetId: 'sync-test' });
+    const coordinator = new OriginTrailGameCoordinator(syncAgent, { contextGraphId: 'sync-test' });
 
     // Create swarm + add remote players to satisfy MIN_PLAYERS
     const swarm = await coordinator.createSwarm('Leader', 'SyncSwarm', 5);
@@ -3018,7 +3018,7 @@ describe('Sync Memory via DKG', () => {
 
     const leaderPeerId = 'sync-fail-leader';
     const failAgent = makeMockAgent(leaderPeerId);
-    const coordinator = new OriginTrailGameCoordinator(failAgent, { paranetId: 'sync-fail-test' });
+    const coordinator = new OriginTrailGameCoordinator(failAgent, { contextGraphId: 'sync-fail-test' });
 
     const swarm = await coordinator.createSwarm('Leader', 'FailSwarm', 5);
     const handle = failAgent._messageHandlers.get('dkg/context-graph/sync-fail-test/app')![0];
@@ -3050,7 +3050,7 @@ describe('Sync Memory via DKG', () => {
 describe('Score in swarm state', () => {
   it('formatSwarmState includes score for finished games', async () => {
     const scoreAgent = makeMockAgent('score-peer');
-    const scoreHandler = createHandler(scoreAgent, { paranets: ['test'] });
+    const scoreHandler = createHandler(scoreAgent, { contextGraphs: ['test'] });
 
     const createReq = createMockReq('POST', '/api/apps/origin-trail-game/create', { playerName: 'Scorer', swarmName: 'Score Swarm' });
     const createMock = createMockRes();
@@ -3065,7 +3065,7 @@ describe('Score in swarm state', () => {
 describe('Notifications', () => {
   it('GET /notifications returns empty initially', async () => {
     const nAgent = makeMockAgent('notif-peer');
-    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+    const nHandler = createHandler(nAgent, { contextGraphs: ['test'] });
     const req = createMockReq('GET', '/api/apps/origin-trail-game/notifications');
     const mock = createMockRes();
     await nHandler(req, mock.res, new URL(req.url, 'http://localhost'));
@@ -3080,7 +3080,7 @@ describe('Notifications', () => {
 
     const localPeer = 'notif-local';
     const nAgent = makeMockAgent(localPeer);
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-test' });
     const swarm = await coordinator.createSwarm('Leader', 'TestSwarm');
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test/app')![0];
 
@@ -3103,7 +3103,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('local-2');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test2' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-test2' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test2/app')![0];
 
     handle('dkg/context-graph/notif-test2/app', encode({
@@ -3125,7 +3125,7 @@ describe('Notifications', () => {
     const { GameEngine } = await import('../src/engine/game-engine.js');
 
     const nAgent = makeMockAgent('local-3');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test3' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-test3' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test3/app')![0];
 
     handle('dkg/context-graph/notif-test3/app', encode({
@@ -3156,7 +3156,7 @@ describe('Notifications', () => {
     const { GameEngine } = await import('../src/engine/game-engine.js');
 
     const nAgent = makeMockAgent('local-4');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-test4' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-test4' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-test4/app')![0];
 
     handle('dkg/context-graph/notif-test4/app', encode({
@@ -3198,7 +3198,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('local-mark');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-mark' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-mark' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-mark/app')![0];
 
     handle('dkg/context-graph/notif-mark/app', encode({
@@ -3221,7 +3221,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('local-partial');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-partial' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-partial' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-partial/app')![0];
 
     for (let i = 0; i < 3; i++) {
@@ -3245,7 +3245,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('api-notif');
-    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+    const nHandler = createHandler(nAgent, { contextGraphs: ['test'] });
 
     const handle = nAgent._messageHandlers.get('dkg/context-graph/origin-trail-game/app')![0];
     handle('dkg/context-graph/origin-trail-game/app', encode({
@@ -3268,7 +3268,7 @@ describe('Notifications', () => {
   it('POST /notifications/read marks notifications as read via API', async () => {
     const { encode } = await import('../src/dkg/protocol.js');
     const nAgent = makeMockAgent('api-read');
-    const nHandler = createHandler(nAgent, { paranets: ['test'] });
+    const nHandler = createHandler(nAgent, { contextGraphs: ['test'] });
 
     const handle = nAgent._messageHandlers.get('dkg/context-graph/origin-trail-game/app')![0];
     handle('dkg/context-graph/origin-trail-game/app', encode({
@@ -3296,7 +3296,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('local-order');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-order' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-order' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-order/app')![0];
 
     for (let i = 0; i < 3; i++) {
@@ -3319,7 +3319,7 @@ describe('Notifications', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const nAgent = makeMockAgent('local-cap');
-    const coordinator = new OriginTrailGameCoordinator(nAgent, { paranetId: 'notif-cap' });
+    const coordinator = new OriginTrailGameCoordinator(nAgent, { contextGraphId: 'notif-cap' });
     const handle = nAgent._messageHandlers.get('dkg/context-graph/notif-cap/app')![0];
 
     for (let i = 0; i < 210; i++) {
@@ -3348,7 +3348,7 @@ describe('getLobby stale finished swarms', () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
 
     const agent = makeMockAgent('lobby-stale');
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'stale-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'stale-test' });
 
     const freshSwarm = await coordinator.createSwarm('Alice', 'FreshSwarm', 3);
     const staleSwarm = await coordinator.createSwarm('Alice', 'StaleSwarm', 3);
@@ -3371,7 +3371,7 @@ describe('getLobby stale finished swarms', () => {
     const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
 
     const agent = makeMockAgent('lobby-fallback');
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'fallback-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'fallback-test' });
 
     const recentSwarm = await coordinator.createSwarm('Alice', 'RecentSwarm', 3);
     recentSwarm.status = 'finished';
@@ -3395,7 +3395,7 @@ describe('Leaderboard deduplication', () => {
       ],
     });
 
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'dedup-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'dedup-test' });
     const entries = await coordinator.getLeaderboard();
 
     expect(entries.length).toBe(2);
@@ -3409,7 +3409,7 @@ describe('Leaderboard deduplication', () => {
 describe('/chat API handler validation', () => {
   it('POST /chat rejects empty message', async () => {
     const agent = makeMockAgent('chat-api-peer');
-    const handler = createHandler(agent, { paranets: ['test'] });
+    const handler = createHandler(agent, { contextGraphs: ['test'] });
     const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: '   ', displayName: 'Alice' });
     const mock = createMockRes();
     await handler(req, mock.res, new URL(req.url, 'http://localhost'));
@@ -3419,7 +3419,7 @@ describe('/chat API handler validation', () => {
 
   it('POST /chat rejects oversized message', async () => {
     const agent = makeMockAgent('chat-api-peer');
-    const handler = createHandler(agent, { paranets: ['test'] });
+    const handler = createHandler(agent, { contextGraphs: ['test'] });
     const longMessage = 'x'.repeat(201);
     const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message: longMessage, displayName: 'Alice' });
     const mock = createMockRes();
@@ -3430,7 +3430,7 @@ describe('/chat API handler validation', () => {
 
   it('POST /chat accepts valid 200-char message', async () => {
     const agent = makeMockAgent('chat-api-peer');
-    const handler = createHandler(agent, { paranets: ['test'] });
+    const handler = createHandler(agent, { contextGraphs: ['test'] });
     const message = 'a'.repeat(200);
     const req = createMockReq('POST', '/api/apps/origin-trail-game/chat', { message, displayName: 'Alice' });
     const mock = createMockRes();
@@ -3443,7 +3443,7 @@ describe('/chat API handler validation', () => {
 
   it('GET /chat clamps invalid limit', async () => {
     const agent = makeMockAgent('chat-api-peer');
-    const handler = createHandler(agent, { paranets: ['test'] });
+    const handler = createHandler(agent, { contextGraphs: ['test'] });
 
     for (const invalidLimit of ['-5', '0', 'NaN', '999']) {
       const req = createMockReq('GET', `/api/apps/origin-trail-game/chat?limit=${invalidLimit}`);
@@ -3460,7 +3460,7 @@ describe('Lobby chat', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const agent = makeMockAgent('chat-peer');
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'chat-test' });
 
     const sent = await coordinator.sendChatMessage('Alice', 'Hello world');
     expect(sent.peerId).toBe('chat-peer');
@@ -3499,7 +3499,7 @@ describe('Lobby chat', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const agent = makeMockAgent('chat-val-peer');
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-val-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'chat-val-test' });
 
     const handle = agent._messageHandlers.get('dkg/context-graph/chat-val-test/app')![0];
 
@@ -3524,7 +3524,7 @@ describe('Lobby chat', () => {
     const { encode } = await import('../src/dkg/protocol.js');
 
     const agent = makeMockAgent('chat-trunc-peer');
-    const coordinator = new OriginTrailGameCoordinator(agent, { paranetId: 'chat-trunc-test' });
+    const coordinator = new OriginTrailGameCoordinator(agent, { contextGraphId: 'chat-trunc-test' });
 
     const handle = agent._messageHandlers.get('dkg/context-graph/chat-trunc-test/app')![0];
     const longMsg = 'a'.repeat(500);

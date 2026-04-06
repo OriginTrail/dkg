@@ -55,6 +55,7 @@ export interface UpdateKAParams {
   batchId: bigint;
   newMerkleRoot: Uint8Array;
   newPublicByteSize: bigint;
+  publisherAddress?: string;
 }
 
 export interface ExtendStorageParams {
@@ -67,8 +68,8 @@ export interface TxResult {
   hash: string;
   blockNumber: number;
   success: boolean;
-  /** Set by createParanet when V9 registry is used (on-chain paranetId as hex). */
-  paranetId?: string;
+  /** Set by createContextGraph when V9 registry is used (on-chain contextGraphId as hex). */
+  contextGraphId?: string;
 }
 
 export interface KAUpdateVerification {
@@ -94,9 +95,9 @@ export interface EventFilter {
   toBlock?: number;
 }
 
-export interface CreateParanetParams {
+export interface CreateContextGraphParams {
   /**
-   * Human-readable paranet name. The on-chain paranetId is derived as
+   * Human-readable context graph name. The on-chain contextGraphId is derived as
    * keccak256(bytes(name)) — only the hash goes to the chain. The cleartext
    * name is never stored on-chain unless revealOnChain is true.
    */
@@ -107,14 +108,14 @@ export interface CreateParanetParams {
   /** If true, immediately reveal name+description on-chain after creation. Default: false. */
   revealOnChain?: boolean;
   /** Legacy/mock: explicit id when not using chain registry. */
-  paranetId?: string;
+  contextGraphId?: string;
   metadata?: Record<string, string>;
 }
 
-/** One paranet entry from chain (e.g. ParanetCreated events). */
-export interface ParanetOnChain {
+/** One context graph entry from chain (e.g. ParanetCreated events). */
+export interface ContextGraphOnChain {
   /** bytes32 hex — keccak256(bytes(name)). */
-  paranetId: string;
+  contextGraphId: string;
   creator: string;
   accessPolicy: number;
   blockNumber: number;
@@ -137,19 +138,19 @@ export interface FairSwapPurchaseInfo {
   state: number; // 0=None, 1=Initiated, 2=Fulfilled, 3=KeyRevealed, 4=Completed, 5=Disputed, 6=Refunded, 7=Expired
 }
 
-// ----- Context Graph types -----
+// ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
-export interface CreateContextGraphParams {
+export interface CreateOnChainContextGraphParams {
   participantIdentityIds: bigint[];
   requiredSignatures: number;
   metadataBatchId?: bigint;
 }
 
-export interface CreateContextGraphResult extends TxResult {
+export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
   contextGraphId: bigint;
 }
 
-export interface AddBatchToContextGraphParams {
+export interface VerifyParams {
   contextGraphId: bigint;
   batchId: bigint;
   merkleRoot?: Uint8Array;
@@ -276,13 +277,13 @@ export interface ChainAdapter {
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 
-  // Paranets
-  createParanet(params: CreateParanetParams): Promise<TxResult>;
-  submitToParanet(kcId: string, paranetId: string): Promise<TxResult>;
-  /** Reveal cleartext name+description on-chain for a paranet you created. Optional. */
-  revealParanetMetadata?(paranetId: string, name: string, description: string): Promise<TxResult>;
-  /** List paranets from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
-  listParanetsFromChain?(fromBlock?: number): Promise<ParanetOnChain[]>;
+  // Context Graphs (V9 Registry)
+  createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
+  submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult>;
+  /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
+  revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
+  /** List context graphs from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
+  listContextGraphsFromChain?(fromBlock?: number): Promise<ContextGraphOnChain[]>;
 
   // Publishing Conviction Accounts
   createConvictionAccount?(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult>;
@@ -313,9 +314,9 @@ export interface ChainAdapter {
    */
   signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
-  // Context Graphs
-  createContextGraph?(params: CreateContextGraphParams): Promise<CreateContextGraphResult>;
-  addBatchToContextGraph?(params: AddBatchToContextGraphParams): Promise<TxResult>;
+  // On-Chain Context Graphs (ContextGraphs contract)
+  createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
   // V10 publish (KnowledgeAssetsV10 contract — writes to KnowledgeCollectionStorage)
@@ -344,3 +345,14 @@ export interface ChainAdapter {
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
 }
+
+// ----- Backward-compat deprecated aliases (V9 → V10 rename) -----
+
+/** @deprecated Use CreateContextGraphParams instead. */
+export type CreateParanetParams = CreateContextGraphParams;
+/** @deprecated Use ContextGraphOnChain instead. */
+export type ParanetOnChain = ContextGraphOnChain;
+/** @deprecated Use VerifyParams instead. */
+export type AddBatchToContextGraphParams = VerifyParams;
+/** @deprecated Use CreateOnChainContextGraphParams instead. */
+export type CreateContextGraphParamsLegacy = CreateOnChainContextGraphParams;

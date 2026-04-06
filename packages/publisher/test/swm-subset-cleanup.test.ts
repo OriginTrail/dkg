@@ -49,10 +49,10 @@ describe('SWM subset publish cleanup', () => {
     });
   });
 
-  it('subset publish removes published entities from SWM even when clearWorkspaceAfter=false', async () => {
+  it('subset publish removes published entities from SWM even when clearSharedMemoryAfter=false', async () => {
     const alice = 'urn:test:alice';
     const bob = 'urn:test:bob';
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(alice, 'http://schema.org/name', '"Alice"'),
       q(alice, 'http://schema.org/age', '"30"'),
       q(bob, 'http://schema.org/name', '"Bob"'),
@@ -63,7 +63,7 @@ describe('SWM subset publish cleanup', () => {
 
     const result = await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: [alice],
-    }, { clearWorkspaceAfter: false });
+    }, { clearSharedMemoryAfter: false });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest.length).toBe(1);
@@ -81,17 +81,17 @@ describe('SWM subset publish cleanup', () => {
     const bob = 'urn:test:bob';
     const carol = 'urn:test:carol';
 
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(alice, 'http://schema.org/name', '"Alice"'),
       q(bob, 'http://schema.org/name', '"Bob"'),
       q(carol, 'http://schema.org/name', '"Carol"'),
     ], { publisherPeerId: 'peer1' });
 
     // Publish Alice only
-    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearWorkspaceAfter: false });
+    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearSharedMemoryAfter: false });
 
     // Publish remaining (Bob + Carol) — should not fail with "already exists"
-    const result = await publisher.publishFromSharedMemory(PARANET, 'all', { clearWorkspaceAfter: true });
+    const result = await publisher.publishFromSharedMemory(PARANET, 'all', { clearSharedMemoryAfter: true });
 
     expect(result.status).toBe('confirmed');
     const roots = result.kaManifest.map((ka) => ka.rootEntity);
@@ -103,24 +103,24 @@ describe('SWM subset publish cleanup', () => {
     expect(await countInGraph(store, WORKSPACE_GRAPH)).toBe(0);
   });
 
-  it('clearWorkspaceAfter=true clears entire SWM including unpublished entities', async () => {
+  it('clearSharedMemoryAfter=true clears entire SWM including unpublished entities', async () => {
     const alice = 'urn:test:alice';
     const bob = 'urn:test:bob';
 
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(alice, 'http://schema.org/name', '"Alice"'),
       q(bob, 'http://schema.org/name', '"Bob"'),
     ], { publisherPeerId: 'peer1' });
 
     // Publish Alice with clearAfter=true → Bob also gets cleared
-    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearWorkspaceAfter: true });
+    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearSharedMemoryAfter: true });
 
     expect(await countInGraph(store, WORKSPACE_GRAPH)).toBe(0);
   });
 
   it('published triples appear in data graph', async () => {
     const entity = 'urn:test:entity';
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(entity, 'http://schema.org/name', '"Published"'),
     ], { publisherPeerId: 'peer1' });
 
@@ -134,13 +134,13 @@ describe('SWM subset publish cleanup', () => {
     const alice = 'urn:test:alice';
     const bob = 'urn:test:bob';
 
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(alice, 'http://schema.org/name', '"Alice"'),
       q(bob, 'http://schema.org/name', '"Bob"'),
     ], { publisherPeerId: 'peer1' });
 
     // Subset publish: alice only, clearAfter=false
-    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearWorkspaceAfter: false });
+    await publisher.publishFromSharedMemory(PARANET, { rootEntities: [alice] }, { clearSharedMemoryAfter: false });
 
     // Alice ownership metadata should be removed
     const aliceOwner = await store.query(

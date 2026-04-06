@@ -38,7 +38,7 @@ export interface SetupOptions {
 interface NetworkConfig {
   networkName: string;
   relays: string[];
-  defaultParanets: string[];
+  defaultContextGraphs: string[];
   defaultNodeRole: string;
   autoUpdate?: {
     enabled: boolean;
@@ -270,7 +270,7 @@ export function writeDkgConfig(
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
     apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
-    paranets: existing.paranets ?? network.defaultParanets,
+    contextGraphs: existing.contextGraphs ?? network.defaultContextGraphs,
     chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
     openclawAdapter: true,

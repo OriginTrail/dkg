@@ -25,7 +25,7 @@ function createGossipBridge() {
 
   function createAgent(peerId: string) {
     const published: any[] = [];
-    const workspaceWrites: any[] = [];
+    const shareWrites: any[] = [];
     const localHandlers = new Map<string, MessageHandler[]>();
 
     return {
@@ -67,17 +67,17 @@ function createGossipBridge() {
           }
         },
       },
-      writeToWorkspace: async (_paranetId: string, quads: any[]) => {
-        workspaceWrites.push(quads);
-        return { workspaceOperationId: `op-${Date.now()}` };
+      share: async (_contextGraphId: string, quads: any[]) => {
+        shareWrites.push(quads);
+        return { shareOperationId: `op-${Date.now()}` };
       },
-      publish: async (_paranetId: string, quads: any[]) => {
+      publish: async (_contextGraphId: string, quads: any[]) => {
         published.push(quads);
         return {};
       },
       query: async () => ({ bindings: [] }),
       _published: published,
-      _workspaceWrites: workspaceWrites,
+      _shareWrites: shareWrites,
     };
   }
 
@@ -134,8 +134,8 @@ describe('Notifications E2E — two-node gossip bridge', () => {
     bridge = createGossipBridge();
     agentA = bridge.createAgent('peer-node-A');
     agentB = bridge.createAgent('peer-node-B');
-    handlerA = createHandler(agentA, { paranets: ['test'], name: 'NodeA' });
-    handlerB = createHandler(agentB, { paranets: ['test'], name: 'NodeB' });
+    handlerA = createHandler(agentA, { contextGraphs: ['test'], name: 'NodeA' });
+    handlerB = createHandler(agentB, { contextGraphs: ['test'], name: 'NodeB' });
   });
 
   it('full game flow generates correct notifications on both nodes', async () => {

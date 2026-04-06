@@ -2,13 +2,13 @@
  * OriginTrail Game DKG Coordinator
  *
  * Bridges the game engine with the DKG network:
- * - Workspace for ephemeral state (votes, lobby)
+ * - Shared memory for ephemeral state (votes, lobby)
  * - GossipSub for real-time coordination between nodes
  * - Publish for permanent game state (turn results → context graph)
  *
- * All gossipsub messages flow through the paranet's app topic
- * (dkg/paranet/{paranetId}/app) so every node subscribed to the
- * paranet — including relays — relays game coordination messages.
+ * All gossipsub messages flow through the context graph's app topic
+ * (dkg/context-graph/{contextGraphId}/app) so every node subscribed to the
+ * context graph — including relays — relays game coordination messages.
  */
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -35,18 +35,18 @@ interface DKGAgent {
     onMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
     offMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
   };
-  writeToWorkspace(paranetId: string, quads: any[]): Promise<{ workspaceOperationId: string }>;
-  writeConditionalToWorkspace?(
-    paranetId: string,
+  share(contextGraphId: string, quads: any[]): Promise<{ shareOperationId: string }>;
+  shareConditional?(
+    contextGraphId: string,
     quads: any[],
     conditions: Array<{ subject: string; predicate: string; expectedValue: string | null }>,
-  ): Promise<{ workspaceOperationId: string }>;
-  publish(paranetId: string | { paranetId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
+  ): Promise<{ shareOperationId: string }>;
+  publish(contextGraphId: string | { contextGraphId: string; quads: any[] }, quads?: any[]): Promise<DKGPublishReturn | undefined>;
   publishFromSharedMemory(
-    paranetId: string,
+    contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     options?: {
-      clearWorkspaceAfter?: boolean;
+      clearSharedMemoryAfter?: boolean;
       contextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
@@ -63,7 +63,7 @@ interface DKGAgent {
 }
 
 export interface CoordinatorConfig {
-  paranetId: string;
+  contextGraphId: string;
 }
 
 export interface SwarmMember {
@@ -215,7 +215,7 @@ function compareSwarmMembers(a: SwarmMember, b: SwarmMember): number {
 
 export class OriginTrailGameCoordinator {
   readonly agent: DKGAgent;
-  readonly paranetId: string;
+  readonly contextGraphId: string;
   private readonly topic: string;
   private static readonly GRAPH_SYNC_INITIAL_DELAY_MS = 2_000;
   private static readonly GRAPH_SYNC_INTERVAL_MS = 10_000;
@@ -234,14 +234,14 @@ export class OriginTrailGameCoordinator {
   private readonly swarmTombstones = new Set<string>();
   private readonly swarmMemberTombstones = new Map<string, Map<string, number>>();
   private topologyTimer: ReturnType<typeof setInterval> | null = null;
-  private workspaceOps = new Map<string, Array<{ workspaceOperationId: string; rootEntities: string[] }>>();
+  private swmOps = new Map<string, Array<{ shareOperationId: string; rootEntities: string[] }>>();
   private notifications: GameNotification[] = [];
   private static readonly MAX_NOTIFICATIONS = 200;
 
   constructor(agent: DKGAgent, config: CoordinatorConfig, log?: (msg: string) => void) {
     this.agent = agent;
-    this.paranetId = config.paranetId;
-    this.topic = proto.appTopic(config.paranetId);
+    this.contextGraphId = config.contextGraphId;
+    this.topic = proto.appTopic(config.contextGraphId);
     this.log = log ?? (() => {});
     this.subscribe();
     this.scheduleGraphSync();
@@ -291,7 +291,7 @@ export class OriginTrailGameCoordinator {
     try {
       const result = await this.agent.query(
         `SELECT (1 AS ?exists) WHERE { <${entity}> a <${rdf.OT}Player> } LIMIT 1`,
-        { paranetId: this.paranetId, includeWorkspace: true },
+        { contextGraphId: this.contextGraphId, includeSharedMemory: true },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
       if (bindings.length > 0) {
@@ -301,10 +301,10 @@ export class OriginTrailGameCoordinator {
     } catch {
       // If query fails, try writing anyway
     }
-    const quads = rdf.playerProfileQuads(this.paranetId, this.myPeerId, displayName);
+    const quads = rdf.playerProfileQuads(this.contextGraphId, this.myPeerId, displayName);
     try {
-      await this.agent.writeToWorkspace(this.paranetId, quads);
-      this.log(`Player profile for "${displayName}" written to workspace`);
+      await this.agent.share(this.contextGraphId, quads);
+      this.log(`Player profile for "${displayName}" written to shared memory`);
     } catch (err: any) {
       this.log(`Failed to write player profile: ${err.message}`);
     }
@@ -354,7 +354,7 @@ export class OriginTrailGameCoordinator {
                 <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
         OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
       }`,
-      { paranetId: this.paranetId },
+      { contextGraphId: this.contextGraphId },
     );
 
     const playerCount = playersResult.bindings?.length ?? 0;
@@ -372,7 +372,7 @@ export class OriginTrailGameCoordinator {
         OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}createdAt> ?createdAt }
         OPTIONAL { ?swarm <${rdf.SPARQL_PREFIXES.OT}maxPlayers> ?maxPlayers }
       }`,
-      { paranetId: this.paranetId, includeWorkspace: true },
+      { contextGraphId: this.contextGraphId, includeSharedMemory: true },
     );
 
     const newSwarms = swarmsResult.bindings?.length ?? 0;
@@ -416,7 +416,7 @@ export class OriginTrailGameCoordinator {
                       <${rdf.SPARQL_PREFIXES.OT}swarm> <${swarmUri}> .
           OPTIONAL { ?membership <${rdf.SPARQL_PREFIXES.OT}joinedAt> ?joinedAt }
         } ORDER BY ?joinedAt ?agent ?displayName`,
-        { paranetId: this.paranetId, includeWorkspace: true },
+        { contextGraphId: this.contextGraphId, includeSharedMemory: true },
       );
 
       const existingSwarm = this.swarms.get(swarmId);
@@ -570,7 +570,7 @@ export class OriginTrailGameCoordinator {
                   <${rdf.SPARQL_PREFIXES.DKG}peerId> ?peerId .
           OPTIONAL { ?player <${rdf.SPARQL_PREFIXES.PROV}atTime> ?registeredAt }
         }`,
-        { paranetId: this.paranetId, includeWorkspace: true },
+        { contextGraphId: this.contextGraphId, includeSharedMemory: true },
       );
 
       return (result.bindings ?? []).map((row: any) => ({
@@ -617,11 +617,11 @@ export class OriginTrailGameCoordinator {
     this.swarms.set(swarmId, swarm);
 
     const quads = [
-      ...rdf.swarmCreatedQuads(this.paranetId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
-      ...rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now),
+      ...rdf.swarmCreatedQuads(this.contextGraphId, swarmId, swarmName, this.myPeerId, now, swarm.maxPlayers),
+      ...rdf.playerJoinedQuads(this.contextGraphId, swarmId, this.myPeerId, playerName, now),
     ];
-    const wsResult = await this.agent.writeToWorkspace(this.paranetId, quads);
-    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, quads);
+    const wsResult = await this.agent.share(this.contextGraphId, quads);
+    this.trackSwmOp(swarmId, wsResult.shareOperationId, quads);
 
     const msg: proto.SwarmCreatedMsg = {
       app: proto.APP_ID,
@@ -657,9 +657,9 @@ export class OriginTrailGameCoordinator {
     });
     this.clearMemberTombstone(swarmId, this.myPeerId);
 
-    const joinQuads = rdf.playerJoinedQuads(this.paranetId, swarmId, this.myPeerId, playerName, now);
-    const wsResult = await this.agent.writeToWorkspace(this.paranetId, joinQuads);
-    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, joinQuads);
+    const joinQuads = rdf.playerJoinedQuads(this.contextGraphId, swarmId, this.myPeerId, playerName, now);
+    const wsResult = await this.agent.share(this.contextGraphId, joinQuads);
+    this.trackSwmOp(swarmId, wsResult.shareOperationId, joinQuads);
 
     const msg: proto.SwarmJoinedMsg = {
       app: proto.APP_ID,
@@ -683,7 +683,7 @@ export class OriginTrailGameCoordinator {
     if (swarm.leaderPeerId === this.myPeerId && swarm.status === 'recruiting') {
       this.markSwarmTombstone(swarmId);
       this.swarms.delete(swarmId);
-      this.workspaceOps.delete(swarmId);
+      this.swmOps.delete(swarmId);
       const msg: proto.SwarmLeftMsg = { app: proto.APP_ID, type: 'swarm:left', swarmId, peerId: this.myPeerId, timestamp: Date.now() };
       await this.broadcast(msg);
       return null;
@@ -693,7 +693,7 @@ export class OriginTrailGameCoordinator {
       swarm.status = 'finished';
       swarm.finishedAt = Date.now();
       if (swarm.gameState) swarm.gameState.status = 'lost';
-      this.workspaceOps.delete(swarmId);
+      this.swmOps.delete(swarmId);
       this.log(`Player left during journey — swarm ${swarmId} ended`);
     }
 
@@ -718,14 +718,14 @@ export class OriginTrailGameCoordinator {
     const gameStateJson = JSON.stringify(newGameState);
     const now = Date.now();
 
-    const launchQuads = rdf.expeditionLaunchedQuads(this.paranetId, swarmId, gameStateJson, now);
+    const launchQuads = rdf.expeditionLaunchedQuads(this.contextGraphId, swarmId, gameStateJson, now);
     const swarmUpdateQuads = rdf.swarmSnapshotQuads(
-      this.paranetId, swarmId, swarm.name, swarm.leaderPeerId,
+      this.contextGraphId, swarmId, swarm.name, swarm.leaderPeerId,
       swarm.createdAt, swarm.maxPlayers, 'traveling',
     );
-    if (this.agent.writeConditionalToWorkspace) {
-      await this.agent.writeConditionalToWorkspace(
-        this.paranetId,
+    if (this.agent.shareConditional) {
+      await this.agent.shareConditional(
+        this.contextGraphId,
         [...launchQuads, ...swarmUpdateQuads],
         [{
           subject: rdf.swarmUri(swarmId),
@@ -734,7 +734,7 @@ export class OriginTrailGameCoordinator {
         }],
       );
     } else {
-      await this.agent.writeToWorkspace(this.paranetId, [...launchQuads, ...swarmUpdateQuads]);
+      await this.agent.share(this.contextGraphId, [...launchQuads, ...swarmUpdateQuads]);
     }
 
     // Create on-chain context graph with all participant identity IDs.
@@ -810,9 +810,9 @@ export class OriginTrailGameCoordinator {
     };
     swarm.votes.push(vote);
 
-    const voteQuads = rdf.voteCastQuads(this.paranetId, swarmId, swarm.currentTurn, this.myPeerId, action, params);
-    const wsResult = await this.agent.writeToWorkspace(this.paranetId, voteQuads);
-    this.trackWorkspaceOp(swarmId, wsResult.workspaceOperationId, voteQuads);
+    const voteQuads = rdf.voteCastQuads(this.contextGraphId, swarmId, swarm.currentTurn, this.myPeerId, action, params);
+    const wsResult = await this.agent.share(this.contextGraphId, voteQuads);
+    this.trackSwmOp(swarmId, wsResult.shareOperationId, voteQuads);
 
     const msg: proto.VoteCastMsg = {
       app: proto.APP_ID,
@@ -979,37 +979,37 @@ export class OriginTrailGameCoordinator {
   }
 
   /**
-   * Write quads to workspace and enshrine them to the swarm's context graph.
+   * Write quads to shared memory and publish them to the swarm's context graph.
    * Falls back to plain publish if no context graph is configured.
    *
-   * Quads are normalized to the workspace graph before staging because
-   * the workspace validator enforces graph URI === paranet workspace graph.
+   * Quads are normalized to the shared memory graph before staging because
+   * the validator enforces graph URI === context graph shared memory graph.
    * The on-chain context graph linkage is handled by the contextGraphId
    * parameter passed to publishFromSharedMemory, not the quad's graph URI.
    */
-  private async enshrineToContextGraph(
+  private async publishToContextGraph(
     swarm: SwarmState,
     quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
     label: string,
     contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>,
   ): Promise<DKGPublishReturn | undefined> {
-    const wsGraph = rdf.workspaceGraph(this.paranetId);
+    const wsGraph = rdf.sharedMemoryGraph(this.contextGraphId);
     const normalized = quads.map(q => ({ ...q, graph: wsGraph }));
 
-    await this.agent.writeToWorkspace(this.paranetId, normalized);
+    await this.agent.share(this.contextGraphId, normalized);
     const rootEntities = [...new Set(normalized.map(q => q.subject))];
 
     if (swarm.contextGraphId) {
       const result = await this.agent.publishFromSharedMemory(
-        this.paranetId,
+        this.contextGraphId,
         { rootEntities },
         { contextGraphId: swarm.contextGraphId, contextGraphSignatures },
       );
-      this.log(`${label} enshrined to context graph ${swarm.contextGraphId}`);
+      this.log(`${label} published from shared memory to context graph ${swarm.contextGraphId}`);
       return result;
     }
 
-    const result = await this.agent.publish(this.paranetId, normalized);
+    const result = await this.agent.publish(this.contextGraphId, normalized);
     this.log(`${label} published (no context graph)`);
     return result;
   }
@@ -1019,14 +1019,14 @@ export class OriginTrailGameCoordinator {
     if (!proposal) return;
 
     // Turn progression is always gated by gossip approval count.
-    // Signature collection for context-graph enshrinement is best-effort
+    // Signature collection for context-graph publishing is best-effort
     // at publish time — a signing failure must not deadlock the game.
     const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
     if (proposal.approvals.size < threshold) return;
 
     const isLeader = swarm.leaderPeerId === this.myPeerId;
-    const opsSnapshot = isLeader ? [...(this.workspaceOps.get(swarm.id) ?? [])] : [];
-    if (isLeader) this.workspaceOps.delete(swarm.id);
+    const opsSnapshot = isLeader ? [...(this.swmOps.get(swarm.id) ?? [])] : [];
+    if (isLeader) this.swmOps.delete(swarm.id);
 
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
@@ -1076,7 +1076,7 @@ export class OriginTrailGameCoordinator {
         }
 
         if (turnQuads.length === 0) {
-          this.log(`Turn ${proposal.turn}: no quads to publish after recomputation, skipping enshrinement`);
+          this.log(`Turn ${proposal.turn}: no quads to publish after recomputation, skipping publish`);
         } else {
           const reqSigs = swarm.requiredSignatures ?? 0;
           let useContextGraph = !!swarm.contextGraphId;
@@ -1088,14 +1088,14 @@ export class OriginTrailGameCoordinator {
           const effectiveSwarm = useContextGraph ? swarm : { ...swarm, contextGraphId: undefined };
           let publishResult: DKGPublishReturn | undefined;
           try {
-            publishResult = await this.enshrineToContextGraph(
+            publishResult = await this.publishToContextGraph(
               effectiveSwarm, turnQuads, `Turn ${proposal.turn}`,
               useContextGraph ? collectedSigs : undefined,
             );
           } catch (ctxErr: any) {
             if (useContextGraph) {
-              this.log(`Context-graph enshrinement failed for turn ${proposal.turn}: ${ctxErr.message}. Falling back to plain publish.`);
-              publishResult = await this.enshrineToContextGraph(
+              this.log(`Context-graph publish failed for turn ${proposal.turn}: ${ctxErr.message}. Falling back to plain publish.`);
+              publishResult = await this.publishToContextGraph(
                 { ...swarm, contextGraphId: undefined }, turnQuads,
                 `Turn ${proposal.turn} (fallback)`,
               );
@@ -1167,8 +1167,8 @@ export class OriginTrailGameCoordinator {
     const turnEvent = event ? { type: event.type, description: event.description } : undefined;
 
     const turnNumber = swarm.currentTurn;
-    const opsSnapshot = [...(this.workspaceOps.get(swarm.id) ?? [])];
-    this.workspaceOps.delete(swarm.id);
+    const opsSnapshot = [...(this.swmOps.get(swarm.id) ?? [])];
+    this.swmOps.delete(swarm.id);
 
     swarm.pendingProposal = null;
     this.stopVoteHeartbeat(swarm.id);
@@ -1214,7 +1214,7 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
 
-    // Force-resolve uses plain publish (not context graph enshrinement) because
+    // Force-resolve uses plain publish (not context graph publishing) because
     // multi-party consensus was not achieved — only the leader signed.
     try {
       const attestations: rdf.ConsensusAttestation[] = [{
@@ -1223,17 +1223,17 @@ export class OriginTrailGameCoordinator {
         approved: true,
         timestamp: Date.now(),
       }];
-      const baseGraph = rdf.workspaceGraph(this.paranetId);
+      const baseGraph = rdf.sharedMemoryGraph(this.contextGraphId);
       const turnQuads = [
         ...rdf.turnResolvedQuads(
-          this.paranetId, swarm.id, turnNumber,
+          this.contextGraphId, swarm.id, turnNumber,
           winningAction, newStateJson, [this.myPeerId],
         ),
         ...rdf.consensusAttestationQuads(
-          this.paranetId, swarm.id, turnNumber, attestations, 'force-resolved', hash,
+          this.contextGraphId, swarm.id, turnNumber, attestations, 'force-resolved', hash,
         ),
       ].map(q => ({ ...q, graph: baseGraph }));
-      const publishResult = await this.agent.publish(this.paranetId, turnQuads);
+      const publishResult = await this.agent.publish(this.contextGraphId, turnQuads);
       this.log(`Force-resolve turn ${turnNumber} published (plain, no context graph)`);
 
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
@@ -1286,11 +1286,11 @@ export class OriginTrailGameCoordinator {
     }));
     return [
       ...rdf.turnResolvedQuads(
-        this.paranetId, swarmId, turn,
+        this.contextGraphId, swarmId, turn,
         winningAction, newStateJson, voters,
       ),
       ...rdf.consensusAttestationQuads(
-        this.paranetId, swarmId, turn, attestations, resolution, proposalHash,
+        this.contextGraphId, swarmId, turn, attestations, resolution, proposalHash,
       ),
     ];
   }
@@ -1438,7 +1438,7 @@ export class OriginTrailGameCoordinator {
         message: `"${swarm.name}" was disbanded by ${playerName}`,
       });
       this.swarms.delete(msg.swarmId);
-      this.workspaceOps.delete(msg.swarmId);
+      this.swmOps.delete(msg.swarmId);
       return;
     }
     swarm.players = swarm.players.filter(p => p.peerId !== msg.peerId);
@@ -1679,7 +1679,7 @@ export class OriginTrailGameCoordinator {
       }
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
-      this.workspaceOps.delete(msg.swarmId);
+      this.swmOps.delete(msg.swarmId);
       swarm.gameState = newState;
 
       swarm.turnHistory.push({
@@ -1848,7 +1848,7 @@ export class OriginTrailGameCoordinator {
       const proposal = swarm.pendingProposal;
       swarm.pendingProposal = null;
       this.stopVoteHeartbeat(swarm.id);
-      this.workspaceOps.delete(msg.swarmId);
+      this.swmOps.delete(msg.swarmId);
 
       const newState: GameState = JSON.parse(proposal.newStateJson);
       swarm.gameState = newState;
@@ -1982,19 +1982,19 @@ export class OriginTrailGameCoordinator {
     };
   }
 
-  // ── Workspace lineage ────────────────────────────────────────────
+  // ── Shared memory lineage ────────────────────────────────────────
 
-  private trackWorkspaceOp(swarmId: string, opId: string, quads: Array<{ subject: string }>): void {
-    if (!this.workspaceOps.has(swarmId)) this.workspaceOps.set(swarmId, []);
+  private trackSwmOp(swarmId: string, opId: string, quads: Array<{ subject: string }>): void {
+    if (!this.swmOps.has(swarmId)) this.swmOps.set(swarmId, []);
     const rootEntities = [...new Set(quads.map(q => q.subject))];
-    this.workspaceOps.get(swarmId)!.push({ workspaceOperationId: opId, rootEntities });
+    this.swmOps.get(swarmId)!.push({ shareOperationId: opId, rootEntities });
   }
 
-  async recordWorkspaceLineage(paranetId: string, entries: Array<{ workspaceOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
-    const quads = rdf.workspaceLineageQuads(paranetId, entries);
+  async recordSharedMemoryLineage(contextGraphId: string, entries: Array<{ shareOperationId: string; rootEntity: string; status?: string; publishedUal?: string; publishedTxHash?: string; publishedAt?: number; confirmed?: boolean }>): Promise<void> {
+    const quads = rdf.sharedMemoryLineageQuads(contextGraphId, entries);
     if (quads.length > 0) {
-      await this.agent.writeToWorkspace(paranetId, quads);
-      this.log(`Recorded workspace lineage for ${entries.length} operation(s)`);
+      await this.agent.share(contextGraphId, quads);
+      this.log(`Recorded shared memory lineage for ${entries.length} operation(s)`);
     }
   }
 
@@ -2011,40 +2011,40 @@ export class OriginTrailGameCoordinator {
       publishedAt: Date.now(),
     };
     try {
-      await this.agent.writeToWorkspace(this.paranetId, rdf.publishProvenanceChainQuads(this.paranetId, provenance));
-      this.log(`Provenance chain written to workspace for ${rootEntity}: tx=${provenance.txHash}`);
+      await this.agent.share(this.contextGraphId, rdf.publishProvenanceChainQuads(this.contextGraphId, provenance));
+      this.log(`Provenance chain written to shared memory for ${rootEntity}: tx=${provenance.txHash}`);
     } catch (err: any) {
       this.log(`Failed to publish provenance chain for ${rootEntity}: ${err.message}`);
     }
   }
 
-  private async writeLineageFromSnapshot(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>, publishResult: any): Promise<void> {
+  private async writeLineageFromSnapshot(snapshot: Array<{ shareOperationId: string; rootEntities: string[] }>, publishResult: any): Promise<void> {
     if (snapshot.length === 0) return;
     const now = Date.now();
     const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
-      workspaceOperationId: op.workspaceOperationId,
+      shareOperationId: op.shareOperationId,
       rootEntity,
-      status: publishResult?.ual ? 'published' as const : 'workspace' as const,
+      status: publishResult?.ual ? 'published' as const : 'shared-memory' as const,
       publishedUal: publishResult?.ual as string | undefined,
       publishedTxHash: publishResult?.onChainResult?.txHash as string | undefined,
       publishedAt: publishResult?.ual ? now : undefined,
       confirmed: !!publishResult?.onChainResult?.txHash,
     })));
     try {
-      await this.recordWorkspaceLineage(this.paranetId, entries);
+      await this.recordSharedMemoryLineage(this.contextGraphId, entries);
     } catch (err: any) {
       this.log(`Lineage write failed (dropped ${snapshot.length} ops): ${err.message}`);
     }
   }
 
-  private async writeFailedLineage(snapshot: Array<{ workspaceOperationId: string; rootEntities: string[] }>): Promise<void> {
+  private async writeFailedLineage(snapshot: Array<{ shareOperationId: string; rootEntities: string[] }>): Promise<void> {
     if (snapshot.length === 0) return;
     const entries = snapshot.flatMap(op => op.rootEntities.map(rootEntity => ({
-      workspaceOperationId: op.workspaceOperationId,
+      shareOperationId: op.shareOperationId,
       rootEntity,
       status: 'failed' as const,
     })));
-    await this.recordWorkspaceLineage(this.paranetId, entries);
+    await this.recordSharedMemoryLineage(this.contextGraphId, entries);
     this.log(`Recorded ${entries.length} failed lineage entries`);
   }
 
@@ -2103,11 +2103,11 @@ export class OriginTrailGameCoordinator {
   private async publishStrategyPatterns(swarm: SwarmState): Promise<void> {
     const strategies = this.computePlayerStrategies(swarm);
     const allQuads = strategies.flatMap(s =>
-      rdf.strategyPatternQuads(this.paranetId, swarm.id, s.peerId, s.stats),
+      rdf.strategyPatternQuads(this.contextGraphId, swarm.id, s.peerId, s.stats),
     );
     if (allQuads.length === 0) return;
     try {
-      await this.agent.publish(this.paranetId, allQuads);
+      await this.agent.publish(this.contextGraphId, allQuads);
       this.log(`Published ${strategies.length} strategy patterns for ${swarm.id}`);
     } catch (err: any) {
       this.log(`Failed to publish strategy patterns for ${swarm.id}: ${err.message}`);
@@ -2217,8 +2217,8 @@ export class OriginTrailGameCoordinator {
     }
 
     const peers = [...peerMap.values()];
-    const quads = rdf.networkTopologyQuads(this.paranetId, this.myPeerId, peers);
-    await this.agent.writeToWorkspace(this.paranetId, quads);
+    const quads = rdf.networkTopologyQuads(this.contextGraphId, this.myPeerId, peers);
+    await this.agent.share(this.contextGraphId, quads);
     this.log(`Topology snapshot written: ${peers.length} peers`);
   }
 
@@ -2235,13 +2235,13 @@ export class OriginTrailGameCoordinator {
     const allQuads: any[] = [];
     for (const player of swarm.players) {
       allQuads.push(...rdf.leaderboardEntryQuads(
-        this.paranetId, swarm.id, player.peerId, player.displayName,
+        this.contextGraphId, swarm.id, player.peerId, player.displayName,
         score, outcome, gs.epochs, survivors, gs.party.length, now,
       ));
     }
 
     try {
-      await this.agent.publish(this.paranetId, allQuads);
+      await this.agent.publish(this.contextGraphId, allQuads);
       this.log(`Leaderboard entries published for swarm ${swarm.id} (${outcome}, score=${score})`);
     } catch (err: any) {
       this.log(`Failed to publish leaderboard: ${err.message}`);
@@ -2283,7 +2283,7 @@ export class OriginTrailGameCoordinator {
           BIND(?ft AS ?finishedAt)
           BIND(REPLACE(STR(?swarm), "^.*/swarm/", "") AS ?swarmId)
         } ORDER BY DESC(?score) DESC(?finishedAt)`,
-        { paranetId: this.paranetId, includeWorkspace: false },
+        { contextGraphId: this.contextGraphId, includeSharedMemory: false },
       );
       const bindings = result?.result?.bindings ?? result?.bindings ?? [];
       const entries = bindings.map((b: any) => ({
@@ -2317,9 +2317,9 @@ export class OriginTrailGameCoordinator {
 
   async publishSyncMemoryDkg(swarm: SwarmState, turn: number, tracSpent: number): Promise<void> {
     if (swarm.leaderPeerId !== this.myPeerId) return;
-    const quads = rdf.syncMemoryDkgQuads(this.paranetId, swarm.id, turn, this.myPeerId, tracSpent);
+    const quads = rdf.syncMemoryDkgQuads(this.contextGraphId, swarm.id, turn, this.myPeerId, tracSpent);
     try {
-      await this.agent.publish(this.paranetId, quads);
+      await this.agent.publish(this.contextGraphId, quads);
       this.log(`Sync Memory via DKG published for swarm ${swarm.id}, turn ${turn} (${tracSpent} TRAC spent)`);
     } catch (err: any) {
       this.log(`Failed to publish sync memory DKG: ${err.message}`);
@@ -2407,7 +2407,7 @@ export class OriginTrailGameCoordinator {
     for (const swarmId of this.voteHeartbeatTimers.keys()) {
       this.stopVoteHeartbeat(swarmId);
     }
-    this.workspaceOps.clear();
+    this.swmOps.clear();
     this.agent.gossip.offMessage(this.topic, this.handleMessage);
   }
 }

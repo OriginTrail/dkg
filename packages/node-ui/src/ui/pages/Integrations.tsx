@@ -1,21 +1,21 @@
 import React, { useState } from 'react';
 import { useFetch, shortId } from '../hooks.js';
-import { fetchIntegrations, subscribeToParanet } from '../api.js';
+import { fetchIntegrations, subscribeToContextGraph } from '../api.js';
 
 export function IntegrationsPage() {
   const { data: integrations, loading, refresh } = useFetch(fetchIntegrations, [], 30_000);
   const [subscribing, setSubscribing] = useState<string | null>(null);
-  const [newParanetId, setNewParanetId] = useState('');
+  const [newContextGraphId, setNewContextGraphId] = useState('');
 
   const adapters = integrations?.adapters ?? [];
   const skills = integrations?.skills ?? [];
-  const paranets = integrations?.paranets ?? [];
+  const contextGraphs = integrations?.contextGraphs ?? [];
 
-  const handleSubscribe = async (paranetId: string) => {
-    if (!paranetId.trim()) return;
-    setSubscribing(paranetId);
+  const handleSubscribe = async (contextGraphId: string) => {
+    if (!contextGraphId.trim()) return;
+    setSubscribing(contextGraphId);
     try {
-      await subscribeToParanet(paranetId.trim());
+      await subscribeToContextGraph(contextGraphId.trim());
       refresh();
     } catch {
       // ignore
@@ -59,7 +59,7 @@ export function IntegrationsPage() {
       <div className="card">
         <div className="card-title">Discovered Skills</div>
         <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 }}>
-          Skills offered by agents on the network (from the agents paranet).
+          Skills offered by agents on the network (from the agents context graph).
         </p>
         {skills.length === 0 ? (
           <div className="empty-state empty-state--compact">
@@ -92,44 +92,44 @@ export function IntegrationsPage() {
       </div>
 
       <div className="card">
-        <div className="card-title">Paranet Subscriptions</div>
+        <div className="card-title">Context Graph Subscriptions</div>
         <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 12 }}>
-          Subscribe to additional paranets. Data will sync from peers.
+          Subscribe to additional context graphs. Data will sync from peers.
         </p>
         <div className="filters" style={{ marginBottom: 16 }}>
           <input
             className="input input-mono"
-            placeholder="Paranet ID (e.g. testing)"
-            value={newParanetId}
-            onChange={e => setNewParanetId(e.target.value)}
+            placeholder="Context Graph ID (e.g. testing)"
+            value={newContextGraphId}
+            onChange={e => setNewContextGraphId(e.target.value)}
             style={{ maxWidth: 240 }}
           />
           <button
             className="btn btn-primary"
-            disabled={!newParanetId.trim() || subscribing !== null}
-            onClick={() => handleSubscribe(newParanetId)}
+            disabled={!newContextGraphId.trim() || subscribing !== null}
+            onClick={() => handleSubscribe(newContextGraphId)}
           >
-            {subscribing === newParanetId ? 'Subscribing…' : 'Subscribe'}
+            {subscribing === newContextGraphId ? 'Subscribing…' : 'Subscribe'}
           </button>
         </div>
-        {paranets.length === 0 ? (
+        {contextGraphs.length === 0 ? (
           <div className="empty-state empty-state--compact">
             <div className="empty-state-icon">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
             </div>
-            <div className="empty-state-title">No paranet subscriptions</div>
-            <div className="empty-state-desc">Use the form above to subscribe to a paranet. Data will sync from peers automatically.</div>
+            <div className="empty-state-title">No context graph subscriptions</div>
+            <div className="empty-state-desc">Use the form above to subscribe to a context graph. Data will sync from peers automatically.</div>
           </div>
         ) : (
           <table className="data-table">
             <thead>
               <tr>
-                <th>Paranet</th>
+                <th>Context Graph</th>
                 <th>ID / URI</th>
               </tr>
             </thead>
             <tbody>
-              {paranets.map((p: any, i: number) => (
+              {contextGraphs.map((p: any, i: number) => (
                 <tr key={i}>
                   <td>{typeof p === 'string' ? p : p.name ?? p.id ?? p}</td>
                   <td className="mono" style={{ fontSize: 12 }}>{typeof p === 'object' && p.uri ? p.uri : p}</td>

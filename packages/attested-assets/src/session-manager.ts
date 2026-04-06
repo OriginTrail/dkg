@@ -29,7 +29,7 @@ import { SessionValidator, detectEquivocation } from './session-validator.js';
 import { isQuorumMet, getActiveMemberCount } from './quorum.js';
 import {
   AKAGossipHandler,
-  paranetSessionsTopic,
+  contextGraphSessionsTopic,
   sessionTopic,
 } from './gossip-handler.js';
 import {
@@ -104,14 +104,14 @@ export class SessionManager {
     this.incomingEventHandler = (event, from) => this.handleIncomingEvent(event, from);
   }
 
-  subscribeParanet(paranetId: string): void {
-    const topic = paranetSessionsTopic(paranetId);
-    this.gossipHandler.subscribeParanet(paranetId);
+  subscribeContextGraph(contextGraphId: string): void {
+    const topic = contextGraphSessionsTopic(contextGraphId);
+    this.gossipHandler.subscribeContextGraph(contextGraphId);
     this.gossipHandler.onEvent(topic, this.incomingEventHandler);
   }
 
   async createSession(
-    paranetId: string,
+    contextGraphId: string,
     appId: string,
     membership: SessionMember[],
     quorumPolicy: QuorumPolicy,
@@ -137,14 +137,14 @@ export class SessionManager {
 
     const createdAt = new Date().toISOString();
     const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionId = computeSessionId(paranetId, this.config.localPeerId, createdAt, nonce);
+    const sessionId = computeSessionId(contextGraphId, this.config.localPeerId, createdAt, nonce);
     const membershipRoot = computeMembershipRoot(membership);
     const genesisState = reducer.genesisState(membership);
     const genesisStateHash = computeStateHash(genesisState);
 
     const configWithoutHash: Omit<SessionConfig, 'configHash' | 'status'> = {
       sessionId,
-      paranetId,
+      contextGraphId,
       appId,
       createdBy: this.config.localPeerId,
       createdAt,
@@ -168,13 +168,13 @@ export class SessionManager {
     const sessionState = this.initSessionState(sessionConfig, genesisState);
     this.sessions.set(sessionId, sessionState);
 
-    this.gossipHandler.subscribeSession(paranetId, sessionId);
-    this.gossipHandler.onEvent(sessionTopic(paranetId, sessionId), this.incomingEventHandler);
+    this.gossipHandler.subscribeSession(contextGraphId, sessionId);
+    this.gossipHandler.onEvent(sessionTopic(contextGraphId, sessionId), this.incomingEventHandler);
 
     const payload = encodeSessionConfig(sessionConfig);
     const event = await this.buildEvent('SessionProposed', sessionId, 0, genesisStateHash, payload);
 
-    const topic = paranetSessionsTopic(paranetId);
+    const topic = contextGraphSessionsTopic(contextGraphId);
     await this.gossipHandler.publishEvent(topic, event);
 
     this.eventBus.emit(AKASessionEvent.SESSION_PROPOSED, { sessionId, config: sessionConfig });
@@ -202,7 +202,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
   }
 
@@ -235,7 +235,7 @@ export class SessionManager {
       new Uint8Array(0),
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
 
     this.eventBus.emit(AKASessionEvent.SESSION_ACTIVATED, { sessionId });
@@ -275,7 +275,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
 
     this.eventBus.emit(AKASessionEvent.ROUND_STARTED, { sessionId, round });
@@ -312,7 +312,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
   }
 
@@ -367,10 +367,10 @@ export class SessionManager {
     return this.sessions.get(sessionId);
   }
 
-  listSessions(paranetId?: string, status?: string): SessionConfig[] {
+  listSessions(contextGraphId?: string, status?: string): SessionConfig[] {
     const results: SessionConfig[] = [];
     for (const session of this.sessions.values()) {
-      if (paranetId && session.config.paranetId !== paranetId) continue;
+      if (contextGraphId && session.config.contextGraphId !== contextGraphId) continue;
       if (status && session.config.status !== status) continue;
       results.push(session.config);
     }
@@ -400,7 +400,7 @@ export class SessionManager {
       const sigCtx: SigningContext = {
         domain: 'AKA-v1',
         network: this.config.network,
-        paranetId: config.paranetId,
+        contextGraphId: config.contextGraphId,
         sessionId: config.sessionId,
         round: 0,
         type: 'SessionProposed',
@@ -418,8 +418,8 @@ export class SessionManager {
       const sessionState = this.initSessionState(config, genesisState);
       this.sessions.set(config.sessionId, sessionState);
 
-      this.gossipHandler.subscribeSession(config.paranetId, config.sessionId);
-      this.gossipHandler.onEvent(sessionTopic(config.paranetId, config.sessionId), this.incomingEventHandler);
+      this.gossipHandler.subscribeSession(config.contextGraphId, config.sessionId);
+      this.gossipHandler.onEvent(sessionTopic(config.contextGraphId, config.sessionId), this.incomingEventHandler);
 
       this.eventBus.emit(AKASessionEvent.SESSION_PROPOSED, {
         sessionId: config.sessionId,
@@ -590,7 +590,7 @@ export class SessionManager {
       const sigCtx: SigningContext = {
         domain: 'AKA-v1',
         network: this.config.network,
-        paranetId: session.config.paranetId,
+        contextGraphId: session.config.contextGraphId,
         sessionId: event.sessionId,
         round: event.round,
         type: 'RoundAck',
@@ -645,7 +645,7 @@ export class SessionManager {
 
   private handleSessionFinalized(event: AKAEvent, session: SessionState): void {
     session.config.status = 'finalized';
-    this.gossipHandler.unsubscribeSession(session.config.paranetId, event.sessionId);
+    this.gossipHandler.unsubscribeSession(session.config.contextGraphId, event.sessionId);
     this.eventBus.emit(AKASessionEvent.SESSION_FINALIZED, { sessionId: event.sessionId });
   }
 
@@ -689,7 +689,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
 
     await this.validateAndAck(session, round, proposal);
@@ -743,7 +743,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, session.config.sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, session.config.sessionId);
     await this.gossipHandler.publishEvent(topic, event);
   }
 
@@ -795,7 +795,7 @@ export class SessionManager {
       payload,
     );
 
-    const topic = sessionTopic(session.config.paranetId, session.config.sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, session.config.sessionId);
     await this.gossipHandler.publishEvent(topic, event);
 
     this.clearTimer(`timeout-${session.config.sessionId}-${round}`);
@@ -889,10 +889,10 @@ export class SessionManager {
       new TextEncoder().encode(reason),
     );
 
-    const topic = sessionTopic(session.config.paranetId, sessionId);
+    const topic = sessionTopic(session.config.contextGraphId, sessionId);
     await this.gossipHandler.publishEvent(topic, event);
 
-    this.gossipHandler.unsubscribeSession(session.config.paranetId, sessionId);
+    this.gossipHandler.unsubscribeSession(session.config.contextGraphId, sessionId);
     this.eventBus.emit(AKASessionEvent.SESSION_ABORTED, { sessionId, reason });
   }
 
@@ -947,7 +947,7 @@ export class SessionManager {
     const context: SigningContext = {
       domain: 'AKA-v1',
       network: this.config.network,
-      paranetId: session.config.paranetId,
+      contextGraphId: session.config.contextGraphId,
       sessionId,
       round,
       type,

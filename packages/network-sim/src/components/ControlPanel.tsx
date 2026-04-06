@@ -90,8 +90,8 @@ function useParanets() {
   useEffect(() => {
     const firstOnline = state.nodes.find((n) => n.online);
     if (!firstOnline) return;
-    api.fetchParanets(firstOnline.id).then((r) => {
-      setParanets(r.paranets.map((p) => p.id || p.name));
+    api.fetchContextGraphs(firstOnline.id).then((r) => {
+      setParanets(r.contextGraphs.map((p: { id: string; name: string }) => p.id || p.name));
     }).catch(() => {});
   }, [state.nodes]);
 
@@ -122,7 +122,7 @@ function SetupTab() {
 
     try {
       try {
-        await api.createParanet(firstOnline.id, paranetId, paranetName);
+        await api.createContextGraph(firstOnline.id, paranetId, paranetName);
         lines.push(`Created paranet "${paranetId}" on Node ${firstOnline.id}`);
       } catch (e: any) {
         if (e.message?.includes('exists') || e.message?.includes('already')) {
@@ -138,7 +138,7 @@ function SetupTab() {
           continue;
         }
         try {
-          await api.subscribeParanet(node.id, paranetId);
+          await api.subscribeContextGraph(node.id, paranetId);
           lines.push(`Node ${node.id}: subscribed`);
         } catch (e: any) {
           lines.push(`Node ${node.id}: ${e.message}`);
@@ -160,7 +160,7 @@ function SetupTab() {
     setResult('');
     const opId = addOperation('connect', state.selectedNode, `create paranet "${paranetId}"`);
     try {
-      const res = await api.createParanet(state.selectedNode, paranetId, paranetName);
+      const res = await api.createContextGraph(state.selectedNode, paranetId, paranetName);
       completeOperation(opId, 'success', res.uri);
       setResult(`Created: ${res.uri}`);
     } catch (e: any) {
@@ -181,7 +181,7 @@ function SetupTab() {
         continue;
       }
       try {
-        await api.subscribeParanet(node.id, paranetId);
+        await api.subscribeContextGraph(node.id, paranetId);
         lines.push(`Node ${node.id}: subscribed to "${paranetId}"`);
       } catch (e: any) {
         lines.push(`Node ${node.id}: ${e.message}`);
@@ -539,9 +539,9 @@ function WorkspaceTab() {
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
     const opId = addBroadcast('workspace', state.selectedNode, 'workspace write');
     try {
-      const res = await api.writeToWorkspace(state.selectedNode, paranet, quads);
-      completeOperation(opId, 'success', res.workspaceOperationId);
-      setResult(`Written to workspace.\nOperation: ${res.workspaceOperationId}`);
+      const res = await api.share(state.selectedNode, paranet, quads);
+      completeOperation(opId, 'success', res.shareOperationId);
+      setResult(`Written to shared memory.\nOperation: ${res.shareOperationId}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
       setResult(`Error: ${e.message}`);

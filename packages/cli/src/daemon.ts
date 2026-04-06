@@ -36,6 +36,9 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
+  resolveSharedMemoryTtlMs,
   repoDir,
   releasesDir,
   activeSlot,
@@ -86,13 +89,13 @@ interface CatchupJobResult {
   syncCapablePeers: number;
   peersTried: number;
   dataSynced: number;
-  workspaceSynced: number;
+  sharedMemorySynced: number;
 }
 
 interface CatchupJob {
   jobId: string;
   paranetId: string;
-  includeWorkspace: boolean;
+  includeWorkspace: boolean; // kept for wire compat; semantically "includeSharedMemory"
   status: CatchupJobState;
   queuedAt: number;
   startedAt?: number;
@@ -214,9 +217,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
-  const syncParanets = [...new Set([
-    ...(config.paranets ?? []),
-    ...(network?.defaultParanets ?? []),
+  const syncContextGraphs = [...new Set([
+    ...resolveContextGraphs(config),
+    ...resolveNetworkDefaultContextGraphs(network),
   ])];
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
@@ -256,7 +259,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    syncParanets,
+    syncContextGraphs: syncContextGraphs,
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -267,7 +270,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
     } : undefined,
-    workspaceTtlMs: config.workspaceTtlMs,
+    sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
   });
 
   const networkId = await computeNetworkId();
@@ -318,37 +321,37 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     }
   }
 
-  // Ensure configured paranets + network defaults are subscribed and available.
-  // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
-  // duplicate creator claims and to survive "already exists" gracefully.
-  const paranetsToSubscribe = new Set(syncParanets);
-  for (const p of paranetsToSubscribe) {
+  // Ensure configured context graphs + network defaults are subscribed and available.
+  // Uses ensureParanetLocal (idempotent) to avoid duplicate creator claims
+  // and to survive "already exists" gracefully.
+  const contextGraphsToSubscribe = new Set(syncContextGraphs);
+  for (const p of contextGraphsToSubscribe) {
     try {
-      await agent.ensureParanetLocal({
+      await agent.ensureContextGraphLocal({
         id: p,
         name: p,
-        description: `Default paranet: ${p}`,
+        description: `Default context graph: ${p}`,
       });
-      log(`Ensured paranet: ${p}`);
+      log(`Ensured context graph: ${p}`);
     } catch (err) {
-      log(`Paranet "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
-      agent.subscribeToParanet(p);
+      log(`Context graph "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
+      agent.subscribeToContextGraph(p);
     }
   }
 
-  // Run an initial chain scan for paranets we might not know about,
+  // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   setTimeout(async () => {
     try {
-      const found = await agent.discoverParanetsFromChain();
-      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+      const found = await agent.discoverContextGraphsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch { /* non-critical */ }
   }, 15_000);
   const chainScanTimer = setInterval(async () => {
     try {
-      const found = await agent.discoverParanetsFromChain();
-      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
+      const found = await agent.discoverContextGraphsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch { /* non-critical */ }
   }, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
@@ -462,7 +465,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     getMeshPeerCount: () => {
       try { return (agent.gossip as any).gossipsub?.getMeshPeers?.()?.length ?? 0; } catch { return 0; }
     },
-    getParanetCount: async () => (await agent.listParanets()).length,
+    getContextGraphCount: async () => (await agent.listContextGraphs()).length,
     getTotalTriples: async () => {
       const r = await agent.query('SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
@@ -605,26 +608,26 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
     const ctx = createOperationContext('publish');
-    tracker.start(ctx, { paranetId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
+    tracker.start(ctx, { contextGraphId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
     try {
       dashDb.insertNotification({
         ts: Date.now(),
         type: 'kc_published',
         title: 'Knowledge published',
-        message: `Knowledge collection published${data.paranetId ? ` on paranet ${shortId(data.paranetId)}` : ''}`,
+        message: `Knowledge collection published${data.paranetId ? ` on context graph ${shortId(data.paranetId)}` : ''}`,
         source: 'dkg',
-        meta: JSON.stringify({ kcId: data.kcId, paranetId: data.paranetId }),
+        meta: JSON.stringify({ kcId: data.kcId, contextGraphId: data.paranetId }),
       });
     } catch { /* never crash */ }
   });
 
   const agentToolsContext = {
-    query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
-    writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.writeToWorkspace(paranetId, quads, opts),
-    publishFromSharedMemory: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.publishFromSharedMemory(paranetId, selection, opts),
-    createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createParanet(opts),
-    listParanets: () => agent.listParanets(),
+    query: (sparql: string, opts?: { contextGraphId?: string; graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean }) => agent.query(sparql, opts),
+    share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.share(contextGraphId, quads, opts),
+    publishFromSharedMemory: (contextGraphId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearSharedMemoryAfter?: boolean }) => agent.publishFromSharedMemory(contextGraphId, selection, opts),
+    createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createContextGraph(opts),
+    listContextGraphs: () => agent.listContextGraphs(),
   };
   const chatAssistant = new ChatAssistant(
     dashDb,
@@ -747,12 +750,12 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       // Auth guard — rejects with 401 if token is invalid/missing
       if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
 
-      // Workspace TTL settings
-      if (req.method === 'GET' && reqUrl.pathname === '/api/settings/workspace-ttl') {
-        const ttlMs = config.workspaceTtlMs ?? 30 * 24 * 60 * 60 * 1000;
+      // Shared memory (workspace) TTL settings — V10 and legacy routes
+      if (req.method === 'GET' && (reqUrl.pathname === '/api/settings/shared-memory-ttl' || reqUrl.pathname === '/api/settings/workspace-ttl')) {
+        const ttlMs = resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
         return jsonResponse(res, 200, { ttlMs, ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)) });
       }
-      if (req.method === 'PUT' && reqUrl.pathname === '/api/settings/workspace-ttl') {
+      if (req.method === 'PUT' && (reqUrl.pathname === '/api/settings/shared-memory-ttl' || reqUrl.pathname === '/api/settings/workspace-ttl')) {
         try {
           const bodyStr = await readBody(req, SMALL_BODY_BYTES);
           const { ttlDays } = JSON.parse(bodyStr ?? '{}') as { ttlDays?: number };
@@ -760,13 +763,14 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
             return jsonResponse(res, 400, { error: 'ttlDays must be a finite non-negative number' });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
+          config.sharedMemoryTtlMs = ttlMs;
           config.workspaceTtlMs = ttlMs;
-          agent.setWorkspaceTtlMs(ttlMs);
+          agent.setSharedMemoryTtlMs(ttlMs);
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;
-          return jsonResponse(res, 500, { error: err.message ?? 'Failed to update workspace TTL' });
+          return jsonResponse(res, 500, { error: err.message ?? 'Failed to update shared memory TTL' });
         }
       }
 
@@ -1167,7 +1171,7 @@ async function handleRequest(
         hubAddress: chainConf.hubAddress,
       } : null,
       peers: uniquePeers.size,
-      paranets: config.paranets?.length ?? 0,
+      paranets: resolveContextGraphs(config).length,
       telemetry: config.telemetry?.enabled ?? false,
       autoUpdate: resolveAutoUpdateEnabled(config),
       auth: config.auth?.enabled !== false,
@@ -1710,7 +1714,7 @@ async function handleRequest(
 
     const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
     const ctx = createOperationContext('publish');
-    tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       const result = await agent.publish(paranetId, quads, privateQuads, {
         accessPolicy,
@@ -1753,19 +1757,21 @@ async function handleRequest(
     }
   }
 
-  // POST /api/update  { kcId: "...", paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/update') {
     const body = await readBody(req);
-    const { kcId, paranetId, quads, privateQuads } = JSON.parse(body);
+    const parsed = JSON.parse(body);
+    const { kcId, quads, privateQuads } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!kcId || !paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "kcId", "paranetId", or "quads"' });
+      return jsonResponse(res, 400, { error: 'Missing "kcId", "contextGraphId" (or "paranetId"), or "quads"' });
     }
     let kcIdBigInt: bigint;
     try { kcIdBigInt = BigInt(kcId); } catch {
       return jsonResponse(res, 400, { error: `Invalid "kcId": ${String(kcId).slice(0, 50)}` });
     }
     const ctx = createOperationContext('update');
-    tracker.start(ctx, { paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
     try {
       const result = await agent.update(kcIdBigInt, paranetId, quads, privateQuads, {
         operationCtx: ctx,
@@ -1796,44 +1802,50 @@ async function handleRequest(
     }
   }
 
-  // POST /api/workspace/write  { paranetId: "...", quads: [...] }
-  if (req.method === 'POST' && path === '/api/workspace/write') {
+  // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
+  if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
     const body = await readBody(req);
-    const { paranetId, quads } = JSON.parse(body);
+    const parsed = JSON.parse(body);
+    const { quads } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "quads"' });
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
     }
-    const ctx = createOperationContext('workspace');
-    tracker.start(ctx, { paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    const ctx = createOperationContext('share');
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       await tracker.trackPhase(ctx, 'validate', async () => {
-        // validation happens inside writeToWorkspace
+        // validation happens inside share
       });
-      const result = await tracker.trackPhase(ctx, 'store', () =>
-        agent.writeToWorkspace(paranetId, quads, { operationCtx: ctx }),
+      await tracker.trackPhase(ctx, 'store', () =>
+        agent.share(paranetId, quads, { operationCtx: ctx }),
       );
-      tracker.complete(ctx, { tripleCount: quads.length, details: { workspaceOperationId: result.workspaceOperationId } });
+      tracker.complete(ctx, { tripleCount: quads.length });
       const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ...result, phases: opDetail.phases });
+      return jsonResponse(res, 200, { ok: true, phases: opDetail.phases });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
     }
   }
 
-  // POST /api/workspace/enshrine  { paranetId, selection?, clearAfter?, contextGraphId? }
-  if (req.method === 'POST' && path === '/api/workspace/enshrine') {
+  // POST /api/shared-memory/publish (V10) or /api/workspace/enshrine (legacy)
+  if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { paranetId, selection, clearAfter, contextGraphId } = JSON.parse(body);
-    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const parsed = JSON.parse(body);
+    const { selection, clearAfter, contextGraphId: bodyCgId } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { paranetId, details: { source: 'api', contextGraphId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', contextGraphId: bodyCgId } });
     try {
+      const sel: 'all' | { rootEntities: string[] } =
+        Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
       const result = await tracker.trackPhase(ctx, 'read-workspace', () =>
-        agent.publishFromSharedMemory(paranetId, selection || 'all', {
-          clearWorkspaceAfter: clearAfter ?? true,
+        agent.publishFromSharedMemory(paranetId, sel, {
+          clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
-          ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),
+          ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
         }),
       );
       const chain = result.onChainResult;
@@ -1849,7 +1861,7 @@ async function handleRequest(
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-        ...(contextGraphId != null ? { contextGraphId: String(contextGraphId) } : {}),
+        ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
         ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
       });
     } catch (err) {
@@ -1858,68 +1870,80 @@ async function handleRequest(
     }
   }
 
-  // POST /api/context-graph/create  { participantIdentityIds: number[], requiredSignatures: number }
+  // POST /api/context-graph/create — on-chain context graph creation (V10)
+  // When the body has `participantIdentityIds`, this is the on-chain multisig creation.
+  // Otherwise, fall through to the paranet-style create handler below.
   if (req.method === 'POST' && path === '/api/context-graph/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { participantIdentityIds, requiredSignatures } = JSON.parse(body);
-    if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
-      return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
-    }
-    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
-      return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
-    }
-    if (requiredSignatures > participantIdentityIds.length) {
-      return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
-    }
-    for (let i = 0; i < participantIdentityIds.length; i++) {
-      const id = participantIdentityIds[i];
-      if (typeof id === 'number') {
-        if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
-          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
-        }
-      } else if (typeof id === 'string') {
-        if (!/^\d+$/.test(id) || id === '0') {
-          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
-        }
-      } else {
-        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
+    const parsed = JSON.parse(body);
+    if (Array.isArray(parsed.participantIdentityIds)) {
+      const { participantIdentityIds, requiredSignatures } = parsed;
+      if (typeof requiredSignatures !== 'number') {
+        return jsonResponse(res, 400, { error: 'Missing requiredSignatures (number)' });
       }
-    }
-    try {
-      const sortedUniqueIds = [...new Set(participantIdentityIds.map((id: number | string) => BigInt(id)))]
-        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-      if (requiredSignatures > sortedUniqueIds.length) {
-        return jsonResponse(res, 400, {
-          error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
+      if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
+        return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
+      }
+      if (requiredSignatures > participantIdentityIds.length) {
+        return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
+      }
+      for (let i = 0; i < participantIdentityIds.length; i++) {
+        const id = participantIdentityIds[i];
+        if (typeof id === 'number') {
+          if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
+            return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
+          }
+        } else if (typeof id === 'string') {
+          if (!/^\d+$/.test(id) || id === '0') {
+            return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
+          }
+        } else {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
+        }
+      }
+      try {
+        const mappedIds = participantIdentityIds.map((id: number | string) => BigInt(id));
+        const uniqueIds: bigint[] = Array.from(new Set(mappedIds));
+        const sortedUniqueIds = uniqueIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        if (requiredSignatures > sortedUniqueIds.length) {
+          return jsonResponse(res, 400, {
+            error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
+          });
+        }
+        const result = await agent.registerContextGraphOnChain({
+          participantIdentityIds: sortedUniqueIds,
+          requiredSignatures,
         });
+        return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
+      } catch (err: any) {
+        return jsonResponse(res, 500, { error: err.message });
       }
-      const result = await agent.createContextGraph({
-        participantIdentityIds: sortedUniqueIds,
-        requiredSignatures,
-      });
-      if (!result.success) {
-        return jsonResponse(res, 502, { error: 'Context graph creation transaction failed on-chain', success: false });
-      }
-      return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
-    } catch (err: any) {
-      return jsonResponse(res, 500, { error: err.message });
     }
+    // Body has `id` + `name` → paranet-style context graph definition create (handled below)
+    const { id, name, description } = parsed;
+    if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+    await agent.createContextGraph({ id, name, description });
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
-  // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_workspace", includeWorkspace?: bool }
+  // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_shared_memory", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
     const serverT0 = Date.now();
     const body = await readBody(req);
-    const { sparql, paranetId, graphSuffix, includeWorkspace } = JSON.parse(body);
+    const parsed = JSON.parse(body);
+    const sparql = parsed.sparql;
+    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
+    const graphSuffix = parsed.graphSuffix;
+    const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
     if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     const ctx = createOperationContext('query');
-    tracker.start(ctx, { paranetId, details: { sparql: sparql.slice(0, 200) } });
+    tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');
     try {
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { paranetId, graphSuffix, includeWorkspace, operationCtx: ctx });
+      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
@@ -1937,7 +1961,7 @@ async function handleRequest(
     if (!rawPeerId) return jsonResponse(res, 400, { error: 'Missing "peerId"' });
     if (!lookupType) return jsonResponse(res, 400, { error: 'Missing "lookupType"' });
     const ctx = createOperationContext('query');
-    tracker.start(ctx, { paranetId, details: { lookupType, remotePeer: rawPeerId, source: 'api-remote' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { lookupType, remotePeer: rawPeerId, source: 'api-remote' } });
     try {
       const peerId = await tracker.trackPhase(ctx, 'resolve', () => resolveNameToPeerId(agent, rawPeerId));
       if (!peerId) {
@@ -1955,13 +1979,15 @@ async function handleRequest(
     }
   }
 
-  // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
-  if (req.method === 'POST' && path === '/api/subscribe') {
+  // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
+  if (req.method === 'POST' && (path === '/api/context-graph/subscribe' || path === '/api/subscribe')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { paranetId, includeWorkspace } = JSON.parse(body);
-    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
-    const shouldSyncWorkspace = includeWorkspace !== false;
-    agent.subscribeToParanet(paranetId);
+    const parsed = JSON.parse(body);
+    const { includeWorkspace, includeSharedMemory } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or legacy "paranetId")' });
+    const shouldSyncWorkspace = (includeSharedMemory ?? includeWorkspace) !== false;
+    agent.subscribeToContextGraph(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
@@ -1995,8 +2021,8 @@ async function handleRequest(
       job.status = 'running';
       job.startedAt = Date.now();
       try {
-        const result = await agent.syncParanetFromConnectedPeers(paranetId, {
-          includeWorkspace: shouldSyncWorkspace,
+        const result = await agent.syncContextGraphFromConnectedPeers(paranetId, {
+          includeSharedMemory: shouldSyncWorkspace,
         });
         job.result = result;
         job.status = 'done';
@@ -2038,24 +2064,28 @@ async function handleRequest(
     return jsonResponse(res, 200, job);
   }
 
-  // POST /api/paranet/create  { id, name, description? }
+  // POST /api/paranet/create (legacy) — create a context graph definition
+  // V10 route /api/context-graph/create is handled above (combined with on-chain context graph create).
   if (req.method === 'POST' && path === '/api/paranet/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createParanet({ id, name, description });
+    await agent.createContextGraph({ id, name, description });
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
-  // GET /api/paranet/list
-  if (req.method === 'GET' && path === '/api/paranet/list') {
-    const paranets = await agent.listParanets();
-    return jsonResponse(res, 200, { paranets });
+  // GET /api/context-graph/list (V10) or /api/paranet/list (legacy)
+  if (req.method === 'GET' && (path === '/api/context-graph/list' || path === '/api/paranet/list')) {
+    const contextGraphs = await agent.listContextGraphs();
+    return jsonResponse(res, 200, {
+      contextGraphs,
+      paranets: contextGraphs, // backward compat
+    });
   }
 
-  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, paranets)
+  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, context graphs)
   if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listParanets()]);
+    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
     const adapters = [
       { id: 'elizaos', name: 'ElizaOS', enabled: true, description: 'Connect to ElizaOS agents' },
       { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
@@ -2079,11 +2109,11 @@ async function handleRequest(
     return jsonResponse(res, 200, { ok: true });
   }
 
-  // GET /api/paranet/exists?id=<paranetId>
-  if (req.method === 'GET' && path === '/api/paranet/exists') {
+  // GET /api/context-graph/exists (V10) or /api/paranet/exists (legacy)
+  if (req.method === 'GET' && (path === '/api/context-graph/exists' || path === '/api/paranet/exists')) {
     const id = url.searchParams.get('id');
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id" query param' });
-    const exists = await agent.paranetExists(id);
+    const exists = await agent.contextGraphExists(id);
     return jsonResponse(res, 200, { id, exists });
   }
 
@@ -2186,16 +2216,17 @@ async function handleRequest(
 
   // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
   if (req.method === 'GET' && path === '/api/epcis/events') {
-    if (!config.epcis?.paranetId) {
-      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    const epcisContextGraphId = config.epcis?.contextGraphId ?? config.epcis?.paranetId;
+    if (!epcisContextGraphId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.contextGraphId in config)' });
     }
     const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
     const epcisQueryEngine = {
-      query: (sparql: string, opts?: { paranetId?: string }) => agent.query(sparql, opts),
+      query: (sparql: string, opts?: { contextGraphId?: string }) => agent.query(sparql, opts),
     };
     try {
       const result = await handleEventsQuery(searchParams, {
-        paranetId: config.epcis.paranetId,
+        contextGraphId: epcisContextGraphId,
         queryEngine: epcisQueryEngine,
         basePath: '/api/epcis/events',
       });
@@ -2213,8 +2244,9 @@ async function handleRequest(
 
   // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
   if (req.method === 'POST' && path === '/api/epcis/capture') {
-    if (!config.epcis?.paranetId) {
-      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
+    const captureContextGraphId = config.epcis?.contextGraphId ?? config.epcis?.paranetId;
+    if (!captureContextGraphId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.contextGraphId in config)' });
     }
     const body = await readBody(req);
     let parsed;
@@ -2228,11 +2260,9 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'Missing "epcisDocument" in request body' });
     }
     const epcisPublisher: EpcisPublisher = {
-      async publish(paranetId, content, opts) {
-        // Using { public: content } because bare JSON-LD (private) publishing
-        // silently drops triples — see GitHub issue #221.
+      async publish(contextGraphId, content, opts) {
         const result = await agent.publish(
-          paranetId,
+          contextGraphId,
           { public: content } as Record<string, unknown>,
           opts,
         );
@@ -2242,7 +2272,7 @@ async function handleRequest(
     try {
       const result = await handleCapture(
         { epcisDocument, publishOptions },
-        { paranetId: config.epcis.paranetId, publisher: epcisPublisher },
+        { contextGraphId: captureContextGraphId, publisher: epcisPublisher },
       );
       // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
       // Current sync model returns 200 with the full result. Switch to 202 + captureID +
@@ -2300,10 +2330,11 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
 
   if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
-    return { ok: false, error: 'Missing or invalid "paranetId"' };
+    return { ok: false, error: 'Missing or invalid "contextGraphId" (or legacy "paranetId")' };
   }
 
   if (!Array.isArray(quads) || quads.length === 0 || !quads.every(isPublishQuad)) {

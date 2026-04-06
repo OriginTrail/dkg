@@ -32,7 +32,7 @@ export type ChatStreamEvent =
 /** OpenAI-compatible LLM config for natural language answers and NL→SPARQL. */
 type QueryFn = (sparql: string) => Promise<{ bindings: Array<Record<string, string>> }>;
 
-const HELP_REPLY = `I'm your node assistant. You can ask me about this node (uptime, peers, triples, operations, logs) or just chat. When you ask me to save or add information to the DKG, I can write it to the knowledge graph (workspace) and optionally finalize it on-chain. Our conversation is stored privately in your DKG.`;
+const HELP_REPLY = `I'm your node assistant. You can ask me about this node (uptime, peers, triples, operations, logs) or just chat. When you ask me to save or add information to the DKG, I can write it to the knowledge graph (shared memory) and optionally publish it on-chain. Our conversation is stored privately in your DKG.`;
 
 /** OpenAI function tool definition for LLM tool calling */
 interface ToolParam {
@@ -55,7 +55,7 @@ const DKG_TOOLS: OpenAITool[] = [
         type: 'object',
         properties: {
           sparql: { type: 'string', description: 'The SPARQL query' },
-          paranetId: { type: 'string', description: 'Optional paranet id; omit for "all"' },
+          contextGraphId: { type: 'string', description: 'Optional context graph id; omit for "all"' },
         },
         required: ['sparql'],
       },
@@ -65,11 +65,11 @@ const DKG_TOOLS: OpenAITool[] = [
     type: 'function',
     function: {
       name: 'dkg_write_to_shared_memory',
-      description: 'Add RDF triples to a paranet\'s workspace. Use when the user asks to save, add, or remember something. Use paranetId "agent-memory" for personal notes. For literal values use plain strings (e.g. "Tesla"). For URIs use full URIs (e.g. "http://example.org/Tesla").',
+      description: 'Add RDF triples to a context graph\'s shared memory. Use when the user asks to save, add, or remember something. Use contextGraphId "agent-memory" for personal notes. For literal values use plain strings (e.g. "Tesla"). For URIs use full URIs (e.g. "http://example.org/Tesla").',
       parameters: {
         type: 'object',
         properties: {
-          paranetId: { type: 'string', description: 'Paranet id (e.g. agent-memory)' },
+          contextGraphId: { type: 'string', description: 'Context graph id (e.g. agent-memory)' },
           quads: {
             type: 'array',
             description: 'Array of RDF triples to write',
@@ -85,27 +85,27 @@ const DKG_TOOLS: OpenAITool[] = [
             },
           },
         },
-        required: ['paranetId', 'quads'],
+        required: ['contextGraphId', 'quads'],
       },
     },
   },
   {
     type: 'function',
     function: {
-      name: 'dkg_list_paranets',
-      description: 'List paranets this node knows about.',
+      name: 'dkg_list_context_graphs',
+      description: 'List context graphs this node knows about.',
       parameters: { type: 'object', properties: {} },
     },
   },
   {
     type: 'function',
     function: {
-      name: 'dkg_create_paranet',
-      description: 'Create a new paranet (knowledge graph namespace). Use when the user wants to create a new graph/paranet.',
+      name: 'dkg_create_context_graph',
+      description: 'Create a new context graph (knowledge graph namespace). Use when the user wants to create a new context graph.',
       parameters: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'Paranet id (e.g. my-data)' },
+          id: { type: 'string', description: 'Context graph id (e.g. my-data)' },
           name: { type: 'string', description: 'Human-readable name' },
           description: { type: 'string', description: 'Optional description' },
         },
@@ -116,15 +116,15 @@ const DKG_TOOLS: OpenAITool[] = [
   {
     type: 'function',
     function: {
-      name: 'dkg_enshrine',
-      description: 'Promote workspace content to the chain (finalize). Use when the user asks to finalize, publish to chain, or make data permanent.',
+      name: 'dkg_publish_from_swm',
+      description: 'Publish shared memory content to the chain. Use when the user asks to finalize, publish to chain, or make data permanent.',
       parameters: {
         type: 'object',
         properties: {
-          paranetId: { type: 'string' },
+          contextGraphId: { type: 'string' },
           selection: { type: 'string', description: '"all" or comma-separated root entity URIs' },
         },
-        required: ['paranetId', 'selection'],
+        required: ['contextGraphId', 'selection'],
       },
     },
   },
@@ -132,7 +132,7 @@ const DKG_TOOLS: OpenAITool[] = [
 
 /**
  * Chat assistant: rule-based answers plus optional LLM for natural language,
- * NL→SPARQL, and DKG API tools (query, write to workspace, list/create paranets, enshrine).
+ * NL→SPARQL, and DKG API tools (query, write to shared memory, list/create context graphs, publish from shared memory).
  */
 export class ChatAssistant {
   private llmConfig?: LlmConfig;
@@ -172,9 +172,9 @@ Otherwise, just answer in plain language. Keep any queries read-only (SELECT, CO
     if (this.agentTools) {
       p += `
 
-You have DKG tools: dkg_query (read graph), dkg_write_to_shared_memory (add/save triples), dkg_list_paranets, dkg_create_paranet, dkg_enshrine (finalize workspace to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_shared_memory with paranetId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
+You have DKG tools: dkg_query (read graph), dkg_write_to_shared_memory (add/save triples), dkg_list_context_graphs, dkg_create_context_graph, dkg_publish_from_swm (publish shared memory to chain). When the user asks to save, add, or remember something in the DKG, use dkg_write_to_shared_memory with contextGraphId "agent-memory" for personal knowledge. Use proper RDF URIs (e.g. http://schema.org/name for "name"). For literals use quoted strings like "value".
 
-The user may have imported memories from other AI assistants (Claude, ChatGPT, Gemini). These are stored in the "agent-memory" paranet. To query them, ALWAYS use dkg_query with paranetId "agent-memory". The data model:
+The user may have imported memories from other AI assistants (Claude, ChatGPT, Gemini). These are stored in the "agent-memory" context graph. To query them, ALWAYS use dkg_query with contextGraphId "agent-memory". The data model:
 - Import batches: type <http://dkg.io/ontology/MemoryImport>, with predicates <http://dkg.io/ontology/importSource> (e.g. "claude"), <http://schema.org/dateCreated>, <http://dkg.io/ontology/itemCount>
 - Individual memories: type <http://dkg.io/ontology/ImportedMemory>, with predicates <http://schema.org/text> (the memory content), <http://dkg.io/ontology/category> (preference/fact/context/instruction/relationship), <http://dkg.io/ontology/importBatch> (links to batch), <http://dkg.io/ontology/importSource>
 - Extracted entities: URIs starting with urn:dkg:entity:, typed with schema.org types
@@ -184,7 +184,7 @@ Example queries:
 - List import batches: SELECT ?batch ?source ?date ?count WHERE { ?batch a <http://dkg.io/ontology/MemoryImport> ; <http://dkg.io/ontology/importSource> ?source ; <http://schema.org/dateCreated> ?date ; <http://dkg.io/ontology/itemCount> ?count } ORDER BY DESC(?date) LIMIT 10
 - Search memories by text: SELECT ?text WHERE { ?m a <http://dkg.io/ontology/ImportedMemory> ; <http://schema.org/text> ?text FILTER(CONTAINS(LCASE(?text), "dark mode")) } LIMIT 20
 
-When the user asks about their memories, imported memories, preferences, or what you know about them, use dkg_query to look up their imported memories from the agent-memory paranet. Do NOT say you can't access memories — always try the query first.`;
+When the user asks about their memories, imported memories, preferences, or what you know about them, use dkg_query to look up their imported memories from the agent-memory context graph. Do NOT say you can't access memories — always try the query first.`;
     }
     return p;
   }
@@ -195,13 +195,13 @@ When the user asks about their memories, imported memories, preferences, or what
       switch (name) {
         case 'dkg_query': {
           const sparql = String(args.sparql ?? '');
-          const paranetId = args.paranetId != null ? String(args.paranetId) : undefined;
-          const res = await this.agentTools.query(sparql, { paranetId, includeWorkspace: paranetId === 'agent-memory' });
+          const contextGraphId = args.contextGraphId != null ? String(args.contextGraphId) : undefined;
+          const res = await this.agentTools.query(sparql, { contextGraphId, includeSharedMemory: contextGraphId === 'agent-memory' });
           const bindings = res?.result?.bindings ?? res?.bindings ?? [];
           return { result: bindings, summary: `Query returned ${bindings.length} result(s).` };
         }
         case 'dkg_write_to_shared_memory': {
-          const paranetId = String(args.paranetId ?? '');
+          const contextGraphId = String(args.contextGraphId ?? '');
           let raw: unknown = args.quads;
           if (typeof raw === 'string') {
             raw = parseQuadsJson(raw);
@@ -215,28 +215,28 @@ When the user asks about their memories, imported memories, preferences, or what
           if (quads.length === 0) {
             return { result: { error: 'No valid quads to write' }, summary: 'No valid quads could be parsed from the input.' };
           }
-          const { workspaceOperationId } = await this.agentTools.writeToWorkspace(paranetId, quads);
-          return { result: { workspaceOperationId, tripleCount: quads.length }, summary: `Successfully wrote ${quads.length} triple(s) to workspace (paranet: ${paranetId}).` };
+          const { shareOperationId } = await this.agentTools.share(contextGraphId, quads);
+          return { result: { shareOperationId, tripleCount: quads.length }, summary: `Successfully wrote ${quads.length} triple(s) to shared memory (context graph: ${contextGraphId}).` };
         }
-        case 'dkg_list_paranets': {
-          const list = await this.agentTools.listParanets();
+        case 'dkg_list_context_graphs': {
+          const list = await this.agentTools.listContextGraphs();
           const arr = Array.isArray(list) ? list : [];
-          return { result: arr, summary: `Found ${arr.length} paranet(s).` };
+          return { result: arr, summary: `Found ${arr.length} context graph(s).` };
         }
-        case 'dkg_create_paranet': {
-          await this.agentTools.createParanet({
+        case 'dkg_create_context_graph': {
+          await this.agentTools.createContextGraph({
             id: String(args.id ?? ''),
             name: String(args.name ?? ''),
             description: args.description != null ? String(args.description) : undefined,
           });
-          return { result: { id: args.id, name: args.name }, summary: `Created paranet "${args.name}" (${args.id}).` };
+          return { result: { id: args.id, name: args.name }, summary: `Created context graph "${args.name}" (${args.id}).` };
         }
-        case 'dkg_enshrine': {
-          const paranetId = String(args.paranetId ?? '');
+        case 'dkg_publish_from_swm': {
+          const contextGraphId = String(args.contextGraphId ?? '');
           const sel = String(args.selection ?? 'all');
           const selection = sel === 'all' ? 'all' as const : { rootEntities: sel.split(',').map(s => s.trim()).filter(Boolean) };
-          const res = await this.agentTools.publishFromSharedMemory(paranetId, selection);
-          return { result: res, summary: `Enshrined workspace content for paranet ${paranetId}.` };
+          const res = await this.agentTools.publishFromSharedMemory(contextGraphId, selection);
+          return { result: res, summary: `Published from shared memory for context graph ${contextGraphId}.` };
         }
         default:
           return { result: null, summary: `Unknown tool: ${name}` };
@@ -315,7 +315,7 @@ When the user asks about their memories, imported memories, preferences, or what
   }
 
   private looksLikeAction(q: string): boolean {
-    return /\b(create|add|save|store|write|publish|remember|enshrine|finalize|make|build|generate|insert|update|delete|remove)\b/.test(q);
+    return /\b(create|add|save|store|write|publish|remember|finalize|make|build|generate|insert|update|delete|remove)\b/.test(q);
   }
 
   private shouldUseRulePath(q: string): boolean {
@@ -326,9 +326,9 @@ When the user asks about their memories, imported memories, preferences, or what
       matches(q, ['cpu', 'memory', 'ram', 'resource', 'hardware', 'system health']) ||
       matches(q, ['failed', 'errors', 'error rate', 'failures']) ||
       matches(q, ['operations', 'how many operations', 'operation count', 'what did', 'processed']) ||
-      matches(q, ['paranet', 'which paranet', 'subscribed']) ||
+      matches(q, ['context graph', 'which context graph', 'subscribed']) ||
       matches(q, ['agent', 'who is', 'which agents', 'discovered agents', 'nodes on']) ||
-      (q.includes('kc') && (q.includes('testing') || q.includes('paranet'))) ||
+      (q.includes('kc') && (q.includes('testing') || q.includes('context graph'))) ||
       matches(q, ['store', 'disk', 'storage', 'how big']) ||
       matches(q, ['recent log', 'last log', 'show log', 'latest log']) ||
       q.startsWith('select') ||
@@ -547,16 +547,16 @@ When the user asks about their memories, imported memories, preferences, or what
       };
     }
 
-    // --- Paranets ---
-    if (matches(q, ['paranet', 'which paranet', 'subscribed'])) {
-      const sparql = `SELECT DISTINCT ?id ?name WHERE { ?p <https://schema.org/name> ?name . ?p <urn:dkg:paranetId> ?id }`;
+    // --- Context Graphs ---
+    if (matches(q, ['context graph', 'which context graph', 'subscribed'])) {
+      const sparql = `SELECT DISTINCT ?id ?name WHERE { ?p <https://schema.org/name> ?name . ?p <urn:dkg:contextGraphId> ?id }`;
       try {
         const result = await this.queryFn(sparql);
-        if (result.bindings.length === 0) return { reply: 'No paranets found in the store.', sparql };
+        if (result.bindings.length === 0) return { reply: 'No context graphs found in the store.', sparql };
         const list = result.bindings.map(b => `- **${b.name}** (\`${b.id}\`)`).join('\n');
-        return { reply: `Known paranets:\n\n${list}`, data: result.bindings, sparql };
+        return { reply: `Known context graphs:\n\n${list}`, data: result.bindings, sparql };
       } catch {
-        return { reply: 'Could not query paranets from the triple store.' };
+        return { reply: 'Could not query context graphs from the triple store.' };
       }
     }
 
@@ -573,20 +573,20 @@ When the user asks about their memories, imported memories, preferences, or what
       }
     }
 
-    // --- KCs in a paranet ---
-    if (q.includes('kc') && (q.includes('testing') || q.includes('paranet'))) {
-      const paranet = q.includes('testing') ? 'testing' : 'agents';
-      const sparql = `SELECT ?kc ?status WHERE { GRAPH <urn:dkg:paranet:${paranet}:meta> { ?kc a <urn:dkg:KC> . OPTIONAL { ?kc <urn:dkg:status> ?status } } } LIMIT 20`;
+    // --- KCs in a context graph ---
+    if (q.includes('kc') && (q.includes('testing') || q.includes('context graph'))) {
+      const contextGraph = q.includes('testing') ? 'testing' : 'agents';
+      const sparql = `SELECT ?kc ?status WHERE { GRAPH <urn:dkg:contextGraph:${contextGraph}:meta> { ?kc a <urn:dkg:KC> . OPTIONAL { ?kc <urn:dkg:status> ?status } } } LIMIT 20`;
       try {
         const result = await this.queryFn(sparql);
-        if (result.bindings.length === 0) return { reply: `No KCs found in the "${paranet}" paranet.`, sparql };
+        if (result.bindings.length === 0) return { reply: `No KCs found in the "${contextGraph}" context graph.`, sparql };
         return {
-          reply: `Found **${result.bindings.length}** KC(s) in the "${paranet}" paranet.`,
+          reply: `Found **${result.bindings.length}** KC(s) in the "${contextGraph}" context graph.`,
           data: result.bindings,
           sparql,
         };
       } catch {
-        return { reply: `Could not query KCs for paranet "${paranet}".` };
+        return { reply: `Could not query KCs for context graph "${contextGraph}".` };
       }
     }
 

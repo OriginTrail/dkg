@@ -27,7 +27,7 @@ export class FinalizationHandler {
     this.chain = chain;
   }
 
-  async handleFinalizationMessage(data: Uint8Array, paranetId: string): Promise<void> {
+  async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
     let ctx = createOperationContext('gossip');
     try {
       const msg = decodeFinalizationMessage(data);
@@ -35,8 +35,8 @@ export class FinalizationHandler {
         ctx = createOperationContext('gossip', msg.operationId);
       }
 
-      if (msg.paranetId && msg.paranetId !== paranetId) {
-        this.log.warn(ctx, `Finalization: paranetId "${msg.paranetId}" does not match topic "${paranetId}", ignoring`);
+      if (msg.paranetId && msg.paranetId !== contextGraphId) {
+        this.log.warn(ctx, `Finalization: paranetId "${msg.paranetId}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
 
@@ -60,20 +60,20 @@ export class FinalizationHandler {
 
       // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller)
       const targetMetaGraph = ctxGraphId
-        ? contextGraphMetaUri(paranetId, ctxGraphId)
-        : `did:dkg:context-graph:${paranetId}/_meta`;
+        ? contextGraphMetaUri(contextGraphId, ctxGraphId)
+        : `did:dkg:context-graph:${contextGraphId}/_meta`;
       const alreadyPromoted = await this.isAlreadyConfirmed(msg.ual, targetMetaGraph);
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
-        this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'paranet'}, skipping`);
+        this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
         return;
       }
 
-      const workspaceQuads = await this.getWorkspaceQuadsForRoots(paranetId, msg.rootEntities);
+      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, msg.rootEntities);
 
-      if (workspaceQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(paranetId, msg.rootEntities);
-        const merkleMatch = this.verifyMerkleMatch(workspaceQuads, privateRoots, msg.kcMerkleRoot);
+      if (sharedMemoryQuads.length > 0) {
+        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities);
+        const merkleMatch = this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, msg.kcMerkleRoot);
 
         if (merkleMatch) {
           const batchId = protoToBigInt(msg.batchId);
@@ -83,26 +83,26 @@ export class FinalizationHandler {
           );
 
           if (verified) {
-            await this.promoteWorkspaceToCanonical(
-              paranetId, workspaceQuads, msg.ual, msg.rootEntities,
+            await this.promoteSharedMemoryToCanonical(
+              contextGraphId, sharedMemoryQuads, msg.ual, msg.rootEntities,
               msg.publisherAddress, msg.txHash, blockNumber, startKAId, endKAId,
               protoToBigInt(msg.batchId), ctx, ctxGraphId,
             );
             this.markProcessed(dedupeKey);
-            this.log.info(ctx, `Finalization: promoted workspace snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
+            this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
           }
           this.log.info(ctx, `Finalization: on-chain verification failed for ${msg.ual}, will retry via ChainEventPoller`);
           return;
         }
-        this.log.info(ctx, `Finalization: merkle mismatch for ${msg.ual}, workspace data differs from published`);
+        this.log.info(ctx, `Finalization: merkle mismatch for ${msg.ual}, shared memory data differs from published`);
       } else {
-        this.log.info(ctx, `Finalization: no workspace data for ${msg.ual}, peer missed workspace sharing`);
+        this.log.info(ctx, `Finalization: no shared memory data for ${msg.ual}, peer missed SWM sharing`);
       }
 
-      // Fallback: no matching workspace data. The data will arrive via
+      // Fallback: no matching shared memory data. The data will arrive via
       // the regular publish topic broadcast or ChainEventPoller sync.
-      this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching workspace snapshot)`);
+      this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching SWM snapshot)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Protobuf decode errors (wire type / index out of range) happen when receiving
@@ -131,14 +131,14 @@ export class FinalizationHandler {
     }
   }
 
-  private async getWorkspaceQuadsForRoots(paranetId: string, rootEntities: string[]): Promise<Quad[]> {
-    const workspaceGraph = paranetWorkspaceGraphUri(paranetId);
+  private async getSharedMemoryQuadsForRoots(contextGraphId: string, rootEntities: string[]): Promise<Quad[]> {
+    const sharedMemoryGraph = paranetWorkspaceGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
     const values = safeRoots.map(r => `<${r}>`).join(' ');
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH <${workspaceGraph}> {
+      GRAPH <${sharedMemoryGraph}> {
         VALUES ?root { ${values} }
         ?s ?p ?o .
         FILTER(
@@ -152,13 +152,13 @@ export class FinalizationHandler {
     return result.type === 'quads' ? result.quads : [];
   }
 
-  private verifyMerkleMatch(workspaceQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
-    const computedRoot = computeFlatKCRoot(workspaceQuads, privateRoots);
+  private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
+    const computedRoot = computeFlatKCRoot(sharedMemoryQuads, privateRoots);
     return ethers.hexlify(computedRoot) === ethers.hexlify(expectedMerkleRoot);
   }
 
-  private async getPrivateRootsFromMeta(paranetId: string, rootEntities: string[]): Promise<Uint8Array[]> {
-    const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+  private async getPrivateRootsFromMeta(contextGraphId: string, rootEntities: string[]): Promise<Uint8Array[]> {
+    const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
@@ -187,8 +187,8 @@ export class FinalizationHandler {
     return roots;
   }
 
-  private async getPublisherPeerIdFromMeta(paranetId: string, rootEntities: string[]): Promise<string | undefined> {
-    const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+  private async getPublisherPeerIdFromMeta(contextGraphId: string, rootEntities: string[]): Promise<string | undefined> {
+    const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return undefined;
 
@@ -209,7 +209,7 @@ export class FinalizationHandler {
         const peerId = raw.replace(/^"(.*)".*$/, '$1');
         if (peerId && peerId !== 'unknown') return peerId;
       }
-    } catch { /* workspace metadata may not exist */ }
+    } catch { /* shared memory metadata may not exist */ }
     return undefined;
   }
 
@@ -285,9 +285,9 @@ export class FinalizationHandler {
     return false;
   }
 
-  private async promoteWorkspaceToCanonical(
-    paranetId: string,
-    workspaceQuads: Quad[],
+  private async promoteSharedMemoryToCanonical(
+    contextGraphId: string,
+    sharedMemoryQuads: Quad[],
     ual: string,
     msgRootEntities: string[],
     publisherAddress: string,
@@ -300,15 +300,15 @@ export class FinalizationHandler {
     ctxGraphId?: string,
   ): Promise<void> {
     const graphManager = new GraphManager(this.store);
-    await graphManager.ensureParanet(paranetId);
+    await graphManager.ensureParanet(contextGraphId);
     const dataGraph = ctxGraphId
-      ? contextGraphDataUri(paranetId, ctxGraphId)
-      : graphManager.dataGraphUri(paranetId);
+      ? contextGraphDataUri(contextGraphId, ctxGraphId)
+      : graphManager.dataGraphUri(contextGraphId);
 
-    const canonicalQuads = workspaceQuads.map(q => ({ ...q, graph: dataGraph }));
+    const canonicalQuads = sharedMemoryQuads.map(q => ({ ...q, graph: dataGraph }));
     await this.store.insert(canonicalQuads);
 
-    const privateRoots = await this.getPrivateRootsFromMeta(paranetId, msgRootEntities);
+    const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities);
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);
@@ -342,10 +342,10 @@ export class FinalizationHandler {
       });
     }
 
-    const wsPeerId = await this.getPublisherPeerIdFromMeta(paranetId, msgRootEntities);
+    const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities);
     const kcMeta: KCMetadata = {
       ual,
-      paranetId,
+      contextGraphId,
       merkleRoot,
       kaCount: kaMetadata.length,
       publisherPeerId: wsPeerId || publisherAddress,
@@ -372,9 +372,9 @@ export class FinalizationHandler {
 
     // Remove any existing tentative status for this UAL before inserting confirmed metadata.
     // For context-graph KCs, tentative status lives in the context-graph meta graph.
-    const tentativeQuad = getTentativeStatusQuad(ual, paranetId);
+    const tentativeQuad = getTentativeStatusQuad(ual, contextGraphId);
     if (ctxGraphId) {
-      tentativeQuad.graph = contextGraphMetaUri(paranetId, ctxGraphId);
+      tentativeQuad.graph = contextGraphMetaUri(contextGraphId, ctxGraphId);
     }
     try {
       await this.store.delete([tentativeQuad]);
@@ -382,27 +382,27 @@ export class FinalizationHandler {
 
     let metaQuads = generateConfirmedFullMetadata(kcMeta, kaMetadata, provenance);
     if (ctxGraphId) {
-      const defaultMeta = `did:dkg:context-graph:${paranetId}/_meta`;
-      const targetMeta = contextGraphMetaUri(paranetId, ctxGraphId);
+      const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
+      const targetMeta = contextGraphMetaUri(contextGraphId, ctxGraphId);
       metaQuads = metaQuads.map((q) =>
         q.graph === defaultMeta ? { ...q, graph: targetMeta } : q,
       );
     }
     await this.store.insert(metaQuads);
 
-    // Clean up promoted workspace entries
-    const workspaceGraph = paranetWorkspaceGraphUri(paranetId);
-    const wsMetaGraph = paranetWorkspaceMetaGraphUri(paranetId);
+    // Clean up promoted shared memory entries
+    const sharedMemoryGraph = paranetWorkspaceGraphUri(contextGraphId);
+    const swmMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
     for (const rootEntity of rootEntities) {
-      await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
-      await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
+      await this.store.deleteByPattern({ graph: sharedMemoryGraph, subject: rootEntity });
+      await this.store.deleteBySubjectPrefix(sharedMemoryGraph, rootEntity + '/.well-known/genid/');
       await this.store.deleteByPattern({
-        graph: wsMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
       });
-      await this.deleteMetaForRoot(wsMetaGraph, rootEntity);
+      await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
     }
 
-    this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from workspace to canonical for ${ual}`);
+    this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from shared memory to canonical for ${ual}`);
   }
 
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {

@@ -3,13 +3,16 @@ import { Logger, createOperationContext, type OperationContext } from '@origintr
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 
-/** Callback invoked when a ParanetCreated / ContextGraphCreated event is detected. */
-export type OnParanetCreated = (info: {
-  paranetId: string;
+/** Callback invoked when a ContextGraphCreated event is detected. */
+export type OnContextGraphCreated = (info: {
+  contextGraphId: string;
   creator: string;
   accessPolicy: number;
   blockNumber: number;
 }) => Promise<void>;
+
+/** @deprecated Use OnContextGraphCreated */
+export type OnParanetCreated = OnContextGraphCreated;
 
 /** Callback for KnowledgeCollectionUpdated events (spec §5.1). */
 export type OnCollectionUpdated = (info: {
@@ -43,8 +46,8 @@ export interface ChainEventPollerConfig {
   publishHandler: PublishHandler;
   /** Polling interval in ms. Default: 12000 (roughly 1 L2 block). */
   intervalMs?: number;
-  /** Called when a ParanetCreated event is detected on-chain. */
-  onParanetCreated?: OnParanetCreated;
+  /** Called when a ContextGraphCreated event is detected on-chain. */
+  onContextGraphCreated?: OnContextGraphCreated;
   /** Called when a KnowledgeCollectionUpdated event is detected. */
   onCollectionUpdated?: OnCollectionUpdated;
   /** Called when an AllowListUpdated event is detected. */
@@ -71,7 +74,7 @@ export class ChainEventPoller {
   private readonly chain: ChainAdapter;
   private readonly publishHandler: PublishHandler;
   private readonly intervalMs: number;
-  private readonly onParanetCreated?: OnParanetCreated;
+  private readonly onContextGraphCreated?: OnContextGraphCreated;
   private readonly onCollectionUpdated?: OnCollectionUpdated;
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
@@ -89,7 +92,7 @@ export class ChainEventPoller {
     this.chain = config.chain;
     this.publishHandler = config.publishHandler;
     this.intervalMs = config.intervalMs ?? 12_000;
-    this.onParanetCreated = config.onParanetCreated;
+    this.onContextGraphCreated = config.onContextGraphCreated;
     this.onCollectionUpdated = config.onCollectionUpdated;
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
@@ -141,11 +144,11 @@ export class ChainEventPoller {
 
   private async poll(): Promise<void> {
     const hasPending = this.publishHandler.hasPendingPublishes;
-    const watchParanets = !!this.onParanetCreated;
+    const watchContextGraphs = !!this.onContextGraphCreated;
     const watchUpdates = !!this.onCollectionUpdated;
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
-    if (!hasPending && !watchParanets && !watchUpdates && !watchAllowList && !watchProfiles) return;
+    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles) return;
 
     const ctx = createOperationContext('publish');
 
@@ -158,7 +161,7 @@ export class ChainEventPoller {
 
     // On first successful head fetch, seed cursor near the tip — but only
     // when there are no pending publishes whose confirmations we might skip.
-    // Full-history paranet discovery is handled by discoverParanetsFromChain().
+    // Full-history context graph discovery is handled by discoverContextGraphsFromChain().
     if (head != null && !this.headKnown) {
       this.headKnown = true;
       if (this.lastBlock === 0 && !hasPending) {
@@ -172,7 +175,7 @@ export class ChainEventPoller {
     // collection failures. Stopping legacy event polling would leave those
     // publishes tentative forever on remote nodes.
     const eventTypes: string[] = ['KnowledgeBatchCreated', 'KCCreated'];
-    if (watchParanets) eventTypes.push('ParanetCreated');
+    if (watchContextGraphs) eventTypes.push('ParanetCreated');
     if (this.onCollectionUpdated) eventTypes.push('KnowledgeCollectionUpdated');
     if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');
     if (this.onProfileEvent) {
@@ -199,7 +202,7 @@ export class ChainEventPoller {
       if (event.type === 'KnowledgeBatchCreated' || event.type === 'KCCreated') {
         await this.handleBatchCreated(event, ctx);
       } else if (event.type === 'ParanetCreated') {
-        await this.handleParanetCreated(event, ctx);
+        await this.handleContextGraphCreated(event, ctx);
       } else if (event.type === 'KnowledgeCollectionUpdated') {
         await this.handleCollectionUpdated(event, ctx);
       } else if (event.type === 'AllowListUpdated') {
@@ -257,21 +260,21 @@ export class ChainEventPoller {
     }
   }
 
-  private async handleParanetCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
-    if (!this.onParanetCreated) return;
+  private async handleContextGraphCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
+    if (!this.onContextGraphCreated) return;
     const { data } = event;
-    const paranetId = String(data['paranetId'] ?? '');
+    const contextGraphId = String(data['paranetId'] ?? data['contextGraphId'] ?? '');
     const creator = String(data['creator'] ?? '');
     const accessPolicy = Number(data['accessPolicy'] ?? 0);
 
     this.log.info(ctx,
-      `Chain event: ParanetCreated block=${event.blockNumber} id=${paranetId.slice(0, 16)}… creator=${creator.slice(0, 10)}…`,
+      `Chain event: ContextGraphCreated block=${event.blockNumber} id=${contextGraphId.slice(0, 16)}… creator=${creator.slice(0, 10)}…`,
     );
 
     try {
-      await this.onParanetCreated({ paranetId, creator, accessPolicy, blockNumber: event.blockNumber });
+      await this.onContextGraphCreated({ contextGraphId, creator, accessPolicy, blockNumber: event.blockNumber });
     } catch (err) {
-      this.log.warn(ctx, `onParanetCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.warn(ctx, `onContextGraphCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

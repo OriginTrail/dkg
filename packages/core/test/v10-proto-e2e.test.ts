@@ -15,8 +15,8 @@ import {
   decodePublishAck,
   encodeFinalizationMessage,
   decodeFinalizationMessage,
-  encodeWorkspacePublishRequest,
-  decodeWorkspacePublishRequest,
+  encodeSharePublishRequest,
+  decodeSharePublishRequest,
   type VerifyProposalMsg,
   type VerifyApprovalMsg,
   type StorageACKMsg,
@@ -101,10 +101,11 @@ describe('V10 proto e2e: VERIFY flow simulation', () => {
 describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
   it('publish request → storage ACK → finalization', () => {
     // Step 1: Encode publish request
+    const contextGraphId = 'cg-42';
     const publishReq = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0xAbc/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: 'cg-42',
+      paranetId: contextGraphId,
       kas: [{ tokenId: 1, rootEntity: 'http://example.org/alice', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: randomBytes(32),
       publisherAddress: '0xPublisher',
@@ -116,7 +117,7 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
     });
 
     const decoded = decodePublishRequest(publishReq);
-    expect(decoded.paranetId).toBe('cg-42');
+    expect(decoded.paranetId).toBe(contextGraphId);
 
     // Step 2: Core node sends StorageACK
     const ack: StorageACKMsg = {
@@ -134,7 +135,7 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
     // Step 3: Publisher sends finalization
     const finBytes = encodeFinalizationMessage({
       ual: 'did:dkg:mock:31337/0xAbc/1',
-      paranetId: 'cg-42',
+      paranetId: contextGraphId,
       kcMerkleRoot: ack.merkleRoot,
       txHash: '0xfeed',
       blockNumber: 12345,
@@ -152,11 +153,12 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
 });
 
 describe('V10 proto e2e: GossipSub envelope wrapping', () => {
-  it('wrap workspace write in envelope → encode → decode → extract payload', () => {
-    // Step 1: Create inner workspace write message
-    const innerMsg = encodeWorkspacePublishRequest({
+  it('wrap shared-memory (SWM) share write in envelope → encode → decode → extract payload', () => {
+    // Step 1: Create inner SharePublishRequest (shared memory write)
+    const swmCgId = 'cg-42';
+    const innerMsg = encodeSharePublishRequest({
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: 'cg-42',
+      paranetId: swmCgId,
       manifest: [{
         rootEntity: 'http://example.org/alice',
       }],
@@ -167,8 +169,8 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
 
     // Step 2: Wrap in V10 envelope
     const sigPayload = computeGossipSigningPayload(
-      'workspace-write',
-      'cg-42',
+      'share-write',
+      swmCgId,
       '2026-04-02T12:00:00Z',
       innerMsg,
     );
@@ -176,8 +178,8 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
 
     const envelope: GossipEnvelopeMsg = {
       version: '10.0.0',
-      type: 'workspace-write',
-      contextGraphId: 'cg-42',
+      type: 'share-write',
+      contextGraphId: swmCgId,
       agentAddress: '0xAgent1',
       timestamp: '2026-04-02T12:00:00Z',
       signature: randomBytes(65),
@@ -190,12 +192,12 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
     // Step 4: Decode on receiver side
     const decoded = decodeGossipEnvelope(envelopeBytes);
     expect(decoded.version).toBe('10.0.0');
-    expect(decoded.type).toBe('workspace-write');
-    expect(decoded.contextGraphId).toBe('cg-42');
+    expect(decoded.type).toBe('share-write');
+    expect(decoded.contextGraphId).toBe(swmCgId);
 
     // Step 5: Extract and decode inner payload
-    const innerDecoded = decodeWorkspacePublishRequest(new Uint8Array(decoded.payload));
-    expect(innerDecoded.paranetId).toBe('cg-42');
+    const innerDecoded = decodeSharePublishRequest(new Uint8Array(decoded.payload));
+    expect(innerDecoded.paranetId).toBe(swmCgId);
     expect(innerDecoded.manifest).toHaveLength(1);
     expect(innerDecoded.manifest[0].rootEntity).toBe('http://example.org/alice');
   });

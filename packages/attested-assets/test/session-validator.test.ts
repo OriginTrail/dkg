@@ -12,7 +12,7 @@ const encoder = new TextEncoder();
 function makeSessionConfig(overrides: Partial<SessionConfig> = {}): SessionConfig {
   return {
     sessionId: 'session-1',
-    paranetId: 'paranet-1',
+    contextGraphId: 'paranet-1',
     appId: 'test-app',
     createdBy: 'peer-1',
     createdAt: '2026-01-01T00:00:00Z',
@@ -78,7 +78,7 @@ async function makeSignedEvent(
     {
       domain: 'AKA-v1',
       network: 'test',
-      paranetId: 'paranet-1',
+      contextGraphId: 'paranet-1',
       sessionId: 'session-1',
       round,
       type,
@@ -277,7 +277,7 @@ describe('SessionValidator', () => {
       {
         domain: 'AKA-v1',
         network: 'test',
-        paranetId: 'paranet-1',
+        contextGraphId: 'paranet-1',
         sessionId: 'session-1',
         round: 1,
         type: 'RoundAck',
@@ -289,7 +289,7 @@ describe('SessionValidator', () => {
       {
         domain: 'AKA-v1',
         network: 'test',
-        paranetId: 'paranet-1',
+        contextGraphId: 'paranet-1',
         sessionId: 'session-1',
         round: 1,
         type: 'RoundAck',

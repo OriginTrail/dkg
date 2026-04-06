@@ -178,7 +178,7 @@ describe('sim-engine', () => {
           opsPerSec: 1,
           enabledOps: ['publish'],
           concurrency: 1,
-          paranet: 'devnet-test',
+          contextGraph: 'devnet-test',
         }),
       });
       const res = mockRes();
@@ -187,7 +187,7 @@ describe('sim-engine', () => {
       const body = parseJsonBody(res) as { started: boolean; name: string };
       expect(body.started).toBe(true);
       expect(body.name).toBeDefined();
-      // Sim runs in background; ensureParanet will fail (no nodes) and sim may error out - we stop in afterEach
+      // Sim runs in background; ensureContextGraph will fail (no nodes) and sim may error out - we stop in afterEach
     });
 
     it('POST /sim/stop when not running returns 200 stopped: false', async () => {

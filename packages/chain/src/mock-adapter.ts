@@ -11,16 +11,16 @@ import type {
   TxResult,
   ChainEvent,
   EventFilter,
-  CreateParanetParams,
+  CreateContextGraphParams,
   PublishParams,
   OnChainPublishResult,
   ConvictionAccountInfo,
   PermanentPublishParams,
   FairSwapPurchaseInfo,
   KAUpdateVerification,
-  CreateContextGraphParams,
-  CreateContextGraphResult,
-  AddBatchToContextGraphParams,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+  VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
 } from './chain-adapter.js';
@@ -45,7 +45,7 @@ export class MockChainAdapter implements ChainAdapter {
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
   private collections = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
-  private paranets = new Map<string, Record<string, string>>();
+  private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
@@ -353,38 +353,38 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // --- Paranets ---
+  // --- Context Graphs (V9 Registry) ---
 
-  async createParanet(params: CreateParanetParams): Promise<TxResult> {
-    const name = params.name ?? 'mock-paranet';
-    const id = params.paranetId ?? `0x${Buffer.from(name).toString('hex').padEnd(64, '0')}`;
+  async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
+    const name = params.name ?? 'mock-context-graph';
+    const id = params.contextGraphId ?? `0x${Buffer.from(name).toString('hex').padEnd(64, '0')}`;
     const meta = params.metadata ?? {
       ...(params.name && { name: params.name }),
       ...(params.description && { description: params.description }),
     };
-    if (this.paranets.has(id)) {
-      throw new Error(`Paranet "${id}" already exists on chain`);
+    if (this.contextGraphRegistry.has(id)) {
+      throw new Error(`Context graph "${id}" already exists on chain`);
     }
-    this.paranets.set(id, meta);
+    this.contextGraphRegistry.set(id, meta);
     this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
-    return { ...result, paranetId: id };
+    return { ...result, contextGraphId: id };
   }
 
-  async submitToParanet(kcId: string, paranetId: string): Promise<TxResult> {
-    this.pushEvent('KCSubmittedToParanet', { kcId, paranetId });
+  async submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult> {
+    this.pushEvent('KCSubmittedToContextGraph', { kcId, contextGraphId });
     return this.txResult(true);
   }
 
-  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
-    const meta = this.paranets.get(paranetId);
-    if (!meta) throw new Error(`Paranet "${paranetId}" not found`);
-    this.paranets.set(paranetId, { ...meta, name, description, revealed: 'true' });
-    this.pushEvent('ParanetMetadataRevealed', { paranetId, name, description });
+  async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
+    const meta = this.contextGraphRegistry.get(contextGraphId);
+    if (!meta) throw new Error(`Context graph "${contextGraphId}" not found`);
+    this.contextGraphRegistry.set(contextGraphId, { ...meta, name, description, revealed: 'true' });
+    this.pushEvent('ParanetMetadataRevealed', { paranetId: contextGraphId, name, description });
     return this.txResult(true);
   }
 
-  async listParanetsFromChain(): Promise<import('./chain-adapter.js').ParanetOnChain[]> {
+  async listContextGraphsFromChain(): Promise<import('./chain-adapter.js').ContextGraphOnChain[]> {
     return [];
   }
 
@@ -557,7 +557,7 @@ export class MockChainAdapter implements ChainAdapter {
     return { multiplier: computeConvictionMultiplier(lockEpochs) };
   }
 
-  // --- Context Graphs ---
+  // --- On-Chain Context Graphs (ContextGraphs contract) ---
 
   private contextGraphs = new Map<bigint, {
     manager: string;
@@ -569,7 +569,7 @@ export class MockChainAdapter implements ChainAdapter {
   }>();
   private nextContextGraphId = 1n;
 
-  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     if (params.requiredSignatures < 1) {
       throw new Error('Mock: requiredSignatures must be >= 1');
     }
@@ -648,7 +648,7 @@ export class MockChainAdapter implements ChainAdapter {
     return true;
   }
 
-  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+  async verify(params: VerifyParams): Promise<TxResult> {
     const cg = this.contextGraphs.get(params.contextGraphId);
     if (!cg || !cg.active) {
       return this.txResult(false);
@@ -723,7 +723,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
     });
-    // Also store in batches so addBatchToContextGraph can find this publish
+    // Also store in batches so verify() can find this publish
     this.batches.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,

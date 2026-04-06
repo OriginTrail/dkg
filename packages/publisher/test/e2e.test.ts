@@ -89,7 +89,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     // === Step 1: Publish on Node A ===
     const publishResult = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://schema.org/description', '"AI image analysis agent"'),
@@ -142,7 +142,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const engineB = new DKGQueryEngine(storeB);
     const queryResult = await engineB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { paranetId: PARANET },
+      { contextGraphId: PARANET },
     );
 
     expect(queryResult.bindings).toHaveLength(1);
@@ -151,7 +151,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Query for skills
     const skillResult = await engineB.query(
       'SELECT ?skill WHERE { ?s <http://ex.org/skill> ?skill }',
-      { paranetId: PARANET },
+      { contextGraphId: PARANET },
     );
     expect(skillResult.bindings).toHaveLength(1);
     expect(skillResult.bindings[0]['skill']).toBe('"ImageAnalysis"');
@@ -191,7 +191,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     // Publish with mixed public/private triples
     const result = await publisherA.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-xyz"'),
@@ -261,12 +261,12 @@ describe('Publisher wallet signature verification', () => {
     startKAId: number,
     endKAId: number,
     chainId: string,
-    paranetId: string,
+    contextGraphId: string,
     wallet: ethers.Wallet,
   ) {
     const commitHash = ethers.solidityPackedKeccak256(
       ['bytes32', 'address', 'uint64', 'uint64', 'string', 'string'],
-      [ethers.hexlify(merkleRoot), publisherAddress, startKAId, endKAId, chainId, paranetId],
+      [ethers.hexlify(merkleRoot), publisherAddress, startKAId, endKAId, chainId, contextGraphId],
     );
     const rawSig = await wallet.signMessage(ethers.getBytes(commitHash));
     const { r, yParityAndS } = ethers.Signature.from(rawSig);

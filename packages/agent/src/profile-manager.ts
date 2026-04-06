@@ -1,11 +1,11 @@
 import type { Publisher, PublishOptions, PublishResult } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { paranetDataGraphUri } from '@origintrail-official/dkg-core';
-import { buildAgentProfile, AGENT_REGISTRY_PARANET, type AgentProfileConfig } from './profile.js';
+import { buildAgentProfile, AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
 
 /**
  * Manages publishing and updating agent profiles as Knowledge Assets
- * in the Agent Registry paranet.
+ * in the Agent Registry context graph.
  */
 export class ProfileManager {
   private readonly publisher: Publisher;
@@ -22,11 +22,11 @@ export class ProfileManager {
 
     // Remove stale triples from prior profile publishes so the data graph
     // contains exactly the triples the merkle root is computed over.
-    const dataGraph = paranetDataGraphUri(AGENT_REGISTRY_PARANET);
+    const dataGraph = paranetDataGraphUri(AGENT_REGISTRY_CONTEXT_GRAPH);
     await this.store.deleteBySubjectPrefix(dataGraph, rootEntity);
 
     const options: PublishOptions = {
-      paranetId: AGENT_REGISTRY_PARANET,
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
       quads,
     };
 

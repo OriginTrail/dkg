@@ -16,7 +16,7 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { WorkspaceHandler } from '../src/workspace-handler.js';
+import { SharedMemoryHandler } from '../src/workspace-handler.js';
 import { ethers } from 'ethers';
 import type { PhaseCallback } from '../src/publisher.js';
 
@@ -59,7 +59,7 @@ describe('Phase-sequence contracts', () => {
 
     const { calls, fn } = recorder();
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads,
       onPhase: fn,
     });
@@ -68,8 +68,8 @@ describe('Phase-sequence contracts', () => {
 
     expect(phases).toEqual([
       'prepare:start',
-      'prepare:ensureParanet:start',
-      'prepare:ensureParanet:end',
+      'prepare:ensureContextGraph:start',
+      'prepare:ensureContextGraph:end',
       'prepare:partition:start',
       'prepare:partition:end',
       'prepare:manifest:start',
@@ -109,14 +109,14 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Tentative"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ paranetId: PARANET, quads, onPhase: fn });
+    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
 
     const phases = calls.map(([p, s]) => `${p}:${s}`);
 
     expect(phases).toEqual([
       'prepare:start',
-      'prepare:ensureParanet:start',
-      'prepare:ensureParanet:end',
+      'prepare:ensureContextGraph:start',
+      'prepare:ensureContextGraph:end',
       'prepare:partition:start',
       'prepare:partition:end',
       'prepare:manifest:start',
@@ -152,12 +152,12 @@ describe('Phase-sequence contracts', () => {
 
     // Publish first so there's something to update
     const quads = [q(ENTITY, 'http://schema.org/name', '"Original"')];
-    const pub = await publisher.publish({ paranetId: PARANET, quads });
+    const pub = await publisher.publish({ contextGraphId: PARANET, quads });
 
     const updatedQuads = [q(ENTITY, 'http://schema.org/name', '"Updated"')];
     const { calls, fn } = recorder();
     await publisher.update(pub.kcId, {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: updatedQuads,
       onPhase: fn,
     });
@@ -186,7 +186,7 @@ describe('Phase-sequence contracts', () => {
 
   it('workspace handle: golden phase sequence', async () => {
     const store = new OxigraphStore();
-    const handler = new WorkspaceHandler(store, new TypedEventBus());
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"WS draft"')];
     const nquads = quads
@@ -194,8 +194,8 @@ describe('Phase-sequence contracts', () => {
       .join('\n');
 
     const msg = encodeWorkspacePublishRequest({
-      workspaceOperationId: 'ws-test-001',
-      paranetId: PARANET,
+      shareOperationId: 'ws-test-001',
+      contextGraphId: PARANET,
       publisherPeerId: '12D3KooWTest',
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY }],
@@ -233,7 +233,7 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Balanced"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ paranetId: PARANET, quads, onPhase: fn });
+    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
 
     const starts = calls.filter(([, s]) => s === 'start').map(([p]) => p);
     const ends = calls.filter(([, s]) => s === 'end').map(([p]) => p);
@@ -257,14 +257,14 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Nested"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ paranetId: PARANET, quads, onPhase: fn });
+    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
 
     const idxOf = (phase: string, status: 'start' | 'end') =>
       calls.findIndex(([p, s]) => p === phase && s === status);
 
-    // prepare:ensureParanet must be inside prepare
-    expect(idxOf('prepare:ensureParanet', 'start')).toBeGreaterThan(idxOf('prepare', 'start'));
-    expect(idxOf('prepare:ensureParanet', 'end')).toBeLessThan(idxOf('prepare', 'end'));
+    // prepare:ensureContextGraph must be inside prepare
+    expect(idxOf('prepare:ensureContextGraph', 'start')).toBeGreaterThan(idxOf('prepare', 'start'));
+    expect(idxOf('prepare:ensureContextGraph', 'end')).toBeLessThan(idxOf('prepare', 'end'));
 
     // chain:sign must be inside chain
     expect(idxOf('chain:sign', 'start')).toBeGreaterThan(idxOf('chain', 'start'));

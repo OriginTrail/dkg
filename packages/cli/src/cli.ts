@@ -16,6 +16,7 @@ import {
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
+  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import {
@@ -160,7 +161,7 @@ async function runForegroundSupervisor(): Promise<void> {
 const program = new Command();
 program
   .name('dkg')
-  .description('DKG V9 testnet node CLI')
+  .description('DKG V10 testnet node CLI')
   .version(getCliVersion());
 
 // ─── dkg init ────────────────────────────────────────────────────────
@@ -200,16 +201,17 @@ program
       ? await ask('Relay multiaddr', defaultRelay)
       : await ask('Relay multiaddr (optional for core)', defaultRelay);
 
-    const defaultParanets = existing.paranets?.length
-      ? existing.paranets.join(',')
-      : network?.defaultParanets?.length
-        ? network.defaultParanets.join(',')
+    const existingContextGraphs = resolveContextGraphs(existing);
+    const defaultContextGraphs = existingContextGraphs.length
+      ? existingContextGraphs.join(',')
+      : resolveNetworkDefaultContextGraphs(network).length
+        ? resolveNetworkDefaultContextGraphs(network).join(',')
         : undefined;
-    const paranetsStr = await ask(
-      'Paranets to subscribe (comma-separated)',
-      defaultParanets,
+    const contextGraphsStr = await ask(
+      'Context graphs to subscribe (comma-separated)',
+      defaultContextGraphs,
     );
-    const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const contextGraphs = contextGraphsStr ? contextGraphsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port', String(existing.apiPort)), 10);
 
     const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
@@ -276,7 +278,8 @@ program
       relay: (!existing.relay && relay === networkDefaultRelay) ? undefined : (relay || undefined),
       apiPort,
       nodeRole,
-      paranets,
+      contextGraphs,
+      paranets: contextGraphs,
       autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
       chain: chainSection ?? existing.chain,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
@@ -300,7 +303,7 @@ program
     const relayDisplay = config.relay
       ?? (network?.relays?.length ? `(network default — ${network.relays.length} relays)` : '(none)');
     console.log(`  relay:      ${relayDisplay}`);
-    console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
+    console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
     console.log(
@@ -667,11 +670,11 @@ program
     }
   });
 
-// ─── dkg publish <paranet> ───────────────────────────────────────────
+// ─── dkg publish <context-graph> ─────────────────────────────────────
 
 program
-  .command('publish <paranet>')
-  .description('Publish triples to a paranet from an RDF file or inline')
+  .command('publish <context-graph>')
+  .description('Publish triples to a context graph from an RDF file or inline')
   .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
   .option('--private-file <path>', 'RDF file with private triples (encrypted, access-controlled)')
   .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
@@ -681,11 +684,11 @@ program
   .option('-o, --object <value>', 'Object value for simple publish')
   .option('--access-policy <policy>', 'Access policy for private triples (public|ownerOnly|allowList)')
   .option('--allowed-peer <peerId>', 'Peer ID allowed when using allowList policy', (v, prev: string[] = []) => [...prev, v], [])
-  .action(async (paranet: string, opts: ActionOpts) => {
+  .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const rdfParser = await import('./rdf-parser.js');
-      const defaultGraph = `did:dkg:context-graph:${paranet}`;
+      const defaultGraph = `did:dkg:context-graph:${contextGraph}`;
 
       let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
 
@@ -736,11 +739,11 @@ program
         process.exit(1);
       }
 
-      const result = await client.publish(paranet, quads, privateQuads, {
+      const result = await client.publish(contextGraph, quads, privateQuads, {
         accessPolicy,
         allowedPeers,
       });
-      console.log(`Published to "${paranet}":`);
+      console.log(`Published to context graph "${contextGraph}":`);
       console.log(`  Status:    ${result.status}`);
       console.log(`  KC ID:     ${result.kcId}`);
       if (result.txHash) {
@@ -758,14 +761,14 @@ program
     }
   });
 
-// ─── dkg query <paranet> <sparql> ───────────────────────────────────
+// ─── dkg query <context-graph> <sparql> ─────────────────────────────
 
 program
-  .command('query [paranet]')
-  .description('Run a SPARQL query against a paranet (or all)')
+  .command('query [context-graph]')
+  .description('Run a SPARQL query against a context graph (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
-  .action(async (paranet: string | undefined, opts: ActionOpts) => {
+  .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
 
@@ -779,7 +782,7 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, paranet);
+      const { result } = await client.query(sparql, contextGraph);
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
@@ -814,20 +817,22 @@ program
 program
   .command('query-remote <peer>')
   .description('Query a remote peer\'s knowledge store')
-  .option('-q, --sparql <query>', 'SPARQL query (requires --paranet)')
+  .option('-q, --sparql <query>', 'SPARQL query (requires --context-graph)')
   .option('--ual <ual>', 'Look up a knowledge asset by UAL')
-  .option('--entity <uri>', 'Get all triples for an entity URI (requires --paranet)')
-  .option('--type <rdfType>', 'Find entities by RDF type (requires --paranet)')
-  .option('-p, --paranet <id>', 'Target paranet')
+  .option('--entity <uri>', 'Get all triples for an entity URI (requires --context-graph)')
+  .option('--type <rdfType>', 'Find entities by RDF type (requires --context-graph)')
+  .option('-p, --context-graph <id>', 'Target context graph')
+  .option('--paranet <id>', 'Target context graph (legacy alias)')
   .option('-l, --limit <n>', 'Max results', '100')
   .option('--timeout <ms>', 'Query timeout in ms', '5000')
   .action(async (peer: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
+      const contextGraphId = opts.contextGraph ?? opts.paranet;
 
       let lookupType: string;
       const request: Record<string, any> = { // eslint-disable-line @typescript-eslint/no-explicit-any
-        paranetId: opts.paranet,
+        paranetId: contextGraphId,
         limit: parseInt(opts.limit, 10),
         timeout: parseInt(opts.timeout, 10),
       };
@@ -838,22 +843,22 @@ program
       } else if (opts.type) {
         lookupType = 'ENTITIES_BY_TYPE';
         request.rdfType = opts.type;
-        if (!opts.paranet) {
-          console.error('--paranet is required for --type queries');
+        if (!contextGraphId) {
+          console.error('--context-graph is required for --type queries');
           process.exit(1);
         }
       } else if (opts.entity) {
         lookupType = 'ENTITY_TRIPLES';
         request.entityUri = opts.entity;
-        if (!opts.paranet) {
-          console.error('--paranet is required for --entity queries');
+        if (!contextGraphId) {
+          console.error('--context-graph is required for --entity queries');
           process.exit(1);
         }
       } else if (opts.sparql) {
         lookupType = 'SPARQL_QUERY';
         request.sparql = opts.sparql;
-        if (!opts.paranet) {
-          console.error('--paranet is required for --sparql queries');
+        if (!contextGraphId) {
+          console.error('--context-graph is required for --sparql queries');
           process.exit(1);
         }
       } else {
@@ -916,35 +921,36 @@ program
     }
   });
 
-// ─── dkg subscribe <paranet> ────────────────────────────────────────
+// ─── dkg subscribe <context-graph> ──────────────────────────────────
 
 program
-  .command('subscribe <paranet>')
-  .description('Subscribe to a paranet\'s GossipSub topic')
+  .command('subscribe <context-graph>')
+  .description('Subscribe to a context graph\'s GossipSub topic')
   .option('--save', 'Also save to config so it auto-subscribes on restart')
-  .action(async (paranet: string, opts: ActionOpts) => {
+  .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.subscribe(paranet);
-      console.log(`Subscribed to paranet: ${paranet}`);
+      const result = await client.subscribeToContextGraph(contextGraph);
+      console.log(`Subscribed to context graph: ${contextGraph}`);
       const catchup = result.catchup;
       if (catchup) {
         if ('peersTried' in catchup) {
           console.log(
-            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, workspace ${catchup.workspaceSynced}`,
+            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.workspaceSynced}`,
           );
         } else {
           console.log(
-            `Catch-up sync queued in background (job ${catchup.jobId}, workspace ${catchup.includeWorkspace ? 'enabled' : 'disabled'}).`,
+            `Catch-up sync queued in background (job ${catchup.jobId}, shared memory ${catchup.includeWorkspace ? 'enabled' : 'disabled'}).`,
           );
         }
       }
 
       if (opts.save) {
         const config = await loadConfig();
-        const paranets = new Set(config.paranets ?? []);
-        paranets.add(paranet);
-        config.paranets = [...paranets];
+        const cgs = new Set(resolveContextGraphs(config));
+        cgs.add(contextGraph);
+        config.contextGraphs = [...cgs];
+        config.paranets = [...cgs];
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
       }
@@ -961,27 +967,27 @@ const syncCmd = program
   .description('Sync status helpers');
 
 syncCmd
-  .command('catchup-status <paranet>')
-  .description('Show latest background catch-up status for a paranet')
-  .action(async (paranet: string) => {
+  .command('catchup-status <context-graph>')
+  .description('Show latest background catch-up status for a context graph')
+  .action(async (contextGraph: string) => {
     try {
       const client = await ApiClient.connect();
-      const status = await client.catchupStatus(paranet);
+      const status = await client.catchupStatus(contextGraph);
 
-      console.log(`Paranet:   ${status.paranetId}`);
-      console.log(`Job:       ${status.jobId}`);
-      console.log(`Status:    ${status.status}`);
-      console.log(`Workspace: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
-      console.log(`Queued:    ${new Date(status.queuedAt).toISOString()}`);
-      if (status.startedAt) console.log(`Started:   ${new Date(status.startedAt).toISOString()}`);
-      if (status.finishedAt) console.log(`Finished:  ${new Date(status.finishedAt).toISOString()}`);
+      console.log(`Context Graph: ${status.paranetId}`);
+      console.log(`Job:           ${status.jobId}`);
+      console.log(`Status:        ${status.status}`);
+      console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+      console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
+      if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
+      if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
       if (status.result) {
         console.log(
-          `Result:    peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, workspace ${status.result.workspaceSynced}`,
+          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.workspaceSynced}`,
         );
       }
       if (status.error) {
-        console.log(`Error:     ${status.error}`);
+        console.log(`Error:         ${status.error}`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -989,33 +995,35 @@ syncCmd
     }
   });
 
-// ─── dkg paranet ────────────────────────────────────────────────────
+// ─── dkg context-graph (alias: paranet) ─────────────────────────────
 
-const paranetCmd = program
-  .command('paranet')
-  .description('Manage paranets (knowledge graph partitions)');
+const contextGraphCmd = program
+  .command('context-graph')
+  .alias('paranet')
+  .description('Manage context graphs (knowledge graph partitions)');
 
-paranetCmd
+contextGraphCmd
   .command('create <id>')
-  .description('Create a new paranet (publishes definition to the system ontology)')
+  .description('Create a new context graph (publishes definition to the system ontology)')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
-  .option('-d, --description <desc>', 'Description of the paranet')
-  .option('--subscribe', 'Also subscribe to the paranet after creation', true)
+  .option('-d, --description <desc>', 'Description of the context graph')
+  .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createParanet(id, opts.name ?? id, opts.description);
-      console.log(`Paranet created:`);
+      const result = await client.createContextGraph(id, opts.name ?? id, opts.description);
+      console.log(`Context graph created:`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
       console.log(`  Auto-subscribed to GossipSub topic.`);
 
       if (opts.save) {
         const config = await loadConfig();
-        const paranets = new Set(config.paranets ?? []);
-        paranets.add(id);
-        config.paranets = [...paranets];
+        const cgs = new Set(resolveContextGraphs(config));
+        cgs.add(id);
+        config.contextGraphs = [...cgs];
+        config.paranets = [...cgs];
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
@@ -1025,50 +1033,50 @@ paranetCmd
     }
   });
 
-paranetCmd
+contextGraphCmd
   .command('list')
-  .description('List all known paranets')
+  .description('List all known context graphs')
   .action(async () => {
     try {
       const client = await ApiClient.connect();
-      const { paranets } = await client.listParanets();
+      const { paranets: contextGraphs } = await client.listContextGraphs();
 
-      if (paranets.length === 0) {
-        console.log('No paranets registered yet.');
+      if (contextGraphs.length === 0) {
+        console.log('No context graphs registered yet.');
         return;
       }
 
-      const idW = Math.max(4, ...paranets.map(p => p.id.length));
-      const nameW = Math.max(4, ...paranets.map(p => p.name.length));
+      const idW = Math.max(4, ...contextGraphs.map(p => p.id.length));
+      const nameW = Math.max(4, ...contextGraphs.map(p => p.name.length));
 
       const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
       console.log(header);
       console.log('  ' + '─'.repeat(header.length - 2));
 
-      for (const p of paranets) {
+      for (const p of contextGraphs) {
         const type = p.isSystem ? 'system' : 'user';
         const creator = p.creator
           ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
           : '—';
         console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
       }
-      console.log(`\n  ${paranets.length} paranet(s)`);
+      console.log(`\n  ${contextGraphs.length} context graph(s)`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
 
-paranetCmd
+contextGraphCmd
   .command('info <id>')
-  .description('Show details of a specific paranet')
+  .description('Show details of a specific context graph')
   .action(async (id: string) => {
     try {
       const client = await ApiClient.connect();
-      const { paranets } = await client.listParanets();
-      const p = paranets.find(x => x.id === id);
+      const { paranets: contextGraphs } = await client.listContextGraphs();
+      const p = contextGraphs.find(x => x.id === id);
       if (!p) {
-        console.error(`Paranet "${id}" not found.`);
+        console.error(`Context graph "${id}" not found.`);
         process.exit(1);
       }
       console.log(`  ID:          ${p.id}`);
@@ -1123,9 +1131,11 @@ openclawCmd
 
 program
   .command('index [directory]')
-  .description('Index a repository and write to workspace graph or publish directly')
-  .option('-p, --paranet <id>', 'Target paranet', 'dev-coordination')
-  .option('--workspace', 'Write indexed quads to workspace graph instead of publishing')
+  .description('Index a repository and write to shared memory or publish directly')
+  .option('-p, --context-graph <id>', 'Target context graph', 'dev-coordination')
+  .option('--paranet <id>', 'Target context graph (legacy alias)')
+  .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
+  .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
@@ -1133,6 +1143,8 @@ program
     try {
       const { resolve } = await import('node:path');
       const repoRoot = resolve(directory ?? '.');
+      const targetContextGraph = opts.contextGraph ?? opts.paranet ?? 'dev-coordination';
+      const useSharedMemory = opts.sharedMemory || opts.workspace;
 
       console.log(`Indexing ${repoRoot}...`);
       const { indexRepository } = await import('./indexer.js');
@@ -1160,20 +1172,20 @@ program
       }
 
       const client = await ApiClient.connect();
-      const verb = opts.workspace ? 'Staging in workspace' : 'Publishing';
-      const applyBatch = opts.workspace
-        ? async (batch: typeof result.quads) => client.workspaceWrite(opts.paranet, batch)
-        : async (batch: typeof result.quads) => client.publish(opts.paranet, batch);
+      const verb = useSharedMemory ? 'Writing to shared memory' : 'Publishing';
+      const applyBatch = useSharedMemory
+        ? async (batch: typeof result.quads) => client.sharedMemoryWrite(targetContextGraph, batch)
+        : async (batch: typeof result.quads) => client.publish(targetContextGraph, batch);
 
       await publishEntityBatches(result.quads, applyBatch, (sent) => {
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       });
 
-      if (opts.workspace) {
-        console.log(`\n\n  Staged ${result.quads.length} quads to workspace graph for paranet "${opts.paranet}".`);
-        console.log('  Next: dkg workspace publish ' + opts.paranet);
+      if (useSharedMemory) {
+        console.log(`\n\n  Written ${result.quads.length} quads to shared memory for context graph "${targetContextGraph}".`);
+        console.log('  Next: dkg shared-memory publish ' + targetContextGraph);
       } else {
-        console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
+        console.log(`\n\n  Published ${result.quads.length} quads to context graph "${targetContextGraph}".`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1181,26 +1193,27 @@ program
     }
   });
 
-// ─── dkg workspace ───────────────────────────────────────────────────
+// ─── dkg shared-memory (alias: workspace) ───────────────────────────
 
-const workspaceCmd = program
-  .command('workspace')
-  .description('Workspace graph operations (stage-first workflow)');
+const sharedMemoryCmd = program
+  .command('shared-memory')
+  .alias('workspace')
+  .description('Shared memory operations (write-first workflow)');
 
-workspaceCmd
-  .command('publish [paranet]')
-  .description('Enshrine staged workspace graph into a paranet publish')
-  .option('--keep', 'Keep workspace triples after enshrining')
-  .option('--root <entity...>', 'Enshrine only specific root entities')
-  .action(async (paranet: string | undefined, opts: ActionOpts) => {
+sharedMemoryCmd
+  .command('publish [context-graph]')
+  .description('Publish from shared memory to a context graph')
+  .option('--keep', 'Keep shared memory triples after publishing')
+  .option('--root <entity...>', 'Publish only specific root entities')
+  .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
-      const targetParanet = paranet ?? 'dev-coordination';
+      const targetContextGraph = contextGraph ?? 'dev-coordination';
       const client = await ApiClient.connect();
       const selection = opts.root?.length
         ? { rootEntities: opts.root as string[] }
         : 'all';
-      const result = await client.workspaceEnshrine(targetParanet, selection, !opts.keep);
-      console.log(`Workspace enshrined to "${targetParanet}":`);
+      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep);
+      console.log(`Published from shared memory to "${targetContextGraph}":`);
       console.log(`  Status: ${result.status}`);
       console.log(`  KC ID:  ${result.kcId}`);
       console.log(`  KAs:    ${result.kas.length}`);

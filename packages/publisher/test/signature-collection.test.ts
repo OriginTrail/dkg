@@ -259,7 +259,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     const peer = new MockSignerPeer(2n);
 
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads,
       onPhase: (phase, event) => {
         phases.push(`${phase}:${event}`);
@@ -300,7 +300,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     ];
 
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads,
       receiverSignatureProvider: async (merkleRoot, publicByteSize) => {
         return [await peer.signReceiverAck(merkleRoot, publicByteSize)];
@@ -324,7 +324,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
 
     // No receiverSignatureProvider → should use legacy self-signing
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads,
     });
 
@@ -361,7 +361,7 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     ];
 
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads,
       receiverSignatureProvider: async () => [],
     });
@@ -393,25 +393,25 @@ describe('Context Graph Enshrinement with Signatures', () => {
     });
 
     // Create a context graph on the mock chain
-    await chain.createContextGraph!({
+    await chain.createOnChainContextGraph({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
   });
 
-  it('publishFromSharedMemory passes participant signatures to addBatchToContextGraph', async () => {
+  it('publishFromSharedMemory passes participant signatures to verify', async () => {
     // Write some data to workspace first
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q(ENTITY, 'http://schema.org/name', '"Context Data"'),
     ], { publisherPeerId: 'test-peer' });
 
     const participant = new MockSignerPeer(2n);
-    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+    const addBatchSpy = vi.spyOn(chain, 'verify');
 
     await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: [ENTITY],
     }, {
-      contextGraphId: '1',
+      publishContextGraphId: '1',
       contextGraphSignatures: [
         await participant.signParticipantAck(
           1n,
@@ -430,7 +430,7 @@ describe('Context Graph Enshrinement with Signatures', () => {
   it('publishToContextGraph available on MockChainAdapter for atomic path', async () => {
     // The atomic path (publishToContextGraph) is available on the chain adapter.
     // publishFromSharedMemory currently uses the two-call approach:
-    //   publish() → addBatchToContextGraph()
+    //   publish() → verify()
     // The atomic single-tx path is tested directly in the
     // "PublishToContextGraph chain adapter method" suite below.
     expect(typeof chain.publishToContextGraph).toBe('function');
@@ -444,7 +444,7 @@ describe('PublishToContextGraph chain adapter method', () => {
     /**
      * publishToContextGraph combines:
      * - publishKnowledgeAssets (creates KC, verifies receiver sigs)
-     * - addBatchToContextGraph (registers batch, verifies participant sigs)
+     * - verify (registers batch, verifies participant sigs)
      * in a single atomic call.
      *
      * Expected interface on ChainAdapter:
@@ -462,7 +462,7 @@ describe('PublishToContextGraph chain adapter method', () => {
     const chain = new MockChainAdapter('mock:31337');
 
     // Create context graph first
-    const { contextGraphId } = await chain.createContextGraph!({
+    const { contextGraphId } = await chain.createOnChainContextGraph({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
@@ -512,18 +512,18 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       publisherPrivateKey: publisherWallet.privateKey,
       publisherNodeIdentityId: 1n,
     });
-    await chain.createContextGraph!({
+    await chain.createOnChainContextGraph({
       participantIdentityIds: [1n, 3n, 5n],
       requiredSignatures: 1,
     });
   });
 
   it('participant sigs are sorted by identityId before chain call (prevents contract revert)', async () => {
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q('urn:test:sort:1', 'http://schema.org/name', '"SortTest"'),
     ], { publisherPeerId: 'test-peer' });
 
-    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+    const addBatchSpy = vi.spyOn(chain, 'verify');
 
     // Provide signatures in WRONG order (5n, 1n, 3n) — they must arrive sorted
     const peer5 = new MockSignerPeer(5n);
@@ -539,7 +539,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
     await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: ['urn:test:sort:1'],
     }, {
-      contextGraphId: '1',
+      publishContextGraphId: '1',
       contextGraphSignatures: sigs,
     });
 
@@ -553,11 +553,11 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
   });
 
   it('duplicate identityId participant sigs are removed (prevents contract revert)', async () => {
-    await publisher.writeToWorkspace(PARANET, [
+    await publisher.share(PARANET, [
       q('urn:test:dedup:1', 'http://schema.org/name', '"DedupTest"'),
     ], { publisherPeerId: 'test-peer' });
 
-    const addBatchSpy = vi.spyOn(chain, 'addBatchToContextGraph');
+    const addBatchSpy = vi.spyOn(chain, 'verify');
 
     const peer = new MockSignerPeer(3n);
     const root = ethers.keccak256(ethers.toUtf8Bytes('dedup-test'));
@@ -568,7 +568,7 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
     await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: ['urn:test:dedup:1'],
     }, {
-      contextGraphId: '1',
+      publishContextGraphId: '1',
       contextGraphSignatures: sigs,
     });
 
@@ -597,7 +597,7 @@ describe('Regression: complete publish result fields', () => {
     });
 
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:test:result:1', 'http://schema.org/name', '"ResultTest"')],
     });
 
@@ -635,7 +635,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     });
 
     const result = await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:test:failfast:1', 'http://schema.org/name', '"FailFast"')],
       receiverSignatureProvider: async () => [],
     });
@@ -665,7 +665,7 @@ describe('Regression: fail-fast when receiver signatures are insufficient', () =
     });
 
     await publisher.publish({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       quads: [q('urn:test:localstore:1', 'http://schema.org/name', '"LocalStore"')],
     });
 

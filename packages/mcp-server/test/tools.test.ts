@@ -25,8 +25,8 @@ const mockClient = {
   status: vi.fn().mockResolvedValue(mockStatus),
   query: vi.fn().mockResolvedValue(mockQueryResult),
   publish: vi.fn().mockResolvedValue(mockPublishResult),
-  listParanets: vi.fn(),
-  createParanet: vi.fn(),
+  listContextGraphs: vi.fn(),
+  createContextGraph: vi.fn(),
   agents: vi.fn(),
   subscribe: vi.fn(),
 };
@@ -48,7 +48,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
 
   const server = new McpServer({ name: 'dkg-test', version: '9.0.0' });
 
-  const PARANET = 'dev-coordination';
+  const CONTEXT_GRAPH = 'dev-coordination';
   const DG = 'https://ontology.dkg.io/devgraph#';
   const esc = escapeSparqlLiteral;
 
@@ -88,7 +88,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
 
   async function sparql(query: string): Promise<Bindings> {
     const client = await getClient();
-    const result = await client.query(query, PARANET);
+    const result = await client.query(query, CONTEXT_GRAPH);
     return parseBindings(result.result);
   }
 
@@ -217,7 +217,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
 
   server.registerTool('dkg_publish', {
     title: 'Publish to DKG',
-    description: 'Publish RDF quads to the dev-coordination paranet.',
+    description: 'Publish RDF quads to the dev-coordination context graph.',
     inputSchema: {
       quads: z.array(z.object({
         subject: z.string(),
@@ -229,7 +229,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
   }, async ({ quads }) => {
     try {
       const client = await getClient();
-      const result = await client.publish(PARANET, quads);
+      const result = await client.publish(CONTEXT_GRAPH, quads);
       return ok(`Published ${quads.length} quads. KC: ${result.kcId}, status: ${result.status}`);
     } catch (e) { return err(`Publish error: ${formatError(e)}`); }
   });
@@ -285,7 +285,7 @@ describe('DKG MCP Server Tools', () => {
       subject: '<urn:session:1>',
       predicate: '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
       object: '<https://ontology.dkg.io/devgraph#Session>',
-      graph: '<urn:paranet:dev-coordination>',
+      graph: '<urn:context-graph:dev-coordination>',
     }];
 
     const result = await client.callTool({

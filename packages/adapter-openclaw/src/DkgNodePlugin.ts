@@ -121,7 +121,7 @@ export class DkgNodePlugin {
     // --- Memory module ---
     const memoryConfig = this.config.memory;
     if (memoryConfig?.enabled) {
-      // Auto-detect memory directory from workspace if not configured
+      // Auto-detect memory directory from shared memory if not configured
       const memoryDir = memoryConfig.memoryDir
         ?? (api.workspaceDir ? `${api.workspaceDir}/memory` : undefined)
         ?? '';
@@ -193,8 +193,8 @@ export class DkgNodePlugin {
 
     try {
       const result = await client.query(checkSparql, {
-        paranetId: 'agent-memory',
-        includeWorkspace: true,
+        contextGraphId: 'agent-memory',
+        includeSharedMemory: true,
       });
       const bindings = result?.result?.bindings ?? result?.results?.bindings ?? result?.bindings ?? [];
       const countRaw = bindings[0]?.cnt;
@@ -312,73 +312,73 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, _params) => this.handleWalletBalances(),
       },
       {
-        name: 'dkg_list_paranets',
+        name: 'dkg_list_context_graphs',
         description:
-          'List all paranets this node knows about. Returns paranet IDs, names, subscription status, ' +
-          'and sync status. Use this to discover available paranets before publishing or querying.',
+          'List all contextGraphs this node knows about. Returns context graph IDs, names, subscription status, ' +
+          'and sync status. Use this to discover available contextGraphs before publishing or querying.',
         parameters: { type: 'object', properties: {}, required: [] },
-        execute: async (_toolCallId, _params) => this.handleListParanets(),
+        execute: async (_toolCallId, _params) => this.handleListContextGraphs(),
       },
       {
-        name: 'dkg_paranet_create',
+        name: 'dkg_context_graph_create',
         description:
-          'Create a new paranet on the DKG node. A paranet is a scoped knowledge domain ' +
-          'that organizes published knowledge. Use dkg_list_paranets first to check if the ' +
-          'paranet already exists. Returns the paranet ID and URI (did:dkg:context-graph:<id>). ' +
+          'Create a new context graph on the DKG node. A context graph is a scoped knowledge domain ' +
+          'that organizes published knowledge. Use dkg_list_context_graphs first to check if the ' +
+          'context graph already exists. Returns the context graph ID and URI (did:dkg:context-graph:<id>). ' +
           'The ID is auto-generated from the name if not provided.',
         parameters: {
           type: 'object',
           properties: {
             name: {
               type: 'string',
-              description: 'Human-readable paranet name (e.g. "My Research Paranet")',
+              description: 'Human-readable context graph name (e.g. "My Research Context Graph")',
             },
             description: {
               type: 'string',
-              description: 'Optional description of what this paranet contains',
+              description: 'Optional description of what this context graph contains',
             },
             id: {
               type: 'string',
-              description: 'Optional custom paranet ID slug. Auto-generated from name if omitted (e.g. "My Research" → "my-research").',
+              description: 'Optional custom context graph ID slug. Auto-generated from name if omitted (e.g. "My Research" → "my-research").',
             },
           },
           required: ['name'],
         },
-        execute: async (_toolCallId, args) => this.handleParanetCreate(args),
+        execute: async (_toolCallId, args) => this.handleContextGraphCreate(args),
       },
       {
         name: 'dkg_subscribe',
         description:
-          'Subscribe to a paranet to receive its data and updates. Subscription is immediate; ' +
+          'Subscribe to a context graph to receive its data and updates. Subscription is immediate; ' +
           'data sync from connected peers happens in the background and may take time depending on ' +
-          'the paranet size. Use dkg_list_paranets to check sync status afterward.',
+          'the context graph size. Use dkg_list_context_graphs to check sync status afterward.',
         parameters: {
           type: 'object',
           properties: {
-            paranet_id: {
+            context_graph_id: {
               type: 'string',
-              description: 'Paranet ID to subscribe to (e.g. "my-research")',
+              description: 'Context Graph ID to subscribe to (e.g. "my-research")',
             },
-            include_workspace: {
+            include_shared_memory: {
               type: 'string',
-              description: 'Set to "false" to skip syncing workspace/draft data. Default: true.',
+              description: 'Set to "false" to skip syncing shared memory/draft data. Default: true.',
             },
           },
-          required: ['paranet_id'],
+          required: ['context_graph_id'],
         },
         execute: async (_toolCallId, args) => this.handleSubscribe(args),
       },
       {
         name: 'dkg_publish',
         description:
-          'Publish knowledge to a DKG paranet as an array of quads (subject/predicate/object). ' +
+          'Publish knowledge to a DKG context graph as an array of quads (subject/predicate/object). ' +
           'Object values that look like URIs (http://, https://, urn:, did:) are treated as URIs; ' +
           'all other values become string literals automatically. ' +
           'By default, published data is private (ownerOnly). Set access_policy to "public" to make it readable by anyone.',
         parameters: {
           type: 'object',
           properties: {
-            paranet_id: { type: 'string', description: 'Target paranet ID (e.g. "testing", "my-research")' },
+            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "testing", "my-research")' },
             quads: {
               type: 'array',
               items: {
@@ -409,7 +409,7 @@ export class DkgNodePlugin {
                 'Required when access_policy is "allowList". Must not be set for other policies.',
             },
           },
-          required: ['paranet_id', 'quads'],
+          required: ['context_graph_id', 'quads'],
         },
         execute: async (_toolCallId, args) => this.handlePublish(args),
       },
@@ -423,8 +423,8 @@ export class DkgNodePlugin {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE)' },
-            paranet_id: { type: 'string', description: 'Optional paranet scope — omit to query all data' },
-            include_workspace: { type: 'string', description: 'Set to "true" to also search workspace (draft/ephemeral) data. Default: false.' },
+            context_graph_id: { type: 'string', description: 'Optional context graph scope — omit to query all data' },
+            include_shared_memory: { type: 'string', description: 'Set to "true" to also search shared memory (draft/ephemeral) data. Default: false.' },
           },
           required: ['sparql'],
         },
@@ -511,10 +511,10 @@ export class DkgNodePlugin {
     }
   }
 
-  private async handleListParanets(): Promise<OpenClawToolResult> {
+  private async handleListContextGraphs(): Promise<OpenClawToolResult> {
     try {
-      const result = await this.client.listParanets();
-      return this.json({ paranets: result.paranets, count: result.paranets.length });
+      const result = await this.client.listContextGraphs();
+      return this.json({ contextGraphs: result.contextGraphs, count: result.contextGraphs.length });
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -522,7 +522,7 @@ export class DkgNodePlugin {
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const paranetId = String(args.paranet_id);
+      const contextGraphId = String(args.context_graph_id);
       const rawQuads = args.quads;
 
       if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
@@ -574,7 +574,7 @@ export class DkgNodePlugin {
         );
       }
 
-      const result = await this.client.publish(paranetId, quads, undefined, {
+      const result = await this.client.publish(contextGraphId, quads, undefined, {
         accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList',
         allowedPeers,
       });
@@ -587,11 +587,11 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
-      const paranetId = args.paranet_id ? String(args.paranet_id) : undefined;
-      const includeWorkspace = args.include_workspace === 'true' || args.include_workspace === true;
+      const contextGraphId = args.context_graph_id ? String(args.context_graph_id) : undefined;
+      const includeSharedMemory = args.include_shared_memory === 'true' || args.include_shared_memory === true;
       const result = await this.client.query(sparql, {
-        paranetId,
-        includeWorkspace: includeWorkspace || undefined,
+        contextGraphId,
+        includeSharedMemory: includeSharedMemory || undefined,
       });
       return this.json(result);
     } catch (err: any) {
@@ -652,7 +652,7 @@ export class DkgNodePlugin {
     }
   }
 
-  private async handleParanetCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+  private async handleContextGraphCreate(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const name = String(args.name ?? '').trim();
       if (!name) {
@@ -661,16 +661,16 @@ export class DkgNodePlugin {
       const explicitId = args.id != null && String(args.id).trim();
       const id = explicitId || slugify(name);
       if (!id) {
-        return this.error('Could not derive a valid paranet ID from the name. Provide an explicit "id".');
+        return this.error('Could not derive a valid context graph ID from the name. Provide an explicit "id".');
       }
       if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(id)) {
         return this.error(
-          `Invalid paranet ID "${id}". Use lowercase letters, numbers, and hyphens (e.g. "my-research"). ` +
+          `Invalid context graph ID "${id}". Use lowercase letters, numbers, and hyphens (e.g. "my-research"). ` +
           'Must start and end with a letter or number.',
         );
       }
       const description = args.description ? String(args.description).trim() : undefined;
-      const result = await this.client.createParanet(id, name, description);
+      const result = await this.client.createContextGraph(id, name, description);
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
@@ -679,13 +679,13 @@ export class DkgNodePlugin {
 
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const paranetId = String(args.paranet_id ?? '').trim();
-      if (!paranetId) {
-        return this.error('"paranet_id" is required.');
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) {
+        return this.error('"context_graph_id" is required.');
       }
-      const includeWorkspace = args.include_workspace === 'false' ? false : undefined;
-      const result = await this.client.subscribe(paranetId, {
-        includeWorkspace,
+      const includeSharedMemory = args.include_shared_memory === 'false' ? false : undefined;
+      const result = await this.client.subscribe(contextGraphId, {
+        includeSharedMemory,
       });
       return this.json(result);
     } catch (err: any) {
@@ -703,7 +703,7 @@ export class DkgNodePlugin {
   }
 }
 
-/** Convert a human-readable name into a URL-safe slug (e.g. "My Research Paranet" → "my-research-paranet"). */
+/** Convert a human-readable name into a URL-safe slug (e.g. "My Research Context Graph" → "my-research-context-graph"). */
 function slugify(name: string): string {
   return name
     .toLowerCase()

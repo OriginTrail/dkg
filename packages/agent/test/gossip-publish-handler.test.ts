@@ -9,14 +9,14 @@ const PARANET = 'test-gossip-handler';
 
 function makePublishMessage(opts: {
   ual?: string;
-  paranetId?: string;
+  contextGraphId?: string;
   nquads?: string;
   kas?: Array<{ tokenId: number; rootEntity: string; privateMerkleRoot: Uint8Array; privateTripleCount: number }>;
 }): Uint8Array {
   return encodePublishRequest({
     ual: opts.ual ?? '',
     nquads: new TextEncoder().encode(opts.nquads ?? '<http://s> <http://p> <http://o> .'),
-    paranetId: opts.paranetId ?? PARANET,
+    paranetId: opts.contextGraphId ?? PARANET,
     kas: opts.kas ?? [],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -28,7 +28,7 @@ function makePublishMessage(opts: {
   });
 }
 
-function createHandler(store?: OxigraphStore, callbacks?: Partial<{ paranetExists: (id: string) => Promise<boolean>; subscribeToParanet: (id: string) => void }>) {
+function createHandler(store?: OxigraphStore, callbacks?: Partial<{ contextGraphExists: (id: string) => Promise<boolean>; subscribeToContextGraph: (id: string) => void }>) {
   const s = store ?? new OxigraphStore();
   return {
     store: s,
@@ -37,8 +37,8 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{ paranetExist
       undefined,
       new Map<string, any>(),
       {
-        paranetExists: callbacks?.paranetExists ?? (async () => false),
-        subscribeToParanet: callbacks?.subscribeToParanet ?? (() => {}),
+        contextGraphExists: callbacks?.contextGraphExists ?? (async () => false),
+        subscribeToContextGraph: callbacks?.subscribeToContextGraph ?? (() => {}),
       },
     ),
   };
@@ -49,7 +49,7 @@ describe('GossipPublishHandler', () => {
     const { store, handler } = createHandler();
 
     const data = makePublishMessage({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     });
 
@@ -89,12 +89,12 @@ describe('GossipPublishHandler', () => {
     expect(insertSpy).not.toHaveBeenCalled();
   });
 
-  it('rejects gossip when paranetId mismatches topic', async () => {
+  it('rejects gossip when contextGraphId mismatches topic', async () => {
     const { store, handler } = createHandler();
     const insertSpy = vi.spyOn(store, 'insert');
 
     const data = makePublishMessage({
-      paranetId: 'wrong-paranet',
+      contextGraphId: 'wrong-paranet',
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     });
 
@@ -112,7 +112,7 @@ describe('GossipPublishHandler', () => {
 
     const data = makePublishMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       nquads,
       kas,
     });
@@ -134,7 +134,7 @@ describe('GossipPublishHandler', () => {
 
     const data = makePublishMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
       kas: [],
     });

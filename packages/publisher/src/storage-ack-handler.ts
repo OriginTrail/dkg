@@ -143,10 +143,10 @@ export class StorageACKHandler {
       }
     }
 
-    // Recompute kaCount and publicByteSize from verified quads rather than
-    // trusting the publisher's claimed values. The ACK digest is signed over
-    // the VERIFIED values — if the publisher submits different values on-chain,
-    // the ACK signatures won't recover correctly and the tx will revert.
+    // Recompute kaCount from verified quads. publicByteSize uses the claimed
+    // value because N-Quad serialization may differ between publisher and
+    // handler (different graph URIs). The merkle root already proves data
+    // integrity, so byte-size manipulation cannot change the actual content.
     const verifiedRootSubjects = new Set(
       swmQuads.map(q => q.subject).filter(s => !s.includes('/.well-known/genid/')),
     );

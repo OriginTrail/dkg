@@ -17,31 +17,31 @@ import { ethers } from 'ethers';
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
 export interface GossipPublishHandlerCallbacks {
-  paranetExists: (id: string) => Promise<boolean>;
-  subscribeToParanet: (id: string, options?: { trackSyncScope?: boolean }) => void;
+  contextGraphExists: (id: string) => Promise<boolean>;
+  subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
   onPhase?: GossipPhaseCallback;
 }
 
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
-  private readonly subscribedParanets: Map<string, any>;
+  private readonly subscribedContextGraphs: Map<string, any>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
 
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    subscribedParanets: Map<string, any>,
+    subscribedContextGraphs: Map<string, any>,
     callbacks: GossipPublishHandlerCallbacks,
   ) {
     this.store = store;
     this.chain = chain;
-    this.subscribedParanets = subscribedParanets;
+    this.subscribedContextGraphs = subscribedContextGraphs;
     this.callbacks = callbacks;
   }
 
-  async handlePublishMessage(data: Uint8Array, paranetId: string, onPhase?: GossipPhaseCallback): Promise<void> {
+  async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback): Promise<void> {
     let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
@@ -54,13 +54,13 @@ export class GossipPublishHandler {
         }
 
         if (!request.paranetId) {
-          request.paranetId = paranetId;
-        } else if (request.paranetId !== paranetId) {
+          request.paranetId = contextGraphId;
+        } else if (request.paranetId !== contextGraphId) {
           // If the decoded paranetId contains non-printable characters, this is a
           // different message type (e.g. finalization) that was decoded as a publish
           // request. Silently skip to avoid spammy WARN logs.
           if (/[^\x20-\x7E]/.test(request.paranetId)) return;
-          this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic paranetId "${paranetId}", ignoring`);
+          this.log.warn(ctx, `Gossip: request paranetId "${request.paranetId}" does not match topic contextGraphId "${contextGraphId}", ignoring`);
           return;
         }
       } finally {
@@ -80,28 +80,28 @@ export class GossipPublishHandler {
       const dataGraph = graphManager.dataGraphUri(request.paranetId);
       let normalized = quads.map(q => ({ ...q, graph: dataGraph }));
 
-      // When receiving ontology-topic broadcasts, skip paranet definition
-      // triples for paranets we already have locally. This prevents duplicate
-      // creator/timestamp triples when multiple nodes create the same paranet
+      // When receiving ontology-topic broadcasts, skip context graph definition
+      // triples for context graphs we already have locally. This prevents duplicate
+      // creator/timestamp triples when multiple nodes create the same context graph
       // during simultaneous startup.
-      // Also auto-subscribe to any newly discovered paranets.
+      // Also auto-subscribe to any newly discovered context graphs.
       if (request.paranetId === SYSTEM_PARANETS.ONTOLOGY) {
-        const paranetPrefix = 'did:dkg:context-graph:';
-        const incomingParanetUris = new Set(
+        const contextGraphPrefix = 'did:dkg:context-graph:';
+        const incomingContextGraphUris = new Set(
           normalized
             .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_PARANET)
             .map(q => q.subject),
         );
-        if (incomingParanetUris.size > 0) {
+        if (incomingContextGraphUris.size > 0) {
           const duplicateUris = new Set<string>();
-          const newParanetIds: string[] = [];
-          for (const uri of incomingParanetUris) {
-            const id = uri.startsWith(paranetPrefix) ? uri.slice(paranetPrefix.length) : null;
+          const newContextGraphIds: string[] = [];
+          for (const uri of incomingContextGraphUris) {
+            const id = uri.startsWith(contextGraphPrefix) ? uri.slice(contextGraphPrefix.length) : null;
             if (!id) continue;
-            if (await this.callbacks.paranetExists(id)) {
+            if (await this.callbacks.contextGraphExists(id)) {
               duplicateUris.add(uri);
             } else if (id !== SYSTEM_PARANETS.AGENTS && id !== SYSTEM_PARANETS.ONTOLOGY) {
-              newParanetIds.push(id);
+              newContextGraphIds.push(id);
             }
           }
           if (duplicateUris.size > 0) {
@@ -113,25 +113,25 @@ export class GossipPublishHandler {
             normalized = normalized.filter(q => !duplicateUris.has(q.subject) && !activityUris.has(q.subject));
           }
 
-          for (const newId of newParanetIds) {
+          for (const newId of newContextGraphIds) {
             const nameQuad = normalized.find(q =>
-              q.subject === `${paranetPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
+              q.subject === `${contextGraphPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
             );
             const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
-            this.subscribedParanets.set(newId, {
+            this.subscribedContextGraphs.set(newId, {
               name,
               subscribed: true,
               synced: true,
-              onChainId: this.subscribedParanets.get(newId)?.onChainId,
+              onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             });
-            this.callbacks.subscribeToParanet(newId, { trackSyncScope: false });
-            this.log.info(ctx, `Discovered paranet "${name}" (${newId}) via gossip — auto-subscribed`);
+            this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: false });
+            this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed`);
           }
         }
       }
 
       // Structural validation (I-002): reject malformed gossip before inserting.
-      // Only applies to real publishes with a manifest — ontology/paranet
+      // Only applies to real publishes with a manifest — ontology/context graph
       // broadcasts (no UAL or no KAs) bypass validation.
       phase?.('validate', 'start');
       let isReplay = false;
@@ -197,7 +197,7 @@ export class GossipPublishHandler {
 
         const kcMeta = {
           ual: request.ual,
-          paranetId: request.paranetId,
+          contextGraphId: request.paranetId,
           merkleRoot,
           kaCount: kaMetadata.length,
           publisherPeerId: request.publisherAddress || 'unknown',
@@ -238,7 +238,9 @@ export class GossipPublishHandler {
         phase?.('store', 'end');
       }
     } catch (err) {
-      this.log.warn(ctx, `Gossip: failed to process publish broadcast: ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (/wire type|index out of range|offset|unexpected tag/i.test(errMsg)) return;
+      this.log.warn(ctx, `Gossip: failed to process publish broadcast: ${errMsg}`);
     }
   }
 
@@ -308,7 +310,7 @@ export class GossipPublishHandler {
   private async promoteGossipToConfirmed(
     ual: string,
     paranetId: string,
-    _kcMeta: { ual: string; paranetId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
+    _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
     _kaMetadata: KAMetadata[],
   ): Promise<void> {
     const tentativeStatus = getTentativeStatusQuad(ual, paranetId);

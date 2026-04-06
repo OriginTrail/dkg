@@ -13,7 +13,7 @@ import {
   updateRetentionSettings,
   fetchTelemetrySettings,
   updateTelemetrySettings,
-  fetchParanets,
+  fetchContextGraphs,
   fetchCatchupStatus,
   type CatchupStatusResponse,
 } from '../api.js';
@@ -552,16 +552,16 @@ function DevModeToggle() {
 }
 
 function CatchupStatusSection() {
-  const { data: paranetData } = useFetch(fetchParanets, [], 30_000);
-  const paranets = ((paranetData as any)?.paranets ?? []).filter((p: any) => p?.id);
-  const [selectedParanet, setSelectedParanet] = useState('');
+  const { data: contextGraphData } = useFetch(fetchContextGraphs, [], 30_000);
+  const contextGraphs = ((contextGraphData as any)?.contextGraphs ?? []).filter((p: any) => p?.id);
+  const [selectedContextGraph, setSelectedContextGraph] = useState('');
 
   useEffect(() => {
-    if (selectedParanet) return;
-    if (paranets.length === 0) return;
-    const preferred = paranets.find((p: any) => !p.isSystem) ?? paranets[0];
-    setSelectedParanet(preferred.id);
-  }, [selectedParanet, paranets]);
+    if (selectedContextGraph) return;
+    if (contextGraphs.length === 0) return;
+    const preferred = contextGraphs.find((p: any) => !p.isSystem) ?? contextGraphs[0];
+    setSelectedContextGraph(preferred.id);
+  }, [selectedContextGraph, contextGraphs]);
 
   const {
     data: catchup,
@@ -570,16 +570,16 @@ function CatchupStatusSection() {
     refresh,
   } = useFetch<CatchupStatusResponse | null>(
     async () => {
-      if (!selectedParanet) return null;
+      if (!selectedContextGraph) return null;
       try {
-        return await fetchCatchupStatus(selectedParanet);
+        return await fetchCatchupStatus(selectedContextGraph);
       } catch (err: any) {
         const msg = String(err?.message ?? '');
         if (msg.includes('No catch-up job found') || msg.includes('HTTP 404')) return null;
         throw err;
       }
     },
-    [selectedParanet],
+    [selectedContextGraph],
     4000,
   );
 
@@ -596,46 +596,46 @@ function CatchupStatusSection() {
     <div className="settings-card">
       <div className="settings-title">Background Sync Status</div>
       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
-        Shows the latest catch-up job for the selected paranet (triggered by subscribe).
+        Shows the latest catch-up job for the selected context graph (triggered by subscribe).
       </div>
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
         <select
           className="input"
           style={{ flex: 1, backgroundImage: 'none', paddingRight: 12 }}
-          value={selectedParanet}
-          onChange={(e) => setSelectedParanet(e.target.value)}
+          value={selectedContextGraph}
+          onChange={(e) => setSelectedContextGraph(e.target.value)}
         >
-          {paranets.length === 0 && <option value="">No paranets available</option>}
-          {paranets.map((p: any) => (
+          {contextGraphs.length === 0 && <option value="">No context graphs available</option>}
+          {contextGraphs.map((p: any) => (
             <option key={p.id} value={p.id}>{p.id}{p.isSystem ? ' (system)' : ''}</option>
           ))}
         </select>
         <button
           className="btn btn-ghost btn-sm"
           onClick={() => refresh()}
-          disabled={!selectedParanet || loading}
+          disabled={!selectedContextGraph || loading}
         >
           {loading ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
-      {!selectedParanet ? (
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select a paranet to view sync status.</div>
+      {!selectedContextGraph ? (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select a context graph to view sync status.</div>
       ) : !catchup ? (
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No catch-up job recorded yet for this paranet.</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No catch-up job recorded yet for this context graph.</div>
       ) : (
         <>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
             <span className={`badge ${statusBadgeClass}`}>status: {catchup.status}</span>
-            <span className="badge badge-info">workspace: {catchup.includeWorkspace ? 'on' : 'off'}</span>
+            <span className="badge badge-info">shared memory: {catchup.includeSharedMemory ? 'on' : 'off'}</span>
             <span className="badge badge-info">job: {catchup.jobId.slice(0, 10)}...</span>
           </div>
 
           {catchup.result && (
             <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 8 }}>
               peers {catchup.result.peersTried}/{catchup.result.syncCapablePeers} (connected {catchup.result.connectedPeers}),
-              data {catchup.result.dataSynced}, workspace {catchup.result.workspaceSynced}
+              data {catchup.result.dataSynced}, shared memory {catchup.result.sharedMemorySynced}
             </div>
           )}
 

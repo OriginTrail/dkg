@@ -14,14 +14,14 @@ import type {
   TxResult,
   ChainEvent,
   EventFilter,
-  CreateParanetParams,
-  ParanetOnChain,
+  CreateContextGraphParams,
+  ContextGraphOnChain,
   PublishParams,
   OnChainPublishResult,
   KAUpdateVerification,
-  CreateContextGraphParams,
-  CreateContextGraphResult,
-  AddBatchToContextGraphParams,
+  CreateOnChainContextGraphParams,
+  CreateOnChainContextGraphResult,
+  VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
 } from './chain-adapter.js';
@@ -212,7 +212,7 @@ export class EVMChainAdapter implements ChainAdapter {
     try {
       this.contracts.paranetV9Registry = await this.resolveContract('ParanetV9Registry');
     } catch {
-      // ParanetV9Registry not registered in Hub — createParanet/listParanetsFromChain unavailable
+      // ParanetV9Registry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
@@ -553,7 +553,33 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     this.requireV9();
 
-    const ka = this.contracts.knowledgeAssets!;
+    let signer: Wallet | undefined;
+
+    // The contract requires the original publisher to call update.
+    // Query the on-chain batch publisher and select the matching signer.
+    const storage = this.contracts.knowledgeAssetsStorage;
+    if (storage) {
+      try {
+        const onChainPublisher: string = await storage.getBatchPublisher(params.batchId);
+        if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
+          signer = this.signerPool.find(
+            (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+          );
+        }
+      } catch {
+        // Fall through to hint-based or round-robin
+      }
+    }
+
+    // Fallback: use the hint from the publisher if chain lookup failed
+    if (!signer && params.publisherAddress) {
+      signer = this.signerPool.find(
+        (s) => s.address.toLowerCase() === params.publisherAddress!.toLowerCase(),
+      );
+    }
+    if (!signer) signer = this.nextSigner();
+
+    const ka = this.contracts.knowledgeAssets!.connect(signer) as Contract;
 
     const tx = await ka.updateKnowledgeAssets(
       params.batchId,
@@ -804,16 +830,16 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Paranets (V9: ParanetV9Registry when deployed)
+  // Context Graphs (V9: ParanetV9Registry when deployed)
   // =====================================================================
 
-  async createParanet(params: CreateParanetParams): Promise<TxResult> {
+  async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
     const name = params.name ?? params.metadata?.['name'];
     if (!registry || !name) {
       throw new Error(
-        'createParanet: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
+        'createContextGraph: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
           'Deploy ParanetV9Registry and register it in the Hub, or provide name.',
       );
     }
@@ -821,13 +847,13 @@ export class EVMChainAdapter implements ChainAdapter {
     const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
     const tx = await registry.createParanetV9(onChainId, accessPolicy);
     const receipt = await tx.wait();
-    if (!receipt) throw new Error('createParanet: no receipt');
-    let paranetIdHex: string | undefined;
+    if (!receipt) throw new Error('createContextGraph: no receipt');
+    let contextGraphIdHex: string | undefined;
     for (const log of receipt.logs) {
       try {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (parsed?.name === 'ParanetCreated') {
-          paranetIdHex = String(parsed.args.paranetId);
+          contextGraphIdHex = String(parsed.args.paranetId);
           break;
         }
       } catch { /* not this contract */ }
@@ -836,32 +862,32 @@ export class EVMChainAdapter implements ChainAdapter {
     // Optionally reveal cleartext metadata on-chain
     if (params.revealOnChain) {
       const description = params.description ?? params.metadata?.['description'] ?? '';
-      await this.revealParanetMetadata(onChainId, name, description);
+      await this.revealContextGraphMetadata(onChainId, name, description);
     }
 
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
       success: true,
-      paranetId: paranetIdHex ?? onChainId,
+      contextGraphId: contextGraphIdHex ?? onChainId,
     };
   }
 
-  async submitToParanet(_kcId: string, _paranetId: string): Promise<TxResult> {
-    throw new Error('submitToParanet: not yet implemented on EVM adapter (Milestone 5)');
+  async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> {
+    throw new Error('submitToContextGraph: not yet implemented on EVM adapter (Milestone 5)');
   }
 
-  async revealParanetMetadata(paranetId: string, name: string, description: string): Promise<TxResult> {
+  async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
-    if (!registry) throw new Error('revealParanetMetadata: ParanetV9Registry not available');
-    const tx = await registry.revealMetadata(paranetId, name, description);
+    if (!registry) throw new Error('revealContextGraphMetadata: ParanetV9Registry not available');
+    const tx = await registry.revealMetadata(contextGraphId, name, description);
     const receipt = await tx.wait();
-    if (!receipt) throw new Error('revealParanetMetadata: no receipt');
+    if (!receipt) throw new Error('revealContextGraphMetadata: no receipt');
     return { hash: receipt.hash, blockNumber: receipt.blockNumber, success: true };
   }
 
-  async listParanetsFromChain(fromBlock?: number): Promise<ParanetOnChain[]> {
+  async listContextGraphsFromChain(fromBlock?: number): Promise<ContextGraphOnChain[]> {
     await this.init();
     const registry = this.contracts.paranetV9Registry;
     if (!registry) return [];
@@ -869,7 +895,7 @@ export class EVMChainAdapter implements ChainAdapter {
     const head = await this.provider.getBlockNumber();
     const PAGE = 9_000;
     const start = fromBlock ?? 0;
-    const results: ParanetOnChain[] = [];
+    const results: ContextGraphOnChain[] = [];
 
     // Paginate in PAGE-sized chunks to stay within RPC range limits.
     for (let lo = start; lo <= head; lo += PAGE) {
@@ -879,7 +905,7 @@ export class EVMChainAdapter implements ChainAdapter {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (!parsed || parsed.name !== 'ParanetCreated') continue;
         results.push({
-          paranetId: String(parsed.args.paranetId),
+          contextGraphId: String(parsed.args.paranetId),
           creator: String(parsed.args.creator),
           accessPolicy: Number(parsed.args.accessPolicy),
           blockNumber: log.blockNumber,
@@ -892,10 +918,10 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Context Graphs
+  // On-Chain Context Graphs (ContextGraphs contract)
   // =====================================================================
 
-  async createContextGraph(params: CreateContextGraphParams): Promise<CreateContextGraphResult> {
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
     if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
       throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
@@ -931,7 +957,7 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
-  async addBatchToContextGraph(params: AddBatchToContextGraphParams): Promise<TxResult> {
+  async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
     if (!this.contracts.contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');

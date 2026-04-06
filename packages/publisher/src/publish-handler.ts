@@ -25,7 +25,7 @@ import { PublishJournal, type JournalEntry } from './publish-journal.js';
 
 interface PendingPublish {
   ual: string;
-  paranetId: string;
+  contextGraphId: string;
   dataQuads: Quad[];
   metadataQuads: Quad[];
   timeout: ReturnType<typeof setTimeout>;
@@ -135,7 +135,7 @@ export class PublishHandler {
     if (!pending) return false;
 
     // Dedup guard: if already confirmed (e.g. by FinalizationHandler), skip
-    if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+    if (await this.isPublishConfirmed(ual, pending.contextGraphId)) {
       this.log.info(opCtx, `Publish ${ual} already confirmed, skipping duplicate confirmation`);
       clearTimeout(pending.timeout);
       this.pendingPublishes.delete(ual);
@@ -177,16 +177,16 @@ export class PublishHandler {
 
     // Promote in graph: remove tentative status, add confirmed (clean model: either tentative or confirmed, never both)
     try {
-      await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
-      await this.store.insert([getConfirmedStatusQuad(ual, pending.paranetId)]);
+      await this.store.delete([getTentativeStatusQuad(ual, pending.contextGraphId)]);
+      await this.store.insert([getConfirmedStatusQuad(ual, pending.contextGraphId)]);
     } catch (err) {
       this.log.error(opCtx, `Failed to promote tentative→confirmed in store: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // SWM cleanup (spec §9.0.5): delete published triples from _shared_memory
     try {
-      const swmGraph = this.graphManager.sharedMemoryUri(pending.paranetId);
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(pending.paranetId);
+      const swmGraph = this.graphManager.sharedMemoryUri(pending.contextGraphId);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(pending.contextGraphId);
       const rootEntities = new Set(pending.dataQuads.map(q => q.subject));
       for (const rootEntity of rootEntities) {
         await this.store.deleteByPattern({ graph: swmGraph, subject: rootEntity });
@@ -211,9 +211,9 @@ export class PublishHandler {
     const ctx = createOperationContext('publish');
     try {
       const request = decodePublishRequest(data);
-      const paranetId = request.paranetId;
-      this.log.info(ctx, `Received publish request from ${fromPeerId} for paranet ${paranetId}`);
-      await this.graphManager.ensureParanet(paranetId);
+      const contextGraphId = request.paranetId;
+      this.log.info(ctx, `Received publish request from ${fromPeerId} for context graph ${contextGraphId}`);
+      await this.graphManager.ensureContextGraph(contextGraphId);
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
       const quads = parseSimpleNQuads(nquadsStr);
@@ -224,8 +224,8 @@ export class PublishHandler {
         privateTripleCount: ka.privateTripleCount,
       }));
 
-      const existing = this.ownedEntities.get(paranetId) ?? new Set();
-      const validation = validatePublishRequest(quads, manifest, paranetId, existing);
+      const existing = this.ownedEntities.get(contextGraphId) ?? new Set();
+      const validation = validatePublishRequest(quads, manifest, contextGraphId, existing);
 
       if (!validation.valid) {
         return this.rejectAck(validation.errors.join('; '));
@@ -274,7 +274,7 @@ export class PublishHandler {
       }
 
       this.log.info(ctx, `Merkle verification passed, storing ${quads.length} triples as tentative`);
-      const dataGraph = this.graphManager.dataGraphUri(paranetId);
+      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const normalized = quads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
 
@@ -292,7 +292,7 @@ export class PublishHandler {
       const metadataQuads = generateTentativeMetadata(
         {
           ual: request.ual,
-          paranetId,
+          contextGraphId,
           merkleRoot: computedMerkleRoot,
           kaCount: manifest.length,
           publisherPeerId: fromPeerId,
@@ -304,12 +304,12 @@ export class PublishHandler {
 
       // ── Tentative lifecycle timeout ──
       const timeout = setTimeout(
-        () => this.expireTentativePublish(request.ual, paranetId, normalized, metadataQuads),
+        () => this.expireTentativePublish(request.ual, contextGraphId, normalized, metadataQuads),
         PublishHandler.TENTATIVE_TIMEOUT_MS,
       );
       this.pendingPublishes.set(request.ual, {
         ual: request.ual,
-        paranetId,
+        contextGraphId,
         dataQuads: normalized,
         metadataQuads,
         timeout,
@@ -324,11 +324,11 @@ export class PublishHandler {
       this.persistJournal();
 
       // Track owned entities
-      if (!this.ownedEntities.has(paranetId)) {
-        this.ownedEntities.set(paranetId, new Set());
+      if (!this.ownedEntities.has(contextGraphId)) {
+        this.ownedEntities.set(contextGraphId, new Set());
       }
       for (const m of manifest) {
-        this.ownedEntities.get(paranetId)!.add(m.rootEntity);
+        this.ownedEntities.get(contextGraphId)!.add(m.rootEntity);
       }
 
       this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
@@ -384,7 +384,7 @@ export class PublishHandler {
 
   private async expireTentativePublish(
     ual: string,
-    paranetId: string,
+    contextGraphId: string,
     dataQuads: Quad[],
     metadataQuads: Quad[],
   ): Promise<void> {
@@ -392,7 +392,7 @@ export class PublishHandler {
     this.pendingPublishes.delete(ual);
     this.persistJournal();
     try {
-      if (await this.isPublishConfirmed(ual, paranetId)) {
+      if (await this.isPublishConfirmed(ual, contextGraphId)) {
         this.log.info(ctx, `Publish already confirmed, skipping cleanup: ${ual}`);
         return;
       }
@@ -400,7 +400,7 @@ export class PublishHandler {
       await this.store.delete(dataQuads);
       await this.store.delete(metadataQuads);
 
-      const owned = this.ownedEntities.get(paranetId);
+      const owned = this.ownedEntities.get(contextGraphId);
       if (owned) {
         const subjects = new Set(dataQuads.map((q) => q.subject));
         for (const s of subjects) owned.delete(s);
@@ -420,7 +420,7 @@ export class PublishHandler {
     for (const p of this.pendingPublishes.values()) {
       entries.push({
         ual: p.ual,
-        paranetId: p.paranetId,
+        paranetId: p.contextGraphId,
         expectedPublisherAddress: p.expectedPublisherAddress,
         expectedMerkleRoot: ethers.hexlify(p.expectedMerkleRoot),
         expectedStartKAId: p.expectedStartKAId.toString(),
@@ -487,7 +487,7 @@ export class PublishHandler {
 
       this.pendingPublishes.set(entry.ual, {
         ual: entry.ual,
-        paranetId: entry.paranetId,
+        contextGraphId: entry.paranetId,
         dataQuads: [],
         metadataQuads: [],
         timeout,
@@ -520,18 +520,18 @@ export class PublishHandler {
 
     if (pending) {
       try {
-        if (await this.isPublishConfirmed(ual, pending.paranetId)) {
+        if (await this.isPublishConfirmed(ual, pending.contextGraphId)) {
           this.log.info(ctx, `Restored publish already confirmed, skipping cleanup: ${ual}`);
           return;
         }
-        const dataGraph = this.graphManager.dataGraphUri(pending.paranetId);
-        const metaGraph = this.graphManager.metaGraphUri(pending.paranetId);
+        const dataGraph = this.graphManager.dataGraphUri(pending.contextGraphId);
+        const metaGraph = this.graphManager.metaGraphUri(pending.contextGraphId);
         for (const rootEntity of pending.rootEntities) {
           await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
           await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
         }
         await this.store.deleteBySubjectPrefix(metaGraph, ual);
-        await this.store.delete([getTentativeStatusQuad(ual, pending.paranetId)]);
+        await this.store.delete([getTentativeStatusQuad(ual, pending.contextGraphId)]);
         this.log.info(ctx, `Restored tentative publish expired, data removed: ${ual} (${pending.rootEntities.length} root entities)`);
       } catch (err) {
         this.log.error(ctx, `Failed to clean up expired restored publish: ${ual} — ${err instanceof Error ? err.message : String(err)}`);
@@ -541,8 +541,8 @@ export class PublishHandler {
     }
   }
 
-  private async isPublishConfirmed(ual: string, paranetId: string): Promise<boolean> {
-    const metaGraph = `did:dkg:context-graph:${paranetId}/_meta`;
+  private async isPublishConfirmed(ual: string, contextGraphId: string): Promise<boolean> {
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const DKG_STATUS = 'http://dkg.io/ontology/status';
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <${DKG_STATUS}> ?status } } LIMIT 1`,
@@ -614,7 +614,7 @@ function protoToBigInt(val: number | { low: number; high: number; unsigned: bool
 /**
  * Minimal N-Triples/N-Quads parser for incoming publish data.
  * Accepts both N-Triples (<s> <p> <o> .) and N-Quads (<s> <p> <o> <g> .).
- * The graph component is ignored; the handler derives it from paranetId.
+ * The graph component is ignored; the handler derives it from the context graph ID.
  * Exported for tests that verify receiver recomputes the same merkle root.
  */
 export function parseSimpleNQuads(text: string): Quad[] {

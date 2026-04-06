@@ -118,7 +118,7 @@ describe('StorageACKMsg', () => {
 describe('GossipEnvelopeMsg', () => {
   const envelope: GossipEnvelopeMsg = {
     version: '10.0.0',
-    type: 'workspace-write',
+    type: 'share-write',
     contextGraphId: 'cg-42',
     agentAddress: '0xAbc123',
     timestamp: '2026-04-02T12:00:00Z',
@@ -130,7 +130,7 @@ describe('GossipEnvelopeMsg', () => {
     const encoded = encodeGossipEnvelope(envelope);
     const decoded = decodeGossipEnvelope(encoded);
     expect(decoded.version).toBe('10.0.0');
-    expect(decoded.type).toBe('workspace-write');
+    expect(decoded.type).toBe('share-write');
     expect(decoded.contextGraphId).toBe('cg-42');
     expect(decoded.agentAddress).toBe('0xAbc123');
     expect(decoded.timestamp).toBe('2026-04-02T12:00:00Z');
@@ -161,22 +161,22 @@ describe('GossipEnvelopeMsg', () => {
 describe('computeGossipSigningPayload', () => {
   it('produces a deterministic payload', () => {
     const payload = new TextEncoder().encode('test');
-    const a = computeGossipSigningPayload('workspace-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
-    const b = computeGossipSigningPayload('workspace-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
+    const a = computeGossipSigningPayload('share-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
+    const b = computeGossipSigningPayload('share-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
     expect(a).toEqual(b);
   });
 
   it('different types produce different payloads', () => {
     const payload = new TextEncoder().encode('test');
-    const a = computeGossipSigningPayload('workspace-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
+    const a = computeGossipSigningPayload('share-write', 'cg-42', '2026-04-02T12:00:00Z', payload);
     const b = computeGossipSigningPayload('finalization', 'cg-42', '2026-04-02T12:00:00Z', payload);
     expect(a).not.toEqual(b);
   });
 
   it('different context graphs produce different payloads', () => {
     const payload = new TextEncoder().encode('test');
-    const a = computeGossipSigningPayload('workspace-write', 'cg-1', '2026-04-02T12:00:00Z', payload);
-    const b = computeGossipSigningPayload('workspace-write', 'cg-2', '2026-04-02T12:00:00Z', payload);
+    const a = computeGossipSigningPayload('share-write', 'cg-1', '2026-04-02T12:00:00Z', payload);
+    const b = computeGossipSigningPayload('share-write', 'cg-2', '2026-04-02T12:00:00Z', payload);
     expect(a).not.toEqual(b);
   });
 

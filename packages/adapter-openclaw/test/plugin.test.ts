@@ -37,8 +37,8 @@ describe('DkgNodePlugin', () => {
     const toolNames = registeredTools.map(t => t.name);
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
-    expect(toolNames).toContain('dkg_list_paranets');
-    expect(toolNames).toContain('dkg_paranet_create');
+    expect(toolNames).toContain('dkg_list_context_graphs');
+    expect(toolNames).toContain('dkg_context_graph_create');
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');

@@ -171,7 +171,7 @@ describe('DkgMemoryPlugin', () => {
     expect(sparql).toContain('ImportedMemory');
   });
 
-  it('search should query workspace graph with includeWorkspace: true', async () => {
+  it('search should query shared memory graph with includeSharedMemory: true', async () => {
     const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
       results: { bindings: [] },
     });
@@ -183,13 +183,13 @@ describe('DkgMemoryPlugin', () => {
     const opts = querySpy.mock.calls[0][1];
     expect(opts).toEqual(
       expect.objectContaining({
-        paranetId: 'agent-memory',
-        includeWorkspace: true,
+        contextGraphId: 'agent-memory',
+        includeSharedMemory: true,
       }),
     );
   });
 
-  it('readFile should query workspace graph with includeWorkspace: true', async () => {
+  it('readFile should query shared memory graph with includeSharedMemory: true', async () => {
     const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
       results: { bindings: [] },
     });
@@ -201,8 +201,8 @@ describe('DkgMemoryPlugin', () => {
     const opts = querySpy.mock.calls[0][1];
     expect(opts).toEqual(
       expect.objectContaining({
-        paranetId: 'agent-memory',
-        includeWorkspace: true,
+        contextGraphId: 'agent-memory',
+        includeSharedMemory: true,
       }),
     );
   });

@@ -16,7 +16,7 @@ interface SimConfig {
   opsPerSec: number;
   concurrency: number;
   kasPerPublish: number;
-  paranet: string;
+  contextGraph: string;
   enabledOps: string[];
 }
 
@@ -243,7 +243,7 @@ async function execPublish(
   signal: AbortSignal,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const graph = `did:dkg:context-graph:${config.paranet}`;
+  const graph = `did:dkg:context-graph:${config.contextGraph}`;
   const quads = Array.from({ length: config.kasPerPublish }, () => {
     const entity = `did:dkg:entity:sim-${rndId()}`;
     return {
@@ -258,7 +258,7 @@ async function execPublish(
     const res = await fetch(`http://127.0.0.1:${node.port}/api/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ paranetId: config.paranet, quads }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
       signal: opSignal(signal, 'publish'),
     });
     const body = (await res.json()) as { kcId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };
@@ -303,7 +303,7 @@ async function execQuery(
     const res = await fetch(`http://127.0.0.1:${node.port}/api/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ sparql, paranetId: config.paranet }),
+      body: JSON.stringify({ sparql, contextGraphId: config.contextGraph }),
       signal: opSignal(signal, 'query'),
     });
     const body = (await res.json()) as { result?: { bindings?: unknown[] }; phases?: Record<string, number> };
@@ -337,7 +337,7 @@ async function execWorkspace(
   signal: AbortSignal,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const graph = `did:dkg:context-graph:${config.paranet}`;
+  const graph = `did:dkg:context-graph:${config.contextGraph}`;
   const entity = `did:dkg:entity:sim-ws-${rndId()}`;
   const quads = [
     {
@@ -349,13 +349,13 @@ async function execWorkspace(
   ];
 
   try {
-    const res = await fetch(`http://127.0.0.1:${node.port}/api/workspace/write`, {
+    const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/write`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ paranetId: config.paranet, quads }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
       signal: opSignal(signal, 'workspace'),
     });
-    const body = (await res.json()) as { workspaceOperationId?: string; phases?: Record<string, number> };
+    const body = (await res.json()) as { shareOperationId?: string; phases?: Record<string, number> };
     const dur = Date.now() - t0;
     return {
       type: 'op',
@@ -363,7 +363,7 @@ async function execWorkspace(
       nodeId: node.id,
       success: res.ok,
       durationMs: dur,
-      detail: `opId: ${body.workspaceOperationId?.slice(0, 8) ?? '?'}`,
+      detail: `opId: ${body.shareOperationId?.slice(0, 8) ?? '?'}`,
       phases: body.phases ?? {},
     };
   } catch (err) {
@@ -434,26 +434,26 @@ async function execChat(
 // Simulation runner
 // ---------------------------------------------------------------------------
 
-async function ensureParanet(nodes: NodeInfo[], paranetId: string, signal: AbortSignal): Promise<void> {
+async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, signal: AbortSignal): Promise<void> {
   try {
-    // Create paranet on every node that will be used for publish/workspace/query.
-    // Each node checks paranetExists() locally, so all must have the paranet definition.
-    broadcast({ type: 'error', message: `Ensuring paranet "${paranetId}" exists on all nodes...` });
+    // Create context graph on every node that will be used for publish/shared-memory/query.
+    // Each node checks contextGraphExists() locally, so all must have the context graph definition.
+    broadcast({ type: 'error', message: `Ensuring context graph "${contextGraphId}" exists on all nodes...` });
     const createBody = JSON.stringify({
-      id: paranetId,
-      name: paranetId,
+      id: contextGraphId,
+      name: contextGraphId,
       description: `Auto-created by sim engine`,
     });
     const results = await Promise.allSettled(
       nodes.map(async (n) => {
         const existsRes = await fetch(
-          `http://127.0.0.1:${n.port}/api/paranet/exists?id=${encodeURIComponent(paranetId)}`,
+          `http://127.0.0.1:${n.port}/api/context-graph/exists?id=${encodeURIComponent(contextGraphId)}`,
           { signal, headers: authHeaders(n) },
         );
         const existsData = (await existsRes.json()) as { exists?: boolean };
         if (existsData.exists) return;
 
-        const createRes = await fetch(`http://127.0.0.1:${n.port}/api/paranet/create`, {
+        const createRes = await fetch(`http://127.0.0.1:${n.port}/api/context-graph/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders(n) },
           body: createBody,
@@ -469,10 +469,10 @@ async function ensureParanet(nodes: NodeInfo[], paranetId: string, signal: Abort
     for (const r of results) {
       if (r.status === 'rejected') throw r.reason;
     }
-    broadcast({ type: 'error', message: `Paranet "${paranetId}" ready on all nodes.` });
+    broadcast({ type: 'error', message: `Context graph "${contextGraphId}" ready on all nodes.` });
     await new Promise((r) => setTimeout(r, 500));
   } catch (err) {
-    broadcast({ type: 'error', message: `Paranet setup failed: ${err instanceof Error ? err.message : String(err)}` });
+    broadcast({ type: 'error', message: `Context graph setup failed: ${err instanceof Error ? err.message : String(err)}` });
   }
 }
 
@@ -481,7 +481,7 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
 
   await loadNodeTokens(nodes);
 
-  await ensureParanet(nodes, config.paranet, signal);
+  await ensureContextGraph(nodes, config.contextGraph, signal);
 
   if (config.enabledOps.includes('chat')) {
     await discoverPeerIds(nodes, signal);
@@ -644,7 +644,7 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
 
     config.concurrency = config.concurrency ?? 10;
     config.kasPerPublish = config.kasPerPublish ?? 1;
-    config.paranet = config.paranet ?? 'devnet-test';
+    config.contextGraph = config.contextGraph ?? 'devnet-test';
     config.name = config.name ?? `Sim-${rndId()}`;
 
     const abort = new AbortController();

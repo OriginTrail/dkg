@@ -295,8 +295,9 @@ create_node_config() {
   local hub_addr
   hub_addr=$(cat "$DEVNET_DIR/hardhat/hub_address" 2>/dev/null || echo "")
 
-  # Node 1 is the relay
-  if [ "$node_num" -eq 1 ]; then
+  # Nodes 1-4 are core (V10 ACK quorum requires >= 3 core peers besides
+  # the publisher). Node 5+ are edge for heterogeneous testing.
+  if [ "$node_num" -le 4 ]; then
     node_role="core"
   fi
 
@@ -339,7 +340,7 @@ create_node_config() {
   "nodeRole": "${node_role}",
   ${relay_value}
   ${store_block}
-  "paranets": ["devnet-test", "origin-trail-game"],
+  "contextGraphs": ["devnet-test", "origin-trail-game"],
   ${devnet_auth_block}
   "chain": {
     "type": "evm",
@@ -597,8 +598,8 @@ cmd_start() {
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 
-  # Register paranets once from the deployer account so nodes don't each attempt it
-  log "Registering paranets on-chain..."
+  # Register context graphs once from the deployer account so nodes don't each attempt it
+  log "Registering context graphs on-chain..."
   cd "$REPO_ROOT/packages/evm-module" && node -e "
     const { ethers } = require('ethers');
     const fs = require('fs');
@@ -610,17 +611,17 @@ cmd_start() {
       if (!registryAddr) { console.log('ParanetV9Registry not deployed, skipping'); return; }
       const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ParanetV9Registry.json', 'utf8'));
       const registry = new ethers.Contract(registryAddr, abi, deployer);
-      const paranets = ['devnet-test', 'origin-trail-game'];
-      for (const name of paranets) {
+      const contextGraphs = ['devnet-test', 'origin-trail-game'];
+      for (const name of contextGraphs) {
         const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
         try {
           const tx = await registry.createParanetV9(onChainId, 0);
           await tx.wait();
-          console.log('Registered paranet: ' + name + ' (' + onChainId.slice(0, 16) + '...)');
+          console.log('Registered context graph: ' + name + ' (' + onChainId.slice(0, 16) + '...)');
         } catch (e) {
           const data = e.data || e.message?.match(/data=\"(0x[0-9a-f]+)\"/)?.[1];
           if (data === '0x8f53dc71' || e.message?.includes('ParanetAlreadyExists')) {
-            console.log('Paranet already exists: ' + name);
+            console.log('Context graph already exists: ' + name);
           } else {
             console.log('Failed to register ' + name + ': ' + e.message);
           }
@@ -636,7 +637,7 @@ cmd_start() {
   for i in $(seq 1 "$NUM_NODES"); do
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
-    [ "$i" -eq 1 ] && role="relay"
+    [ "$i" -le 4 ] && role="core"
     local store_label="oxigraph-worker"
     if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
       [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"

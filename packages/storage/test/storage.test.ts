@@ -308,18 +308,18 @@ describe('N-Quads literal escaping (regression for parser errors)', () => {
         subject: 'urn:test:turn:1',
         predicate: 'http://ex.org/gameState',
         object: `"${escapeNQuads(gameStateJson)}"`,
-        graph: 'http://ex.org/workspace',
+        graph: 'http://ex.org/shared-memory',
       },
       {
         subject: 'urn:test:turn:1',
         predicate: 'http://ex.org/message',
         object: `"${escapeNQuads('Line1\nLine2\r\nLine3')}"`,
-        graph: 'http://ex.org/workspace',
+        graph: 'http://ex.org/shared-memory',
       },
     ]);
 
     const result = await store.query(
-      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/workspace> { ?s ?p ?o } }',
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <http://ex.org/shared-memory> { ?s ?p ?o } }',
     );
     expect(result.type).toBe('quads');
     if (result.type !== 'quads') return;
@@ -410,7 +410,7 @@ describe('PrivateContentStore', () => {
 
   it('stores and retrieves private triples', async () => {
     const entity = 'did:dkg:agent:QmBot';
-    const paranet = 'agent-registry';
+    const contextGraph = 'agent-registry';
     const quads: Quad[] = [
       {
         subject: entity,
@@ -419,10 +419,10 @@ describe('PrivateContentStore', () => {
         graph: '',
       },
     ];
-    await ps.storePrivateTriples(paranet, entity, quads);
-    expect(ps.hasPrivateTriples(paranet, entity)).toBe(true);
+    await ps.storePrivateTriples(contextGraph, entity, quads);
+    expect(ps.hasPrivateTriples(contextGraph, entity)).toBe(true);
 
-    const retrieved = await ps.getPrivateTriples(paranet, entity);
+    const retrieved = await ps.getPrivateTriples(contextGraph, entity);
     expect(retrieved.length).toBe(1);
     expect(retrieved[0].subject).toBe(entity);
     expect(retrieved[0].object).toBe('"hidden"');

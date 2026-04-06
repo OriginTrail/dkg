@@ -415,62 +415,64 @@ describe('MockChainAdapter V9', () => {
   });
 
   // =====================================================================
-  // Paranets
+  // Context graphs (V9 registry)
   // =====================================================================
 
-  it('creates a paranet with legacy paranetId + metadata', async () => {
+  it('creates a context graph with legacy explicit contextGraphId + metadata', async () => {
     const adapter = createAdapter();
-    const result = await adapter.createParanet({
-      paranetId: 'test-paranet',
+    const contextGraphId = 'test-context-graph';
+    const result = await adapter.createContextGraph({
+      contextGraphId,
       metadata: { name: 'Test' },
     });
     expect(result.success).toBe(true);
-    expect(result.paranetId).toBe('test-paranet');
+    expect(result.contextGraphId).toBe(contextGraphId);
   });
 
-  it('creates a paranet with V9 name (privacy-preserving: hash-based ID)', async () => {
+  it('creates a context graph with a name (privacy-preserving: hash-based on-chain ID)', async () => {
     const adapter = createAdapter();
-    const result = await adapter.createParanet({
-      name: 'MyParanet',
-      description: 'A test paranet',
+    const result = await adapter.createContextGraph({
+      name: 'MyContextGraph',
+      description: 'A test context graph',
       accessPolicy: 0,
     });
     expect(result.success).toBe(true);
-    expect(result.paranetId).toBeDefined();
-    expect(result.paranetId).toMatch(/^0x/);
+    expect(result.contextGraphId).toBeDefined();
+    expect(result.contextGraphId).toMatch(/^0x/);
   });
 
-  it('rejects duplicate paranet creation', async () => {
+  it('rejects duplicate context graph creation', async () => {
     const adapter = createAdapter();
-    await adapter.createParanet({ paranetId: 'dup-test', metadata: { name: 'First' } });
+    await adapter.createContextGraph({ contextGraphId: 'dup-test', metadata: { name: 'First' } });
     await expect(
-      adapter.createParanet({ paranetId: 'dup-test', metadata: { name: 'Second' } }),
+      adapter.createContextGraph({ contextGraphId: 'dup-test', metadata: { name: 'Second' } }),
     ).rejects.toThrow(/already exists/);
   });
 
-  it('reveals paranet metadata', async () => {
+  it('reveals context graph metadata', async () => {
     const adapter = createAdapter();
-    const result = await adapter.createParanet({ paranetId: 'reveal-test' });
+    const contextGraphId = 'reveal-test';
+    const result = await adapter.createContextGraph({ contextGraphId });
     expect(result.success).toBe(true);
-    await adapter.revealParanetMetadata!('reveal-test', 'Revealed Name', 'A description');
+    await adapter.revealContextGraphMetadata!(contextGraphId, 'Revealed Name', 'A description');
   });
 
-  it('revealParanetMetadata rejects unknown paranet', async () => {
+  it('revealContextGraphMetadata rejects unknown context graph', async () => {
     const adapter = createAdapter();
     await expect(
-      adapter.revealParanetMetadata!('unknown-id', 'Name', 'Desc'),
+      adapter.revealContextGraphMetadata!('unknown-id', 'Name', 'Desc'),
     ).rejects.toThrow(/not found/);
   });
 
-  it('listParanetsFromChain returns empty when mock has no chain events', async () => {
+  it('listContextGraphsFromChain returns empty when mock has no chain events', async () => {
     const adapter = createAdapter();
-    const list = await adapter.listParanetsFromChain!();
+    const list = await adapter.listContextGraphsFromChain!();
     expect(list).toEqual([]);
   });
 
-  it('submits KC to paranet', async () => {
+  it('submits KC to a context graph', async () => {
     const adapter = createAdapter();
-    const result = await adapter.submitToParanet('kc-1', 'paranet-1');
+    const result = await adapter.submitToContextGraph('kc-1', 'cg-1');
     expect(result.success).toBe(true);
   });
 
@@ -506,9 +508,9 @@ describe('MockChainAdapter V9', () => {
   // Context graph operations
   // =====================================================================
 
-  it('createContextGraph returns an incrementing contextGraphId and stores the graph config', async () => {
+  it('createOnChainContextGraph returns an incrementing contextGraphId and stores the graph config', async () => {
     const adapter = createAdapter();
-    const result = await adapter.createContextGraph!({
+    const result = await adapter.createOnChainContextGraph!({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 2,
       metadataBatchId: 5n,
@@ -527,11 +529,11 @@ describe('MockChainAdapter V9', () => {
     expect(graph!.batches).toEqual([]);
   });
 
-  it('addBatchToContextGraph succeeds when the batch exists', async () => {
+  it('verify succeeds when the batch exists', async () => {
     const adapter = createAdapter();
     const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
 
-    await adapter.createContextGraph!({
+    await adapter.createOnChainContextGraph!({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
@@ -548,7 +550,7 @@ describe('MockChainAdapter V9', () => {
       receiverSignatures: [{ identityId: 2n, ...sig }],
     });
 
-    const result = await adapter.addBatchToContextGraph!({
+    const result = await adapter.verify!({
       contextGraphId: 1n,
       batchId: 1n,
       signerSignatures: [{ identityId: 1n, ...sig }],
@@ -560,11 +562,11 @@ describe('MockChainAdapter V9', () => {
     expect(graph!.batches).toEqual([1n]);
   });
 
-  it('addBatchToContextGraph fails when the context graph does not exist', async () => {
+  it('verify fails when the context graph does not exist', async () => {
     const adapter = createAdapter();
     const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
 
-    const result = await adapter.addBatchToContextGraph!({
+    const result = await adapter.verify!({
       contextGraphId: 999n,
       batchId: 1n,
       signerSignatures: [{ identityId: 1n, ...sig }],
@@ -576,15 +578,15 @@ describe('MockChainAdapter V9', () => {
   it('multiple context graphs get unique IDs', async () => {
     const adapter = createAdapter();
 
-    const r1 = await adapter.createContextGraph!({
+    const r1 = await adapter.createOnChainContextGraph!({
       participantIdentityIds: [1n],
       requiredSignatures: 1,
     });
-    const r2 = await adapter.createContextGraph!({
+    const r2 = await adapter.createOnChainContextGraph!({
       participantIdentityIds: [2n],
       requiredSignatures: 1,
     });
-    const r3 = await adapter.createContextGraph!({
+    const r3 = await adapter.createOnChainContextGraph!({
       participantIdentityIds: [3n],
       requiredSignatures: 1,
     });
