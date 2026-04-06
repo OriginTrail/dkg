@@ -77,7 +77,8 @@ export function validatePublishRequest(
         continue;
       }
       errors.push(
-        `Rule 4: rootEntity "${m.rootEntity}" already exists in context graph "${contextGraphId}"`,
+        `Rule 4: rootEntity "${m.rootEntity}" already exists in context graph "${contextGraphId}". ` +
+        `Use /api/update with the existing kcId to modify it, or use a unique rootEntity URI.`,
       );
     }
   }

@@ -209,7 +209,13 @@ function quadToNQuad(q: DKGQuad): string {
 }
 
 function formatTerm(term: string): string {
-  if (term.startsWith('"')) return term;
+  if (term.startsWith('"')) {
+    // Wrap bare datatype IRIs in angle brackets: "val"^^http://... → "val"^^<http://...>
+    // Anchored to closing quote to avoid matching ^^ inside string content.
+    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
+    if (m) return `${m[1]}^^<${m[2]}>`;
+    return term;
+  }
   if (term.startsWith('_:')) return term;
   if (term.startsWith('<')) return term;
   return `<${term}>`;

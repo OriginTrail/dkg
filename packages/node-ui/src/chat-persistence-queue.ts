@@ -204,7 +204,7 @@ export class ChatPersistenceQueue {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.process();
+      void this.process().catch(() => {});
     }, Math.max(0, delayMs));
   }
 
@@ -294,6 +294,8 @@ export class ChatPersistenceQueue {
           }
         }
       }
+    } catch {
+      // Queue processing must never throw — errors are handled per-job above.
     } finally {
       this.processing = false;
     }

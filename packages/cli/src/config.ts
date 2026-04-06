@@ -112,6 +112,10 @@ export interface DkgConfig {
   workspaceTtlMs?: number;
   /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
   epcis?: { contextGraphId?: string; /** @deprecated */ paranetId?: string };
+  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  corsOrigins?: string | string[];
+  /** HTTP rate limiting settings. */
+  rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
 }
 
 /**

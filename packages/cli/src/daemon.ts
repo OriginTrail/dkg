@@ -732,14 +732,36 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   // --- HTTP API ---
 
+  const rateLimiter = new HttpRateLimiter(
+    config.rateLimit?.requestsPerMinute ?? 120,
+    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health'],
+  );
+  let corsAllowed: CorsAllowlist = '*';
+
   const server = createServer(async (req, res) => {
     try {
       const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
+      // Rate limiting
+      const clientIp = req.socket.remoteAddress ?? 'unknown';
+      if (!rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
+        res.end(JSON.stringify({ error: 'Too many requests' }));
+        return;
+      }
+
+      // Resolve CORS origin once per request for all response helpers
+      _currentRequestCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
+
       // CORS preflight
       if (req.method === 'OPTIONS') {
+        const corsOrigin = _currentRequestCorsOrigin;
+        if (!corsOrigin && corsAllowed !== '*') {
+          res.writeHead(403).end();
+          return;
+        }
         res.writeHead(204, {
-          'Access-Control-Allow-Origin': '*',
+          ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         });
@@ -748,7 +770,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
-      if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
+      if (!httpAuthGuard(req, res, authEnabled, validTokens, resolveCorsOrigin(req, corsAllowed))) return;
 
       // Shared memory (workspace) TTL settings — V10 and legacy routes
       if (req.method === 'GET' && (reqUrl.pathname === '/api/settings/shared-memory-ttl' || reqUrl.pathname === '/api/settings/workspace-ttl')) {
@@ -776,7 +798,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
@@ -817,8 +839,11 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         catchupTracker,
       );
     } catch (err: any) {
+      if (res.headersSent || res.writableEnded) return;
       if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
+      } else if (err instanceof SyntaxError) {
+        jsonResponse(res, 400, { error: err.message });
       } else {
         jsonResponse(res, 500, { error: err.message });
       }
@@ -834,6 +859,12 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
 
+  corsAllowed = buildCorsAllowlist(config, boundPort);
+  _moduleCorsAllowed = corsAllowed;
+  if (corsAllowed !== '*') {
+    log(`CORS allowlist: ${corsAllowed.join(', ')}`);
+  }
+
   log(`API listening on http://${apiHost}:${boundPort}`);
   log(`Node UI: http://${apiHost}:${boundPort}/ui`);
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
@@ -847,6 +878,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
     clearInterval(pingTimer);
+    clearInterval(pruneTimer);
+    rateLimiter.destroy();
     await Promise.allSettled(installedApps.map(async (app) => {
       if (!app.destroy) return;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -867,9 +900,13 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     process.exit(exitCode);
   }
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown(0));
+  process.on('SIGTERM', () => shutdown(0));
 }
+
+let _moduleCorsAllowed: CorsAllowlist = '*';
+/** Per-request resolved CORS origin — set at the top of each HTTP request handler. */
+let _currentRequestCorsOrigin: string | null = null;
 
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
@@ -1302,7 +1339,10 @@ async function handleRequest(
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${to}" not found` });
 
     const sendT0 = Date.now();
-    const result = await agent.sendChat(peerId, text);
+    const result = await Promise.race([
+      agent.sendChat(peerId, text),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('sendChat timeout (30s)')), 30_000)),
+    ]);
     const sendDur = Date.now() - sendT0;
     try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text, delivered: result.delivered }); } catch { /* never crash */ }
     return jsonResponse(res, 200, { ...result, phases: { resolve: resolveDur, send: sendDur, serverTotal: Date.now() - serverT0 } });
@@ -1543,7 +1583,7 @@ async function handleRequest(
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
+            ...corsHeaders(resolveCorsOrigin(req, _moduleCorsAllowed)),
           });
 
           try {
@@ -1562,7 +1602,7 @@ async function handleRequest(
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
-          'Access-Control-Allow-Origin': '*',
+          ...corsHeaders(resolveCorsOrigin(req, _moduleCorsAllowed)),
         });
         res.write(`data: ${JSON.stringify({ type: 'final', text: reply.text ?? '', correlationId: reply.correlationId ?? corrId })}\n\n`);
         res.end();
@@ -1699,7 +1739,11 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { multiaddr: addr } = JSON.parse(body);
     if (!addr) return jsonResponse(res, 400, { error: 'Missing "multiaddr"' });
-    await agent.connectTo(addr);
+    try {
+      await agent.connectTo(addr);
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err.message ?? 'Failed to connect' });
+    }
     return jsonResponse(res, 200, { connected: true });
   }
 
@@ -1922,7 +1966,16 @@ async function handleRequest(
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
     const { id, name, description } = parsed;
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createContextGraph({ id, name, description });
+    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    try {
+      await agent.createContextGraph({ id, name, description });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('already exists') || msg.includes('duplicate') || msg.includes('conflict')) {
+        return jsonResponse(res, 409, { error: msg });
+      }
+      throw err;
+    }
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
@@ -1935,7 +1988,7 @@ async function handleRequest(
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
-    if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     const ctx = createOperationContext('query');
     tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');
@@ -1948,8 +2001,12 @@ async function handleRequest(
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
       return jsonResponse(res, 200, { result, phases: { execute: execDur, serverTotal: Date.now() - serverT0 } });
-    } catch (err) {
+    } catch (err: any) {
       tracker.fail(ctx, err);
+      const msg = err?.message ?? '';
+      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
       throw err;
     }
   }
@@ -2374,13 +2431,16 @@ function parsePublishRequestBody(body: string):
 }
 
 
-function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
+function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOrigin?: string | null): void {
+  const origin = corsOrigin !== undefined ? corsOrigin : _currentRequestCorsOrigin;
+  const body = JSON.stringify(data, (_key, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    ...corsHeaders(origin),
   });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
@@ -2399,7 +2459,7 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
         rejected = true;
         req.removeListener('data', onData);
         req.resume();
-        req.destroy();
+        setTimeout(() => req.destroy(), 5_000); // close after giving time for 413 response
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
@@ -2409,6 +2469,89 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
     req.on('end', () => { if (!rejected) resolve(Buffer.concat(chunks).toString()); });
     req.on('error', (err) => { if (!rejected) reject(err); });
   });
+}
+
+// ─── CORS / rate-limit / validation helpers ───────────────────────────
+
+type CorsAllowlist = '*' | string[];
+
+function buildCorsAllowlist(config: DkgConfig, boundPort: number): CorsAllowlist {
+  const raw = config.corsOrigins;
+  if (raw === '*') return '*';
+  if (typeof raw === 'string' && raw.trim().length > 0) return [raw.trim()];
+  if (Array.isArray(raw)) {
+    const origins = raw.filter((v): v is string => typeof v === 'string' && v.length > 0);
+    if (origins.length > 0) return origins;
+  }
+  // Default: derive from apiHost
+  const host = config.apiHost ?? '127.0.0.1';
+  if (host === '0.0.0.0') return '*'; // backward-compatible
+  return [
+    `http://127.0.0.1:${boundPort}`,
+    `http://localhost:${boundPort}`,
+    `http://[::1]:${boundPort}`,
+  ];
+}
+
+function resolveCorsOrigin(req: IncomingMessage, allowlist: CorsAllowlist): string | undefined {
+  if (allowlist === '*') return '*';
+  const origin = req.headers.origin;
+  if (!origin) return undefined;
+  return allowlist.includes(origin) ? origin : undefined;
+}
+
+function corsHeaders(origin?: string | null): Record<string, string> {
+  if (!origin) return {};
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+  if (origin !== '*') headers['Vary'] = 'Origin';
+  return headers;
+}
+
+class HttpRateLimiter {
+  private _max: number;
+  private _exempt: Set<string>;
+  private _hits = new Map<string, { count: number; resetAt: number }>();
+  private _timer: ReturnType<typeof setInterval>;
+
+  constructor(requestsPerMinute: number, exemptPaths: string[] = []) {
+    this._max = requestsPerMinute;
+    this._exempt = new Set(exemptPaths);
+    // Sweep expired buckets every 60s
+    this._timer = setInterval(() => {
+      const now = Date.now();
+      for (const [key, bucket] of this._hits) {
+        if (now >= bucket.resetAt) this._hits.delete(key);
+      }
+    }, 60_000);
+    if (this._timer.unref) this._timer.unref();
+  }
+
+  isAllowed(ip: string, pathname: string): boolean {
+    if (this._exempt.has(pathname)) return true;
+    const now = Date.now();
+    let bucket = this._hits.get(ip);
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + 60_000 };
+      this._hits.set(ip, bucket);
+    }
+    bucket.count += 1;
+    return bucket.count <= this._max;
+  }
+
+  destroy(): void {
+    clearInterval(this._timer);
+    this._hits.clear();
+  }
+}
+
+function isValidContextGraphId(id: string): boolean {
+  if (!id || typeof id !== 'string') return false;
+  if (id.length > 256) return false;
+  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
+  return /^[\w:/.@\-]+$/.test(id);
 }
 
 function shortId(peerId: string): string {

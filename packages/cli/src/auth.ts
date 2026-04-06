@@ -133,6 +133,7 @@ export function httpAuthGuard(
   res: ServerResponse,
   authEnabled: boolean,
   validTokens: Set<string>,
+  corsOrigin?: string | null,
 ): boolean {
   if (!authEnabled) return true;
   if (req.method === 'OPTIONS') return true;
@@ -146,7 +147,8 @@ export function httpAuthGuard(
   res.writeHead(401, {
     'Content-Type': 'application/json',
     'WWW-Authenticate': 'Bearer realm="dkg-node"',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': corsOrigin ?? '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
   return false;
