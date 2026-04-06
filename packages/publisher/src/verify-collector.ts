@@ -86,17 +86,27 @@ export class VerifyCollector {
     };
     const proposalBytes = encodeVerifyProposal(proposal);
 
+    // The proposer already signed before calling collect(), so we need
+    // (requiredSignatures - 1) additional remote approvals.
+    const remoteRequired = Math.max(0, requiredSignatures - 1);
+
     const peers = this.deps.getParticipantPeers(contextGraphId);
-    if (peers.length === 0) {
+    if (remoteRequired > 0 && peers.length === 0) {
       throw new Error('verify_no_peers: no participant peers connected');
     }
-    if (peers.length < requiredSignatures) {
+    if (peers.length < remoteRequired) {
       throw new Error(
-        `verify_insufficient_peers: need ${requiredSignatures} approvals but only ${peers.length} participants connected`,
+        `verify_insufficient_peers: need ${remoteRequired} remote approvals but only ${peers.length} participants connected`,
       );
     }
 
-    log(`[VerifyCollector] Requesting approvals from ${peers.length} participants (need ${requiredSignatures})`);
+    // Self-sign only (1-of-1): return immediately, no remote collection needed
+    if (remoteRequired === 0) {
+      log(`[VerifyCollector] Self-sign mode (1-of-1) — no remote approvals needed`);
+      return { approvals: [], merkleRoot, contextGraphId, verifiedMemoryId };
+    }
+
+    log(`[VerifyCollector] Requesting approvals from ${peers.length} participants (need ${remoteRequired} remote, ${requiredSignatures} total)`);
 
     // Digest for signature verification: keccak256(contextGraphId, merkleRoot)
     const digest = computeACKDigest(contextGraphIdOnChain, merkleRoot);
@@ -144,12 +154,12 @@ export class VerifyCollector {
     await Promise.race([
       (async () => {
         const promises = peers.map(async (peerId) => {
-          if (collected.length >= requiredSignatures) return;
+          if (collected.length >= remoteRequired) return;
           const approval = await requestApproval(peerId);
           if (approval && !seenAddresses.has(approval.approverAddress)) {
             seenAddresses.add(approval.approverAddress);
             collected.push(approval);
-            if (collected.length >= requiredSignatures) {
+            if (collected.length >= remoteRequired) {
               quorumResolve?.();
             }
           }
@@ -158,21 +168,21 @@ export class VerifyCollector {
       })(),
       new Promise<never>((_, reject) =>
         setTimeout(
-          () => reject(new Error(`verify_timeout: ${collected.length}/${requiredSignatures} approvals within ${timeoutMs}ms`)),
+          () => reject(new Error(`verify_timeout: ${collected.length}/${remoteRequired} remote approvals within ${timeoutMs}ms`)),
           timeoutMs,
         ),
       ),
     ]);
 
-    if (collected.length < requiredSignatures) {
+    if (collected.length < remoteRequired) {
       throw new Error(
-        `verify_insufficient: got ${collected.length}/${requiredSignatures} valid approvals from ${peers.length} participants`,
+        `verify_insufficient: got ${collected.length}/${remoteRequired} valid remote approvals from ${peers.length} participants`,
       );
     }
 
     log(`[VerifyCollector] Collected ${collected.length} approvals — quorum reached`);
     return {
-      approvals: collected.slice(0, requiredSignatures),
+      approvals: collected.slice(0, remoteRequired),
       merkleRoot,
       contextGraphId,
       verifiedMemoryId,

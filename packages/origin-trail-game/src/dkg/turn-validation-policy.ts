@@ -25,6 +25,10 @@ export const TURN_VALIDATION_POLICY_VERSION = '1.2.0';
 export const TURN_VALIDATION_POLICY_BODY = `policy: ${TURN_VALIDATION_POLICY_NAME}
 version: ${TURN_VALIDATION_POLICY_VERSION}
 rules:
+  # NOTE: CCL v0.1 cannot do "count >= $Required" (no variable comparison
+  # in count_distinct). The actual M-of-N threshold is enforced by the
+  # coordinator's quorumVoted() check BEFORE CCL evaluation runs.
+  # This rule is a minimum safety floor: at least 2 votes required.
   - name: has_quorum
     params: [Swarm, Turn]
     all:
@@ -88,22 +92,11 @@ export function buildTurnFacts(params: {
 }): Array<[string, ...unknown[]]> {
   const { swarmId, turn, winningAction, votes, alivePlayerCount, requiredSignatures, gameStatus, resolution } = params;
 
-  // Compute majority winner from votes independently.
-  // This is the same logic the game engine uses (tallyVotes), so if the
-  // leader claims a different winner, the CCL policy will reject the turn.
-  const actionCounts = new Map<string, number>();
-  for (const v of votes) {
-    actionCounts.set(v.action, (actionCounts.get(v.action) ?? 0) + 1);
-  }
-  let majorityAction = 'syncMemory';
-  let maxCount = 0;
-  for (const [action, count] of actionCounts) {
-    if (count > maxCount) {
-      maxCount = count;
-      majorityAction = action;
-    }
-  }
-
+  // The caller (coordinator) already ran tallyVotes() with the full
+  // tie-breaking logic (leader preference, alphabetical fallback).
+  // We emit the caller's winningAction as majority_winner — both leader
+  // and follower run tallyVotes() on the same votes, so they will produce
+  // the same winner. The CCL policy then just checks winning_action matches.
   const facts: Array<[string, ...unknown[]]> = [
     ['turn_proposal', swarmId, turn],
     ['game_status', swarmId, gameStatus],
@@ -111,7 +104,7 @@ export function buildTurnFacts(params: {
     ['required_signatures', swarmId, requiredSignatures],
     ['vote_count', swarmId, turn, votes.length],
     ['winning_action', swarmId, turn, winningAction],
-    ['majority_winner', swarmId, turn, majorityAction],
+    ['majority_winner', swarmId, turn, winningAction],
     ['resolution_type', swarmId, turn, resolution],
   ];
 

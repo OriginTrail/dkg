@@ -58,12 +58,10 @@ describe('VerifyCollector', () => {
       timeoutMs: 5000,
     });
 
-    expect(result.approvals).toHaveLength(2);
+    // requiredSignatures=2 means 1 remote needed (proposer already signed)
+    expect(result.approvals).toHaveLength(1);
     expect(result.contextGraphId).toBe('test-cg');
     expect(result.verifiedMemoryId).toBe(1n);
-    // Each approval has a unique address
-    const addresses = result.approvals.map(a => a.approverAddress);
-    expect(new Set(addresses).size).toBe(2);
   });
 
   it('throws when not enough peers are connected', async () => {
@@ -99,7 +97,7 @@ describe('VerifyCollector', () => {
       merkleRoot: new Uint8Array(32),
       entities: [],
       proposerSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
-      requiredSignatures: 1,
+      requiredSignatures: 2, // needs 1 remote, but 0 peers → error
       timeoutMs: 1000,
     })).rejects.toThrow('verify_no_peers');
   });
