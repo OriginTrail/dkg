@@ -378,6 +378,9 @@ export function nodeApi(node: TestNode) {
     apps: () => httpGet(`${base}/api/apps`, token),
     createParanet: (id: string, name: string, description?: string) =>
       httpPost(`${base}/api/paranet/create`, { id, name, description }, token),
+    createContextGraph: (id: string, name: string, description?: string) =>
+      httpPost(`${base}/api/context-graph/create`, { id, name, description }, token)
+        .catch(() => httpPost(`${base}/api/paranet/create`, { id, name, description }, token)),
     listParanets: () => httpGet(`${base}/api/paranet/list`, token),
     publishCclPolicy: (body: {
       paranetId: string;

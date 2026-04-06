@@ -66,7 +66,7 @@ describe('OriginTrail Game CCL e2e', () => {
   }, 30_000);
 
   it('evaluates a CCL policy against live game state and publishes the result', async () => {
-    await apiA.createParanet(PARANET_ID, 'Game CCL E2E', 'CCL policy evaluation using OriginTrail Game state');
+    await apiA.createContextGraph(PARANET_ID, 'Game CCL E2E', 'CCL policy evaluation using OriginTrail Game state');
 
     const published = await apiA.publishCclPolicy({
       paranetId: PARANET_ID,

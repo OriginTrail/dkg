@@ -9,5 +9,6 @@ export { OriginTrailGameCoordinator } from './dkg/coordinator.js';
 export type { CoordinatorConfig, SwarmState, ResolvedTurn } from './dkg/coordinator.js';
 export * as protocol from './dkg/protocol.js';
 export * as rdf from './dkg/rdf.js';
+export { TURN_VALIDATION_POLICY_NAME, TURN_VALIDATION_POLICY_VERSION, TURN_VALIDATION_POLICY_BODY, buildTurnFacts } from './dkg/turn-validation-policy.js';
 export { default as createHandler } from './api/handler.js';
 export type { AppRequestHandler } from './api/handler.js';

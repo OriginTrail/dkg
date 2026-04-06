@@ -19,6 +19,12 @@ import type { GameState, ActionResult } from '../game/types.js';
 import { signatureThreshold, MIN_PLAYERS, MAX_PLAYERS } from '../engine/wagon-train.js';
 import * as proto from './protocol.js';
 import * as rdf from './rdf.js';
+import {
+  TURN_VALIDATION_POLICY_NAME,
+  TURN_VALIDATION_POLICY_VERSION,
+  TURN_VALIDATION_POLICY_BODY,
+  buildTurnFacts,
+} from './turn-validation-policy.js';
 
 /** Subset of PublishResult from @origintrail-official/dkg-publisher — keep aligned with the canonical type. */
 interface DKGPublishReturn {
@@ -60,6 +66,11 @@ interface DKGAgent {
     merkleRoot: Uint8Array,
   ): Promise<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   query(sparql: string, options?: any): Promise<any>;
+  // CCL support (optional — gracefully no-ops if not available)
+  publishCclPolicy?(opts: { paranetId: string; name: string; version: string; content: string; description?: string }): Promise<{ policyUri: string; hash: string; status: string }>;
+  approveCclPolicy?(opts: { paranetId: string; policyUri: string }): Promise<{ policyUri: string }>;
+  evaluateCclPolicy?(opts: { paranetId: string; name: string; facts: Array<[string, ...unknown[]]>; snapshotId?: string }): Promise<{ result: { derived: Record<string, unknown[][]>; decisions: Record<string, unknown[][]> } }>;
+  evaluateAndPublishCclPolicy?(opts: { paranetId: string; name: string; facts: Array<[string, ...unknown[]]>; snapshotId?: string }): Promise<{ evaluationUri: string; evaluation: any }>;
 }
 
 export interface CoordinatorConfig {
@@ -785,6 +796,27 @@ export class OriginTrailGameCoordinator {
     };
     await this.broadcast(msg);
     this.log(`Expedition launched for ${swarmId}`);
+
+    // Install CCL turn-validation policy (best-effort, doesn't block game)
+    if (this.agent.publishCclPolicy && this.agent.approveCclPolicy) {
+      try {
+        const published = await this.agent.publishCclPolicy({
+          paranetId: this.contextGraphId,
+          name: TURN_VALIDATION_POLICY_NAME,
+          version: TURN_VALIDATION_POLICY_VERSION,
+          content: TURN_VALIDATION_POLICY_BODY,
+          description: 'Validates turn resolution: quorum, active game, winning action',
+        });
+        await this.agent.approveCclPolicy({
+          paranetId: this.contextGraphId,
+          policyUri: published.policyUri,
+        });
+        this.log(`CCL turn-validation policy installed for ${swarmId}`);
+      } catch (err: any) {
+        this.log(`CCL policy installation skipped: ${err.message}`);
+      }
+    }
+
     return swarm;
   }
 
@@ -954,6 +986,57 @@ export class OriginTrailGameCoordinator {
       participantSignatures: leaderSigs,
     };
 
+    // Validate turn via CCL policy (if available). The evaluation result is
+    // published alongside the turn data for auditability — anyone can replay
+    // the same policy + facts and get the same output.
+    let cclValidated = false;
+    if (this.agent.evaluateCclPolicy) {
+      try {
+        const aliveCount = result.newState.party?.filter((m: any) => m.alive !== false).length
+          ?? swarm.players.length;
+        const facts = buildTurnFacts({
+          swarmId: swarm.id,
+          turn: swarm.currentTurn,
+          winningAction,
+          votes,
+          alivePlayerCount: aliveCount,
+          gameStatus: result.newState.status ?? 'active',
+          resolution,
+        });
+        const evaluation = await this.agent.evaluateCclPolicy({
+          paranetId: this.contextGraphId,
+          name: TURN_VALIDATION_POLICY_NAME,
+          facts,
+          snapshotId: `turn-${swarm.id}-${swarm.currentTurn}`,
+        });
+
+        const publishDecisions = evaluation.result.decisions.propose_publish ?? [];
+        const flagDecisions = evaluation.result.decisions.flag_review ?? [];
+
+        if (flagDecisions.length > 0) {
+          this.log(`Turn ${swarm.currentTurn} flagged by CCL policy — proceeding with warning`);
+        }
+        if (publishDecisions.length > 0) {
+          cclValidated = true;
+          this.log(`Turn ${swarm.currentTurn} validated by CCL policy (propose_publish)`);
+        }
+
+        // Publish evaluation result for auditability
+        if (this.agent.evaluateAndPublishCclPolicy) {
+          try {
+            await this.agent.evaluateAndPublishCclPolicy({
+              paranetId: this.contextGraphId,
+              name: TURN_VALIDATION_POLICY_NAME,
+              facts,
+              snapshotId: `turn-${swarm.id}-${swarm.currentTurn}`,
+            });
+          } catch { /* Best-effort — don't block turn on eval publish failure */ }
+        }
+      } catch (err: any) {
+        this.log(`CCL turn validation skipped: ${err.message}`);
+      }
+    }
+
     const msg: proto.TurnProposalMsg = {
       app: proto.APP_ID,
       type: 'turn:proposal',
@@ -973,7 +1056,7 @@ export class OriginTrailGameCoordinator {
       contextGraphId: swarm.contextGraphId,
     };
     await this.broadcast(msg);
-    this.log(`Turn ${swarm.currentTurn} proposal broadcast for ${swarm.id} (hash=${hash.slice(0, 8)})`);
+    this.log(`Turn ${swarm.currentTurn} proposal broadcast for ${swarm.id} (hash=${hash.slice(0, 8)}${cclValidated ? ', CCL-validated' : ''})`);
 
     await this.checkProposalThreshold(swarm);
   }
