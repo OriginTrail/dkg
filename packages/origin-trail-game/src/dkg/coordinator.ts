@@ -861,8 +861,12 @@ export class OriginTrailGameCoordinator {
 
     this.startVoteHeartbeat(swarmId);
 
-    if (this.allAliveVoted(swarm) && swarm.leaderPeerId === this.myPeerId) {
-      await this.proposeTurnResolution(swarm);
+    // Propose when we have enough votes: either all alive voted (fast path)
+    // or M-of-N quorum reached (allows offline players).
+    if (swarm.leaderPeerId === this.myPeerId) {
+      if (this.allAliveVoted(swarm) || this.quorumVoted(swarm)) {
+        await this.proposeTurnResolution(swarm);
+      }
     }
 
     return swarm;
@@ -883,6 +887,13 @@ export class OriginTrailGameCoordinator {
   private allAliveVoted(swarm: SwarmState): boolean {
     const aliveVotes = swarm.votes.filter(v => this.isPeerAlive(swarm, v.peerId)).length;
     return aliveVotes >= this.alivePlayerCount(swarm);
+  }
+
+  /** Check if enough votes arrived to meet the M-of-N quorum threshold. */
+  private quorumVoted(swarm: SwarmState): boolean {
+    const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
+    const aliveVotes = swarm.votes.filter(v => this.isPeerAlive(swarm, v.peerId)).length;
+    return aliveVotes >= threshold;
   }
 
   private startVoteHeartbeat(swarmId: string): void {
@@ -994,12 +1005,14 @@ export class OriginTrailGameCoordinator {
     if (this.agent.evaluateCclPolicy) {
       const aliveCount = result.newState.party?.filter((m: any) => m.alive !== false).length
         ?? swarm.players.length;
+      const threshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
       const facts = buildTurnFacts({
         swarmId: swarm.id,
         turn: swarm.currentTurn,
         winningAction,
         votes,
         alivePlayerCount: aliveCount,
+        requiredSignatures: threshold,
         gameStatus: result.newState.status ?? 'active',
         resolution,
       });
@@ -1823,12 +1836,14 @@ export class OriginTrailGameCoordinator {
       try {
         const aliveCount = swarm.gameState?.party?.filter((m: any) => m.alive !== false).length
           ?? swarm.players.length;
+        const followerThreshold = swarm.requiredSignatures ?? signatureThreshold(swarm.players.length);
         const followerFacts = buildTurnFacts({
           swarmId: swarm.id,
           turn: msg.turn,
           winningAction: msg.winningAction,
           votes,
           alivePlayerCount: aliveCount,
+          requiredSignatures: followerThreshold,
           gameStatus: swarm.gameState?.status ?? 'active',
           resolution,
         });
