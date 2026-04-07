@@ -22,13 +22,9 @@ const MIME: Record<string, string> = {
 };
 
 /**
- * Per-request CORS origin — set at the start of handleNodeUIRequest.
- * NOTE: Process-global; concurrent async requests can overwrite it.
- * The race window is microseconds and impact is limited (wrong CORS
- * header, auth is token-based). AsyncLocalStorage would fix it but
- * isn't worth the complexity.
+ * Per-request CORS origin — stored on the ServerResponse to avoid
+ * global state races in concurrent async handlers and long-lived SSE streams.
  */
-let _currentCorsOrigin: string | null = null;
 
 const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -104,7 +100,7 @@ export async function handleNodeUIRequest(
   telemetrySettings?: TelemetrySettingsCallbacks,
   corsOrigin?: string | null,
 ): Promise<boolean> {
-  _currentCorsOrigin = corsOrigin ?? null;
+  (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 
   // --- Metrics ---
@@ -739,13 +735,18 @@ function enqueueTurnPersistence(
 }
 
 function beginSse(res: ServerResponse): void {
-  res.writeHead(200, {
+  const origin = (res as any).__corsOrigin as string | null ?? null;
+  const headers: Record<string, string> = {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': _currentCorsOrigin ?? '*',
-  });
+  };
+  if (origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    if (origin !== '*') headers['Vary'] = 'Origin';
+  }
+  res.writeHead(200, headers);
 }
 
 function sendSse(res: ServerResponse, data: unknown): void {
@@ -839,10 +840,13 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
 }
 
 function json(res: ServerResponse, status: number, data: unknown): true {
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': _currentCorsOrigin ?? '*',
-  });
+  const origin = (res as any).__corsOrigin as string | null ?? null;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (origin) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    if (origin !== '*') headers['Vary'] = 'Origin';
+  }
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
   return true;
 }

@@ -14,7 +14,7 @@ jobs:
   build-and-test:
     name: Build & Test (TypeScript)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -32,13 +32,13 @@ jobs:
       - name: Build all packages
         run: pnpm build
 
-      - name: Run tests (Vitest packages)
-        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
+      - name: Run tests with coverage gates (Vitest packages)
+        run: pnpm turbo test:coverage --filter='!@origintrail-official/dkg-evm-module'
 
   solidity:
-    name: Solidity (Compile & Test)
+    name: Solidity (Compile, test & coverage)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +68,6 @@ jobs:
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: Run Hardhat tests
-        run: node scripts/run-tests.js
+      - name: Hardhat tests + Solidity coverage + ratchet check
+        run: pnpm test:coverage
         working-directory: packages/evm-module

@@ -1,14 +1,16 @@
 import { defineConfig } from 'vitest/config';
-import { coverageThresholds } from '../../vitest.coverage';
+import { kosavaMcpServerCoverage } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'html', 'lcov'],
+      reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
-      thresholds: coverageThresholds,
+      // Stdio entrypoint (index.ts) is not unit-tested here; ratchet DkgClient only.
+      include: ['src/connection.ts'],
+      thresholds: kosavaMcpServerCoverage,
     },
   },
 });

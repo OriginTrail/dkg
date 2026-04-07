@@ -294,8 +294,9 @@ export class ChatPersistenceQueue {
           }
         }
       }
-    } catch {
-      // Queue processing must never throw — errors are handled per-job above.
+    } catch (err: unknown) {
+      console.error('[chat-persistence] queue-level error:', err instanceof Error ? err.message : String(err));
+      this.kick(5_000);
     } finally {
       this.processing = false;
     }

@@ -742,26 +742,26 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     try {
       const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
-      // Rate limiting
+      // Resolve CORS origin once per request (request-scoped, not global)
+      const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
+      (res as any).__corsOrigin = reqCorsOrigin;
+
+      // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
       const clientIp = req.socket.remoteAddress ?? 'unknown';
       if (!rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60' });
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
       }
 
-      // Resolve CORS origin once per request for all response helpers
-      _currentRequestCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
-
       // CORS preflight
       if (req.method === 'OPTIONS') {
-        const corsOrigin = _currentRequestCorsOrigin;
-        if (!corsOrigin && corsAllowed !== '*') {
+        if (!reqCorsOrigin && corsAllowed !== '*') {
           res.writeHead(403).end();
           return;
         }
         res.writeHead(204, {
-          ...(corsOrigin ? { 'Access-Control-Allow-Origin': corsOrigin } : {}),
+          ...(reqCorsOrigin ? { 'Access-Control-Allow-Origin': reqCorsOrigin } : {}),
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         });
@@ -905,8 +905,6 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 }
 
 let _moduleCorsAllowed: CorsAllowlist = '*';
-/** Per-request resolved CORS origin — set at the top of each HTTP request handler. */
-let _currentRequestCorsOrigin: string | null = null;
 
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
@@ -2554,7 +2552,7 @@ function parsePublishRequestBody(body: string):
 
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOrigin?: string | null): void {
-  const origin = corsOrigin !== undefined ? corsOrigin : _currentRequestCorsOrigin;
+  const origin = corsOrigin !== undefined ? corsOrigin : ((res as any).__corsOrigin as string | null ?? null);
   const body = JSON.stringify(data, (_key, value) =>
     typeof value === 'bigint' ? value.toString() : value,
   );
