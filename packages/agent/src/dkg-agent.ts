@@ -2007,9 +2007,9 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const now = new Date().toISOString();
     let creator: string;
-    if (alreadyOnChain && typeof this.chain.getContextGraphOwner === 'function') {
+    if (alreadyOnChain && typeof (this.chain as any).getContextGraphOwner === 'function') {
       try {
-        const onChainOwner = await this.chain.getContextGraphOwner(onChainId ?? opts.id);
+        const onChainOwner = await (this.chain as any).getContextGraphOwner(onChainId ?? opts.id);
         creator = onChainOwner ? `did:dkg:agent:${onChainOwner}` : `did:dkg:agent:${this.peerId}`;
       } catch {
         creator = `did:dkg:agent:${this.peerId}`;
@@ -2388,7 +2388,7 @@ export class DKGAgent {
     validateCclPolicy(record.body, { expectedName: record.name, expectedVersion: record.version });
 
     // Guard against duplicate approvals for the same policy+scope
-    const existingBindings = await this.listCclPolicies({ paranetId: opts.paranetId, name: record.name });
+    const existingBindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: record.name });
     const activeForScope = existingBindings.find(
       b => b.policyUri === opts.policyUri && b.status === 'approved' &&
            (b.contextType ?? '') === (opts.contextType ?? record.contextType ?? ''),
