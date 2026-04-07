@@ -726,4 +726,16 @@ describe('handleNodeUIRequest CORS origin handling', () => {
     expect(state.statusCode).toBe(200);
     expect(state.headers['Access-Control-Allow-Origin']).toBe('https://example.com');
   });
+
+  it('omits Access-Control-Allow-Origin when corsOrigin is explicitly null (rejected origin)', async () => {
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
+    const { res, state } = createMockRes();
+
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+
+    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, null);
+
+    expect(state.statusCode).toBe(200);
+    expect(state.headers['Access-Control-Allow-Origin']).toBeUndefined();
+  });
 });
