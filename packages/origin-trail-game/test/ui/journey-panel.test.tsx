@@ -35,12 +35,17 @@ vi.mock('../../ui/src/api.js', () => ({
     lobby: vi.fn(),
     swarm: vi.fn(),
     leaderboard: vi.fn(),
+    locations: vi.fn(),
     create: vi.fn(),
     join: vi.fn(),
     leave: vi.fn(),
     start: vi.fn(),
     vote: vi.fn(),
     forceResolve: vi.fn(),
+    chat: vi.fn(),
+    sendChat: vi.fn(),
+    notifications: vi.fn(),
+    markNotificationsRead: vi.fn(),
   },
 }));
 
@@ -52,12 +57,17 @@ const mockApi = api as unknown as {
   lobby: ReturnType<typeof vi.fn>;
   swarm: ReturnType<typeof vi.fn>;
   leaderboard: ReturnType<typeof vi.fn>;
+  locations: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
   join: ReturnType<typeof vi.fn>;
   leave: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   vote: ReturnType<typeof vi.fn>;
   forceResolve: ReturnType<typeof vi.fn>;
+  chat: ReturnType<typeof vi.fn>;
+  sendChat: ReturnType<typeof vi.fn>;
+  notifications: ReturnType<typeof vi.fn>;
+  markNotificationsRead: ReturnType<typeof vi.fn>;
 };
 
 function getCapturedRdfGraphProps(): any {
@@ -161,6 +171,11 @@ describe('Journey Panel visualization in play view', () => {
     mockApi.lobby.mockResolvedValue({ mySwarms: [], openSwarms: [] });
     mockApi.swarm.mockResolvedValue(makeTravelingSwarm(2));
     mockApi.leaderboard.mockResolvedValue({ entries: [] });
+    mockApi.locations.mockResolvedValue({ locations: [] });
+    mockApi.chat.mockResolvedValue({ messages: [] });
+    mockApi.sendChat.mockResolvedValue({ ok: true });
+    mockApi.notifications.mockResolvedValue({ notifications: [] });
+    mockApi.markNotificationsRead.mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
