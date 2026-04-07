@@ -1,10 +1,10 @@
 {
+  "_status": "pre-deployment: hubAddress must be set after V10 contracts are deployed on Gnosis",
   "chain": {
     "name": "gnosis",
     "type": "evm",
     "chainId": "gnosis:100",
-    "rpcUrl": "https://rpc.gnosischain.com",
-    "hubAddress": ""
+    "rpcUrl": "https://rpc.gnosischain.com"
   },
   "autoUpdate": {
     "enabled": true,

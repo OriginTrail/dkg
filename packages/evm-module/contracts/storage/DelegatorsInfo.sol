@@ -163,6 +163,10 @@ contract DelegatorsInfo is INamed, IVersioned, ContractStatus, IInitializable {
         return netNodeEpochRewards[identityId][epoch];
     }
 
+    function setLastClaimedDelegatorsRewardsEpoch(uint72 identityId, uint256 epoch) external onlyContracts {
+        lastClaimedDelegatorsRewardsEpoch[identityId] = epoch;
+    }
+
     function setHasDelegatorClaimedEpochRewards(
         uint256 epoch,
         uint72 identityId,

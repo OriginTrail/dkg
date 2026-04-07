@@ -418,6 +418,7 @@ describe('@unit V10 Conviction System', function () {
       await oldDI.setLastStakeHeldEpoch(identityId, delegator, 3);
       await oldDI.setIsOperatorFeeClaimedForEpoch(identityId, 4, true);
       await oldDI.setNetNodeEpochRewards(identityId, 4, 5000);
+      await oldDI.setLastClaimedDelegatorsRewardsEpoch(identityId, 7);
 
       await Migrator.migrateNode(identityId, 4, 4);
 
@@ -445,6 +446,9 @@ describe('@unit V10 Conviction System', function () {
       expect(
         await DelegatorsInfo.getNetNodeEpochRewards(identityId, 4),
       ).to.equal(5000);
+      expect(
+        await DelegatorsInfo.lastClaimedDelegatorsRewardsEpoch(identityId),
+      ).to.equal(7);
     });
 
     it('migrateEpochRewardsClaimed copies claim status', async () => {

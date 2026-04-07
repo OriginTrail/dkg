@@ -1343,8 +1343,9 @@ export class EVMChainAdapter implements ChainAdapter {
         conviction: BigInt(conviction),
         discountBps: Number(discountBps),
       };
-    } catch {
-      return null;
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return null;
+      throw err;
     }
   }
 
@@ -1364,8 +1365,9 @@ export class EVMChainAdapter implements ChainAdapter {
         discountBps: Number(discountBps),
         conviction: BigInt(conviction),
       };
-    } catch {
-      return { discountBps: 0, conviction: 0n };
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return { discountBps: 0, conviction: 0n };
+      throw err;
     }
   }
 

@@ -93,6 +93,11 @@ contract MigratorV10Staking is ContractStatus {
             }
         }
 
+        uint256 lastClaimedDelegators = oldDelegatorsInfo.lastClaimedDelegatorsRewardsEpoch(identityId);
+        if (lastClaimedDelegators != 0) {
+            newDelegatorsInfo.setLastClaimedDelegatorsRewardsEpoch(identityId, lastClaimedDelegators);
+        }
+
         for (uint256 epoch = startEpoch; epoch <= endEpoch; ) {
             bool feeClaimed = oldDelegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, epoch);
             if (feeClaimed) {
