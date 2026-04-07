@@ -17,7 +17,7 @@
     "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "dev:ui": "vite",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage && vitest run --config vitest.ui.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "clean": "rm -rf dist dist-ui tsconfig.tsbuildinfo"

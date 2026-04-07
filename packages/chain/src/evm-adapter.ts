@@ -961,7 +961,7 @@ export class EVMChainAdapter implements ChainAdapter {
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
-      success: true,
+      success: receipt.status === 1,
       contextGraphId,
     };
   }

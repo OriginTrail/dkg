@@ -145,6 +145,7 @@ export const kosavaAdapterAutoresearchCoverage: CoverageThresholds = {
   statements: 91,
 };
 
+/** Engine / server-side tests only; UI component tests (`vitest.ui.config.ts`) run separately. */
 export const kosavaOriginTrailGameCoverage: CoverageThresholds = {
   lines: 75,
   functions: 74,
