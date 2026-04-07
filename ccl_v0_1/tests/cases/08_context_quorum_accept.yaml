@@ -1,0 +1,31 @@
+name: context_quorum_accept
+policy: context_corroboration.yaml
+context:
+  paranet: ops-paranet
+  scope_ual: ual:dkg:ops-paranet:auth:context:incident-128:claim-c1
+  view: accepted
+  snapshot_id: snap-context-08
+facts:
+  - [claim, c1]
+  - [supports, e1, c1]
+  - [supports, e2, c1]
+  - [evidence_view, e1, accepted]
+  - [evidence_view, e2, accepted]
+  - [independent, e1]
+  - [independent, e2]
+  - [authority_class, e1, vendor]
+  - [authority_class, e2, operator]
+  - [claim_epoch, c1, 7]
+  - [quorum_epoch, incident_review, 7]
+  - [quorum_reached, incident_review, 3, 4]
+expected:
+  derived:
+    corroborated:
+      - [c1]
+    disputed: []
+    promotable:
+      - [c1]
+  decisions:
+    propose_accept:
+      - [c1]
+    propose_reject: []

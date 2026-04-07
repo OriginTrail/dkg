@@ -311,11 +311,18 @@ Create or update `WORKSPACE_DIR/config.json` with a `"dkg-node"` block:
 
 ### 6. Copy the skill files into the workspace
 
+The package ships three skill files that teach the agent how to use DKG tools, CCL, and game tools:
+
 ```bash
-mkdir -p WORKSPACE_DIR/skills/dkg-node WORKSPACE_DIR/skills/origin-trail-game
+mkdir -p WORKSPACE_DIR/skills/dkg-node WORKSPACE_DIR/skills/ccl WORKSPACE_DIR/skills/origin-trail-game
 cp ~/dkg-v9/packages/adapter-openclaw/skills/dkg-node/SKILL.md WORKSPACE_DIR/skills/dkg-node/SKILL.md
+cp ~/dkg-v9/packages/adapter-openclaw/skills/ccl/SKILL.md WORKSPACE_DIR/skills/ccl/SKILL.md
 cp ~/dkg-v9/packages/adapter-openclaw/skills/origin-trail-game/SKILL.md WORKSPACE_DIR/skills/origin-trail-game/SKILL.md
 ```
+
+- `dkg-node/SKILL.md` — teaches memory, publishing, querying, and agent discovery tools
+- `ccl/SKILL.md` — teaches deterministic adjudication over DKG facts with the CCL evaluator
+- `origin-trail-game/SKILL.md` — teaches game mechanics, actions, strategy, and autopilot usage
 
 ### 7. Restart the OpenClaw gateway
 

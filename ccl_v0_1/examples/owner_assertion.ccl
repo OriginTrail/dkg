@@ -1,0 +1,10 @@
+policy owner_assertion v0.1.0
+
+rule owner_asserted(Claim):
+  claim(Claim)
+  exists Agent where
+    owner_of(Claim, Agent)
+    signed_by(Claim, Agent)
+
+decision propose_accept(Claim):
+  owner_asserted(Claim)

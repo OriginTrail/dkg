@@ -1,0 +1,16 @@
+name: owner_invalid_signature
+policy: owner_assertion.yaml
+context:
+  paranet: example-paranet
+  scope_ual: ual:dkg:example-paranet:auth:pk:0xalice:profile
+  view: accepted
+  snapshot_id: snap-owner-02
+facts:
+  - [claim, p1]
+  - [owner_of, p1, 0xalice]
+  - [signed_by, p1, 0xbob]
+expected:
+  derived:
+    owner_asserted: []
+  decisions:
+    propose_accept: []

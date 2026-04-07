@@ -1877,11 +1877,11 @@ async function handleRequest(
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { selection, clearAfter, contextGraphId: bodyCgId } = parsed;
+    const { selection, clearAfter, publishContextGraphId } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', contextGraphId: bodyCgId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
@@ -1889,7 +1889,7 @@ async function handleRequest(
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
-          ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
+          ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
       const chain = result.onChainResult;
@@ -1905,7 +1905,7 @@ async function handleRequest(
         status: result.status,
         kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-        ...(bodyCgId != null ? { contextGraphId: String(bodyCgId) } : {}),
+        ...(publishContextGraphId != null ? { publishContextGraphId: String(publishContextGraphId) } : {}),
         ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
       });
     } catch (err) {
@@ -2172,6 +2172,128 @@ async function handleRequest(
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id" query param' });
     const exists = await agent.contextGraphExists(id);
     return jsonResponse(res, 200, { id, exists });
+  }
+
+  // POST /api/verify
+  if (req.method === 'POST' && path === '/api/verify') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, verifiedMemoryId, batchId, timeoutMs } = JSON.parse(body);
+    if (!contextGraphId || !verifiedMemoryId || !batchId) {
+      return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
+    }
+    const result = await agent.verify({
+      contextGraphId,
+      verifiedMemoryId,
+      batchId: BigInt(batchId),
+      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+    });
+    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+  }
+
+  // POST /api/endorse
+  if (req.method === 'POST' && path === '/api/endorse') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
+    if (!contextGraphId || !ual || !agentAddress) {
+      return jsonResponse(res, 400, { error: 'Missing contextGraphId, ual, or agentAddress' });
+    }
+    const result = await agent.endorse({ contextGraphId, knowledgeAssetUal: ual, agentAddress });
+    return jsonResponse(res, 200, { endorsed: true, endorserAddress: agentAddress, ...result });
+  }
+
+  // POST /api/ccl/policy/publish
+  if (req.method === 'POST' && path === '/api/ccl/policy/publish') {
+    const body = await readBody(req, SMALL_BODY_BYTES * 4);
+    const { paranetId, name, version, content, description, contextType, language, format } = JSON.parse(body);
+    if (!paranetId || !name || !version || !content) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name, version, content' });
+    }
+    const result = await agent.publishCclPolicy({ paranetId, name, version, content, description, contextType, language, format });
+    return jsonResponse(res, 200, result);
+  }
+
+  // POST /api/ccl/policy/approve
+  if (req.method === 'POST' && path === '/api/ccl/policy/approve') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { paranetId, policyUri, contextType } = JSON.parse(body);
+    if (!paranetId || !policyUri) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, policyUri' });
+    }
+    const result = await agent.approveCclPolicy({ paranetId, policyUri, contextType });
+    return jsonResponse(res, 200, result);
+  }
+
+  // POST /api/ccl/policy/revoke
+  if (req.method === 'POST' && path === '/api/ccl/policy/revoke') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { paranetId, policyUri, contextType } = JSON.parse(body);
+    if (!paranetId || !policyUri) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, policyUri' });
+    }
+    const result = await agent.revokeCclPolicy({ paranetId, policyUri, contextType });
+    return jsonResponse(res, 200, result);
+  }
+
+  // GET /api/ccl/policy/list
+  if (req.method === 'GET' && path === '/api/ccl/policy/list') {
+    const policies = await agent.listCclPolicies({
+      paranetId: url.searchParams.get('paranetId') ?? undefined,
+      name: url.searchParams.get('name') ?? undefined,
+      contextType: url.searchParams.get('contextType') ?? undefined,
+      status: url.searchParams.get('status') ?? undefined,
+      includeBody: url.searchParams.get('includeBody') === 'true',
+    });
+    return jsonResponse(res, 200, { policies });
+  }
+
+  // GET /api/ccl/policy/resolve?paranetId=&name=&contextType=
+  if (req.method === 'GET' && path === '/api/ccl/policy/resolve') {
+    const paranetId = url.searchParams.get('paranetId');
+    const name = url.searchParams.get('name');
+    if (!paranetId || !name) {
+      return jsonResponse(res, 400, { error: 'Missing required query params: paranetId, name' });
+    }
+    const policy = await agent.resolveCclPolicy({
+      paranetId,
+      name,
+      contextType: url.searchParams.get('contextType') ?? undefined,
+      includeBody: url.searchParams.get('includeBody') === 'true',
+    });
+    return jsonResponse(res, 200, { policy });
+  }
+
+  // POST /api/ccl/eval
+  if (req.method === 'POST' && path === '/api/ccl/eval') {
+    const body = await readBody(req, SMALL_BODY_BYTES * 8);
+    const { paranetId, name, facts, contextType, view, snapshotId, scopeUal, publishResult } = JSON.parse(body);
+    if (!paranetId || !name) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name' });
+    }
+    if (facts != null && !Array.isArray(facts)) {
+      return jsonResponse(res, 400, { error: 'facts must be an array when provided' });
+    }
+    const result = publishResult
+      ? await agent.evaluateAndPublishCclPolicy({ paranetId, name, facts, contextType, view, snapshotId, scopeUal })
+      : await agent.evaluateCclPolicy({ paranetId, name, facts, contextType, view, snapshotId, scopeUal });
+    return jsonResponse(res, 200, result);
+  }
+
+  // GET /api/ccl/results?paranetId=&...
+  if (req.method === 'GET' && path === '/api/ccl/results') {
+    const paranetId = url.searchParams.get('paranetId');
+    if (!paranetId) {
+      return jsonResponse(res, 400, { error: 'Missing required query param: paranetId' });
+    }
+    const evaluations = await agent.listCclEvaluations({
+      paranetId,
+      policyUri: url.searchParams.get('policyUri') ?? undefined,
+      snapshotId: url.searchParams.get('snapshotId') ?? undefined,
+      view: url.searchParams.get('view') ?? undefined,
+      contextType: url.searchParams.get('contextType') ?? undefined,
+      resultKind: (url.searchParams.get('resultKind') as 'derived' | 'decision' | null) ?? undefined,
+      resultName: url.searchParams.get('resultName') ?? undefined,
+    });
+    return jsonResponse(res, 200, { evaluations });
   }
 
   // GET /api/wallets (list addresses only)

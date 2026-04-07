@@ -136,6 +136,24 @@ describe('DKG_ONTOLOGY', () => {
     for (const [key, expectedUri] of Object.entries(expectedUris)) {
       expect((DKG_ONTOLOGY as Record<string, string>)[key]).toBe(expectedUri);
     }
+
+    const cclKeys = [
+      'DKG_CCL_POLICY', 'DKG_POLICY_BINDING', 'DKG_POLICY_APPLIES_TO_PARANET',
+      'DKG_POLICY_VERSION', 'DKG_POLICY_LANGUAGE', 'DKG_POLICY_FORMAT',
+      'DKG_POLICY_HASH', 'DKG_POLICY_BODY', 'DKG_POLICY_STATUS',
+      'DKG_POLICY_CONTEXT_TYPE', 'DKG_ACTIVE_POLICY', 'DKG_POLICY_BINDING_STATUS',
+      'DKG_APPROVED_BY', 'DKG_APPROVED_AT', 'DKG_REVOKED_BY', 'DKG_REVOKED_AT',
+      'DKG_CCL_EVALUATION', 'DKG_CCL_RESULT_ENTRY',
+      'DKG_EVALUATED_POLICY', 'DKG_FACT_SET_HASH', 'DKG_FACT_QUERY_HASH',
+      'DKG_FACT_RESOLVER_VERSION', 'DKG_FACT_RESOLUTION_MODE', 'DKG_SCOPE_UAL',
+      'DKG_VIEW', 'DKG_SNAPSHOT_ID', 'DKG_RESULT_KIND', 'DKG_RESULT_NAME',
+      'DKG_HAS_RESULT', 'DKG_CCL_RESULT_ARG',
+      'DKG_HAS_RESULT_ARG', 'DKG_RESULT_ARG_INDEX', 'DKG_RESULT_ARG_VALUE',
+    ];
+    for (const key of cclKeys) {
+      expect((DKG_ONTOLOGY as Record<string, string>)[key]).toBeDefined();
+      expect((DKG_ONTOLOGY as Record<string, string>)[key]).toMatch(/^https?:\/\//);
+    }
   });
 
   it('all values are unique URIs (excluding deprecated alias keys that mirror canonical URIs)', () => {

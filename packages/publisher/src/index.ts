@@ -114,3 +114,6 @@ export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export { ACKCollector, type ACKCollectorDeps, type CollectedACK, type ACKCollectionResult } from './ack-collector.js';
 export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
+export { VerifyCollector, type VerifyCollectorDeps, type CollectedApproval, type VerifyCollectionResult } from './verify-collector.js';
+export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
+export { buildVerificationMetadata } from './verification-metadata.js';

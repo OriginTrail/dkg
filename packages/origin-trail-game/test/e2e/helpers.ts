@@ -376,6 +376,60 @@ export function nodeApi(node: TestNode) {
   return {
     status: () => httpGet(`${base}/api/status`),
     apps: () => httpGet(`${base}/api/apps`, token),
+    createParanet: (id: string, name: string, description?: string) =>
+      httpPost(`${base}/api/paranet/create`, { id, name, description }, token),
+    createContextGraph: (id: string, name: string, description?: string) =>
+      httpPost(`${base}/api/context-graph/create`, { id, name, description }, token)
+        .catch(() => httpPost(`${base}/api/paranet/create`, { id, name, description }, token)),
+    listParanets: () => httpGet(`${base}/api/paranet/list`, token),
+    publishCclPolicy: (body: {
+      paranetId: string;
+      name: string;
+      version: string;
+      content: string;
+      description?: string;
+      contextType?: string;
+      language?: string;
+      format?: string;
+    }) => httpPost(`${base}/api/ccl/policy/publish`, body, token),
+    approveCclPolicy: (body: {
+      paranetId: string;
+      policyUri: string;
+      contextType?: string;
+    }) => httpPost(`${base}/api/ccl/policy/approve`, body, token),
+    resolveCclPolicy: (paranetId: string, name: string, opts?: { contextType?: string; includeBody?: boolean }) => {
+      const params = new URLSearchParams({ paranetId, name });
+      if (opts?.contextType) params.set('contextType', opts.contextType);
+      if (opts?.includeBody) params.set('includeBody', 'true');
+      return httpGet(`${base}/api/ccl/policy/resolve?${params.toString()}`, token);
+    },
+    evaluateCclPolicy: (body: {
+      paranetId: string;
+      name: string;
+      facts: Array<[string, ...unknown[]]>;
+      contextType?: string;
+      view?: string;
+      snapshotId?: string;
+      scopeUal?: string;
+      publishResult?: boolean;
+    }) => httpPost(`${base}/api/ccl/eval`, body, token),
+    listCclEvaluations: (paranetId: string, opts?: {
+      policyUri?: string;
+      snapshotId?: string;
+      view?: string;
+      contextType?: string;
+      resultKind?: 'derived' | 'decision';
+      resultName?: string;
+    }) => {
+      const params = new URLSearchParams({ paranetId });
+      if (opts?.policyUri) params.set('policyUri', opts.policyUri);
+      if (opts?.snapshotId) params.set('snapshotId', opts.snapshotId);
+      if (opts?.view) params.set('view', opts.view);
+      if (opts?.contextType) params.set('contextType', opts.contextType);
+      if (opts?.resultKind) params.set('resultKind', opts.resultKind);
+      if (opts?.resultName) params.set('resultName', opts.resultName);
+      return httpGet(`${base}/api/ccl/results?${params.toString()}`, token);
+    },
     info: () => httpGet(`${game}/info`, token),
     lobby: () => httpGet(`${game}/lobby`, token),
     swarm: (id: string) => httpGet(`${game}/swarm/${id}`, token),

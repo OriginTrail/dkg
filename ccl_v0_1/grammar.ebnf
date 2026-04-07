@@ -1,0 +1,43 @@
+(* CCL v0.1 surface grammar *)
+
+policy        = "policy", ws, ident, ws, version, nl, { rule | decision } ;
+
+rule          = "rule", ws, head, ":", nl, body ;
+decision      = "decision", ws, head, ":", nl, body ;
+
+head          = ident, "(", [ ident, { ",", ws, ident } ], ")" ;
+body          = { indented_condition } ;
+
+indented_condition
+              = indent, condition, nl ;
+
+condition     = atom
+              | exists_block
+              | not_exists_block
+              | count_distinct_block
+              ;
+
+atom          = ident, "(", [ arg, { ",", ws, arg } ], ")" ;
+arg           = ident | string | integer ;
+
+exists_block  = "exists", ws, ident_list, ws, "where", nl, subbody ;
+not_exists_block
+              = "not", ws, "exists", ws, ident_list, ws, "where", nl, subbody ;
+
+count_distinct_block
+              = "count_distinct", ws, ident_list, ws, "where", nl, subbody,
+                indent, compare_op, ws, integer ;
+
+subbody       = { indent, condition, nl } ;
+
+ident_list    = ident, { ",", ws, ident } ;
+compare_op    = ">=" | ">" | "==" | "<=" | "<" ;
+
+ident         = letter, { letter | digit | "_" | "-" } ;
+version       = "v", digit, { digit | "." } ;
+integer       = digit, { digit } ;
+string        = '"', { ? any char except '"' ? }, '"' ;
+
+ws            = { " " | "\t" } ;
+nl            = "\n" ;
+indent        = "  ", { "  " } ;

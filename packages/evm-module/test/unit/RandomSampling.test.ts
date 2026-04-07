@@ -554,11 +554,10 @@ describe('@unit RandomSampling', () => {
       // Update the period and mine blocks for the new period
       await updateAndGetActiveProofPeriod();
       const newStatus = await RandomSampling.getActiveProofPeriodStatus();
-      const blocksToMineNew =
-        Number(newStatus.activeProofPeriodStartBlock) +
-        Number(await RandomSampling.getActiveProofingPeriodDurationInBlocks()) -
-        (await hre.ethers.provider.getBlockNumber()) -
-        1;
+      const durationNew = Number(await RandomSampling.getActiveProofingPeriodDurationInBlocks());
+      const currentBlockNew = await hre.ethers.provider.getBlockNumber();
+      const periodEndNew = Number(newStatus.activeProofPeriodStartBlock) + durationNew;
+      const blocksToMineNew = Math.max(0, periodEndNew - currentBlockNew - 2);
       await mineBlocks(blocksToMineNew);
 
       statusAfterUpdate = await RandomSampling.getActiveProofPeriodStatus();

@@ -11,6 +11,7 @@ import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { requestFaucetFunding } from './faucet.js';
 import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
@@ -65,6 +66,12 @@ function getCliVersion(): string {
   } catch {
     return '0.0.0';
   }
+}
+
+function loadStructuredFile(filePath: string): any {
+  const content = readFileSync(filePath, 'utf8');
+  if (filePath.endsWith('.json')) return JSON.parse(content);
+  return yaml.load(content);
 }
 
 function resolveDaemonEntryPoint(): string {
@@ -761,6 +768,55 @@ program
     }
   });
 
+// ─── dkg verify <batchId> ──────────────────────────────────────────
+
+program
+  .command('verify <batchId>')
+  .description('Propose M-of-N verification for a published batch')
+  .requiredOption('--context-graph <id>', 'Context Graph ID')
+  .requiredOption('--verified-graph <id>', 'Verified Graph ID')
+  .option('--timeout <ms>', 'Timeout in milliseconds (default: 30 min)')
+  .action(async (batchId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.verify({
+        contextGraphId: opts.contextGraph,
+        verifiedMemoryId: opts.verifiedGraph,
+        batchId,
+        timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
+      });
+      console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
+      console.log(`  TX: ${result.txHash}`);
+      console.log(`  Block: ${result.blockNumber}`);
+      console.log(`  Signers: ${result.signers.join(', ')}`);
+    } catch (err) {
+      console.error(`Verify failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+// ─── dkg endorse <ual> ─────────────────────────────────────────────
+
+program
+  .command('endorse <ual>')
+  .description('Endorse a published Knowledge Asset')
+  .requiredOption('--context-graph <id>', 'Context Graph ID')
+  .requiredOption('--agent <address>', 'Agent address (endorser)')
+  .action(async (ual: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.endorse({
+        contextGraphId: opts.contextGraph,
+        ual,
+        agentAddress: opts.agent,
+      });
+      console.log(`Endorsed ${ual} by ${result.endorserAddress}`);
+    } catch (err) {
+      console.error(`Endorse failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg query <context-graph> <sparql> ─────────────────────────────
 
 program
@@ -1123,6 +1179,246 @@ openclawCmd
       }
       console.error('\nTo set up the OpenClaw adapter, run:');
       console.error('  npx @origintrail-official/dkg-adapter-openclaw setup\n');
+      process.exit(1);
+    }
+  });
+
+// ─── dkg ccl ────────────────────────────────────────────────────────
+
+const cclCmd = program
+  .command('ccl')
+  .description('Manage paranet-scoped CCL policies');
+
+const cclPolicyCmd = cclCmd
+  .command('policy')
+  .description('Publish, approve, revoke, list, and resolve CCL policies');
+
+cclPolicyCmd
+  .command('publish <paranetId>')
+  .description('Publish a CCL policy proposal into the ontology graph')
+  .requiredOption('--name <name>', 'Policy name')
+  .requiredOption('--version <version>', 'Policy version')
+  .requiredOption('--file <path>', 'Path to canonical policy file')
+  .option('--description <desc>', 'Description of the policy')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .option('--language <language>', 'Policy language identifier', 'ccl/v0.1')
+  .option('--format <format>', 'Canonical policy format', 'canonical-yaml')
+  .action(async (paranetId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const content = readFileSync(opts.file, 'utf8');
+      const result = await client.publishCclPolicy({
+        paranetId,
+        name: opts.name,
+        version: opts.version,
+        content,
+        description: opts.description,
+        contextType: opts.contextType,
+        language: opts.language,
+        format: opts.format,
+      });
+      console.log(`Policy published:`);
+      console.log(`  URI:    ${result.policyUri}`);
+      console.log(`  Hash:   ${result.hash}`);
+      console.log(`  Status: ${result.status}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclPolicyCmd
+  .command('approve <paranetId> <policyUri>')
+  .description('Approve a published CCL policy for a paranet or context override')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .action(async (paranetId: string, policyUri: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.approveCclPolicy({ paranetId, policyUri, contextType: opts.contextType });
+      console.log(`Policy approved:`);
+      console.log(`  Policy:   ${result.policyUri}`);
+      console.log(`  Binding:  ${result.bindingUri}`);
+      if (result.contextType) console.log(`  Context:  ${result.contextType}`);
+      console.log(`  Approved: ${result.approvedAt}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclPolicyCmd
+  .command('revoke <paranetId> <policyUri>')
+  .description('Revoke the currently active CCL policy binding for a paranet or context override')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .action(async (paranetId: string, policyUri: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.revokeCclPolicy({ paranetId, policyUri, contextType: opts.contextType });
+      console.log(`Policy revoked:`);
+      console.log(`  Policy:   ${result.policyUri}`);
+      console.log(`  Binding:  ${result.bindingUri}`);
+      if (result.contextType) console.log(`  Context:  ${result.contextType}`);
+      console.log(`  Revoked:  ${result.revokedAt}`);
+      console.log(`  Status:   ${result.status}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclPolicyCmd
+  .command('list')
+  .description('List known CCL policies')
+  .option('--paranet <id>', 'Filter by paranet id')
+  .option('--name <name>', 'Filter by policy name')
+  .option('--context-type <contextType>', 'Filter by context type')
+  .option('--status <status>', 'Filter by status')
+  .option('--include-body', 'Include policy body in output')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const { policies } = await client.listCclPolicies({
+        paranetId: opts.paranet,
+        name: opts.name,
+        contextType: opts.contextType,
+        status: opts.status,
+        includeBody: !!opts.includeBody,
+      });
+      if (policies.length === 0) {
+        console.log('No CCL policies found.');
+        return;
+      }
+      for (const policy of policies) {
+        console.log(`${policy.name}@${policy.version}  ${policy.policyUri}`);
+        console.log(`  Paranet: ${policy.paranetId}`);
+        console.log(`  Status:  ${policy.status}${policy.isActiveDefault ? ' (active default)' : ''}`);
+        if (policy.contextType) console.log(`  Context: ${policy.contextType}`);
+        if (policy.activeContexts?.length) console.log(`  Active in contexts: ${policy.activeContexts.join(', ')}`);
+        console.log(`  Hash:    ${policy.hash}`);
+        if (policy.description) console.log(`  Desc:    ${policy.description}`);
+        if (opts.includeBody && policy.body) console.log(`  Body:\n${policy.body}`);
+      }
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclPolicyCmd
+  .command('resolve <paranetId>')
+  .description('Resolve the active approved policy for a paranet and policy name')
+  .requiredOption('--name <name>', 'Policy name')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .option('--include-body', 'Include policy body in output')
+  .action(async (paranetId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const { policy } = await client.resolveCclPolicy({
+        paranetId,
+        name: opts.name,
+        contextType: opts.contextType,
+        includeBody: !!opts.includeBody,
+      });
+      if (!policy) {
+        console.log('No approved policy found for that scope.');
+        return;
+      }
+      console.log(`Resolved policy:`);
+      console.log(`  URI:     ${policy.policyUri}`);
+      console.log(`  Name:    ${policy.name}@${policy.version}`);
+      console.log(`  Paranet: ${policy.paranetId}`);
+      console.log(`  Hash:    ${policy.hash}`);
+      if (policy.contextType) console.log(`  Context: ${policy.contextType}`);
+      if (policy.body) console.log(`  Body:\n${policy.body}`);
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclCmd
+  .command('eval <paranetId>')
+  .description('Resolve the approved CCL policy for a paranet and evaluate it against facts')
+  .requiredOption('--name <name>', 'Policy name')
+  .option('--context-type <contextType>', 'Optional stricter context override scope')
+  .option('--case <path>', 'YAML/JSON file with { facts, context? }')
+  .option('--facts-file <path>', 'YAML/JSON file containing facts array')
+  .option('--publish-result', 'Publish the evaluation output back into the paranet as typed records')
+  .option('--view <view>', 'Declared view, for example accepted')
+  .option('--snapshot-id <snapshotId>', 'Snapshot identifier')
+  .option('--scope-ual <scopeUal>', 'Scope UAL for evaluation')
+  .action(async (paranetId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      let payload: { facts: Array<[string, ...unknown[]]>; view?: string; snapshotId?: string; scopeUal?: string } | null = null;
+
+      if (opts.case) {
+        const parsed = loadStructuredFile(opts.case) as any;
+        payload = {
+          facts: parsed?.facts ?? [],
+          view: opts.view ?? parsed?.context?.view,
+          snapshotId: opts.snapshotId ?? parsed?.context?.snapshot_id,
+          scopeUal: opts.scopeUal ?? parsed?.context?.scope_ual,
+        };
+      } else if (opts.factsFile) {
+        const parsed = loadStructuredFile(opts.factsFile) as any;
+        payload = {
+          facts: Array.isArray(parsed) ? parsed : parsed?.facts ?? [],
+          view: opts.view,
+          snapshotId: opts.snapshotId,
+          scopeUal: opts.scopeUal,
+        };
+      }
+
+      // Allow snapshot-resolved mode: if no facts provided but scope options
+      // are given, the agent resolves facts from the graph snapshot.
+      const isSnapshotMode = !payload && (opts.snapshotId || opts.view || opts.scopeUal);
+      if (!payload && !isSnapshotMode) {
+        throw new Error('Provide --case, --facts-file, or --snapshot-id/--view/--scope-ual for snapshot-resolved evaluation');
+      }
+
+      const result = await client.evaluateCclPolicy({
+        paranetId,
+        name: opts.name,
+        contextType: opts.contextType,
+        facts: payload?.facts,
+        view: payload?.view ?? opts.view,
+        snapshotId: payload?.snapshotId ?? opts.snapshotId,
+        scopeUal: payload?.scopeUal ?? opts.scopeUal,
+        publishResult: !!opts.publishResult,
+      });
+
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err: any) {
+      console.error(err.message);
+      process.exit(1);
+    }
+  });
+
+cclCmd
+  .command('results <paranetId>')
+  .description('List published CCL evaluation results in a paranet')
+  .option('--policy-uri <policyUri>', 'Filter by evaluated policy URI')
+  .option('--snapshot-id <snapshotId>', 'Filter by snapshot id')
+  .option('--view <view>', 'Filter by view')
+  .option('--context-type <contextType>', 'Filter by context type')
+  .option('--result-kind <kind>', 'Filter by result kind: derived or decision')
+  .option('--result-name <name>', 'Filter by result predicate/decision name')
+  .action(async (paranetId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const { evaluations } = await client.listCclEvaluations({
+        paranetId,
+        policyUri: opts.policyUri,
+        snapshotId: opts.snapshotId,
+        view: opts.view,
+        contextType: opts.contextType,
+        resultKind: opts.resultKind,
+        resultName: opts.resultName,
+      });
+      console.log(JSON.stringify({ evaluations }, null, 2));
+    } catch (err: any) {
+      console.error(err.message);
       process.exit(1);
     }
   });

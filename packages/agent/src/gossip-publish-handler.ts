@@ -18,6 +18,7 @@ export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => vo
 
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
+  getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
   onPhase?: GossipPhaseCallback;
 }
@@ -128,6 +129,8 @@ export class GossipPublishHandler {
             this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed`);
           }
         }
+
+        normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
       }
 
       // Structural validation (I-002): reject malformed gossip before inserting.
@@ -324,6 +327,94 @@ export class GossipPublishHandler {
         `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    // Detect binding subjects from rdf:type AND from revocation/approval predicates.
+    // Revocation quads may not include the type triple, so we must also check
+    // for policy-binding-specific predicates to prevent forged revocations.
+    const BINDING_PREDICATES = new Set<string>([
+      DKG_ONTOLOGY.DKG_POLICY_BINDING_STATUS,
+      DKG_ONTOLOGY.DKG_ACTIVE_POLICY,
+      DKG_ONTOLOGY.DKG_APPROVED_BY,
+      DKG_ONTOLOGY.DKG_APPROVED_AT,
+      DKG_ONTOLOGY.DKG_REVOKED_BY,
+      DKG_ONTOLOGY.DKG_REVOKED_AT,
+      DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET,
+    ]);
+    const bindingSubjects = new Set(
+      quads
+        .filter(q =>
+          (q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_POLICY_BINDING) ||
+          BINDING_PREDICATES.has(q.predicate),
+        )
+        .map(q => q.subject),
+    );
+    if (bindingSubjects.size === 0) return quads;
+
+    const invalidBindings = new Set<string>();
+    for (const bindingUri of bindingSubjects) {
+      const bindingQuads = quads.filter(q => q.subject === bindingUri);
+      const paranetUri = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET)?.object;
+      const approvedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_AT)?.object;
+      const approvedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_BY)?.object;
+      const revokedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_AT)?.object;
+      const revokedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_BY)?.object;
+      const paranetId = paranetUri?.startsWith('did:dkg:context-graph:')
+        ? paranetUri.slice('did:dkg:context-graph:'.length)
+        : paranetUri?.startsWith('did:dkg:paranet:')
+          ? paranetUri.slice('did:dkg:paranet:'.length)
+          : null;
+
+      if (!paranetId) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: missing or invalid paranet reference`);
+        continue;
+      }
+
+      const owner = await this.callbacks.getContextGraphOwner(paranetId);
+      if (!owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: paranet "${paranetId}" owner is unknown locally`);
+        continue;
+      }
+
+      if (approvedAt && !approvedBy) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: approvedBy is required when approvedAt is present`);
+        continue;
+      }
+
+      if (approvedBy && approvedBy !== owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: approvedBy ${approvedBy} does not match owner ${owner}`);
+        continue;
+      }
+
+      if (revokedAt && !revokedBy) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: revokedBy is required when revokedAt is present`);
+        continue;
+      }
+
+      if (revokedBy && revokedBy !== owner) {
+        invalidBindings.add(bindingUri);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: revokedBy ${revokedBy} does not match owner ${owner}`);
+      }
+    }
+
+    if (invalidBindings.size === 0) return quads;
+    // Also collect policy URIs referenced by rejected bindings so we drop
+    // any policy-level quads (policyStatus, approvedBy, etc.) that rode
+    // the same gossip message.
+    const relatedPolicyUris = new Set<string>();
+    for (const bindingUri of invalidBindings) {
+      const policyRef = quads.find(
+        q => q.subject === bindingUri && q.predicate === DKG_ONTOLOGY.DKG_ACTIVE_POLICY,
+      )?.object;
+      if (policyRef) relatedPolicyUris.add(policyRef);
+    }
+    return quads.filter(q => !invalidBindings.has(q.subject) && !relatedPolicyUris.has(q.subject));
   }
 }
 
