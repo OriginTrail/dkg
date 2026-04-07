@@ -701,3 +701,29 @@ describe('serveStatic path traversal prevention', () => {
     expect(state.body).toContain('<html>');
   });
 });
+
+describe('handleNodeUIRequest CORS origin handling', () => {
+  it('omits Access-Control-Allow-Origin when corsOrigin is undefined', async () => {
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
+    const { res, state } = createMockRes();
+
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+
+    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined);
+
+    expect(state.statusCode).toBe(200);
+    expect(state.headers['Access-Control-Allow-Origin']).toBeUndefined();
+  });
+
+  it('sets Access-Control-Allow-Origin when corsOrigin is provided', async () => {
+    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
+    const { res, state } = createMockRes();
+
+    const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+
+    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, 'https://example.com');
+
+    expect(state.statusCode).toBe(200);
+    expect(state.headers['Access-Control-Allow-Origin']).toBe('https://example.com');
+  });
+});

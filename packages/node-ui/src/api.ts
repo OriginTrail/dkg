@@ -100,7 +100,7 @@ export async function handleNodeUIRequest(
   telemetrySettings?: TelemetrySettingsCallbacks,
   corsOrigin?: string | null,
 ): Promise<boolean> {
-  (res as any).__corsOrigin = corsOrigin === undefined ? '*' : corsOrigin;
+  (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 
   // --- Metrics ---
