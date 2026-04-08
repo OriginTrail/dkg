@@ -528,6 +528,10 @@ export class DKGAgent {
       const contextGraphId = isWorkspace ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
       const nquads: string[] = [];
 
+      if (await this.isPrivateContextGraph(contextGraphId)) {
+        return new TextEncoder().encode('');
+      }
+
       if (isWorkspace) {
         const wsGraph = paranetWorkspaceGraphUri(contextGraphId);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
@@ -1870,6 +1874,7 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
     ];
 
     if (onChainId) {
@@ -2837,6 +2842,29 @@ export class DKGAgent {
       } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
+    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+      return false;
+    }
+
+    const local = this.subscribedContextGraphs.get(contextGraphId);
+    if (local?.subscribed === false && local?.synced) {
+      return true;
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?policy WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+        }
+      } LIMIT 1`,
+    );
+
+    return result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"';
   }
 
   /**

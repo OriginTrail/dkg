@@ -153,4 +153,14 @@ describe('Private data isolation (2 nodes)', () => {
     );
     expect(attempt.bindings.length).toBe(0);
   }, 5000);
+
+  it('node B cannot sync private verified memory explicitly from node A', async () => {
+    const synced = await nodeB.syncFromPeer(nodeA.peerId, [PRIVATE_PARANET]);
+    expect(synced).toBe(0);
+  }, 10000);
+
+  it('node B cannot sync private shared memory explicitly from node A', async () => {
+    const synced = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, [PRIVATE_PARANET]);
+    expect(synced).toBe(0);
+  }, 10000);
 });
