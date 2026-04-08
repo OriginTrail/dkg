@@ -318,7 +318,7 @@ describe('V10 GET Protocol (spec §12)', () => {
     expect(swmQuads.every(q => q.graph === swmGraph)).toBe(true);
   });
 
-  it('view=verified-memory queries VM with minTrust filtering', () => {
+  it('view=verified-memory resolves to VM graph prefix', () => {
     const vmGraph = `did:dkg:context-graph:${contextGraphId}/_verified_memory/`;
     expect(vmGraph).toContain('_verified_memory');
   });

@@ -1166,16 +1166,27 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
     let txResult;
-    const updateV10Ready = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()
+    const v10UpdateAvailable = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()
       && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
-    if (updateV10Ready) {
-      this.log.info(ctx, `Using V10 updateKnowledgeCollection path for kcId=${kcId}`);
-      txResult = await this.chain.updateKnowledgeCollectionV10!({
-        kcId,
-        newMerkleRoot: kcMerkleRoot,
-        newByteSize: BigInt(allSkolemizedQuads.length * 100),
-        publisherAddress: this.publisherAddress,
-      });
+
+    if (v10UpdateAvailable) {
+      try {
+        this.log.info(ctx, `Trying V10 updateKnowledgeCollection path for kcId=${kcId}`);
+        txResult = await this.chain.updateKnowledgeCollectionV10!({
+          kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newByteSize: BigInt(allSkolemizedQuads.length * 100),
+          publisherAddress: this.publisherAddress,
+        });
+      } catch (v10Err: any) {
+        this.log.info(ctx, `V10 update failed (${v10Err?.message?.slice(0, 80)}), falling back to V9 path`);
+        txResult = await this.chain.updateKnowledgeAssets({
+          batchId: kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
+          publisherAddress: this.publisherAddress,
+        });
+      }
     } else {
       txResult = await this.chain.updateKnowledgeAssets({
         batchId: kcId,

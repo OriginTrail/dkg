@@ -203,12 +203,25 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     ) external onlyContracts {
         _requireExists(contextGraphId);
         uint72[] storage participants = _contextGraphs[contextGraphId].participantIdentityIds;
-        for (uint256 i; i < participants.length; i++) {
+        uint256 len = participants.length;
+
+        // Find insertion point to maintain ascending sort order
+        uint256 insertAt = len;
+        for (uint256 i; i < len; i++) {
             if (participants[i] == identityId) {
                 revert KnowledgeAssetsLib.ParticipantAlreadyExists(contextGraphId, identityId);
             }
+            if (participants[i] > identityId && insertAt == len) {
+                insertAt = i;
+            }
         }
-        participants.push(identityId);
+
+        participants.push(0); // extend array
+        for (uint256 j = len; j > insertAt; j--) {
+            participants[j] = participants[j - 1];
+        }
+        participants[insertAt] = identityId;
+
         emit ParticipantAdded(contextGraphId, identityId);
     }
 
@@ -226,7 +239,10 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
 
         for (uint256 i; i < len; i++) {
             if (participants[i] == identityId) {
-                participants[i] = participants[len - 1];
+                // Shift left to preserve sorted order (no swap-pop)
+                for (uint256 j = i; j < len - 1; j++) {
+                    participants[j] = participants[j + 1];
+                }
                 participants.pop();
                 emit ParticipantRemoved(contextGraphId, identityId);
                 return;

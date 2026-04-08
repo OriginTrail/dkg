@@ -25,11 +25,11 @@ export interface QueryOptions {
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;
   /**
-   * Minimum trust level for verified-memory queries. Filters out triples below this trust threshold.
-   * NOTE: Not yet enforced by DKGQueryEngine — reserved for future implementation when trust
+   * @internal Reserved for future use — not yet enforced by DKGQueryEngine.
+   * Will filter verified-memory triples below this trust threshold once trust
    * metadata is available in verified-memory graphs.
    */
-  minTrust?: TrustLevel;
+  _minTrust?: TrustLevel;
 }
 
 export interface QueryEngine {

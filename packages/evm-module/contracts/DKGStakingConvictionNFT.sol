@@ -83,13 +83,11 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     /**
      * @notice Create a new staking position NFT.
      * Locks `amount` TRAC for `lockEpochs` on node `identityId`.
-     * The TRAC is transferred to StakingStorage.
      *
-     * TODO: Integrate with Staking.stakeWithLock() instead of direct transfer.
-     * Currently this only transfers TRAC to StakingStorage without registering
-     * the position in the Staking protocol (no rewards/slashing tracking).
-     * Requires a stakeOnBehalf() function in Staking.sol since stakeWithLock
-     * uses msg.sender as delegator, which would be this contract's address.
+     * TRAC is held in this contract until staking protocol integration is
+     * complete (requires stakeOnBehalf in Staking.sol). Once integrated,
+     * stake() will delegate to Staking.stakeWithLock() so positions are
+     * tracked for rewards, slashing, and voting power.
      */
     function stake(
         uint72 identityId,
@@ -111,7 +109,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
 
         _mint(msg.sender, positionId);
 
-        if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, amount)) {
+        if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
             revert InvalidAmount();
         }
 
@@ -127,7 +125,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
 
         positions[positionId].stakedAmount += addedAmount;
 
-        if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, addedAmount)) {
+        if (!tokenContract.transferFrom(msg.sender, address(this), addedAmount)) {
             revert InvalidAmount();
         }
 
@@ -159,7 +157,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
             delete positions[positionId];
         }
 
-        if (!tokenContract.transferFrom(stakingStorageAddress, msg.sender, amount)) {
+        if (!tokenContract.transfer(msg.sender, amount)) {
             revert InvalidAmount();
         }
 

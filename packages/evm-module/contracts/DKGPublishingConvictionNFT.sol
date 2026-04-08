@@ -136,6 +136,10 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         _requireOwner(accountId);
         if (amount == 0) revert InvalidAmount();
 
+        Account storage acct = accounts[accountId];
+        acct.committedTRAC += amount;
+        acct.epochAllowance = acct.committedTRAC / uint96(LOCK_DURATION_EPOCHS);
+
         if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, amount)) {
             revert InvalidAmount();
         }
