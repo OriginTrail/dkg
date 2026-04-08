@@ -827,7 +827,7 @@ export class DKGPublisher implements Publisher {
     if (precomputedTokenAmount <= 0n) precomputedTokenAmount = 1n;
 
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
-    if (options.v10ACKProvider && !hasPrivateData && !isPublishFromSharedMemory) {
+    if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);

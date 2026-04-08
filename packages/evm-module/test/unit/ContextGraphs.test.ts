@@ -539,6 +539,135 @@ describe('@unit ContextGraphs', () => {
     });
   });
 
+  describe('regression: isAuthorizedPublisher rejects deactivated CGs', () => {
+    it('returns false for a deactivated CG (even if policy is open)', async () => {
+      const node = { operational: accounts[1], admin: accounts[2] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId], 1, 0, 1, ethers.ZeroAddress,
+      );
+      expect(await ContextGraphsContract.isAuthorizedPublisher(1, accounts[9].address)).to.be.true;
+
+      await ContextGraphStorageContract.connect(accounts[19]).deactivateContextGraph(1);
+      expect(await ContextGraphsContract.isAuthorizedPublisher(1, accounts[9].address)).to.be.false;
+    });
+  });
+
+  describe('regression: addBatchToContextGraph enforces publishPolicy', () => {
+    it('rejects batch from non-authority on curated CG', async () => {
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+      const curator = accounts[5].address;
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId], 1, 0, 0, curator,
+      );
+      const cgId = 1n;
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('curated-root'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
+      const digest = ethers.solidityPackedKeccak256(['uint256', 'bytes32'], [cgId, merkleRoot]);
+      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
+
+      // Non-curator caller should be rejected
+      await expect(
+        ContextGraphsContract.connect(accounts[9]).addBatchToContextGraph(
+          cgId, batchId, merkleRoot, [identityId], [sig.r], [sig.yParityAndS],
+        ),
+      ).to.be.revertedWith('Unauthorized: curated CG');
+    });
+
+    it('allows batch from authority on curated CG', async () => {
+      const signer = accounts[3];
+      const node = { operational: signer, admin: accounts[4] };
+      const { identityId } = await createProfile(ProfileContract, node);
+      const curator = accounts[5];
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId], 1, 0, 0, curator.address,
+      );
+      const cgId = 1n;
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('curated-ok'));
+      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
+      const digest = ethers.solidityPackedKeccak256(['uint256', 'bytes32'], [cgId, merkleRoot]);
+      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
+
+      await expect(
+        ContextGraphsContract.connect(curator).addBatchToContextGraph(
+          cgId, batchId, merkleRoot, [identityId], [sig.r], [sig.yParityAndS],
+        ),
+      ).to.emit(ContextGraphStorageContract, 'ContextGraphExpanded');
+    });
+  });
+
+  describe('regression: addParticipant maintains sorted order', () => {
+    it('inserts participants in ascending order', async () => {
+      const node1 = { operational: accounts[1], admin: accounts[2] };
+      const node2 = { operational: accounts[3], admin: accounts[4] };
+      const node3 = { operational: accounts[5], admin: accounts[6] };
+      const p1 = await createProfile(ProfileContract, node1);
+      const p2 = await createProfile(ProfileContract, node2);
+      const p3 = await createProfile(ProfileContract, node3);
+
+      // Create CG with just node2 (middle identity)
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [p2.identityId], 1, 0, 1, ethers.ZeroAddress,
+      );
+
+      // Add node3 (higher), then node1 (lower)
+      await ContextGraphsContract.connect(accounts[0]).addParticipant(1, BigInt(p3.identityId));
+      await ContextGraphsContract.connect(accounts[0]).addParticipant(1, BigInt(p1.identityId));
+
+      const participants = await ContextGraphStorageContract.getContextGraphParticipants(1);
+      const ids = participants.map(Number);
+      for (let i = 1; i < ids.length; i++) {
+        expect(ids[i]).to.be.greaterThan(ids[i - 1]);
+      }
+    });
+
+    it('removeParticipant preserves sorted order (no swap-pop)', async () => {
+      const nodes = [
+        { operational: accounts[1], admin: accounts[2] },
+        { operational: accounts[3], admin: accounts[4] },
+        { operational: accounts[5], admin: accounts[6] },
+      ];
+      const profiles = [];
+      for (const n of nodes) {
+        profiles.push(await createProfile(ProfileContract, n));
+      }
+      const ids = profiles.map(p => p.identityId);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        ids, 1, 0, 1, ethers.ZeroAddress,
+      );
+
+      // Remove the first participant (lowest ID)
+      await ContextGraphsContract.connect(accounts[0]).removeParticipant(1, BigInt(ids[0]));
+
+      const remaining = await ContextGraphStorageContract.getContextGraphParticipants(1);
+      const remainingIds = remaining.map(Number);
+      for (let i = 1; i < remainingIds.length; i++) {
+        expect(remainingIds[i]).to.be.greaterThan(remainingIds[i - 1]);
+      }
+    });
+  });
+
+  describe('regression: addParticipant rejects identityId 0', () => {
+    it('reverts when adding identity ID 0', async () => {
+      const node = { operational: accounts[1], admin: accounts[2] };
+      const { identityId } = await createProfile(ProfileContract, node);
+
+      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
+        [identityId], 1, 0, 1, ethers.ZeroAddress,
+      );
+
+      await expect(
+        ContextGraphsContract.connect(accounts[0]).addParticipant(1, 0n),
+      ).to.be.revertedWith('Identity ID cannot be zero');
+    });
+  });
+
   describe('ERC-721 enumeration', () => {
     it('totalSupply and tokenByIndex work', async () => {
       const node = { operational: accounts[1], admin: accounts[2] };

@@ -60,6 +60,20 @@ describe('resolveViewGraphs', () => {
     });
   });
 
+  describe('regression: legacy views throw migration error', () => {
+    it('long-term-memory throws', () => {
+      expect(() => resolveViewGraphs('long-term-memory' as GetView, CG)).toThrow(
+        /removed in V10/,
+      );
+    });
+
+    it('authoritative throws', () => {
+      expect(() => resolveViewGraphs('authoritative' as GetView, CG)).toThrow(
+        /removed in V10/,
+      );
+    });
+  });
+
   describe('GET_VIEWS constant', () => {
     it('contains all 3 views', () => {
       expect(GET_VIEWS).toHaveLength(3);

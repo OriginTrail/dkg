@@ -7,6 +7,7 @@ import {
   VALID_TRANSITIONS,
   PUBLICATION_STATES,
   GET_VIEWS,
+  REMOVED_VIEWS,
   type PublicationState,
   type GetView,
   type Publication,
@@ -97,6 +98,19 @@ describe('GetView type', () => {
       'working-memory', 'shared-working-memory', 'verified-memory',
     ];
     expect([...GET_VIEWS]).toEqual(expected);
+  });
+});
+
+describe('regression: REMOVED_VIEWS lists legacy V9 views', () => {
+  it('contains long-term-memory and authoritative', () => {
+    expect(REMOVED_VIEWS).toContain('long-term-memory');
+    expect(REMOVED_VIEWS).toContain('authoritative');
+  });
+
+  it('does not contain any current V10 views', () => {
+    for (const v of GET_VIEWS) {
+      expect(REMOVED_VIEWS).not.toContain(v);
+    }
   });
 });
 

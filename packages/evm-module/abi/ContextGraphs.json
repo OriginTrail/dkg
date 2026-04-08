@@ -11,6 +11,17 @@
     "type": "constructor"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ContextGraphNotActive",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ECDSAInvalidSignature",
     "type": "error"

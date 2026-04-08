@@ -55,6 +55,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     PublishingConvictionAccount public convictionAccount;
     ContextGraphs public contextGraphs;
 
+    // Tracks the original (maximum) byte size paid for at creation time.
+    // Updates can shrink below this but never exceed it without additional payment.
+    mapping(uint256 => uint88) public originalByteSize;
+
     error ConvictionAccountNotConfigured();
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -168,8 +172,17 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         _verifySignatures(identityIds, ECDSA.toEthSignedMessageHash(ackDigest), r, vs);
 
         if (address(contextGraphs) != address(0) && contextGraphId > 0) {
-            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, msg.sender)) {
-                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, msg.sender);
+            // Recover the publisher's wallet from the publisher signature — not msg.sender,
+            // because the tx may be submitted by a different operational wallet (round-robin).
+            address publisherWallet = ECDSA.recover(
+                ECDSA.toEthSignedMessageHash(
+                    keccak256(abi.encodePacked(contextGraphId, publisherNodeIdentityId, merkleRoot))
+                ),
+                publisherNodeR,
+                publisherNodeVS
+            );
+            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet)) {
+                revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, publisherWallet);
             }
         }
 
@@ -187,6 +200,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             tokenAmount,
             isImmutable
         );
+
+        originalByteSize[id] = byteSize;
 
         _validateTokenAmount(byteSize, epochs, tokenAmount, false);
 
@@ -401,7 +416,9 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert KnowledgeCollectionLib.KnowledgeCollectionExpired(id, currentEpoch, endEpoch);
         }
 
-        require(newByteSize <= oldByteSize, "Cannot increase byte size without additional payment");
+        uint88 ceiling = originalByteSize[id];
+        if (ceiling == 0) ceiling = oldByteSize; // Fallback for pre-tracking collections
+        require(newByteSize <= ceiling, "Cannot increase byte size without additional payment");
 
         kcs.updateKnowledgeCollection(
             msg.sender,

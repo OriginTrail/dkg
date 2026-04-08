@@ -46,6 +46,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
 
     mapping(uint256 => Account) public accounts;
     mapping(uint256 => mapping(uint40 => uint96)) public epochSpent;
+    mapping(uint256 => mapping(uint40 => uint96)) public topUpCredits;
     mapping(uint256 => address[]) private _registeredAgents;
     mapping(address => uint256) public agentToAccountId;
     mapping(uint256 => mapping(address => bool)) private _isRegisteredAgent;
@@ -142,17 +143,25 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
             revert AccountExpired(accountId, acct.expiresAtEpoch);
         }
 
-        // Top-ups increase the spendable epoch allowance but do NOT count toward
-        // committedTRAC (which determines the discount tier). Increasing the tier
-        // without a fresh 12-epoch lock would break conviction economics.
+        // Top-ups do NOT increase committedTRAC (discount tier) — they only add
+        // spending capacity. The top-up amount is distributed over the remaining
+        // epochs, not the global epochAllowance, to avoid over-allocating
+        // on old epochs (which releaseUnspentTRAC reads).
         //
-        // Extend the expiry by 12 epochs from now so the top-up has a full
-        // spending window. Without this, near-expiry top-ups would strand TRAC.
+        // Extend expiry by 12 epochs from now so top-up funds have a full window.
         uint40 newExpiry = currentEpoch + uint40(LOCK_DURATION_EPOCHS);
         if (newExpiry > acct.expiresAtEpoch) {
             acct.expiresAtEpoch = newExpiry;
         }
-        acct.epochAllowance += amount / uint96(LOCK_DURATION_EPOCHS);
+
+        uint40 remainingEpochs = acct.expiresAtEpoch > currentEpoch
+            ? acct.expiresAtEpoch - currentEpoch
+            : 1;
+        uint96 perEpochTopUp = amount / uint96(remainingEpochs);
+        // Credit each remaining epoch individually so historical epochs aren't inflated
+        for (uint40 e = currentEpoch; e < acct.expiresAtEpoch; e++) {
+            topUpCredits[accountId][e] += perEpochTopUp;
+        }
 
         if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
             revert InvalidAmount();
@@ -185,7 +194,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
 
         uint96 discountedCost = _applyDiscount(acct.committedTRAC, baseCost);
         uint96 spent = epochSpent[accountId][currentEpoch];
-        uint96 available = acct.epochAllowance > spent ? acct.epochAllowance - spent : 0;
+        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][currentEpoch];
+        uint96 available = epochCap > spent ? epochCap - spent : 0;
 
         if (discountedCost > available) {
             revert InsufficientAllowance(accountId, currentEpoch, discountedCost, available);
@@ -265,11 +275,12 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         require(epoch >= acct.createdAtEpoch && epoch < acct.expiresAtEpoch, "Epoch out of account range");
 
         uint96 spent = epochSpent[accountId][epoch];
-        uint96 unspent = acct.epochAllowance > spent ? acct.epochAllowance - spent : 0;
+        uint96 epochCap = acct.epochAllowance + topUpCredits[accountId][epoch];
+        uint96 unspent = epochCap > spent ? epochCap - spent : 0;
 
         if (unspent == 0) revert EpochAlreadyReleased(accountId, epoch);
 
-        epochSpent[accountId][epoch] = acct.epochAllowance;
+        epochSpent[accountId][epoch] = epochCap;
 
         if (!tokenContract.transfer(stakingStorageAddress, unspent)) {
             revert InvalidAmount();
