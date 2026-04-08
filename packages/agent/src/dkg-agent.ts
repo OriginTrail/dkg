@@ -85,6 +85,16 @@ const SYNC_ROUTER_ATTEMPTS = 3;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
+interface SyncRequestEnvelope {
+  contextGraphId: string;
+  offset: number;
+  limit: number;
+  includeSharedMemory: boolean;
+  requesterIdentityId?: string;
+  requesterSignatureR?: string;
+  requesterSignatureVS?: string;
+}
+
 /** Health status of a peer from the last ping round. */
 export interface PeerHealth {
   peerId: string;
@@ -519,16 +529,14 @@ export class DKGAgent {
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
     this.router.register(PROTOCOL_SYNC, async (data) => {
-      const text = new TextDecoder().decode(data).trim();
-      const [ctxGraphPart, offsetStr, limitStr] = text.split('|');
-      const offset = parseInt(offsetStr, 10) || 0;
-      const limit = Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE);
-
-      const isWorkspace = ctxGraphPart.startsWith('workspace:');
-      const contextGraphId = isWorkspace ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
+      const request = this.parseSyncRequest(data);
+      const offset = request.offset;
+      const limit = request.limit;
+      const isWorkspace = request.includeSharedMemory;
+      const contextGraphId = request.contextGraphId;
       const nquads: string[] = [];
 
-      if (await this.isPrivateContextGraph(contextGraphId)) {
+      if (!(await this.authorizeSyncRequest(request))) {
         return new TextEncoder().encode('');
       }
 
@@ -759,6 +767,7 @@ export class DKGAgent {
           }
 
           const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, false);
 
           // Cap per-call timeout so ProtocolRouter.send (3 internal retries) stays within deadline
           const remainingMs = Math.max(0, deadline - Date.now());
@@ -768,7 +777,7 @@ export class DKGAgent {
           );
 
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, requestBytes, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
@@ -855,7 +864,7 @@ export class DKGAgent {
             break;
           }
 
-          const payload = new TextEncoder().encode(`workspace:${pid}|${offset}|${SYNC_PAGE_SIZE}`);
+          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, true);
 
           const remainingMs = Math.max(0, deadline - Date.now());
           const timeoutMs = Math.min(
@@ -864,7 +873,7 @@ export class DKGAgent {
           );
 
           const responseBytes = await withRetry(
-            () => this.router.send(remotePeerId, PROTOCOL_SYNC, payload, timeoutMs),
+            () => this.router.send(remotePeerId, PROTOCOL_SYNC, requestBytes, timeoutMs),
             {
               maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
               baseDelayMs: 1000,
@@ -2842,6 +2851,120 @@ export class DKGAgent {
       } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
+    const text = new TextDecoder().decode(data).trim();
+    if (text.startsWith('{')) {
+      const parsed = JSON.parse(text) as SyncRequestEnvelope;
+      return {
+        contextGraphId: parsed.contextGraphId,
+        offset: parsed.offset ?? 0,
+        limit: Math.min(parsed.limit ?? SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
+        includeSharedMemory: parsed.includeSharedMemory ?? false,
+        requesterIdentityId: parsed.requesterIdentityId,
+        requesterSignatureR: parsed.requesterSignatureR,
+        requesterSignatureVS: parsed.requesterSignatureVS,
+      };
+    }
+
+    const [ctxGraphPart, offsetStr, limitStr] = text.split('|');
+    const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
+    const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
+    return {
+      contextGraphId,
+      offset: parseInt(offsetStr, 10) || 0,
+      limit: Math.min(parseInt(limitStr, 10) || SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
+      includeSharedMemory,
+    };
+  }
+
+  private async buildSyncRequest(
+    contextGraphId: string,
+    offset: number,
+    limit: number,
+    includeSharedMemory: boolean,
+  ): Promise<Uint8Array> {
+    const request: SyncRequestEnvelope = {
+      contextGraphId,
+      offset,
+      limit,
+      includeSharedMemory,
+    };
+
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      const identityId = await this.chain.getIdentityId();
+      if (identityId > 0n && typeof this.chain.signMessage === 'function') {
+        const digest = this.computeSyncDigest(contextGraphId, offset, limit, includeSharedMemory);
+        const signature = await this.chain.signMessage(digest);
+        request.requesterIdentityId = identityId.toString();
+        request.requesterSignatureR = ethers.hexlify(signature.r);
+        request.requesterSignatureVS = ethers.hexlify(signature.vs);
+      }
+    }
+
+    return new TextEncoder().encode(JSON.stringify(request));
+  }
+
+  private computeSyncDigest(
+    contextGraphId: string,
+    offset: number,
+    limit: number,
+    includeSharedMemory: boolean,
+  ): Uint8Array {
+    return ethers.getBytes(
+      ethers.solidityPackedKeccak256(
+        ['string', 'uint256', 'uint256', 'bool'],
+        [contextGraphId, BigInt(offset), BigInt(limit), includeSharedMemory],
+      ),
+    );
+  }
+
+  private async authorizeSyncRequest(request: SyncRequestEnvelope): Promise<boolean> {
+    const isPrivate = await this.isPrivateContextGraph(request.contextGraphId);
+    if (!isPrivate) {
+      return true;
+    }
+
+    const requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n;
+    if (
+      requesterIdentityId === 0n ||
+      !request.requesterSignatureR ||
+      !request.requesterSignatureVS ||
+      typeof this.chain.verifyACKIdentity !== 'function'
+    ) {
+      return false;
+    }
+
+    const onChainId = this.subscribedContextGraphs.get(request.contextGraphId)?.onChainId;
+    if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
+      return false;
+    }
+
+    const digest = this.computeSyncDigest(
+      request.contextGraphId,
+      request.offset,
+      request.limit,
+      request.includeSharedMemory,
+    );
+
+    let recoveredAddress: string;
+    try {
+      recoveredAddress = ethers.recoverAddress(ethers.hashMessage(digest), {
+        r: request.requesterSignatureR,
+        yParityAndS: request.requesterSignatureVS,
+      });
+    } catch {
+      return false;
+    }
+
+    const validIdentity = await this.chain.verifyACKIdentity(recoveredAddress, requesterIdentityId);
+    if (!validIdentity) {
+      return false;
+    }
+
+    const participants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
+    return participants?.some((id) => id === requesterIdentityId) ?? false;
   }
 
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {

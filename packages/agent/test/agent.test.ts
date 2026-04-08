@@ -1390,6 +1390,80 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('builds authenticated sync requests for private context graphs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthRequest',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+
+      const chain = (agent as any).chain as MockChainAdapter;
+      const identityId = await chain.ensureProfile();
+      vi.spyOn(chain, 'signMessage').mockResolvedValue({ r: new Uint8Array(32), vs: new Uint8Array(32) });
+
+      const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false);
+      const parsed = JSON.parse(new TextDecoder().decode(encoded));
+
+      expect(parsed.contextGraphId).toBe('private-cg');
+      expect(parsed.requesterIdentityId).toBe(identityId.toString());
+      expect(parsed.requesterSignatureR).toBeDefined();
+      expect(parsed.requesterSignatureVS).toBeDefined();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('denies private sync requests when requester is not an allowed participant', async () => {
+    const chain = new MockChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthDeny',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      await chain.ensureProfile();
+      (chain as any).contextGraphs.set(1n, {
+        manager: chain.signerAddress,
+        participantIdentityIds: [999n],
+        requiredSignatures: 1,
+        metadataBatchId: 0n,
+        active: true,
+        batches: [],
+      });
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+
+      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+
+      const allowed = await (agent as any).authorizeSyncRequest({
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        requesterIdentityId: '1',
+        requesterSignatureR: '0x' + '00'.repeat(32),
+        requesterSignatureVS: '0x' + '00'.repeat(32),
+      });
+
+      expect(allowed).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('emits warning when queryAccess.defaultPolicy is explicitly "public"', async () => {
     const { Logger } = await import('@origintrail-official/dkg-core');
     const logs: Array<{ level: string; message: string }> = [];

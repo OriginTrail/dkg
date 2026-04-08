@@ -711,6 +711,11 @@ export class MockChainAdapter implements ChainAdapter {
     return this.contextGraphs.get(contextGraphId);
   }
 
+  async getContextGraphParticipants(contextGraphId: bigint): Promise<bigint[] | null> {
+    const cg = this.contextGraphs.get(contextGraphId);
+    return cg ? [...cg.participantIdentityIds] : null;
+  }
+
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
   async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {

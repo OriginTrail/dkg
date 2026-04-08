@@ -975,6 +975,20 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
+  async getContextGraphParticipants(contextGraphId: bigint): Promise<bigint[] | null> {
+    await this.init();
+    if (!this.contracts.contextGraphStorage) {
+      return null;
+    }
+
+    try {
+      const participants: bigint[] = await this.contracts.contextGraphStorage.getContextGraphParticipants(contextGraphId);
+      return participants.map((id) => BigInt(id));
+    } catch {
+      return null;
+    }
+  }
+
   async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
     if (!this.contracts.contextGraphs) {

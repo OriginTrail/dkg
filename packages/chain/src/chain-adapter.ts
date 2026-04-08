@@ -316,6 +316,7 @@ export interface ChainAdapter {
 
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
+  getContextGraphParticipants?(contextGraphId: bigint): Promise<bigint[] | null>;
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
