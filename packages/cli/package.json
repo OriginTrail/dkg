@@ -15,9 +15,12 @@
   "dependencies": {
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*",
+    "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
+    "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*",
     "commander": "^13",
     "ethers": "^6",
     "js-yaml": "^4.1.1",

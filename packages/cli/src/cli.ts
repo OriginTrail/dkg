@@ -9,15 +9,14 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import { batchEntityQuads, type PublishQuad } from './batching.js';
 import { requestFaucetFunding } from './faucet.js';
 import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
-import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
   loadNetworkConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
-  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import {
@@ -68,14 +67,7 @@ function getCliVersion(): string {
   }
 }
 
-function loadStructuredFile(filePath: string): any {
-  const content = readFileSync(filePath, 'utf8');
-  if (filePath.endsWith('.json')) return JSON.parse(content);
-  return yaml.load(content);
-}
-
 function resolveDaemonEntryPoint(): string {
-  if (process.env.DKG_NO_BLUE_GREEN) return fileURLToPath(import.meta.url);
   const rDir = releasesDir();
   if (existsSync(rDir)) {
     const entry = slotEntryPoint(join(rDir, 'current'));
@@ -168,7 +160,7 @@ async function runForegroundSupervisor(): Promise<void> {
 const program = new Command();
 program
   .name('dkg')
-  .description('DKG V10 testnet node CLI')
+  .description('DKG V9 testnet node CLI')
   .version(getCliVersion());
 
 // ─── dkg init ────────────────────────────────────────────────────────
@@ -208,17 +200,16 @@ program
       ? await ask('Relay multiaddr', defaultRelay)
       : await ask('Relay multiaddr (optional for core)', defaultRelay);
 
-    const existingContextGraphs = resolveContextGraphs(existing);
-    const defaultContextGraphs = existingContextGraphs.length
-      ? existingContextGraphs.join(',')
-      : resolveNetworkDefaultContextGraphs(network).length
-        ? resolveNetworkDefaultContextGraphs(network).join(',')
+    const defaultParanets = existing.paranets?.length
+      ? existing.paranets.join(',')
+      : network?.defaultParanets?.length
+        ? network.defaultParanets.join(',')
         : undefined;
-    const contextGraphsStr = await ask(
-      'Context graphs to subscribe (comma-separated)',
-      defaultContextGraphs,
+    const paranetsStr = await ask(
+      'Paranets to subscribe (comma-separated)',
+      defaultParanets,
     );
-    const contextGraphs = contextGraphsStr ? contextGraphsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const paranets = paranetsStr ? paranetsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port', String(existing.apiPort)), 10);
 
     const autoUpdateDefault = existing.autoUpdate?.enabled ?? network?.autoUpdate?.enabled ?? false;
@@ -285,8 +276,7 @@ program
       relay: (!existing.relay && relay === networkDefaultRelay) ? undefined : (relay || undefined),
       apiPort,
       nodeRole,
-      contextGraphs,
-      paranets: contextGraphs,
+      paranets,
       autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
       chain: chainSection ?? existing.chain,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
@@ -310,7 +300,7 @@ program
     const relayDisplay = config.relay
       ?? (network?.relays?.length ? `(network default — ${network.relays.length} relays)` : '(none)');
     console.log(`  relay:      ${relayDisplay}`);
-    console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
+    console.log(`  paranets:   ${paranets.length ? paranets.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
     console.log(
@@ -446,9 +436,7 @@ program
     }
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
-    if (!process.env.DKG_NO_BLUE_GREEN) {
-      await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
-    }
+    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
 
     if (opts.foreground) {
       await runForegroundSupervisor();
@@ -677,13 +665,14 @@ program
     }
   });
 
-// ─── dkg publish <context-graph> ─────────────────────────────────────
+// ─── dkg publish <paranet> ───────────────────────────────────────────
 
 program
-  .command('publish <context-graph>')
-  .description('Publish triples to a context graph from an RDF file or inline')
+  .command('publish <paranet>')
+  .description('Publish triples to a paranet from an RDF file or inline')
   .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
   .option('--private-file <path>', 'RDF file with private triples (encrypted, access-controlled)')
+  .option('--workspace', 'Stage quads in workspace instead of publishing immediately')
   .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
   .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
   .option('-s, --subject <uri>', 'Subject URI for simple publish')
@@ -691,13 +680,13 @@ program
   .option('-o, --object <value>', 'Object value for simple publish')
   .option('--access-policy <policy>', 'Access policy for private triples (public|ownerOnly|allowList)')
   .option('--allowed-peer <peerId>', 'Peer ID allowed when using allowList policy', (v, prev: string[] = []) => [...prev, v], [])
-  .action(async (contextGraph: string, opts: ActionOpts) => {
+  .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       const rdfParser = await import('./rdf-parser.js');
-      const defaultGraph = `did:dkg:context-graph:${contextGraph}`;
+      const defaultGraph = `did:dkg:context-graph:${paranet}`;
 
-      let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+        let quads: PublishQuad[];
 
       if (opts.file) {
         const { readFile } = await import('node:fs/promises');
@@ -722,8 +711,12 @@ program
         process.exit(1);
       }
 
-      let privateQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> | undefined;
+        let privateQuads: PublishQuad[] | undefined;
       if (opts.privateFile) {
+        if (opts.workspace) {
+          console.error('--private-file is not supported with --workspace');
+          process.exit(1);
+        }
         const { readFile } = await import('node:fs/promises');
         const raw = await readFile(opts.privateFile, 'utf-8');
         const format = opts.format ?? rdfParser.detectFormat(opts.privateFile);
@@ -746,21 +739,51 @@ program
         process.exit(1);
       }
 
-      const result = await client.publish(contextGraph, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-      });
-      console.log(`Published to context graph "${contextGraph}":`);
-      console.log(`  Status:    ${result.status}`);
-      console.log(`  KC ID:     ${result.kcId}`);
-      if (result.txHash) {
-        console.log(`  TX hash:   ${result.txHash}`);
-        console.log(`  Block:     ${result.blockNumber}`);
-        console.log(`  Batch ID:  ${result.batchId}`);
-        console.log(`  Publisher: ${result.publisherAddress}`);
-      }
-      for (const ka of result.kas) {
-        console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
+      if (opts.workspace) {
+        let shareOperationId: string | undefined;
+        let graph: string | undefined;
+        let skolemizedBlankNodes = 0;
+        const workspaceBatches = batchEntityQuads(quads, {
+          maxBatchQuads: 500,
+          maxBatchBytes: 450 * 1024,
+          estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: paranet, quads: batch })).length,
+          splitOversizedEntities: true,
+        });
+        let sent = 0;
+        for (const batch of workspaceBatches) {
+          const result = await client.workspaceWrite(paranet, batch);
+          shareOperationId ??= result.shareOperationId;
+          graph ??= result.graph;
+          skolemizedBlankNodes += result.skolemizedBlankNodes ?? 0;
+          sent += batch.length;
+          process.stdout.write(`\r  Staging in workspace: ${sent}/${quads.length} quads`);
+        }
+        process.stdout.write('\n');
+        console.log(`Staged to shared memory for "${paranet}":`);
+        console.log(`  Share operation:     ${shareOperationId}`);
+        console.log(`  Graph:               ${graph}`);
+        console.log(`  Triples written:     ${quads.length}`);
+        if (skolemizedBlankNodes > 0) {
+          console.log(`  Skolemized blanks:   ${skolemizedBlankNodes}`);
+        }
+        console.log(`  Next: dkg publisher enqueue ${paranet} --workspace-operation-id ${shareOperationId} --root <entity> --namespace <ns> --scope <scope> --authority-proof-ref <ref>`);
+      } else {
+        const result = await client.publish(paranet, quads, privateQuads, {
+          accessPolicy,
+          allowedPeers,
+        });
+        console.log(`Published to "${paranet}":`);
+        console.log(`  Status:    ${result.status}`);
+        console.log(`  KC ID:     ${result.kcId}`);
+        if (result.txHash) {
+          console.log(`  TX hash:   ${result.txHash}`);
+          console.log(`  Block:     ${result.blockNumber}`);
+          console.log(`  Batch ID:  ${result.batchId}`);
+          console.log(`  Publisher: ${result.publisherAddress}`);
+        }
+        for (const ka of result.kas) {
+          console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
+        }
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -768,63 +791,14 @@ program
     }
   });
 
-// ─── dkg verify <batchId> ──────────────────────────────────────────
+// ─── dkg query <paranet> <sparql> ───────────────────────────────────
 
 program
-  .command('verify <batchId>')
-  .description('Propose M-of-N verification for a published batch')
-  .requiredOption('--context-graph <id>', 'Context Graph ID')
-  .requiredOption('--verified-graph <id>', 'Verified Graph ID')
-  .option('--timeout <ms>', 'Timeout in milliseconds (default: 30 min)')
-  .action(async (batchId: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const result = await client.verify({
-        contextGraphId: opts.contextGraph,
-        verifiedMemoryId: opts.verifiedGraph,
-        batchId,
-        timeoutMs: opts.timeout ? Number(opts.timeout) : undefined,
-      });
-      console.log(`Verified batch ${batchId} → _verified_memory/${result.verifiedMemoryId}`);
-      console.log(`  TX: ${result.txHash}`);
-      console.log(`  Block: ${result.blockNumber}`);
-      console.log(`  Signers: ${result.signers.join(', ')}`);
-    } catch (err) {
-      console.error(`Verify failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-// ─── dkg endorse <ual> ─────────────────────────────────────────────
-
-program
-  .command('endorse <ual>')
-  .description('Endorse a published Knowledge Asset')
-  .requiredOption('--context-graph <id>', 'Context Graph ID')
-  .requiredOption('--agent <address>', 'Agent address (endorser)')
-  .action(async (ual: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const result = await client.endorse({
-        contextGraphId: opts.contextGraph,
-        ual,
-        agentAddress: opts.agent,
-      });
-      console.log(`Endorsed ${ual} by ${result.endorserAddress}`);
-    } catch (err) {
-      console.error(`Endorse failed: ${err instanceof Error ? err.message : String(err)}`);
-      process.exit(1);
-    }
-  });
-
-// ─── dkg query <context-graph> <sparql> ─────────────────────────────
-
-program
-  .command('query [context-graph]')
-  .description('Run a SPARQL query against a context graph (or all)')
+  .command('query [paranet]')
+  .description('Run a SPARQL query against a paranet (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
-  .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
+  .action(async (paranet: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
 
@@ -838,7 +812,7 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, contextGraph);
+      const { result } = await client.query(sparql, paranet);
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
@@ -873,22 +847,20 @@ program
 program
   .command('query-remote <peer>')
   .description('Query a remote peer\'s knowledge store')
-  .option('-q, --sparql <query>', 'SPARQL query (requires --context-graph)')
+  .option('-q, --sparql <query>', 'SPARQL query (requires --paranet)')
   .option('--ual <ual>', 'Look up a knowledge asset by UAL')
-  .option('--entity <uri>', 'Get all triples for an entity URI (requires --context-graph)')
-  .option('--type <rdfType>', 'Find entities by RDF type (requires --context-graph)')
-  .option('-p, --context-graph <id>', 'Target context graph')
-  .option('--paranet <id>', 'Target context graph (legacy alias)')
+  .option('--entity <uri>', 'Get all triples for an entity URI (requires --paranet)')
+  .option('--type <rdfType>', 'Find entities by RDF type (requires --paranet)')
+  .option('-p, --paranet <id>', 'Target paranet')
   .option('-l, --limit <n>', 'Max results', '100')
   .option('--timeout <ms>', 'Query timeout in ms', '5000')
   .action(async (peer: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const contextGraphId = opts.contextGraph ?? opts.paranet;
 
       let lookupType: string;
       const request: Record<string, any> = { // eslint-disable-line @typescript-eslint/no-explicit-any
-        paranetId: contextGraphId,
+        contextGraphId: opts.paranet,
         limit: parseInt(opts.limit, 10),
         timeout: parseInt(opts.timeout, 10),
       };
@@ -899,22 +871,22 @@ program
       } else if (opts.type) {
         lookupType = 'ENTITIES_BY_TYPE';
         request.rdfType = opts.type;
-        if (!contextGraphId) {
-          console.error('--context-graph is required for --type queries');
+        if (!opts.paranet) {
+          console.error('--paranet is required for --type queries');
           process.exit(1);
         }
       } else if (opts.entity) {
         lookupType = 'ENTITY_TRIPLES';
         request.entityUri = opts.entity;
-        if (!contextGraphId) {
-          console.error('--context-graph is required for --entity queries');
+        if (!opts.paranet) {
+          console.error('--paranet is required for --entity queries');
           process.exit(1);
         }
       } else if (opts.sparql) {
         lookupType = 'SPARQL_QUERY';
         request.sparql = opts.sparql;
-        if (!contextGraphId) {
-          console.error('--context-graph is required for --sparql queries');
+        if (!opts.paranet) {
+          console.error('--paranet is required for --sparql queries');
           process.exit(1);
         }
       } else {
@@ -977,36 +949,35 @@ program
     }
   });
 
-// ─── dkg subscribe <context-graph> ──────────────────────────────────
+// ─── dkg subscribe <paranet> ────────────────────────────────────────
 
 program
-  .command('subscribe <context-graph>')
-  .description('Subscribe to a context graph\'s GossipSub topic')
+  .command('subscribe <paranet>')
+  .description('Subscribe to a paranet\'s GossipSub topic')
   .option('--save', 'Also save to config so it auto-subscribes on restart')
-  .action(async (contextGraph: string, opts: ActionOpts) => {
+  .action(async (paranet: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.subscribeToContextGraph(contextGraph);
-      console.log(`Subscribed to context graph: ${contextGraph}`);
+      const result = await client.subscribe(paranet);
+      console.log(`Subscribed to paranet: ${paranet}`);
       const catchup = result.catchup;
       if (catchup) {
         if ('peersTried' in catchup) {
           console.log(
-            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.workspaceSynced}`,
+            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, workspace ${catchup.workspaceSynced}`,
           );
         } else {
           console.log(
-            `Catch-up sync queued in background (job ${catchup.jobId}, shared memory ${catchup.includeWorkspace ? 'enabled' : 'disabled'}).`,
+            `Catch-up sync queued in background (job ${catchup.jobId}, workspace ${catchup.includeWorkspace ? 'enabled' : 'disabled'}).`,
           );
         }
       }
 
       if (opts.save) {
         const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(contextGraph);
-        config.contextGraphs = [...cgs];
-        config.paranets = [...cgs];
+        const paranets = new Set(config.paranets ?? []);
+        paranets.add(paranet);
+        config.paranets = [...paranets];
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
       }
@@ -1023,27 +994,27 @@ const syncCmd = program
   .description('Sync status helpers');
 
 syncCmd
-  .command('catchup-status <context-graph>')
-  .description('Show latest background catch-up status for a context graph')
-  .action(async (contextGraph: string) => {
+  .command('catchup-status <paranet>')
+  .description('Show latest background catch-up status for a paranet')
+  .action(async (paranet: string) => {
     try {
       const client = await ApiClient.connect();
-      const status = await client.catchupStatus(contextGraph);
+      const status = await client.catchupStatus(paranet);
 
-      console.log(`Context Graph: ${status.paranetId}`);
-      console.log(`Job:           ${status.jobId}`);
-      console.log(`Status:        ${status.status}`);
-      console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
-      console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
-      if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
-      if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
+      console.log(`Paranet:   ${status.paranetId}`);
+      console.log(`Job:       ${status.jobId}`);
+      console.log(`Status:    ${status.status}`);
+      console.log(`Workspace: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+      console.log(`Queued:    ${new Date(status.queuedAt).toISOString()}`);
+      if (status.startedAt) console.log(`Started:   ${new Date(status.startedAt).toISOString()}`);
+      if (status.finishedAt) console.log(`Finished:  ${new Date(status.finishedAt).toISOString()}`);
       if (status.result) {
         console.log(
-          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.workspaceSynced}`,
+          `Result:    peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, workspace ${status.result.workspaceSynced}`,
         );
       }
       if (status.error) {
-        console.log(`Error:         ${status.error}`);
+        console.log(`Error:     ${status.error}`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1051,35 +1022,33 @@ syncCmd
     }
   });
 
-// ─── dkg context-graph (alias: paranet) ─────────────────────────────
+// ─── dkg paranet ────────────────────────────────────────────────────
 
-const contextGraphCmd = program
-  .command('context-graph')
-  .alias('paranet')
-  .description('Manage context graphs (knowledge graph partitions)');
+const paranetCmd = program
+  .command('paranet')
+  .description('Manage paranets (knowledge graph partitions)');
 
-contextGraphCmd
+paranetCmd
   .command('create <id>')
-  .description('Create a new context graph (publishes definition to the system ontology)')
+  .description('Create a new paranet (publishes definition to the system ontology)')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
-  .option('-d, --description <desc>', 'Description of the context graph')
-  .option('--subscribe', 'Also subscribe to the context graph after creation', true)
+  .option('-d, --description <desc>', 'Description of the paranet')
+  .option('--subscribe', 'Also subscribe to the paranet after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createContextGraph(id, opts.name ?? id, opts.description);
-      console.log(`Context graph created:`);
+      const result = await client.createParanet(id, opts.name ?? id, opts.description);
+      console.log(`Paranet created:`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
       console.log(`  Auto-subscribed to GossipSub topic.`);
 
       if (opts.save) {
         const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(id);
-        config.contextGraphs = [...cgs];
-        config.paranets = [...cgs];
+        const paranets = new Set(config.paranets ?? []);
+        paranets.add(id);
+        config.paranets = [...paranets];
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
@@ -1089,50 +1058,50 @@ contextGraphCmd
     }
   });
 
-contextGraphCmd
+paranetCmd
   .command('list')
-  .description('List all known context graphs')
+  .description('List all known paranets')
   .action(async () => {
     try {
       const client = await ApiClient.connect();
-      const { paranets: contextGraphs } = await client.listContextGraphs();
+      const { paranets } = await client.listParanets();
 
-      if (contextGraphs.length === 0) {
-        console.log('No context graphs registered yet.');
+      if (paranets.length === 0) {
+        console.log('No paranets registered yet.');
         return;
       }
 
-      const idW = Math.max(4, ...contextGraphs.map(p => p.id.length));
-      const nameW = Math.max(4, ...contextGraphs.map(p => p.name.length));
+      const idW = Math.max(4, ...paranets.map(p => p.id.length));
+      const nameW = Math.max(4, ...paranets.map(p => p.name.length));
 
       const header = `  ${'ID'.padEnd(idW)}   ${'Name'.padEnd(nameW)}   Type       Creator`;
       console.log(header);
       console.log('  ' + '─'.repeat(header.length - 2));
 
-      for (const p of contextGraphs) {
+      for (const p of paranets) {
         const type = p.isSystem ? 'system' : 'user';
         const creator = p.creator
           ? (p.creator.length > 24 ? p.creator.slice(0, 12) + '...' + p.creator.slice(-8) : p.creator)
           : '—';
         console.log(`  ${p.id.padEnd(idW)}   ${p.name.padEnd(nameW)}   ${type.padEnd(9)}  ${creator}`);
       }
-      console.log(`\n  ${contextGraphs.length} context graph(s)`);
+      console.log(`\n  ${paranets.length} paranet(s)`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
 
-contextGraphCmd
+paranetCmd
   .command('info <id>')
-  .description('Show details of a specific context graph')
+  .description('Show details of a specific paranet')
   .action(async (id: string) => {
     try {
       const client = await ApiClient.connect();
-      const { paranets: contextGraphs } = await client.listContextGraphs();
-      const p = contextGraphs.find(x => x.id === id);
+      const { paranets } = await client.listParanets();
+      const p = paranets.find(x => x.id === id);
       if (!p) {
-        console.error(`Context graph "${id}" not found.`);
+        console.error(`Paranet "${id}" not found.`);
         process.exit(1);
       }
       console.log(`  ID:          ${p.id}`);
@@ -1183,255 +1152,13 @@ openclawCmd
     }
   });
 
-// ─── dkg ccl ────────────────────────────────────────────────────────
-
-const cclCmd = program
-  .command('ccl')
-  .description('Manage paranet-scoped CCL policies');
-
-const cclPolicyCmd = cclCmd
-  .command('policy')
-  .description('Publish, approve, revoke, list, and resolve CCL policies');
-
-cclPolicyCmd
-  .command('publish <paranetId>')
-  .description('Publish a CCL policy proposal into the ontology graph')
-  .requiredOption('--name <name>', 'Policy name')
-  .requiredOption('--version <version>', 'Policy version')
-  .requiredOption('--file <path>', 'Path to canonical policy file')
-  .option('--description <desc>', 'Description of the policy')
-  .option('--context-type <contextType>', 'Optional stricter context override scope')
-  .option('--language <language>', 'Policy language identifier', 'ccl/v0.1')
-  .option('--format <format>', 'Canonical policy format', 'canonical-yaml')
-  .action(async (paranetId: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const content = readFileSync(opts.file, 'utf8');
-      const result = await client.publishCclPolicy({
-        paranetId,
-        name: opts.name,
-        version: opts.version,
-        content,
-        description: opts.description,
-        contextType: opts.contextType,
-        language: opts.language,
-        format: opts.format,
-      });
-      console.log(`Policy published:`);
-      console.log(`  URI:    ${result.policyUri}`);
-      console.log(`  Hash:   ${result.hash}`);
-      console.log(`  Status: ${result.status}`);
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclPolicyCmd
-  .command('approve <paranetId> <policyUri>')
-  .description('Approve a published CCL policy for a paranet or context override')
-  .option('--context-type <contextType>', 'Optional stricter context override scope')
-  .action(async (paranetId: string, policyUri: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const result = await client.approveCclPolicy({ paranetId, policyUri, contextType: opts.contextType });
-      console.log(`Policy approved:`);
-      console.log(`  Policy:   ${result.policyUri}`);
-      console.log(`  Binding:  ${result.bindingUri}`);
-      if (result.contextType) console.log(`  Context:  ${result.contextType}`);
-      console.log(`  Approved: ${result.approvedAt}`);
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclPolicyCmd
-  .command('revoke <paranetId> <policyUri>')
-  .description('Revoke the currently active CCL policy binding for a paranet or context override')
-  .option('--context-type <contextType>', 'Optional stricter context override scope')
-  .action(async (paranetId: string, policyUri: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const result = await client.revokeCclPolicy({ paranetId, policyUri, contextType: opts.contextType });
-      console.log(`Policy revoked:`);
-      console.log(`  Policy:   ${result.policyUri}`);
-      console.log(`  Binding:  ${result.bindingUri}`);
-      if (result.contextType) console.log(`  Context:  ${result.contextType}`);
-      console.log(`  Revoked:  ${result.revokedAt}`);
-      console.log(`  Status:   ${result.status}`);
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclPolicyCmd
-  .command('list')
-  .description('List known CCL policies')
-  .option('--paranet <id>', 'Filter by paranet id')
-  .option('--name <name>', 'Filter by policy name')
-  .option('--context-type <contextType>', 'Filter by context type')
-  .option('--status <status>', 'Filter by status')
-  .option('--include-body', 'Include policy body in output')
-  .action(async (opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const { policies } = await client.listCclPolicies({
-        paranetId: opts.paranet,
-        name: opts.name,
-        contextType: opts.contextType,
-        status: opts.status,
-        includeBody: !!opts.includeBody,
-      });
-      if (policies.length === 0) {
-        console.log('No CCL policies found.');
-        return;
-      }
-      for (const policy of policies) {
-        console.log(`${policy.name}@${policy.version}  ${policy.policyUri}`);
-        console.log(`  Paranet: ${policy.paranetId}`);
-        console.log(`  Status:  ${policy.status}${policy.isActiveDefault ? ' (active default)' : ''}`);
-        if (policy.contextType) console.log(`  Context: ${policy.contextType}`);
-        if (policy.activeContexts?.length) console.log(`  Active in contexts: ${policy.activeContexts.join(', ')}`);
-        console.log(`  Hash:    ${policy.hash}`);
-        if (policy.description) console.log(`  Desc:    ${policy.description}`);
-        if (opts.includeBody && policy.body) console.log(`  Body:\n${policy.body}`);
-      }
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclPolicyCmd
-  .command('resolve <paranetId>')
-  .description('Resolve the active approved policy for a paranet and policy name')
-  .requiredOption('--name <name>', 'Policy name')
-  .option('--context-type <contextType>', 'Optional stricter context override scope')
-  .option('--include-body', 'Include policy body in output')
-  .action(async (paranetId: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const { policy } = await client.resolveCclPolicy({
-        paranetId,
-        name: opts.name,
-        contextType: opts.contextType,
-        includeBody: !!opts.includeBody,
-      });
-      if (!policy) {
-        console.log('No approved policy found for that scope.');
-        return;
-      }
-      console.log(`Resolved policy:`);
-      console.log(`  URI:     ${policy.policyUri}`);
-      console.log(`  Name:    ${policy.name}@${policy.version}`);
-      console.log(`  Paranet: ${policy.paranetId}`);
-      console.log(`  Hash:    ${policy.hash}`);
-      if (policy.contextType) console.log(`  Context: ${policy.contextType}`);
-      if (policy.body) console.log(`  Body:\n${policy.body}`);
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclCmd
-  .command('eval <paranetId>')
-  .description('Resolve the approved CCL policy for a paranet and evaluate it against facts')
-  .requiredOption('--name <name>', 'Policy name')
-  .option('--context-type <contextType>', 'Optional stricter context override scope')
-  .option('--case <path>', 'YAML/JSON file with { facts, context? }')
-  .option('--facts-file <path>', 'YAML/JSON file containing facts array')
-  .option('--publish-result', 'Publish the evaluation output back into the paranet as typed records')
-  .option('--view <view>', 'Declared view, for example accepted')
-  .option('--snapshot-id <snapshotId>', 'Snapshot identifier')
-  .option('--scope-ual <scopeUal>', 'Scope UAL for evaluation')
-  .action(async (paranetId: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      let payload: { facts: Array<[string, ...unknown[]]>; view?: string; snapshotId?: string; scopeUal?: string } | null = null;
-
-      if (opts.case) {
-        const parsed = loadStructuredFile(opts.case) as any;
-        payload = {
-          facts: parsed?.facts ?? [],
-          view: opts.view ?? parsed?.context?.view,
-          snapshotId: opts.snapshotId ?? parsed?.context?.snapshot_id,
-          scopeUal: opts.scopeUal ?? parsed?.context?.scope_ual,
-        };
-      } else if (opts.factsFile) {
-        const parsed = loadStructuredFile(opts.factsFile) as any;
-        payload = {
-          facts: Array.isArray(parsed) ? parsed : parsed?.facts ?? [],
-          view: opts.view,
-          snapshotId: opts.snapshotId,
-          scopeUal: opts.scopeUal,
-        };
-      }
-
-      // Allow snapshot-resolved mode: if no facts provided but scope options
-      // are given, the agent resolves facts from the graph snapshot.
-      const isSnapshotMode = !payload && (opts.snapshotId || opts.view || opts.scopeUal);
-      if (!payload && !isSnapshotMode) {
-        throw new Error('Provide --case, --facts-file, or --snapshot-id/--view/--scope-ual for snapshot-resolved evaluation');
-      }
-
-      const result = await client.evaluateCclPolicy({
-        paranetId,
-        name: opts.name,
-        contextType: opts.contextType,
-        facts: payload?.facts,
-        view: payload?.view ?? opts.view,
-        snapshotId: payload?.snapshotId ?? opts.snapshotId,
-        scopeUal: payload?.scopeUal ?? opts.scopeUal,
-        publishResult: !!opts.publishResult,
-      });
-
-      console.log(JSON.stringify(result, null, 2));
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
-cclCmd
-  .command('results <paranetId>')
-  .description('List published CCL evaluation results in a paranet')
-  .option('--policy-uri <policyUri>', 'Filter by evaluated policy URI')
-  .option('--snapshot-id <snapshotId>', 'Filter by snapshot id')
-  .option('--view <view>', 'Filter by view')
-  .option('--context-type <contextType>', 'Filter by context type')
-  .option('--result-kind <kind>', 'Filter by result kind: derived or decision')
-  .option('--result-name <name>', 'Filter by result predicate/decision name')
-  .action(async (paranetId: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const { evaluations } = await client.listCclEvaluations({
-        paranetId,
-        policyUri: opts.policyUri,
-        snapshotId: opts.snapshotId,
-        view: opts.view,
-        contextType: opts.contextType,
-        resultKind: opts.resultKind,
-        resultName: opts.resultName,
-      });
-      console.log(JSON.stringify({ evaluations }, null, 2));
-    } catch (err: any) {
-      console.error(err.message);
-      process.exit(1);
-    }
-  });
-
 // ─── dkg index ──────────────────────────────────────────────────────
 
 program
   .command('index [directory]')
-  .description('Index a repository and write to shared memory or publish directly')
-  .option('-p, --context-graph <id>', 'Target context graph', 'dev-coordination')
-  .option('--paranet <id>', 'Target context graph (legacy alias)')
-  .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
-  .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
+  .description('Index a repository and write to workspace graph or publish directly')
+  .option('-p, --paranet <id>', 'Target paranet', 'dev-coordination')
+  .option('--workspace', 'Write indexed quads to workspace graph instead of publishing')
   .option('--include-content', 'Index docs/content files in addition to source code')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
@@ -1439,8 +1166,6 @@ program
     try {
       const { resolve } = await import('node:path');
       const repoRoot = resolve(directory ?? '.');
-      const targetContextGraph = opts.contextGraph ?? opts.paranet ?? 'dev-coordination';
-      const useSharedMemory = opts.sharedMemory || opts.workspace;
 
       console.log(`Indexing ${repoRoot}...`);
       const { indexRepository } = await import('./indexer.js');
@@ -1468,20 +1193,20 @@ program
       }
 
       const client = await ApiClient.connect();
-      const verb = useSharedMemory ? 'Writing to shared memory' : 'Publishing';
-      const applyBatch = useSharedMemory
-        ? async (batch: typeof result.quads) => client.sharedMemoryWrite(targetContextGraph, batch)
-        : async (batch: typeof result.quads) => client.publish(targetContextGraph, batch);
+      const verb = opts.workspace ? 'Staging in workspace' : 'Publishing';
+      const applyBatch = opts.workspace
+        ? async (batch: typeof result.quads) => client.workspaceWrite(opts.paranet, batch)
+        : async (batch: typeof result.quads) => client.publish(opts.paranet, batch);
 
       await publishEntityBatches(result.quads, applyBatch, (sent) => {
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       });
 
-      if (useSharedMemory) {
-        console.log(`\n\n  Written ${result.quads.length} quads to shared memory for context graph "${targetContextGraph}".`);
-        console.log('  Next: dkg shared-memory publish ' + targetContextGraph);
+      if (opts.workspace) {
+        console.log(`\n\n  Staged ${result.quads.length} quads to workspace graph for paranet "${opts.paranet}".`);
+        console.log('  Next: dkg workspace publish ' + opts.paranet);
       } else {
-        console.log(`\n\n  Published ${result.quads.length} quads to context graph "${targetContextGraph}".`);
+        console.log(`\n\n  Published ${result.quads.length} quads to paranet "${opts.paranet}".`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1489,27 +1214,26 @@ program
     }
   });
 
-// ─── dkg shared-memory (alias: workspace) ───────────────────────────
+// ─── dkg workspace ───────────────────────────────────────────────────
 
-const sharedMemoryCmd = program
-  .command('shared-memory')
-  .alias('workspace')
-  .description('Shared memory operations (write-first workflow)');
+const workspaceCmd = program
+  .command('workspace')
+  .description('Workspace graph operations (stage-first workflow)');
 
-sharedMemoryCmd
-  .command('publish [context-graph]')
-  .description('Publish from shared memory to a context graph')
-  .option('--keep', 'Keep shared memory triples after publishing')
-  .option('--root <entity...>', 'Publish only specific root entities')
-  .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
+workspaceCmd
+  .command('publish [paranet]')
+  .description('Enshrine staged workspace graph into a paranet publish')
+  .option('--keep', 'Keep workspace triples after enshrining')
+  .option('--root <entity...>', 'Enshrine only specific root entities')
+  .action(async (paranet: string | undefined, opts: ActionOpts) => {
     try {
-      const targetContextGraph = contextGraph ?? 'dev-coordination';
+      const targetParanet = paranet ?? 'dev-coordination';
       const client = await ApiClient.connect();
       const selection = opts.root?.length
         ? { rootEntities: opts.root as string[] }
         : 'all';
-      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep);
-      console.log(`Published from shared memory to "${targetContextGraph}":`);
+      const result = await client.workspaceEnshrine(targetParanet, selection, !opts.keep);
+      console.log(`Workspace enshrined to "${targetParanet}":`);
       console.log(`  Status: ${result.status}`);
       console.log(`  KC ID:  ${result.kcId}`);
       console.log(`  KAs:    ${result.kas.length}`);
@@ -1518,6 +1242,43 @@ sharedMemoryCmd
       }
     } catch (err) {
       console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+workspaceCmd
+  .command('roots <paranet>')
+  .description('List workspace operations and root entities available for lift/enshrine')
+  .option('--workspace-operation-id <id>', 'Filter to a single workspace operation')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.workspaceRoots(paranet, opts.workspaceOperationId ? String(opts.workspaceOperationId) : undefined);
+
+      if (result.operations.length === 0) {
+        console.log('No workspace operations found.');
+        return;
+      }
+
+      console.log(`\nWorkspace operations for "${paranet}":\n`);
+      for (const op of result.operations) {
+        console.log(`Operation: ${op.shareOperationId}`);
+        console.log(`  Publisher: ${op.publisherPeerId}`);
+        console.log(`  Published: ${op.publishedAt}`);
+        console.log('  Roots:');
+        for (const root of op.roots) {
+          console.log(`    - ${root}`);
+        }
+        console.log('');
+      }
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (message === 'Not found') {
+        console.error('The running daemon does not support `workspace roots` yet. Restart it using the latest CLI build and try again.');
+        console.error('For local development, use: node packages/cli/dist/cli.js daemon');
+      } else {
+        console.error(message);
+      }
       process.exit(1);
     }
   });
@@ -1543,6 +1304,365 @@ program
   });
 
 // ─── dkg wallet ──────────────────────────────────────────────────────
+
+const publisherCmd = program
+  .command('publisher')
+  .description('Async publisher worker operations');
+
+const publisherWalletCmd = publisherCmd
+  .command('wallet')
+  .description('Manage async publisher wallets');
+
+publisherCmd
+  .command('enable')
+  .description('Enable async publisher startup inside `dkg start`')
+  .option('--poll-interval <ms>', 'Idle poll interval in milliseconds', '1000')
+  .option('--error-backoff <ms>', 'Error backoff in milliseconds', '1000')
+  .action(async (opts: ActionOpts) => {
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { parsePositiveMsOption } = await import('./publisher-runner.js');
+      const { loadPublisherWallets } = await import('./publisher-wallets.js');
+      const publisherWallets = await loadPublisherWallets(dkgDir());
+      if (publisherWallets.wallets.length === 0) {
+        console.error('No publisher wallets configured.');
+        console.error('Add one first with: dkg publisher wallet add <privateKey>');
+        process.exit(1);
+      }
+      config.publisher = {
+        enabled: true,
+        pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval), '--poll-interval'),
+        errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff), '--error-backoff'),
+      };
+      await saveConfig(config);
+      console.log('Async publisher enabled for `dkg start`.');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('disable')
+  .description('Disable async publisher startup inside `dkg start`')
+  .action(async () => {
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      config.publisher = {
+        ...config.publisher,
+        enabled: false,
+      };
+      await saveConfig(config);
+      console.log('Async publisher disabled for `dkg start`.');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('jobs')
+  .description('List async publisher jobs')
+  .option('--status <status>', 'Filter by job status')
+  .action(async (opts: ActionOpts) => {
+    let inspector: { publisher: { list(filter?: { status?: string }): Promise<any[]> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { LIFT_JOB_STATES } = await import('@origintrail-official/dkg-publisher');
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      const requestedStatus = opts.status ? String(opts.status) : undefined;
+      if (requestedStatus && !LIFT_JOB_STATES.includes(requestedStatus as any)) {
+        console.error(`Invalid publisher job status: ${requestedStatus}`);
+        console.error(`Valid statuses: ${LIFT_JOB_STATES.join(', ')}`);
+        process.exit(1);
+      }
+
+      let jobs: any[];
+      try {
+        const client = await ApiClient.connect();
+        jobs = (await client.publisherJobs(requestedStatus)).jobs;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          const filter = requestedStatus ? { status: requestedStatus } : undefined;
+          jobs = await inspector.publisher.list(filter as any);
+        } else {
+          throw err;
+        }
+      }
+
+      if (!jobs.length) {
+        console.log('No publisher jobs found.');
+        return;
+      }
+
+      console.log(`\nPublisher jobs (${jobs.length}):\n`);
+      for (const job of jobs) {
+        const failureSuffix = job.failure?.message ? `  ERROR: ${job.failure.message}` : '';
+        console.log(`${job.jobId}  ${job.status}  ${job.jobSlug}${failureSuffix}`);
+      }
+      console.log('');
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
+publisherCmd
+  .command('enqueue <paranet>')
+  .description('Enqueue a workspace lift request into the async publisher queue')
+  .requiredOption('--workspace-operation-id <id>', 'Workspace operation ID to lift from')
+  .requiredOption('--root <entity...>', 'Root entity or entities to lift')
+  .requiredOption('--namespace <namespace>', 'Protected namespace for the publication')
+  .requiredOption('--scope <scope>', 'Protected scope for the publication')
+  .option('--workspace-id <id>', 'Workspace identifier', 'workspace-main')
+  .option('--transition-type <type>', 'Transition type (CREATE|MUTATE|REVOKE)', 'CREATE')
+  .option('--authority-type <type>', 'Authority type (owner|multisig|quorum|capability)', 'owner')
+  .requiredOption('--authority-proof-ref <ref>', 'Authority proof reference')
+  .option('--prior-version <version>', 'Prior version required for MUTATE/REVOKE')
+  .action(async (paranet: string, opts: ActionOpts) => {
+    let inspector: { publisher: { lift(request: any): Promise<string> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      const transitionType = String(opts.transitionType).toUpperCase();
+      if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
+        console.error(`Invalid transition type: ${opts.transitionType}`);
+        process.exit(1);
+      }
+
+      const authorityType = String(opts.authorityType);
+      if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
+        console.error(`Invalid authority type: ${opts.authorityType}`);
+        process.exit(1);
+      }
+
+      const roots = (opts.root as string[]).map((value) => String(value).trim()).filter(Boolean);
+      if (roots.length === 0) {
+        console.error('At least one --root value is required.');
+        process.exit(1);
+      }
+
+      const request = {
+        swmId: String(opts.workspaceId),
+        shareOperationId: String(opts.workspaceOperationId),
+        roots,
+        contextGraphId: paranet,
+        namespace: String(opts.namespace),
+        scope: String(opts.scope),
+        transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
+        authority: {
+          type: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
+          proofRef: String(opts.authorityProofRef),
+        },
+        priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
+      };
+
+      let jobId: string;
+      try {
+        const client = await ApiClient.connect();
+        jobId = (await client.publisherEnqueue(request)).jobId;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          jobId = await inspector.publisher.lift(request);
+        } else {
+          throw err;
+        }
+      }
+
+      console.log('Publisher job enqueued:');
+      console.log(`  Job ID:   ${jobId}`);
+      console.log(`  Paranet:  ${paranet}`);
+      console.log(`  Roots:    ${roots.join(', ')}`);
+      console.log(`  Scope:    ${opts.scope}`);
+      console.log(`  Type:     ${transitionType}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
+publisherCmd
+  .command('job <jobId>')
+  .description('Inspect a specific async publisher job')
+  .option('--payload', 'Show the prepared canonical publish payload instead of the stored job record')
+  .action(async (jobId: string, opts: ActionOpts) => {
+    let inspector: { publisher: { getStatus(jobId: string): Promise<any | null>; inspectPreparedPayload(jobId: string): Promise<any | null> }; stop(): Promise<void> } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+
+      let job: any | null;
+      try {
+        const client = await ApiClient.connect();
+        job = (await client.publisherJob(jobId)).job;
+      } catch (err: any) {
+        if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+          job = await inspector.publisher.getStatus(jobId);
+        } else {
+          throw err;
+        }
+      }
+      if (!job) {
+        console.error(`Publisher job not found: ${jobId}`);
+        process.exit(1);
+      }
+
+      if (opts.payload) {
+        let payload: any | null;
+        try {
+          const client = await ApiClient.connect();
+          payload = await client.publisherJobPayload(jobId);
+        } catch (err: any) {
+          if ((err?.message ?? String(err)).includes('Daemon is not running')) {
+            payload = await inspector.publisher.inspectPreparedPayload(jobId);
+          } else {
+            throw err;
+          }
+        }
+        if (!payload) {
+          console.error(`Publisher job not found: ${jobId}`);
+          process.exit(1);
+        }
+
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(JSON.stringify(job, null, 2));
+      }
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    } finally {
+      if (inspector) {
+        await inspector.stop().catch(() => {});
+      }
+    }
+  });
+
+publisherWalletCmd
+  .command('list')
+  .description('List async publisher wallet addresses')
+  .action(async () => {
+    try {
+      await ensureDkgDir();
+      const { loadPublisherWallets, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const config = await loadPublisherWallets(dkgDir());
+
+      if (!config.wallets.length) {
+        console.log('No publisher wallets configured.');
+        console.log('Use `dkg publisher wallet add <privateKey>` to add one.');
+        return;
+      }
+
+      console.log(`\nPublisher wallets (${config.wallets.length}):\n`);
+      for (const wallet of config.wallets) {
+        console.log(`  ${wallet.address}`);
+      }
+      console.log(`\n  File: ${publisherWalletsPath(dkgDir())}\n`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('add <privateKey>')
+  .description('Add an async publisher wallet private key')
+  .action(async (privateKey: string) => {
+    try {
+      await ensureDkgDir();
+      const { addPublisherWallet, publisherWalletsPath } = await import('./publisher-wallets.js');
+      const updated = await addPublisherWallet(dkgDir(), privateKey);
+      const added = updated.wallets[updated.wallets.length - 1];
+      console.log('Publisher wallet added:');
+      console.log(`  Address: ${added?.address}`);
+      console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherWalletCmd
+  .command('remove <address>')
+  .description('Remove an async publisher wallet by address')
+  .action(async (address: string) => {
+    try {
+      await ensureDkgDir();
+      const { removePublisherWallet } = await import('./publisher-wallets.js');
+      await removePublisherWallet(dkgDir(), address);
+      console.log(`Removed publisher wallet ${address}`);
+    } catch (err: any) {
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('start')
+  .description('Start the async publisher worker loop')
+  .option('--poll-interval <ms>', 'Idle poll interval in milliseconds', '1000')
+  .option('--error-backoff <ms>', 'Error backoff in milliseconds', '1000')
+  .action(async (opts: ActionOpts) => {
+    let runtime: { runner: { start(): Promise<void> }; stop(): Promise<void>; walletIds: string[] } | undefined;
+    try {
+      await ensureDkgDir();
+      const config = await loadConfig();
+      const { createPublisherRuntime, parsePositiveMsOption } = await import('./publisher-runner.js');
+      runtime = await createPublisherRuntime({
+        dataDir: dkgDir(),
+        config,
+        pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval), '--poll-interval'),
+        errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff), '--error-backoff'),
+      });
+
+      console.log('Starting async publisher worker...');
+      console.log(`  Wallets: ${runtime.walletIds.join(', ')}`);
+      console.log(`  Poll interval: ${opts.pollInterval}ms`);
+      console.log(`  Error backoff: ${opts.errorBackoff}ms`);
+
+      await runtime.runner.start();
+      console.log('Async publisher runner started. Press Ctrl+C to stop.');
+      await new Promise<void>((resolve) => {
+        let stopping = false;
+        const done = async () => {
+          if (stopping) return;
+          stopping = true;
+          process.off('SIGINT', done);
+          process.off('SIGTERM', done);
+          if (runtime) {
+            await runtime.stop();
+          }
+          resolve();
+        };
+        process.once('SIGINT', done);
+        process.once('SIGTERM', done);
+      });
+    } catch (err: any) {
+      if (runtime) {
+        await runtime.stop().catch(() => {});
+      }
+      console.error(err.message ?? String(err));
+      process.exit(1);
+    }
+  });
 
 program
   .command('wallet')
@@ -1736,34 +1856,14 @@ function formatUptime(ms: number): string {
 }
 
 async function publishEntityBatches(
-  quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
-  applyBatch: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => Promise<unknown>,
+  quads: PublishQuad[],
+  applyBatch: (batch: PublishQuad[]) => Promise<unknown>,
   onProgress?: (publishedQuadCount: number) => void,
 ): Promise<void> {
-  // Keep entities intact per batch to avoid partial-entity writes.
-  const byEntity = new Map<string, typeof quads>();
-  for (const q of quads) {
-    const key = q.subject;
-    let arr = byEntity.get(key);
-    if (!arr) { arr = []; byEntity.set(key, arr); }
-    arr.push(q);
-  }
-
-  const MAX_BATCH_QUADS = 500;
-  let batch: typeof quads = [];
+  const batches = batchEntityQuads(quads, { maxBatchQuads: 500 });
   let sent = 0;
 
-  for (const entityQuads of byEntity.values()) {
-    if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
-      await applyBatch(batch);
-      sent += batch.length;
-      onProgress?.(sent);
-      batch = [];
-    }
-    batch.push(...entityQuads);
-  }
-
-  if (batch.length > 0) {
+  for (const batch of batches) {
     await applyBatch(batch);
     sent += batch.length;
     onProgress?.(sent);

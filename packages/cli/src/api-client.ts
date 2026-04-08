@@ -97,51 +97,21 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId: contextGraphId, quads, privateQuads, ...options });
+    return this.post('/api/publish', { contextGraphId, quads, privateQuads, ...options });
   }
 
-  /** Write quads to shared memory (formerly workspace). */
-  async sharedMemoryWrite(contextGraphId: string, quads: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>): Promise<{
-    workspaceOperationId: string;
-    paranetId: string;
-    graph: string;
-    triplesWritten: number;
-    skolemizedBlankNodes?: number;
-  }> {
-    return this.post('/api/shared-memory/write', { paranetId: contextGraphId, quads });
-  }
-
-  /** @deprecated Use sharedMemoryWrite */
   async workspaceWrite(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
-    workspaceOperationId: string;
-    paranetId: string;
+    shareOperationId: string;
+    contextGraphId: string;
     graph: string;
     triplesWritten: number;
     skolemizedBlankNodes?: number;
   }> {
-    return this.sharedMemoryWrite(contextGraphId, quads);
+    return this.post('/api/workspace/write', { contextGraphId, quads });
   }
 
-  /** Publish from shared memory (formerly enshrine from workspace). */
-  async publishFromSharedMemory(
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] } = 'all',
-    clearAfter = true,
-  ): Promise<{
-    kcId: string;
-    status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
-    return this.post('/api/shared-memory/publish', { paranetId: contextGraphId, selection, clearAfter });
-  }
-
-  /** @deprecated Use publishFromSharedMemory */
   async workspaceEnshrine(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
@@ -153,16 +123,60 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter);
+    return this.post('/api/workspace/enshrine', { contextGraphId, selection, clearAfter });
+  }
+
+  async workspaceRoots(contextGraphId: string, shareOperationId?: string): Promise<{
+    operations: Array<{
+      shareOperationId: string;
+      publisherPeerId: string;
+      publishedAt: string;
+      roots: string[];
+    }>;
+  }> {
+    const params = new URLSearchParams({ contextGraphId });
+    if (shareOperationId) {
+      params.set('shareOperationId', shareOperationId);
+    }
+    return this.get(`/api/workspace/roots?${params.toString()}`);
+  }
+
+  async publisherEnqueue(request: {
+    swmId: string;
+    shareOperationId: string;
+    roots: string[];
+    contextGraphId: string;
+    namespace: string;
+    scope: string;
+    transitionType: 'CREATE' | 'MUTATE' | 'REVOKE';
+    authority: { type: 'owner' | 'multisig' | 'quorum' | 'capability'; proofRef: string };
+    priorVersion?: string;
+  }): Promise<{ jobId: string }> {
+    return this.post('/api/publisher/enqueue', request);
+  }
+
+  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    const qs = params.toString();
+    return this.get(`/api/publisher/jobs${qs ? `?${qs}` : ''}`);
+  }
+
+  async publisherJob(jobId: string): Promise<{ job: any }> {
+    return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
+  }
+
+  async publisherJobPayload(jobId: string): Promise<any> {
+    return this.get(`/api/publisher/job/payload?id=${encodeURIComponent(jobId)}`);
   }
 
   async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, paranetId: contextGraphId });
+    return this.post('/api/query', { sparql, contextGraphId });
   }
 
   async queryRemote(peerId: string, request: {
     lookupType: string;
-    paranetId?: string;
+    contextGraphId?: string;
     ual?: string;
     entityUri?: string;
     rdfType?: string;
@@ -183,7 +197,7 @@ export class ApiClient {
     return this.post('/api/query-remote', { peerId, ...request });
   }
 
-  async subscribeToContextGraph(contextGraphId: string, options?: { includeSharedMemory?: boolean }): Promise<{
+  async subscribe(paranetId: string, options?: { includeWorkspace?: boolean }): Promise<{
     subscribed: string;
     catchup?:
       | {
@@ -199,30 +213,10 @@ export class ApiClient {
         jobId: string;
       };
   }> {
-    return this.post('/api/subscribe', { paranetId: contextGraphId, includeWorkspace: options?.includeSharedMemory });
+    return this.post('/api/subscribe', { paranetId, ...options });
   }
 
-  /** @deprecated Use subscribeToContextGraph */
-  async subscribe(contextGraphId: string, options?: { includeWorkspace?: boolean }): Promise<{
-    subscribed: string;
-    catchup?:
-      | {
-        connectedPeers: number;
-        syncCapablePeers: number;
-        peersTried: number;
-        dataSynced: number;
-        workspaceSynced: number;
-      }
-      | {
-        status: 'queued';
-        includeWorkspace: boolean;
-        jobId: string;
-      };
-  }> {
-    return this.subscribeToContextGraph(contextGraphId, { includeSharedMemory: options?.includeWorkspace });
-  }
-
-  async catchupStatus(contextGraphId: string): Promise<{
+  async catchupStatus(paranetId: string): Promise<{
     jobId: string;
     paranetId: string;
     includeWorkspace: boolean;
@@ -239,43 +233,20 @@ export class ApiClient {
     };
     error?: string;
   }> {
-    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(contextGraphId)}`);
+    return this.get(`/api/sync/catchup-status?paranetId=${encodeURIComponent(paranetId)}`);
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {
     return this.post('/api/connect', { multiaddr });
   }
 
-  async createContextGraph(id: string, name: string, description?: string): Promise<{
-    created: string;
-    uri: string;
-  }> {
-    return this.post('/api/context-graph/create', { id, name, description });
-  }
-
-  /** @deprecated Use createContextGraph */
   async createParanet(id: string, name: string, description?: string): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.createContextGraph(id, name, description);
+    return this.post('/api/paranet/create', { id, name, description });
   }
 
-  async listContextGraphs(): Promise<{
-    paranets: Array<{
-      id: string;
-      uri: string;
-      name: string;
-      description?: string;
-      creator?: string;
-      createdAt?: string;
-      isSystem: boolean;
-    }>;
-  }> {
-    return this.get('/api/context-graph/list');
-  }
-
-  /** @deprecated Use listContextGraphs */
   async listParanets(): Promise<{
     paranets: Array<{
       id: string;
@@ -287,131 +258,11 @@ export class ApiClient {
       isSystem: boolean;
     }>;
   }> {
-    return this.listContextGraphs();
+    return this.get('/api/paranet/list');
   }
 
-  async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {
-    return this.get(`/api/context-graph/exists?id=${encodeURIComponent(id)}`);
-  }
-
-  /** @deprecated Use contextGraphExists */
   async paranetExists(id: string): Promise<{ id: string; exists: boolean }> {
-    return this.contextGraphExists(id);
-  }
-
-  async verify(request: {
-    contextGraphId: string;
-    verifiedMemoryId: string;
-    batchId: string;
-    timeoutMs?: number;
-  }): Promise<{ txHash: string; blockNumber: number; verifiedMemoryId: string; signers: string[] }> {
-    return this.post('/api/verify', request);
-  }
-
-  async endorse(request: {
-    contextGraphId: string;
-    ual: string;
-    agentAddress: string;
-  }): Promise<{ endorsed: boolean; endorserAddress: string }> {
-    return this.post('/api/endorse', request);
-  }
-
-  async publishCclPolicy(request: {
-    paranetId: string;
-    name: string;
-    version: string;
-    content: string;
-    description?: string;
-    contextType?: string;
-    language?: string;
-    format?: string;
-  }): Promise<{ policyUri: string; hash: string; status: 'proposed' }> {
-    return this.post('/api/ccl/policy/publish', request);
-  }
-
-  async approveCclPolicy(request: {
-    paranetId: string;
-    policyUri: string;
-    contextType?: string;
-  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
-    return this.post('/api/ccl/policy/approve', request);
-  }
-
-  async revokeCclPolicy(request: {
-    paranetId: string;
-    policyUri: string;
-    contextType?: string;
-  }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
-    return this.post('/api/ccl/policy/revoke', request);
-  }
-
-  async listCclPolicies(opts: {
-    paranetId?: string;
-    name?: string;
-    contextType?: string;
-    status?: string;
-    includeBody?: boolean;
-  } = {}): Promise<{ policies: any[] }> {
-    const params = new URLSearchParams();
-    if (opts.paranetId) params.set('paranetId', opts.paranetId);
-    if (opts.name) params.set('name', opts.name);
-    if (opts.contextType) params.set('contextType', opts.contextType);
-    if (opts.status) params.set('status', opts.status);
-    if (opts.includeBody) params.set('includeBody', 'true');
-    const qs = params.toString();
-    return this.get(`/api/ccl/policy/list${qs ? `?${qs}` : ''}`);
-  }
-
-  async resolveCclPolicy(opts: {
-    paranetId: string;
-    name: string;
-    contextType?: string;
-    includeBody?: boolean;
-  }): Promise<{ policy: any | null }> {
-    const params = new URLSearchParams({ paranetId: opts.paranetId, name: opts.name });
-    if (opts.contextType) params.set('contextType', opts.contextType);
-    if (opts.includeBody) params.set('includeBody', 'true');
-    return this.get(`/api/ccl/policy/resolve?${params.toString()}`);
-  }
-
-  async evaluateCclPolicy(request: {
-    paranetId: string;
-    name: string;
-    facts?: Array<[string, ...unknown[]]>;
-    contextType?: string;
-    view?: string;
-    snapshotId?: string;
-    scopeUal?: string;
-    publishResult?: boolean;
-  }): Promise<{
-    policy: any;
-    context: any;
-    factSetHash: string;
-    factQueryHash: string;
-    factResolverVersion: string;
-    factResolutionMode: 'manual' | 'snapshot-resolved';
-    result: any;
-  }> {
-    return this.post('/api/ccl/eval', request);
-  }
-
-  async listCclEvaluations(opts: {
-    paranetId: string;
-    policyUri?: string;
-    snapshotId?: string;
-    view?: string;
-    contextType?: string;
-    resultKind?: 'derived' | 'decision';
-    resultName?: string;
-  }): Promise<{ evaluations: any[] }> {
-    const params = new URLSearchParams({ paranetId: opts.paranetId });
-    if (opts.policyUri) params.set('policyUri', opts.policyUri);
-    if (opts.snapshotId) params.set('snapshotId', opts.snapshotId);
-    if (opts.view) params.set('view', opts.view);
-    if (opts.contextType) params.set('contextType', opts.contextType);
-    if (opts.resultKind) params.set('resultKind', opts.resultKind);
-    if (opts.resultName) params.set('resultName', opts.resultName);
-    return this.get(`/api/ccl/results?${params.toString()}`);
+    return this.get(`/api/paranet/exists?id=${encodeURIComponent(id)}`);
   }
 
   async shutdown(): Promise<void> {

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
@@ -36,9 +37,6 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
-  resolveContextGraphs,
-  resolveNetworkDefaultContextGraphs,
-  resolveSharedMemoryTtlMs,
   repoDir,
   releasesDir,
   activeSlot,
@@ -53,6 +51,8 @@ import {
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
+import { startPublisherRuntimeIfEnabled } from './publisher-runner.js';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 
 function getNodeVersion(): string {
   try {
@@ -89,13 +89,13 @@ interface CatchupJobResult {
   syncCapablePeers: number;
   peersTried: number;
   dataSynced: number;
-  sharedMemorySynced: number;
+  workspaceSynced: number;
 }
 
 interface CatchupJob {
   jobId: string;
   paranetId: string;
-  includeWorkspace: boolean; // kept for wire compat; semantically "includeSharedMemory"
+  includeWorkspace: boolean;
   status: CatchupJobState;
   queuedAt: number;
   startedAt?: number;
@@ -119,7 +119,7 @@ interface PublishQuad {
 }
 
 interface PublishRequestBody {
-  paranetId: string;
+  contextGraphId: string;
   quads: PublishQuad[];
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
@@ -217,9 +217,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
 
   const network = await loadNetworkConfig();
-  const syncContextGraphs = [...new Set([
-    ...resolveContextGraphs(config),
-    ...resolveNetworkDefaultContextGraphs(network),
+  const syncParanets = [...new Set([
+    ...(config.paranets ?? []),
+    ...(network?.defaultParanets ?? []),
   ])];
 
   // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
@@ -259,7 +259,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     relayPeers,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
-    syncContextGraphs: syncContextGraphs,
+    syncParanets,
     storeConfig: config.store ? {
       backend: config.store.backend,
       options: config.store.options,
@@ -270,7 +270,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
     } : undefined,
-    sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    workspaceTtlMs: config.workspaceTtlMs,
   });
 
   const networkId = await computeNetworkId();
@@ -305,6 +305,22 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   await agent.start();
   await agent.publishProfile();
 
+  let publisherRuntime: Awaited<ReturnType<typeof startPublisherRuntimeIfEnabled>> = null;
+  try {
+    publisherRuntime = await startPublisherRuntimeIfEnabled({
+      dataDir: dkgDir(),
+      config,
+      store: agent.store,
+      keypair: agent.wallet.keypair,
+      chainBase,
+      log,
+    });
+  } catch (err: any) {
+    log(`Publisher startup failed: ${err?.message ?? String(err)}`);
+    throw err;
+  }
+  const publisherApi = publisherRuntime?.publisher ?? new TripleStoreAsyncLiftPublisher(agent.store);
+
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
 
@@ -321,37 +337,37 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     }
   }
 
-  // Ensure configured context graphs + network defaults are subscribed and available.
-  // Uses ensureParanetLocal (idempotent) to avoid duplicate creator claims
-  // and to survive "already exists" gracefully.
-  const contextGraphsToSubscribe = new Set(syncContextGraphs);
-  for (const p of contextGraphsToSubscribe) {
+  // Ensure configured paranets + network defaults are subscribed and available.
+  // Uses ensureParanetLocal (idempotent) instead of createParanet to avoid
+  // duplicate creator claims and to survive "already exists" gracefully.
+  const paranetsToSubscribe = new Set(syncParanets);
+  for (const p of paranetsToSubscribe) {
     try {
-      await agent.ensureContextGraphLocal({
+      await agent.ensureParanetLocal({
         id: p,
         name: p,
-        description: `Default context graph: ${p}`,
+        description: `Default paranet: ${p}`,
       });
-      log(`Ensured context graph: ${p}`);
+      log(`Ensured paranet: ${p}`);
     } catch (err) {
-      log(`Context graph "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
-      agent.subscribeToContextGraph(p);
+      log(`Paranet "${p}" setup failed: ${err instanceof Error ? err.message : String(err)} — will discover via sync/gossip`);
+      agent.subscribeToParanet(p);
     }
   }
 
-  // Run an initial chain scan for context graphs we might not know about,
+  // Run an initial chain scan for paranets we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   setTimeout(async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain();
-      if (found > 0) log(`Chain scan: discovered ${found} new context graph(s)`);
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
     } catch { /* non-critical */ }
   }, 15_000);
   const chainScanTimer = setInterval(async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain();
-      if (found > 0) log(`Chain scan: discovered ${found} new context graph(s)`);
+      const found = await agent.discoverParanetsFromChain();
+      if (found > 0) log(`Chain scan: discovered ${found} new paranet(s)`);
     } catch { /* non-critical */ }
   }, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
@@ -465,7 +481,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     getMeshPeerCount: () => {
       try { return (agent.gossip as any).gossipsub?.getMeshPeers?.()?.length ?? 0; } catch { return 0; }
     },
-    getContextGraphCount: async () => (await agent.listContextGraphs()).length,
+    getParanetCount: async () => (await agent.listParanets()).length,
     getTotalTriples: async () => {
       const r = await agent.query('SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }');
       return parseRdfInt(r?.bindings?.[0]?.c);
@@ -608,26 +624,26 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   // Track publishes via KC_PUBLISHED event (covers GossipSub-received publishes)
   agent.eventBus.on(DKGEvent.KC_PUBLISHED, (data: any) => {
     const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
+    tracker.start(ctx, { paranetId: data.paranetId, details: { kcId: data.kcId, source: 'gossipsub' } });
     tracker.complete(ctx, { tripleCount: data.tripleCount });
     try {
       dashDb.insertNotification({
         ts: Date.now(),
         type: 'kc_published',
         title: 'Knowledge published',
-        message: `Knowledge collection published${data.paranetId ? ` on context graph ${shortId(data.paranetId)}` : ''}`,
+        message: `Knowledge collection published${data.paranetId ? ` on paranet ${shortId(data.paranetId)}` : ''}`,
         source: 'dkg',
-        meta: JSON.stringify({ kcId: data.kcId, contextGraphId: data.paranetId }),
+        meta: JSON.stringify({ kcId: data.kcId, paranetId: data.paranetId }),
       });
     } catch { /* never crash */ }
   });
 
   const agentToolsContext = {
-    query: (sparql: string, opts?: { contextGraphId?: string; graphSuffix?: '_shared_memory'; includeSharedMemory?: boolean }) => agent.query(sparql, opts),
-    share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.share(contextGraphId, quads, opts),
-    publishFromSharedMemory: (contextGraphId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearSharedMemoryAfter?: boolean }) => agent.publishFromSharedMemory(contextGraphId, selection, opts),
-    createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createContextGraph(opts),
-    listContextGraphs: () => agent.listContextGraphs(),
+    query: (sparql: string, opts?: { paranetId?: string; graphSuffix?: '_shared_memory'; includeWorkspace?: boolean }) => agent.query(sparql, opts),
+    writeToWorkspace: (paranetId: string, quads: any[], opts?: { localOnly?: boolean }) => agent.writeToWorkspace(paranetId, quads, opts),
+    enshrineFromWorkspace: (paranetId: string, selection: 'all' | { rootEntities: string[] }, opts?: { clearWorkspaceAfter?: boolean }) => agent.enshrineFromWorkspace(paranetId, selection, opts),
+    createParanet: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createParanet(opts),
+    listParanets: () => agent.listParanets(),
   };
   const chatAssistant = new ChatAssistant(
     dashDb,
@@ -732,36 +748,14 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   // --- HTTP API ---
 
-  const rateLimiter = new HttpRateLimiter(
-    config.rateLimit?.requestsPerMinute ?? 120,
-    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health'],
-  );
-  let corsAllowed: CorsAllowlist = '*';
-
   const server = createServer(async (req, res) => {
     try {
       const reqUrl = new URL(req.url ?? '/', `http://${req.headers.host}`);
 
-      // Resolve CORS origin once per request (request-scoped, not global)
-      const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
-      (res as any).__corsOrigin = reqCorsOrigin;
-
-      // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
-      const clientIp = req.socket.remoteAddress ?? 'unknown';
-      if (!rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
-        res.end(JSON.stringify({ error: 'Too many requests' }));
-        return;
-      }
-
       // CORS preflight
       if (req.method === 'OPTIONS') {
-        if (!reqCorsOrigin && corsAllowed !== '*') {
-          res.writeHead(403).end();
-          return;
-        }
         res.writeHead(204, {
-          ...(reqCorsOrigin ? { 'Access-Control-Allow-Origin': reqCorsOrigin } : {}),
+          'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         });
@@ -770,14 +764,14 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
-      if (!httpAuthGuard(req, res, authEnabled, validTokens, resolveCorsOrigin(req, corsAllowed))) return;
+      if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
 
-      // Shared memory (workspace) TTL settings — V10 and legacy routes
-      if (req.method === 'GET' && (reqUrl.pathname === '/api/settings/shared-memory-ttl' || reqUrl.pathname === '/api/settings/workspace-ttl')) {
-        const ttlMs = resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
+      // Workspace TTL settings
+      if (req.method === 'GET' && reqUrl.pathname === '/api/settings/workspace-ttl') {
+        const ttlMs = config.workspaceTtlMs ?? 30 * 24 * 60 * 60 * 1000;
         return jsonResponse(res, 200, { ttlMs, ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)) });
       }
-      if (req.method === 'PUT' && (reqUrl.pathname === '/api/settings/shared-memory-ttl' || reqUrl.pathname === '/api/settings/workspace-ttl')) {
+      if (req.method === 'PUT' && reqUrl.pathname === '/api/settings/workspace-ttl') {
         try {
           const bodyStr = await readBody(req, SMALL_BODY_BYTES);
           const { ttlDays } = JSON.parse(bodyStr ?? '{}') as { ttlDays?: number };
@@ -785,20 +779,19 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
             return jsonResponse(res, 400, { error: 'ttlDays must be a finite non-negative number' });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
           config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
+          agent.setWorkspaceTtlMs(ttlMs);
           await saveConfig(config);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;
-          return jsonResponse(res, 500, { error: err.message ?? 'Failed to update shared memory TTL' });
+          return jsonResponse(res, 500, { error: err.message ?? 'Failed to update workspace TTL' });
         }
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings);
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
@@ -826,6 +819,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         req,
         res,
         agent,
+        publisherApi,
         config,
         startedAt,
         dashDb,
@@ -839,11 +833,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         catchupTracker,
       );
     } catch (err: any) {
-      if (res.headersSent || res.writableEnded) return;
       if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
-      } else if (err instanceof SyntaxError) {
-        jsonResponse(res, 400, { error: err.message });
       } else {
         jsonResponse(res, 500, { error: err.message });
       }
@@ -859,12 +850,6 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
   apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
 
-  corsAllowed = buildCorsAllowlist(config, boundPort);
-  _moduleCorsAllowed = corsAllowed;
-  if (corsAllowed !== '*') {
-    log(`CORS allowlist: ${corsAllowed.join(', ')}`);
-  }
-
   log(`API listening on http://${apiHost}:${boundPort}`);
   log(`Node UI: http://${apiHost}:${boundPort}/ui`);
   log('Node is running. Use "dkg status" or "dkg peers" to interact.');
@@ -878,8 +863,6 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     if (updateInterval) clearInterval(updateInterval);
     clearInterval(chainScanTimer);
     clearInterval(pingTimer);
-    clearInterval(pruneTimer);
-    rateLimiter.destroy();
     await Promise.allSettled(installedApps.map(async (app) => {
       if (!app.destroy) return;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -892,6 +875,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     metricsCollector.stop();
     server.close();
     appStaticServer?.close();
+    if (publisherRuntime) {
+      await publisherRuntime.stop().catch((err: any) => log(`Publisher stop error: ${err?.message ?? String(err)}`));
+    }
     await agent.stop();
     dashDb.close();
     await removePid();
@@ -900,11 +886,9 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     process.exit(exitCode);
   }
 
-  process.on('SIGINT', () => shutdown(0));
-  process.on('SIGTERM', () => shutdown(0));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
-
-let _moduleCorsAllowed: CorsAllowlist = '*';
 
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
@@ -1132,6 +1116,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   agent: DKGAgent,
+  publisherApi: import('@origintrail-official/dkg-publisher').AsyncLiftPublisher,
   config: DkgConfig,
   startedAt: number,
   dashDb: DashboardDB,
@@ -1206,7 +1191,7 @@ async function handleRequest(
         hubAddress: chainConf.hubAddress,
       } : null,
       peers: uniquePeers.size,
-      paranets: resolveContextGraphs(config).length,
+      paranets: config.paranets?.length ?? 0,
       telemetry: config.telemetry?.enabled ?? false,
       autoUpdate: resolveAutoUpdateEnabled(config),
       auth: config.auth?.enabled !== false,
@@ -1337,10 +1322,7 @@ async function handleRequest(
     if (!peerId) return jsonResponse(res, 404, { error: `Agent "${to}" not found` });
 
     const sendT0 = Date.now();
-    const result = await Promise.race([
-      agent.sendChat(peerId, text),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('sendChat timeout (30s)')), 30_000)),
-    ]);
+    const result = await agent.sendChat(peerId, text);
     const sendDur = Date.now() - sendT0;
     try { dashDb.insertChatMessage({ ts: Date.now(), direction: 'out', peer: peerId, text, delivered: result.delivered }); } catch { /* never crash */ }
     return jsonResponse(res, 200, { ...result, phases: { resolve: resolveDur, send: sendDur, serverTotal: Date.now() - serverT0 } });
@@ -1581,7 +1563,7 @@ async function handleRequest(
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            ...corsHeaders(resolveCorsOrigin(req, _moduleCorsAllowed)),
+            'Access-Control-Allow-Origin': '*',
           });
 
           try {
@@ -1600,7 +1582,7 @@ async function handleRequest(
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
-          ...corsHeaders(resolveCorsOrigin(req, _moduleCorsAllowed)),
+          'Access-Control-Allow-Origin': '*',
         });
         res.write(`data: ${JSON.stringify({ type: 'final', text: reply.text ?? '', correlationId: reply.correlationId ?? corrId })}\n\n`);
         res.end();
@@ -1737,15 +1719,11 @@ async function handleRequest(
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { multiaddr: addr } = JSON.parse(body);
     if (!addr) return jsonResponse(res, 400, { error: 'Missing "multiaddr"' });
-    try {
-      await agent.connectTo(addr);
-    } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message ?? 'Failed to connect' });
-    }
+    await agent.connectTo(addr);
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
+  // POST /api/publish  { contextGraphId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
   if (req.method === 'POST' && path === '/api/publish') {
     const serverT0 = Date.now();
     const body = await readBody(req);
@@ -1754,11 +1732,11 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: parsed.error });
     }
 
-    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
+    const { contextGraphId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
     const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { paranetId: contextGraphId, details: { tripleCount: quads.length, source: 'api' } });
     try {
-      const result = await agent.publish(paranetId, quads, privateQuads, {
+      const result = await agent.publish(contextGraphId, quads, privateQuads, {
         accessPolicy,
         allowedPeers,
         operationCtx: ctx,
@@ -1799,23 +1777,21 @@ async function handleRequest(
     }
   }
 
-  // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
+  // POST /api/update  { kcId: "...", contextGraphId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/update') {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
-    const { kcId, quads, privateQuads } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!kcId || !paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "kcId", "contextGraphId" (or "paranetId"), or "quads"' });
+    const { kcId, contextGraphId, quads, privateQuads } = JSON.parse(body);
+    if (!kcId || !contextGraphId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "kcId", "contextGraphId", or "quads"' });
     }
     let kcIdBigInt: bigint;
     try { kcIdBigInt = BigInt(kcId); } catch {
       return jsonResponse(res, 400, { error: `Invalid "kcId": ${String(kcId).slice(0, 50)}` });
     }
     const ctx = createOperationContext('update');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { paranetId: contextGraphId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
     try {
-      const result = await agent.update(kcIdBigInt, paranetId, quads, privateQuads, {
+      const result = await agent.update(kcIdBigInt, contextGraphId, quads, privateQuads, {
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
       });
@@ -1844,50 +1820,51 @@ async function handleRequest(
     }
   }
 
-  // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
-  if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
+  // POST /api/workspace/write  { contextGraphId: "...", quads: [...] }
+  if (req.method === 'POST' && path === '/api/workspace/write') {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
-    const { quads } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!paranetId || !quads?.length) {
-      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
+    const { contextGraphId, quads } = JSON.parse(body);
+    if (!contextGraphId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
     }
     const ctx = createOperationContext('share');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { paranetId: contextGraphId, details: { tripleCount: quads.length, source: 'api' } });
     try {
       await tracker.trackPhase(ctx, 'validate', async () => {
-        // validation happens inside share
+        // validation happens inside writeToWorkspace
       });
-      await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { operationCtx: ctx }),
+      const graphManager = new GraphManager(agent.store);
+      const result = await tracker.trackPhase(ctx, 'store', () =>
+        agent.share(contextGraphId, quads, { operationCtx: ctx }),
       );
-      tracker.complete(ctx, { tripleCount: quads.length });
+      tracker.complete(ctx, { tripleCount: quads.length, details: { shareOperationId: result.shareOperationId } });
       const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ok: true, phases: opDetail.phases });
+      return jsonResponse(res, 200, {
+        ...result,
+        contextGraphId,
+        graph: graphManager.workspaceGraphUri(contextGraphId),
+        triplesWritten: quads.length,
+        phases: opDetail.phases,
+      });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
     }
   }
 
-  // POST /api/shared-memory/publish (V10) or /api/workspace/enshrine (legacy)
-  if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
+  // POST /api/workspace/enshrine  { contextGraphId, selection?, clearAfter?, publishContextGraphId? }
+  if (req.method === 'POST' && path === '/api/workspace/enshrine') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
-    const { selection, clearAfter, publishContextGraphId } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
+    const { contextGraphId, selection, clearAfter, publishContextGraphId } = JSON.parse(body);
+    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
+    tracker.start(ctx, { paranetId: contextGraphId, details: { source: 'api', publishContextGraphId } });
     try {
-      const sel: 'all' | { rootEntities: string[] } =
-        Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
-      const result = await tracker.trackPhase(ctx, 'read-shared-memory', () =>
-        agent.publishFromSharedMemory(paranetId, sel, {
+      const result = await tracker.trackPhase(ctx, 'read-workspace', () =>
+        agent.publishFromSharedMemory(contextGraphId, selection || 'all', {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
-          ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
+          ...(publishContextGraphId != null ? { publishContextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
       const chain = result.onChainResult;
@@ -1912,99 +1889,179 @@ async function handleRequest(
     }
   }
 
-  // POST /api/context-graph/create — on-chain context graph creation (V10)
-  // When the body has `participantIdentityIds`, this is the on-chain multisig creation.
-  // Otherwise, fall through to the context-graph-style create handler below.
-  if (req.method === 'POST' && path === '/api/context-graph/create') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
-    if (Array.isArray(parsed.participantIdentityIds)) {
-      const { participantIdentityIds, requiredSignatures } = parsed;
-      if (typeof requiredSignatures !== 'number') {
-        return jsonResponse(res, 400, { error: 'Missing requiredSignatures (number)' });
-      }
-      if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
-        return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
-      }
-      if (requiredSignatures > participantIdentityIds.length) {
-        return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
-      }
-      for (let i = 0; i < participantIdentityIds.length; i++) {
-        const id = participantIdentityIds[i];
-        if (typeof id === 'number') {
-          if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
-            return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
-          }
-        } else if (typeof id === 'string') {
-          if (!/^\d+$/.test(id) || id === '0') {
-            return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
-          }
-        } else {
-          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
-        }
-      }
-      try {
-        const mappedIds = participantIdentityIds.map((id: number | string) => BigInt(id));
-        const uniqueIds: bigint[] = Array.from(new Set(mappedIds));
-        const sortedUniqueIds = uniqueIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        if (requiredSignatures > sortedUniqueIds.length) {
-          return jsonResponse(res, 400, {
-            error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
-          });
-        }
-        const result = await agent.registerContextGraphOnChain({
-          participantIdentityIds: sortedUniqueIds,
-          requiredSignatures,
-        });
-        return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
-      } catch (err: any) {
-        return jsonResponse(res, 500, { error: err.message });
-      }
+  // GET /api/workspace/roots?contextGraphId=...&shareOperationId=...
+  if (req.method === 'GET' && path === '/api/workspace/roots') {
+    const contextGraphId = url.searchParams.get('contextGraphId');
+    const shareOperationId = url.searchParams.get('shareOperationId');
+    if (!contextGraphId) {
+      return jsonResponse(res, 400, { error: 'Missing contextGraphId' });
     }
-    // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description } = parsed;
-    if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    try {
-      await agent.createContextGraph({ id, name, description });
-    } catch (err: any) {
-      const msg = err?.message ?? '';
-      if (msg.includes('already exists') || msg.includes('duplicate') || msg.includes('conflict')) {
-        return jsonResponse(res, 409, { error: msg });
-      }
-      throw err;
+
+    const graphManager = new GraphManager(agent.store);
+    const workspaceMetaGraph = graphManager.workspaceMetaGraphUri(contextGraphId);
+    const opFilter = shareOperationId
+      ? `FILTER(STRENDS(STR(?op), ${JSON.stringify(`:${shareOperationId}`)}))`
+      : '';
+    const result = await agent.store.query(
+      `SELECT ?op ?root ?publisherPeerId ?publishedAt WHERE {
+        GRAPH <${workspaceMetaGraph}> {
+          ?op a <http://dkg.io/ontology/WorkspaceOperation> ;
+              <http://dkg.io/ontology/rootEntity> ?root ;
+              <http://www.w3.org/ns/prov#wasAttributedTo> ?publisherPeerId ;
+              <http://dkg.io/ontology/publishedAt> ?publishedAt .
+          ${opFilter}
+        }
+      } ORDER BY ?op ?root`,
+    );
+
+    if (result.type !== 'bindings') {
+      return jsonResponse(res, 500, { error: 'Unexpected workspace roots query result' });
     }
-    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+
+    type WorkspaceRootsEntry = {
+      shareOperationId: string;
+      publisherPeerId: string;
+      publishedAt: string;
+      roots: string[];
+    };
+    const operations = new Map<string, WorkspaceRootsEntry>();
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (!op) continue;
+      const opId = op.split(':').pop() ?? op;
+      const entry: WorkspaceRootsEntry = operations.get(opId) ?? {
+        shareOperationId: opId,
+        publisherPeerId: stripWorkspaceLiteral(String(row['publisherPeerId'] ?? '')),
+        publishedAt: stripWorkspaceLiteral(String(row['publishedAt'] ?? '')),
+        roots: [],
+      };
+      const root = row['root'];
+      if (root && !entry.roots.includes(root)) {
+        entry.roots.push(root);
+      }
+      operations.set(opId, entry);
+    }
+
+    return jsonResponse(res, 200, { operations: [...operations.values()] });
   }
 
-  // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_shared_memory", includeWorkspace?: bool }
+  // POST /api/publisher/enqueue
+  if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const payload = JSON.parse(body);
+    const jobId = await publisherApi.lift(payload);
+    return jsonResponse(res, 200, { jobId });
+  }
+
+  // GET /api/publisher/jobs?status=...
+  if (req.method === 'GET' && path === '/api/publisher/jobs') {
+    const status = url.searchParams.get('status') ?? undefined;
+    const jobs = await publisherApi.list(status ? { status: status as any } : undefined);
+    return jsonResponse(res, 200, { jobs });
+  }
+
+  // GET /api/publisher/job?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) {
+      return jsonResponse(res, 400, { error: 'Missing id' });
+    }
+    const job = await publisherApi.getStatus(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: 'Publisher job not found' });
+    }
+    return jsonResponse(res, 200, { job });
+  }
+
+  // GET /api/publisher/job/payload?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job/payload') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) {
+      return jsonResponse(res, 400, { error: 'Missing id' });
+    }
+    const job = await publisherApi.getStatus(jobId);
+    if (!job) {
+      return jsonResponse(res, 404, { error: 'Publisher job not found' });
+    }
+    const payload = await publisherApi.inspectPreparedPayload(jobId);
+    return jsonResponse(res, 200, {
+      jobId: job.jobId,
+      jobSlug: job.jobSlug,
+      status: job.status,
+      request: job.request,
+      failure: job.failure ?? null,
+      payload,
+    });
+  }
+
+  // POST /api/context-graph/create  { participantIdentityIds: number[], requiredSignatures: number }
+  if (req.method === 'POST' && path === '/api/context-graph/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { participantIdentityIds, requiredSignatures } = JSON.parse(body);
+    if (!Array.isArray(participantIdentityIds) || typeof requiredSignatures !== 'number') {
+      return jsonResponse(res, 400, { error: 'Missing participantIdentityIds (array) and requiredSignatures (number)' });
+    }
+    if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
+      return jsonResponse(res, 400, { error: 'requiredSignatures must be a positive integer (>= 1)' });
+    }
+    if (requiredSignatures > participantIdentityIds.length) {
+      return jsonResponse(res, 400, { error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})` });
+    }
+    for (let i = 0; i < participantIdentityIds.length; i++) {
+      const id = participantIdentityIds[i];
+      if (typeof id === 'number') {
+        if (!Number.isInteger(id) || id <= 0 || id > Number.MAX_SAFE_INTEGER) {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive safe integer` });
+        }
+      } else if (typeof id === 'string') {
+        if (!/^\d+$/.test(id) || id === '0') {
+          return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a positive decimal integer string` });
+        }
+      } else {
+        return jsonResponse(res, 400, { error: `participantIdentityIds[${i}] must be a number or string` });
+      }
+    }
+    try {
+      const sortedUniqueIds = [...new Set(participantIdentityIds.map((id: number | string) => BigInt(id)))]
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      if (requiredSignatures > sortedUniqueIds.length) {
+        return jsonResponse(res, 400, {
+          error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
+        });
+      }
+      const result = await agent.createContextGraph({
+        participantIdentityIds: sortedUniqueIds,
+        requiredSignatures,
+      });
+      if (!result.success) {
+        return jsonResponse(res, 502, { error: 'Context graph creation transaction failed on-chain', success: false });
+      }
+      return jsonResponse(res, 200, { contextGraphId: String(result.contextGraphId), success: true });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/query  { sparql: "...", contextGraphId?: "...", graphSuffix?: "_workspace", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
     const serverT0 = Date.now();
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
-    const sparql = parsed.sparql;
-    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
-    const graphSuffix = parsed.graphSuffix;
-    const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
-    if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    const { sparql, contextGraphId, graphSuffix, includeWorkspace } = JSON.parse(body);
+    if (!sparql) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     const ctx = createOperationContext('query');
-    tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
+    tracker.start(ctx, { paranetId: contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');
     try {
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, operationCtx: ctx });
+      const result = await agent.query(sparql, { paranetId: contextGraphId, graphSuffix, includeWorkspace, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
       return jsonResponse(res, 200, { result, phases: { execute: execDur, serverTotal: Date.now() - serverT0 } });
-    } catch (err: any) {
+    } catch (err) {
       tracker.fail(ctx, err);
-      const msg = err?.message ?? '';
-      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
-        return jsonResponse(res, 400, { error: msg });
-      }
       throw err;
     }
   }
@@ -2016,7 +2073,7 @@ async function handleRequest(
     if (!rawPeerId) return jsonResponse(res, 400, { error: 'Missing "peerId"' });
     if (!lookupType) return jsonResponse(res, 400, { error: 'Missing "lookupType"' });
     const ctx = createOperationContext('query');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { lookupType, remotePeer: rawPeerId, source: 'api-remote' } });
+    tracker.start(ctx, { paranetId, details: { lookupType, remotePeer: rawPeerId, source: 'api-remote' } });
     try {
       const peerId = await tracker.trackPhase(ctx, 'resolve', () => resolveNameToPeerId(agent, rawPeerId));
       if (!peerId) {
@@ -2034,21 +2091,19 @@ async function handleRequest(
     }
   }
 
-  // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
-  if (req.method === 'POST' && (path === '/api/context-graph/subscribe' || path === '/api/subscribe')) {
+  // POST /api/subscribe  { paranetId: "...", includeWorkspace?: boolean }
+  if (req.method === 'POST' && path === '/api/subscribe') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
-    const { includeWorkspace, includeSharedMemory } = parsed;
-    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or legacy "paranetId")' });
-    const shouldSyncSharedMemory = (includeSharedMemory ?? includeWorkspace) !== false;
-    agent.subscribeToContextGraph(paranetId);
+    const { paranetId, includeWorkspace } = JSON.parse(body);
+    if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "paranetId"' });
+    const shouldSyncWorkspace = includeWorkspace !== false;
+    agent.subscribeToParanet(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const job: CatchupJob = {
       jobId,
       paranetId,
-      includeWorkspace: shouldSyncSharedMemory,
+      includeWorkspace: shouldSyncWorkspace,
       status: 'queued',
       queuedAt: Date.now(),
     };
@@ -2076,8 +2131,8 @@ async function handleRequest(
       job.status = 'running';
       job.startedAt = Date.now();
       try {
-        const result = await agent.syncContextGraphFromConnectedPeers(paranetId, {
-          includeSharedMemory: shouldSyncSharedMemory,
+        const result = await agent.syncParanetFromConnectedPeers(paranetId, {
+          includeWorkspace: shouldSyncWorkspace,
         });
         job.result = result;
         job.status = 'done';
@@ -2093,18 +2148,18 @@ async function handleRequest(
       subscribed: paranetId,
       catchup: {
         status: 'queued',
-        includeWorkspace: shouldSyncSharedMemory,
+        includeWorkspace: shouldSyncWorkspace,
         jobId,
       },
     });
   }
 
-  // GET /api/sync/catchup-status?contextGraphId=<id> | ?paranetId=<id> | ?jobId=<id>
+  // GET /api/sync/catchup-status?paranetId=<id> | ?jobId=<id>
   if (req.method === 'GET' && path === '/api/sync/catchup-status') {
-    const paranetId = url.searchParams.get('contextGraphId') ?? url.searchParams.get('paranetId');
+    const paranetId = url.searchParams.get('paranetId');
     const jobIdParam = url.searchParams.get('jobId');
     if (!paranetId && !jobIdParam) {
-      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "jobId" query param' });
+      return jsonResponse(res, 400, { error: 'Missing "paranetId" or "jobId" query param' });
     }
 
     const jobId = jobIdParam ?? (paranetId ? catchupTracker.latestByParanet.get(paranetId) : undefined);
@@ -2119,28 +2174,24 @@ async function handleRequest(
     return jsonResponse(res, 200, job);
   }
 
-  // POST /api/paranet/create (legacy) — create a context graph definition
-  // V10 route /api/context-graph/create is handled above (combined with on-chain context graph create).
+  // POST /api/paranet/create  { id, name, description? }
   if (req.method === 'POST' && path === '/api/paranet/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const { id, name, description } = JSON.parse(body);
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
-    await agent.createContextGraph({ id, name, description });
+    await agent.createParanet({ id, name, description });
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
-  // GET /api/context-graph/list (V10) or /api/paranet/list (legacy)
-  if (req.method === 'GET' && (path === '/api/context-graph/list' || path === '/api/paranet/list')) {
-    const contextGraphs = await agent.listContextGraphs();
-    return jsonResponse(res, 200, {
-      contextGraphs,
-      paranets: contextGraphs, // backward compat
-    });
+  // GET /api/paranet/list
+  if (req.method === 'GET' && path === '/api/paranet/list') {
+    const paranets = await agent.listParanets();
+    return jsonResponse(res, 200, { paranets });
   }
 
-  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, context graphs)
+  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, paranets)
   if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
+    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listParanets()]);
     const adapters = [
       { id: 'elizaos', name: 'ElizaOS', enabled: true, description: 'Connect to ElizaOS agents' },
       { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
@@ -2164,134 +2215,12 @@ async function handleRequest(
     return jsonResponse(res, 200, { ok: true });
   }
 
-  // GET /api/context-graph/exists (V10) or /api/paranet/exists (legacy)
-  if (req.method === 'GET' && (path === '/api/context-graph/exists' || path === '/api/paranet/exists')) {
+  // GET /api/paranet/exists?id=<paranetId>
+  if (req.method === 'GET' && path === '/api/paranet/exists') {
     const id = url.searchParams.get('id');
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id" query param' });
-    const exists = await agent.contextGraphExists(id);
+    const exists = await agent.paranetExists(id);
     return jsonResponse(res, 200, { id, exists });
-  }
-
-  // POST /api/verify
-  if (req.method === 'POST' && path === '/api/verify') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, verifiedMemoryId, batchId, timeoutMs } = JSON.parse(body);
-    if (!contextGraphId || !verifiedMemoryId || !batchId) {
-      return jsonResponse(res, 400, { error: 'Missing contextGraphId, verifiedMemoryId, or batchId' });
-    }
-    const result = await agent.verify({
-      contextGraphId,
-      verifiedMemoryId,
-      batchId: BigInt(batchId),
-      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
-    });
-    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
-  }
-
-  // POST /api/endorse
-  if (req.method === 'POST' && path === '/api/endorse') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, ual, agentAddress } = JSON.parse(body);
-    if (!contextGraphId || !ual || !agentAddress) {
-      return jsonResponse(res, 400, { error: 'Missing contextGraphId, ual, or agentAddress' });
-    }
-    const result = await agent.endorse({ contextGraphId, knowledgeAssetUal: ual, agentAddress });
-    return jsonResponse(res, 200, { endorsed: true, endorserAddress: agentAddress, ...result });
-  }
-
-  // POST /api/ccl/policy/publish
-  if (req.method === 'POST' && path === '/api/ccl/policy/publish') {
-    const body = await readBody(req, SMALL_BODY_BYTES * 4);
-    const { paranetId, name, version, content, description, contextType, language, format } = JSON.parse(body);
-    if (!paranetId || !name || !version || !content) {
-      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name, version, content' });
-    }
-    const result = await agent.publishCclPolicy({ paranetId, name, version, content, description, contextType, language, format });
-    return jsonResponse(res, 200, result);
-  }
-
-  // POST /api/ccl/policy/approve
-  if (req.method === 'POST' && path === '/api/ccl/policy/approve') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { paranetId, policyUri, contextType } = JSON.parse(body);
-    if (!paranetId || !policyUri) {
-      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, policyUri' });
-    }
-    const result = await agent.approveCclPolicy({ paranetId, policyUri, contextType });
-    return jsonResponse(res, 200, result);
-  }
-
-  // POST /api/ccl/policy/revoke
-  if (req.method === 'POST' && path === '/api/ccl/policy/revoke') {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const { paranetId, policyUri, contextType } = JSON.parse(body);
-    if (!paranetId || !policyUri) {
-      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, policyUri' });
-    }
-    const result = await agent.revokeCclPolicy({ paranetId, policyUri, contextType });
-    return jsonResponse(res, 200, result);
-  }
-
-  // GET /api/ccl/policy/list
-  if (req.method === 'GET' && path === '/api/ccl/policy/list') {
-    const policies = await agent.listCclPolicies({
-      paranetId: url.searchParams.get('paranetId') ?? undefined,
-      name: url.searchParams.get('name') ?? undefined,
-      contextType: url.searchParams.get('contextType') ?? undefined,
-      status: url.searchParams.get('status') ?? undefined,
-      includeBody: url.searchParams.get('includeBody') === 'true',
-    });
-    return jsonResponse(res, 200, { policies });
-  }
-
-  // GET /api/ccl/policy/resolve?paranetId=&name=&contextType=
-  if (req.method === 'GET' && path === '/api/ccl/policy/resolve') {
-    const paranetId = url.searchParams.get('paranetId');
-    const name = url.searchParams.get('name');
-    if (!paranetId || !name) {
-      return jsonResponse(res, 400, { error: 'Missing required query params: paranetId, name' });
-    }
-    const policy = await agent.resolveCclPolicy({
-      paranetId,
-      name,
-      contextType: url.searchParams.get('contextType') ?? undefined,
-      includeBody: url.searchParams.get('includeBody') === 'true',
-    });
-    return jsonResponse(res, 200, { policy });
-  }
-
-  // POST /api/ccl/eval
-  if (req.method === 'POST' && path === '/api/ccl/eval') {
-    const body = await readBody(req, SMALL_BODY_BYTES * 8);
-    const { paranetId, name, facts, contextType, view, snapshotId, scopeUal, publishResult } = JSON.parse(body);
-    if (!paranetId || !name) {
-      return jsonResponse(res, 400, { error: 'Missing required fields: paranetId, name' });
-    }
-    if (facts != null && !Array.isArray(facts)) {
-      return jsonResponse(res, 400, { error: 'facts must be an array when provided' });
-    }
-    const result = publishResult
-      ? await agent.evaluateAndPublishCclPolicy({ paranetId, name, facts, contextType, view, snapshotId, scopeUal })
-      : await agent.evaluateCclPolicy({ paranetId, name, facts, contextType, view, snapshotId, scopeUal });
-    return jsonResponse(res, 200, result);
-  }
-
-  // GET /api/ccl/results?paranetId=&...
-  if (req.method === 'GET' && path === '/api/ccl/results') {
-    const paranetId = url.searchParams.get('paranetId');
-    if (!paranetId) {
-      return jsonResponse(res, 400, { error: 'Missing required query param: paranetId' });
-    }
-    const evaluations = await agent.listCclEvaluations({
-      paranetId,
-      policyUri: url.searchParams.get('policyUri') ?? undefined,
-      snapshotId: url.searchParams.get('snapshotId') ?? undefined,
-      view: url.searchParams.get('view') ?? undefined,
-      contextType: url.searchParams.get('contextType') ?? undefined,
-      resultKind: (url.searchParams.get('resultKind') as 'derived' | 'decision' | null) ?? undefined,
-      resultName: url.searchParams.get('resultName') ?? undefined,
-    });
-    return jsonResponse(res, 200, { evaluations });
   }
 
   // GET /api/wallets (list addresses only)
@@ -2393,17 +2322,16 @@ async function handleRequest(
 
   // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
   if (req.method === 'GET' && path === '/api/epcis/events') {
-    const epcisContextGraphId = config.epcis?.contextGraphId ?? config.epcis?.paranetId;
-    if (!epcisContextGraphId) {
-      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.contextGraphId in config)' });
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
     }
     const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
     const epcisQueryEngine = {
-      query: (sparql: string, opts?: { contextGraphId?: string }) => agent.query(sparql, opts),
+      query: (sparql: string, opts?: { paranetId?: string }) => agent.query(sparql, opts),
     };
     try {
       const result = await handleEventsQuery(searchParams, {
-        contextGraphId: epcisContextGraphId,
+        paranetId: config.epcis.paranetId,
         queryEngine: epcisQueryEngine,
         basePath: '/api/epcis/events',
       });
@@ -2421,9 +2349,8 @@ async function handleRequest(
 
   // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
   if (req.method === 'POST' && path === '/api/epcis/capture') {
-    const captureContextGraphId = config.epcis?.contextGraphId ?? config.epcis?.paranetId;
-    if (!captureContextGraphId) {
-      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.contextGraphId in config)' });
+    if (!config.epcis?.paranetId) {
+      return jsonResponse(res, 503, { error: 'EPCIS plugin is not configured (missing epcis.paranetId in config)' });
     }
     const body = await readBody(req);
     let parsed;
@@ -2437,9 +2364,11 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'Missing "epcisDocument" in request body' });
     }
     const epcisPublisher: EpcisPublisher = {
-      async publish(contextGraphId, content, opts) {
+      async publish(paranetId, content, opts) {
+        // Using { public: content } because bare JSON-LD (private) publishing
+        // silently drops triples — see GitHub issue #221.
         const result = await agent.publish(
-          contextGraphId,
+          paranetId,
           { public: content } as Record<string, unknown>,
           opts,
         );
@@ -2449,7 +2378,7 @@ async function handleRequest(
     try {
       const result = await handleCapture(
         { epcisDocument, publishOptions },
-        { contextGraphId: captureContextGraphId, publisher: epcisPublisher },
+        { paranetId: config.epcis.paranetId, publisher: epcisPublisher },
       );
       // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
       // Current sync model returns 200 with the full result. Switch to 202 + captureID +
@@ -2507,11 +2436,10 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
-  const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
+  const { contextGraphId, quads, privateQuads, accessPolicy, allowedPeers } = payload;
 
-  if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
-    return { ok: false, error: 'Missing or invalid "contextGraphId" (or legacy "paranetId")' };
+  if (typeof contextGraphId !== 'string' || contextGraphId.trim().length === 0) {
+    return { ok: false, error: 'Missing or invalid "contextGraphId"' };
   }
 
   if (!Array.isArray(quads) || quads.length === 0 || !quads.every(isPublishQuad)) {
@@ -2540,8 +2468,8 @@ function parsePublishRequestBody(body: string):
 
   return {
     ok: true,
-    value: {
-      paranetId,
+      value: {
+      contextGraphId,
       quads,
       privateQuads,
       accessPolicy,
@@ -2551,16 +2479,13 @@ function parsePublishRequestBody(body: string):
 }
 
 
-function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOrigin?: string | null): void {
-  const origin = corsOrigin !== undefined ? corsOrigin : ((res as any).__corsOrigin as string | null ?? null);
-  const body = JSON.stringify(data, (_key, value) =>
-    typeof value === 'bigint' ? value.toString() : value,
-  );
+function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    ...corsHeaders(origin),
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
-  res.end(body);
+  res.end(JSON.stringify(data));
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
@@ -2579,7 +2504,7 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
         rejected = true;
         req.removeListener('data', onData);
         req.resume();
-        setTimeout(() => req.destroy(), 5_000); // close after giving time for 413 response
+        req.destroy();
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
@@ -2591,89 +2516,6 @@ function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<stri
   });
 }
 
-// ─── CORS / rate-limit / validation helpers ───────────────────────────
-
-type CorsAllowlist = '*' | string[];
-
-function buildCorsAllowlist(config: DkgConfig, boundPort: number): CorsAllowlist {
-  const raw = config.corsOrigins;
-  if (raw === '*') return '*';
-  if (typeof raw === 'string' && raw.trim().length > 0) return [raw.trim()];
-  if (Array.isArray(raw)) {
-    const origins = raw.filter((v): v is string => typeof v === 'string' && v.length > 0);
-    if (origins.length > 0) return origins;
-  }
-  // Default: derive from apiHost
-  const host = config.apiHost ?? '127.0.0.1';
-  if (host === '0.0.0.0') return '*'; // backward-compatible
-  return [
-    `http://127.0.0.1:${boundPort}`,
-    `http://localhost:${boundPort}`,
-    `http://[::1]:${boundPort}`,
-  ];
-}
-
-function resolveCorsOrigin(req: IncomingMessage, allowlist: CorsAllowlist): string | undefined {
-  if (allowlist === '*') return '*';
-  const origin = req.headers.origin;
-  if (!origin) return undefined;
-  return allowlist.includes(origin) ? origin : undefined;
-}
-
-function corsHeaders(origin?: string | null): Record<string, string> {
-  if (!origin) return {};
-  const headers: Record<string, string> = {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  };
-  if (origin !== '*') headers['Vary'] = 'Origin';
-  return headers;
-}
-
-class HttpRateLimiter {
-  private _max: number;
-  private _exempt: Set<string>;
-  private _hits = new Map<string, { count: number; resetAt: number }>();
-  private _timer: ReturnType<typeof setInterval>;
-
-  constructor(requestsPerMinute: number, exemptPaths: string[] = []) {
-    this._max = requestsPerMinute;
-    this._exempt = new Set(exemptPaths);
-    // Sweep expired buckets every 60s
-    this._timer = setInterval(() => {
-      const now = Date.now();
-      for (const [key, bucket] of this._hits) {
-        if (now >= bucket.resetAt) this._hits.delete(key);
-      }
-    }, 60_000);
-    if (this._timer.unref) this._timer.unref();
-  }
-
-  isAllowed(ip: string, pathname: string): boolean {
-    if (this._exempt.has(pathname)) return true;
-    const now = Date.now();
-    let bucket = this._hits.get(ip);
-    if (!bucket || now >= bucket.resetAt) {
-      bucket = { count: 0, resetAt: now + 60_000 };
-      this._hits.set(ip, bucket);
-    }
-    bucket.count += 1;
-    return bucket.count <= this._max;
-  }
-
-  destroy(): void {
-    clearInterval(this._timer);
-    this._hits.clear();
-  }
-}
-
-function isValidContextGraphId(id: string): boolean {
-  if (!id || typeof id !== 'string') return false;
-  if (id.length > 256) return false;
-  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
-  return /^[\w:/.@\-]+$/.test(id);
-}
-
 function shortId(peerId: string): string {
   if (peerId.length > 16) return peerId.slice(0, 8) + '...' + peerId.slice(-4);
   return peerId;
@@ -2681,6 +2523,17 @@ function shortId(peerId: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
+}
+
+function stripWorkspaceLiteral(value: string): string {
+  if (value.startsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, value.lastIndexOf('"'));
+    }
+  }
+  return value;
 }
 
 function deriveBlockExplorerUrl(chainId?: string): string | undefined {
