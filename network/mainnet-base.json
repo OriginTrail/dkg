@@ -1,0 +1,13 @@
+{
+  "_status": "pre-deployment: hubAddress must be set after V10 contracts are deployed on Base",
+  "chain": {
+    "name": "base",
+    "type": "evm",
+    "chainId": "base:8453",
+    "rpcUrl": "https://mainnet.base.org"
+  },
+  "autoUpdate": {
+    "enabled": true,
+    "branch": "v10-rc"
+  }
+}

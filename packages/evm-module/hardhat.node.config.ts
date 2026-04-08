@@ -6,7 +6,7 @@ import { lazyObject } from 'hardhat/plugins';
 import { HardhatRuntimeEnvironment, HardhatUserConfig } from 'hardhat/types';
 
 import { Helpers } from './utils/helpers';
-import { rpc, accounts } from './utils/network';
+import { rpc, accounts, mainnetAccounts } from './utils/network';
 
 extendEnvironment((hre: HardhatRuntimeEnvironment) => {
   hre.helpers = lazyObject(() => new Helpers(hre));
@@ -63,6 +63,30 @@ const config: HardhatUserConfig = {
       chainId: 84532,
       url: rpc('BASE_SEPOLIA_V9') || 'https://sepolia.base.org',
       accounts: accounts('BASE_SEPOLIA_V9'),
+      saveDeployments: false,
+    },
+    base_mainnet: {
+      environment: 'mainnet',
+      chainId: 8453,
+      url: rpc('BASE_MAINNET') || 'https://mainnet.base.org',
+      gasPrice: 1_000_000_000,
+      accounts: mainnetAccounts('BASE_MAINNET'),
+      saveDeployments: false,
+    },
+    gnosis_mainnet: {
+      environment: 'mainnet',
+      chainId: 100,
+      url: rpc('GNOSIS_MAINNET') || 'https://rpc.gnosischain.com',
+      gasPrice: 3_000_000_000,
+      accounts: mainnetAccounts('GNOSIS_MAINNET'),
+      saveDeployments: false,
+    },
+    neuroweb_mainnet: {
+      environment: 'mainnet',
+      chainId: 2043,
+      url: rpc('NEUROWEB_MAINNET') || 'https://astrosat-parachain-rpc.origin-trail.network',
+      gasPrice: 1_000_000_000,
+      accounts: mainnetAccounts('NEUROWEB_MAINNET'),
       saveDeployments: false,
     },
   },

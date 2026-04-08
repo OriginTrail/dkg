@@ -110,7 +110,7 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      * V8-compatible: stake() defaults to 1-epoch lock (1x multiplier).
      * @param identityId Node to stake to
      * @param addedStake Amount of TRAC to stake
-     * @param lockEpochs Lock duration in epochs (min 1). Longer = higher reward multiplier (up to 3x at 12 epochs).
+     * @param lockEpochs Lock duration in epochs (min 1). Tiers: 1=1x, 2=1.5x, 3=2x, 6=3.5x, 12=6x.
      */
     function stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) external profileExists(identityId) {
         if (lockEpochs == 0) revert StakingLib.InvalidLockEpochs();
@@ -934,31 +934,25 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
-    // V9 Conviction Multiplier
+    // V10 Conviction Multiplier — Discrete Tiers
     // ========================================================================
 
     /**
      * @notice Compute the conviction multiplier for a delegator's lock duration.
-     * Formula: lockEpochs == 0 → 0; lockEpochs >= 1 → min(3.0, 1 + K*(lockEpochs-1)/(lockEpochs-1+H))
-     * where K = 18/7, H = 22/7. All fixed-point with 1e18 scaling.
-     * Calibration: 1 epoch = 1x, 3 epochs = 2x, 12 epochs = 3x (cap).
-     * @param lockEpochs Original lock duration
-     * @return multiplier18 Multiplier scaled by 1e18 (e.g. 3e18 = 3x)
+     * Discrete tiers (lockEpochs → multiplier):
+     *   0 = invalid (returns 0), 1 = 1.0x, ≥2 = 1.5x, ≥3 = 2.0x,
+     *   ≥6 = 3.5x, ≥12 = 6.0x.
+     * Values between tiers snap DOWN to the nearest tier.
+     * @param lockEpochs Lock duration in epochs (1 epoch ≈ 30 days)
+     * @return multiplier18 Multiplier scaled by 1e18 (e.g. 6e18 = 6x)
      */
     function convictionMultiplier(uint40 lockEpochs) public pure returns (uint256 multiplier18) {
         if (lockEpochs == 0) return 0;
-        if (lockEpochs == 1) return SCALE18;
-
-        // K = 18/7 ≈ 2.571, H = 22/7 ≈ 3.143
-        // We use numerators scaled by 7 to avoid fractions:
-        // multiplier = 1 + 18*(lockEpochs-1) / (7*(lockEpochs-1) + 22)
-        uint256 x = uint256(lockEpochs) - 1;
-        uint256 numerator = 18 * x * SCALE18;
-        uint256 denominator = 7 * x + 22;
-        uint256 result = SCALE18 + (numerator / denominator);
-
-        uint256 cap = 3 * SCALE18;
-        return result > cap ? cap : result;
+        if (lockEpochs >= 12) return 6 * SCALE18;
+        if (lockEpochs >= 6) return 35 * SCALE18 / 10; // 3.5x
+        if (lockEpochs >= 3) return 2 * SCALE18;
+        if (lockEpochs >= 2) return 15 * SCALE18 / 10; // 1.5x
+        return SCALE18; // lockEpochs == 1 → 1.0x base
     }
 
     /**

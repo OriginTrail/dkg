@@ -24,6 +24,7 @@ import type {
   VerifyParams,
   PublishToContextGraphParams,
   V10PublishParams,
+  ConvictionAccountInfo,
 } from './chain-adapter.js';
 
 const require = createRequire(import.meta.url);
@@ -44,6 +45,7 @@ const ERROR_ABI_CONTRACTS = [
   'ParanetV9Registry', 'Paranet', 'Profile', 'Identity', 'IdentityStorage',
   'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
   'Paymaster', 'ShardingTable', 'ParametersStorage',
+  'PublishingConvictionAccount',
 ];
 
 let _errorInterface: Interface | null = null;
@@ -124,6 +126,7 @@ interface ContractCache {
   contextGraphs?: Contract;
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
+  publishingConvictionAccount?: Contract;
 }
 
 /**
@@ -226,6 +229,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.knowledgeAssetsV10 = await this.resolveContract('KnowledgeAssetsV10');
     } catch {
       // V10 contract not deployed — createKnowledgeAssetsV10 unavailable
+    }
+
+    try {
+      this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
+    } catch {
+      // PublishingConvictionAccount not deployed — conviction account operations unavailable
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -1189,6 +1198,177 @@ export class EVMChainAdapter implements ChainAdapter {
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
     };
+  }
+
+  // =====================================================================
+  // Staking Conviction
+  // =====================================================================
+
+  async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    await this.init();
+    const staking = this.contracts.staking!;
+    const stakingAddr = await staking.getAddress();
+
+    if (this.contracts.token && amount > 0n) {
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingAddr);
+      if (currentAllowance < amount) {
+        const approveTx = await this.contracts.token.approve(stakingAddr, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
+    const tx = await staking.stakeWithLock(identityId, amount, lockEpochs);
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
+    await this.init();
+    const staking = this.contracts.staking!;
+    const multiplier18: bigint = await staking.getDelegatorConvictionMultiplier(identityId, delegator);
+    return { multiplier: Number(multiplier18) / 1e18 };
+  }
+
+  // =====================================================================
+  // Publishing Conviction Accounts
+  // =====================================================================
+
+  async createConvictionAccount(amount: bigint, lockEpochs: number): Promise<{ accountId: bigint } & TxResult> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) {
+      throw new Error('PublishingConvictionAccount contract not deployed.');
+    }
+
+    const pca = this.contracts.publishingConvictionAccount;
+    const pcaAddress = await pca.getAddress();
+
+    if (this.contracts.token && amount > 0n) {
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
+      if (currentAllowance < amount) {
+        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
+    const tx = await pca.createAccount(amount, lockEpochs);
+    const receipt = await tx.wait();
+
+    let accountId = 0n;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = pca.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'AccountCreated') {
+          accountId = BigInt(parsed.args.accountId);
+          break;
+        }
+      } catch { /* not this contract */ }
+    }
+
+    if (accountId === 0n) {
+      throw new Error('createConvictionAccount succeeded but no AccountCreated event found');
+    }
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+      accountId,
+    };
+  }
+
+  async addConvictionFunds(accountId: bigint, amount: bigint): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) {
+      throw new Error('PublishingConvictionAccount contract not deployed.');
+    }
+
+    const pca = this.contracts.publishingConvictionAccount;
+    const pcaAddress = await pca.getAddress();
+
+    if (this.contracts.token && amount > 0n) {
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
+      if (currentAllowance < amount) {
+        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
+        await approveTx.wait();
+      }
+    }
+
+    const tx = await pca.addFunds(accountId, amount);
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  async extendConvictionLock(accountId: bigint, additionalEpochs: number): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) {
+      throw new Error('PublishingConvictionAccount contract not deployed.');
+    }
+
+    const tx = await this.contracts.publishingConvictionAccount.extendLock(accountId, additionalEpochs);
+    const receipt = await tx.wait();
+
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) return null;
+
+    try {
+      const [admin, balance, initialDeposit, lockEpochs, conviction, discountBps] =
+        await this.contracts.publishingConvictionAccount.getAccountInfo(accountId);
+
+      if (admin === ethers.ZeroAddress) return null;
+
+      return {
+        accountId,
+        admin,
+        balance: BigInt(balance),
+        initialDeposit: BigInt(initialDeposit),
+        lockEpochs: Number(lockEpochs),
+        conviction: BigInt(conviction),
+        discountBps: Number(discountBps),
+      };
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return null;
+      throw err;
+    }
+  }
+
+  async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) {
+      return { discountBps: 0, conviction: 0n };
+    }
+
+    try {
+      const [admin, , , , conviction, discountBps] =
+        await this.contracts.publishingConvictionAccount.getAccountInfo(accountId);
+
+      if (admin === ethers.ZeroAddress) return { discountBps: 0, conviction: 0n };
+
+      return {
+        discountBps: Number(discountBps),
+        conviction: BigInt(conviction),
+      };
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return { discountBps: 0, conviction: 0n };
+      throw err;
+    }
   }
 
   // =====================================================================

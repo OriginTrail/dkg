@@ -831,13 +831,14 @@ function fromHex(hex: string): Uint8Array {
 }
 
 /**
- * Conviction multiplier matching the Solidity formula.
- * lockEpochs=0 → 0, lockEpochs=1 → 1.0, lockEpochs=3 → 2.0, lockEpochs>=12 → 3.0
+ * V10 conviction multiplier — discrete tiers matching Solidity.
+ * 0 → 0, 1 → 1.0x, 2 → 1.5x, 3-5 → 2.0x, 6-11 → 3.5x, 12+ → 6.0x
  */
 export function computeConvictionMultiplier(lockEpochs: number): number {
   if (lockEpochs <= 0) return 0;
-  if (lockEpochs === 1) return 1.0;
-  const x = lockEpochs - 1;
-  const result = 1 + (18 * x) / (7 * x + 22);
-  return Math.min(3.0, result);
+  if (lockEpochs >= 12) return 6.0;
+  if (lockEpochs >= 6) return 3.5;
+  if (lockEpochs >= 3) return 2.0;
+  if (lockEpochs >= 2) return 1.5;
+  return 1.0;
 }

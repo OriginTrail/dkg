@@ -57,3 +57,19 @@ export function accounts(
     return { mnemonic: mnemonic(networkName) };
   }
 }
+
+/**
+ * Accounts for mainnet networks — refuses to fall back to the shared MNEMONIC
+ * or the Hardhat test mnemonic. Returns an empty array when no network-specific
+ * credentials are set, so deploys fail fast instead of broadcasting from the
+ * wrong signer.
+ */
+export function mainnetAccounts(networkName: string): [string] | { mnemonic: string } | never[] {
+  const privKey = privateKey(networkName);
+  if (privKey) return [privKey];
+
+  const mn = networkName ? process.env['MNEMONIC_' + networkName.toUpperCase()] : undefined;
+  if (mn && mn !== '') return { mnemonic: mn };
+
+  return [];
+}
