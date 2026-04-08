@@ -82,6 +82,7 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
+const SYNC_AUTH_MAX_AGE_MS = 30_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -90,6 +91,10 @@ interface SyncRequestEnvelope {
   offset: number;
   limit: number;
   includeSharedMemory: boolean;
+  targetPeerId?: string;
+  requesterPeerId?: string;
+  requestId?: string;
+  issuedAtMs?: number;
   requesterIdentityId?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
@@ -209,6 +214,7 @@ export class DKGAgent {
   private readonly peerHealth = new Map<string, PeerHealth>();
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
+  private readonly seenPrivateSyncRequestIds = new Map<string, number>();
 
   private constructor(
     config: DKGAgentConfig,
@@ -528,7 +534,7 @@ export class DKGAgent {
     //   or: "workspace:contextGraphId|offset|limit" for shared memory graph sync
     // Response includes both the data graph and the meta graph so the
     // receiver can verify merkle roots before inserting.
-    this.router.register(PROTOCOL_SYNC, async (data) => {
+    this.router.register(PROTOCOL_SYNC, async (data, peerId) => {
       const request = this.parseSyncRequest(data);
       const offset = request.offset;
       const limit = request.limit;
@@ -536,7 +542,7 @@ export class DKGAgent {
       const contextGraphId = request.contextGraphId;
       const nquads: string[] = [];
 
-      if (!(await this.authorizeSyncRequest(request))) {
+      if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
         return new TextEncoder().encode('');
       }
 
@@ -767,7 +773,7 @@ export class DKGAgent {
           }
 
           const payload = new TextEncoder().encode(`${pid}|${offset}|${SYNC_PAGE_SIZE}`);
-          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, false);
+          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, false, remotePeerId);
 
           // Cap per-call timeout so ProtocolRouter.send (3 internal retries) stays within deadline
           const remainingMs = Math.max(0, deadline - Date.now());
@@ -864,7 +870,7 @@ export class DKGAgent {
             break;
           }
 
-          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, true);
+          const requestBytes = await this.buildSyncRequest(pid, offset, SYNC_PAGE_SIZE, true, remotePeerId);
 
           const remainingMs = Math.max(0, deadline - Date.now());
           const timeoutMs = Math.min(
@@ -2862,6 +2868,10 @@ export class DKGAgent {
         offset: parsed.offset ?? 0,
         limit: Math.min(parsed.limit ?? SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
         includeSharedMemory: parsed.includeSharedMemory ?? false,
+        targetPeerId: parsed.targetPeerId,
+        requesterPeerId: parsed.requesterPeerId,
+        requestId: parsed.requestId,
+        issuedAtMs: parsed.issuedAtMs,
         requesterIdentityId: parsed.requesterIdentityId,
         requesterSignatureR: parsed.requesterSignatureR,
         requesterSignatureVS: parsed.requesterSignatureVS,
@@ -2884,6 +2894,7 @@ export class DKGAgent {
     offset: number,
     limit: number,
     includeSharedMemory: boolean,
+    responderPeerId: string,
   ): Promise<Uint8Array> {
     const request: SyncRequestEnvelope = {
       contextGraphId,
@@ -2893,9 +2904,22 @@ export class DKGAgent {
     };
 
     if (await this.isPrivateContextGraph(contextGraphId)) {
+      request.targetPeerId = responderPeerId;
+      request.requesterPeerId = this.peerId;
+      request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      request.issuedAtMs = Date.now();
       const identityId = await this.chain.getIdentityId();
       if (identityId > 0n && typeof this.chain.signMessage === 'function') {
-        const digest = this.computeSyncDigest(contextGraphId, offset, limit, includeSharedMemory);
+        const digest = this.computeSyncDigest(
+          contextGraphId,
+          offset,
+          limit,
+          includeSharedMemory,
+          responderPeerId,
+          request.requesterPeerId,
+          request.requestId,
+          request.issuedAtMs,
+        );
         const signature = await this.chain.signMessage(digest);
         request.requesterIdentityId = identityId.toString();
         request.requesterSignatureR = ethers.hexlify(signature.r);
@@ -2911,28 +2935,58 @@ export class DKGAgent {
     offset: number,
     limit: number,
     includeSharedMemory: boolean,
+    targetPeerId: string,
+    requesterPeerId: string | undefined,
+    requestId: string | undefined,
+    issuedAtMs: number | undefined,
   ): Uint8Array {
     return ethers.getBytes(
       ethers.solidityPackedKeccak256(
-        ['string', 'uint256', 'uint256', 'bool'],
-        [contextGraphId, BigInt(offset), BigInt(limit), includeSharedMemory],
+        ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256'],
+        [
+          contextGraphId,
+          BigInt(offset),
+          BigInt(limit),
+          includeSharedMemory,
+          targetPeerId,
+          requesterPeerId ?? '',
+          requestId ?? '',
+          BigInt(issuedAtMs ?? 0),
+        ],
       ),
     );
   }
 
-  private async authorizeSyncRequest(request: SyncRequestEnvelope): Promise<boolean> {
+  private async authorizeSyncRequest(request: SyncRequestEnvelope, remotePeerId: string): Promise<boolean> {
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId);
     if (!isPrivate) {
       return true;
     }
 
+    const now = Date.now();
+    for (const [requestId, seenAt] of this.seenPrivateSyncRequestIds) {
+      if (now - seenAt > SYNC_AUTH_MAX_AGE_MS) {
+        this.seenPrivateSyncRequestIds.delete(requestId);
+      }
+    }
+
     const requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n;
     if (
+      request.targetPeerId !== this.peerId ||
+      request.requesterPeerId !== remotePeerId ||
+      !request.requestId ||
+      request.issuedAtMs == null ||
+      now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
+      now < request.issuedAtMs - 5000 ||
       requesterIdentityId === 0n ||
       !request.requesterSignatureR ||
       !request.requesterSignatureVS ||
       typeof this.chain.verifyACKIdentity !== 'function'
     ) {
+      return false;
+    }
+
+    if (this.seenPrivateSyncRequestIds.has(request.requestId)) {
       return false;
     }
 
@@ -2946,6 +3000,10 @@ export class DKGAgent {
       request.offset,
       request.limit,
       request.includeSharedMemory,
+      request.targetPeerId,
+      request.requesterPeerId,
+      request.requestId,
+      request.issuedAtMs,
     );
 
     let recoveredAddress: string;
@@ -2964,7 +3022,11 @@ export class DKGAgent {
     }
 
     const participants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
-    return participants?.some((id) => id === requesterIdentityId) ?? false;
+    const allowed = participants?.some((id) => id === requesterIdentityId) ?? false;
+    if (allowed) {
+      this.seenPrivateSyncRequestIds.set(request.requestId, now);
+    }
+    return allowed;
   }
 
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {

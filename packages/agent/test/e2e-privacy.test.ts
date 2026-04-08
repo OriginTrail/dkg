@@ -275,11 +275,12 @@ describe('Private context graph sync auth (3 nodes)', () => {
       },
     ]);
 
-    const requestB = JSON.parse(new TextDecoder().decode(await (nodeB as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false)));
+    const requestB = JSON.parse(new TextDecoder().decode(await (nodeB as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false, nodeA.peerId)));
+    expect(requestB.targetPeerId).toBe(nodeA.peerId);
     expect(requestB.requesterIdentityId).toBe(idB.toString());
     expect(requestB.requesterSignatureR).toBeDefined();
     expect(requestB.requesterSignatureVS).toBeDefined();
-    const digestB = (nodeA as any).computeSyncDigest(PRIVATE_PARANET, 0, 50, false);
+    const digestB = (nodeA as any).computeSyncDigest(PRIVATE_PARANET, 0, 50, false, nodeA.peerId, nodeB.peerId, requestB.requestId, requestB.issuedAtMs);
     const recoveredB = ethers.recoverAddress(ethers.hashMessage(digestB), {
       r: requestB.requesterSignatureR,
       yParityAndS: requestB.requesterSignatureVS,
@@ -287,10 +288,10 @@ describe('Private context graph sync auth (3 nodes)', () => {
     expect(recoveredB.toLowerCase()).toBe(walletB.address.toLowerCase());
     expect(await chainA.verifyACKIdentity(recoveredB, idB)).toBe(true);
     expect(await chainA.getContextGraphParticipants(1n)).toEqual([idA, idB]);
-    expect(await (nodeA as any).authorizeSyncRequest(requestB)).toBe(true);
+    expect(await (nodeA as any).authorizeSyncRequest(requestB, nodeB.peerId)).toBe(true);
 
-    const requestC = JSON.parse(new TextDecoder().decode(await (nodeC as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false)));
-    expect(await (nodeA as any).authorizeSyncRequest(requestC)).toBe(false);
+    const requestC = JSON.parse(new TextDecoder().decode(await (nodeC as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false, nodeA.peerId)));
+    expect(await (nodeA as any).authorizeSyncRequest(requestC, nodeC.peerId)).toBe(false);
 
     const syncedDataB = await nodeB.syncFromPeer(nodeA.peerId, [PRIVATE_PARANET]);
     expect(syncedDataB).toBeGreaterThan(0);

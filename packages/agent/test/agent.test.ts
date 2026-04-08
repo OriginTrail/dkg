@@ -19,6 +19,7 @@ import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 import { tmpdir } from 'node:os';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -1409,10 +1410,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       const identityId = await chain.ensureProfile();
       vi.spyOn(chain, 'signMessage').mockResolvedValue({ r: new Uint8Array(32), vs: new Uint8Array(32) });
 
-      const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false);
+      const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote');
       const parsed = JSON.parse(new TextDecoder().decode(encoded));
 
       expect(parsed.contextGraphId).toBe('private-cg');
+      expect(parsed.targetPeerId).toBe('peer-remote');
+      expect(parsed.requesterPeerId).toBe(agent.peerId);
+      expect(parsed.requestId).toBeDefined();
+      expect(parsed.issuedAtMs).toBeDefined();
       expect(parsed.requesterIdentityId).toBe(identityId.toString());
       expect(parsed.requesterSignatureR).toBeDefined();
       expect(parsed.requesterSignatureVS).toBeDefined();
@@ -1453,14 +1458,79 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         offset: 0,
         limit: 10,
         includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: agent.peerId,
+        requestId: 'req-1',
+        issuedAtMs: Date.now(),
         requesterIdentityId: '1',
         requesterSignatureR: '0x' + '00'.repeat(32),
         requesterSignatureVS: '0x' + '00'.repeat(32),
-      });
+      }, agent.peerId);
 
       expect(allowed).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
+    }
+  });
+
+  it('rejects replayed private sync requests', async () => {
+    const chain = new MockChainAdapter();
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncReplay',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+      });
+      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
+      vi.spyOn(chain, 'getContextGraphParticipants').mockResolvedValue([1n]);
+      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-requester',
+        requestId: 'req-1',
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '1',
+      } as const;
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+
+      const signedRequest = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const first = await (agent as any).authorizeSyncRequest(signedRequest, 'peer-requester');
+      const second = await (agent as any).authorizeSyncRequest(signedRequest, 'peer-requester');
+
+      expect(first).toBe(true);
+      expect(second).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+      vi.restoreAllMocks();
     }
   });
 
