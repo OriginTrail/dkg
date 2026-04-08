@@ -11,7 +11,7 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   createOperationContext,
-  encodeWorkspacePublishRequest,
+  encodeSharePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -193,7 +193,7 @@ describe('Phase-sequence contracts', () => {
       .map(t => `<${t.subject}> <${t.predicate}> ${t.object} .`)
       .join('\n');
 
-    const msg = encodeWorkspacePublishRequest({
+    const msg = encodeSharePublishRequest({
       shareOperationId: 'ws-test-001',
       contextGraphId: PARANET,
       publisherPeerId: '12D3KooWTest',

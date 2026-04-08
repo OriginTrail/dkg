@@ -16,9 +16,11 @@
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@multiformats/multiaddr": "^13.0.1",
-    "ethers": "^6.16.0"
+    "ethers": "^6.16.0",
+    "n3": "^1.17.4"
   },
   "devDependencies": {
+    "@types/n3": "^1.26.1",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

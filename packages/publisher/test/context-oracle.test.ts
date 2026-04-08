@@ -75,7 +75,6 @@ describe('ContextOracle', () => {
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
 
       expect(result.contextGraphId).toBe(CG_ID);
-      expect(result.paranetId).toBe(PARANET);
       expect(result.entity).toBe('did:dkg:agent:Alice');
       expect(result.triples).toHaveLength(2);
 

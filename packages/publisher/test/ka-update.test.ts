@@ -24,16 +24,8 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
-function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
-  const partitioned = autoPartition(quads);
-  const kaRoots: Uint8Array[] = [];
-  for (const m of manifest) {
-    const entityQuads = partitioned.get(m.rootEntity) ?? [];
-    const pubRoot = computePublicRoot(entityQuads);
-    const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-    kaRoots.push(computeKARoot(pubRoot, privRoot));
-  }
-  return computeKCRoot(kaRoots);
+function computeGossipMerkleRoot(quads: Quad[], _manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
+  return computeFlatKCRoot(quads, []);
 }
 
 /** Build a gossip message that matches an on-chain update (same quads → same merkle root). */
@@ -49,7 +41,7 @@ function buildGossipMessage(opts: {
 }) {
   const gossipRoot = computeGossipMerkleRoot(opts.quads, opts.manifest);
   return encodeKAUpdateRequest({
-    paranetId: opts.contextGraphId,
+    contextGraphId: opts.contextGraphId,
     batchId: opts.batchId,
     nquads: quadsToNQuads(opts.quads, `did:dkg:context-graph:${opts.contextGraphId}`),
     manifest: opts.manifest,
@@ -65,7 +57,7 @@ function buildGossipMessage(opts: {
 describe('KAUpdateRequest encode/decode', () => {
   it('round-trips a KAUpdateRequest message', () => {
     const original = {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: 42n,
       nquads: new TextEncoder().encode('<urn:a> <urn:b> "c" .'),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -81,7 +73,7 @@ describe('KAUpdateRequest encode/decode', () => {
     expect(encoded).toBeInstanceOf(Uint8Array);
 
     const decoded = decodeKAUpdateRequest(encoded);
-    expect(decoded.paranetId).toBe(PARANET);
+    expect(decoded.contextGraphId).toBe(PARANET);
     expect(decoded.batchId).toBe(42n);
     expect(decoded.publisherPeerId).toBe('12D3KooWTest');
     expect(decoded.publisherAddress).toBe('0xABCDEF');
@@ -95,7 +87,7 @@ describe('KAUpdateRequest encode/decode', () => {
     const largeBatchId = (1n << 53n) + 7n;
     const largeBlock = (1n << 60n) + 42n;
     const original = {
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: largeBatchId,
       nquads: new Uint8Array(),
       manifest: [],
@@ -276,7 +268,7 @@ describe('UpdateHandler', () => {
     const gossipRoot = computeGossipMerkleRoot(quadsWithExtra, manifestOnlyA);
 
     const message = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(quadsWithExtra, DATA_GRAPH),
       manifest: manifestOnlyA,
@@ -315,7 +307,7 @@ describe('UpdateHandler', () => {
     // Send gossip for update1 with a forged high block number.
     // The handler should use the chain-verified block (chainBlock1), not 999999.
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(update1Quads, DATA_GRAPH),
       manifest: [{ rootEntity: ENTITY_A, privateTripleCount: 0 }],
@@ -766,7 +758,13 @@ describe('UpdateHandler', () => {
     expect(newRootResult.type).toBe('bindings');
     if (newRootResult.type === 'bindings') {
       expect(newRootResult.bindings.length).toBe(1);
-      const newRootHex = toHex(computeFlatKCRoot(updateQuads, []));
+      const verification = await chain.verifyKAUpdate(
+        updateResult.onChainResult!.txHash,
+        original.kcId,
+        wallet.address,
+      );
+      expect(verification.verified).toBe(true);
+      const newRootHex = toHex(verification.onChainMerkleRoot!);
       expect(newRootResult.bindings[0]['root']).toContain(newRootHex);
       expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
     }

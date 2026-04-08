@@ -428,10 +428,10 @@ describe('SharedMemoryHandler', () => {
   });
 
   it('stores valid workspace message to workspace and workspace_meta', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const nquads = `<${ENTITY}> <http://schema.org/name> "Handler Test" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -456,12 +456,12 @@ describe('SharedMemoryHandler', () => {
   });
 
   it('rejects message when rootEntity was created by a different peer (Rule 4)', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     workspaceOwned.set(PARANET, new Map([[ENTITY, 'otherPeer']]));
 
     const nquads = `<${ENTITY}> <http://schema.org/name> "Duplicate" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: '12D3KooWPeer',
@@ -484,11 +484,11 @@ describe('SharedMemoryHandler', () => {
   });
 
   it('allows same creator to upsert via gossip handler', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWSameCreator';
 
-    const msg1 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg1 = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Original" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -497,8 +497,8 @@ describe('SharedMemoryHandler', () => {
     });
     await handler.handle(msg1, peerId);
 
-    const msg2 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg2 = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -520,11 +520,11 @@ describe('SharedMemoryHandler', () => {
   });
 
   it('persists ownership triples and does not duplicate on same-creator upsert', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWOwner';
 
-    const msg1 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg1 = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "First" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -544,8 +544,8 @@ describe('SharedMemoryHandler', () => {
       expect(afterFirst.bindings[0]['creator']).toBe(`"${peerId}"`);
     }
 
-    const msg2 = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg2 = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${ENTITY}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -579,13 +579,13 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in subject', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const safeEntity = 'urn:test:safe-entity';
     const nquads = `<${safeEntity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -611,13 +611,13 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in expectedValue', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const safeEntity = 'urn:test:safe-entity2';
 
     // First write so the entity exists
-    const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${safeEntity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -627,8 +627,8 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     await handler.handle(setupMsg, peerId);
 
     const nquads = `<${safeEntity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`;
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: safeEntity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -657,12 +657,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('accepts valid CAS conditions and enforces them', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:cas-valid';
 
-    const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -671,8 +671,8 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const updateMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -700,12 +700,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects write when CAS condition value mismatches', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:cas-mismatch';
 
-    const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -714,8 +714,8 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const updateMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "arrived" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -743,12 +743,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('expectAbsent: allows write when triple does not exist', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:absent-pass';
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -773,12 +773,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('expectAbsent: rejects write when triple already exists', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:absent-fail';
 
-    const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -787,8 +787,8 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const updateMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -816,12 +816,12 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
   });
 
   it('rejects non-absent CAS condition with empty expectedValue (protobuf default)', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:empty-expected';
 
-    const setupMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Setup" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -830,8 +830,8 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
     });
     await handler.handle(setupMsg, peerId);
 
-    const updateMsg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const updateMsg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://schema.org/name> "Updated" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1104,13 +1104,13 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('rejects CAS conditions with SPARQL injection in predicate', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:inject-pred';
     const nquads = `<${entity}> <http://schema.org/name> "Test" <${DATA_GRAPH}> .`;
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1136,13 +1136,13 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('cross-subject CAS: condition on subject A, write targets subject B — lock covers both', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const subjectA = 'urn:test:lock-a';
     const subjectB = 'urn:test:lock-b';
 
-    const setupA = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupA = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "active" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1151,8 +1151,8 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(setupA, peerId);
 
-    const writeB = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const writeB = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Created conditionally" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1177,13 +1177,13 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('cross-subject CAS: rejects when condition on subject A fails', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const subjectA = 'urn:test:lock-a2';
     const subjectB = 'urn:test:lock-b2';
 
-    const setupA = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setupA = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${subjectA}> <http://example.org/status> "inactive" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectA, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1192,8 +1192,8 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(setupA, peerId);
 
-    const writeB = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const writeB = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${subjectB}> <http://example.org/name> "Should not appear" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: subjectB, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1218,12 +1218,12 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('multiple gossip CAS conditions: rejects if any single condition fails', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:multi-cond';
 
-    const setup = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setup = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/status> "recruiting" <${DATA_GRAPH}> .\n` +
         `<${entity}> <http://example.org/turn> "5"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
@@ -1235,8 +1235,8 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(setup, peerId);
 
-    const update = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const update = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<${entity}> <http://example.org/status> "traveling" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: entity, privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -1262,12 +1262,12 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
   });
 
   it('gossip CAS with typed literal (xsd:integer) succeeds when match', async () => {
-    const { encodeWorkspacePublishRequest } = await import('@origintrail-official/dkg-core');
+    const { encodeSharePublishRequest } = await import('@origintrail-official/dkg-core');
     const peerId = '12D3KooWPeer';
     const entity = 'urn:test:typed-lit';
 
-    const setup = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const setup = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "1"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),
@@ -1278,8 +1278,8 @@ describe('SharedMemoryHandler: CAS edge cases', () => {
     });
     await handler.handle(setup, peerId);
 
-    const update = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const update = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(
         `<${entity}> <http://example.org/turn> "2"^^<http://www.w3.org/2001/XMLSchema#integer> <${DATA_GRAPH}> .`,
       ),

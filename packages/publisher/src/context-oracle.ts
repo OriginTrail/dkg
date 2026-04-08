@@ -21,7 +21,6 @@ export interface ProvedTriple {
 
 export interface EntityLookupResult {
   contextGraphId: string;
-  paranetId: string;
   entity: string;
   triples: ProvedTriple[];
   verification: VerificationInfo;
@@ -29,7 +28,6 @@ export interface EntityLookupResult {
 
 export interface QueryWithProofsResult {
   contextGraphId: string;
-  paranetId: string;
   bindings: Array<Record<string, string>>;
   provenanceTriples: ProvedTriple[];
   verification: VerificationInfo;
@@ -93,7 +91,6 @@ export class ContextOracle {
 
     return {
       contextGraphId: cgId,
-      paranetId: contextGraphId,
       entity: entityUri,
       triples: provedTriples,
       verification: this.buildVerification(cgId, batchIds),
@@ -124,7 +121,6 @@ export class ContextOracle {
 
     return {
       contextGraphId: cgId,
-      paranetId: contextGraphId,
       bindings,
       provenanceTriples: provedTriples,
       verification: this.buildVerification(cgId, batchIds),
@@ -271,4 +267,3 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   const after = sparql.slice(braceEnd);
   return `${before} GRAPH <${graphUri}> { ${inner} } ${after}`;
 }
-

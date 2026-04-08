@@ -56,6 +56,26 @@ export type ParticipantSignatureProvider = (
   merkleRoot: string,
 ) => Promise<ReceiverSignature[]>;
 
+export interface WriteMemoryOptions {
+  publisherPeerId: string;
+  operationCtx?: OperationContext;
+}
+
+export interface WriteMemoryResult {
+  shareOperationId: string;
+  message: Uint8Array;
+}
+
+export interface CASCondition {
+  subject: string;
+  predicate: string;
+  expectedValue: string | null;
+}
+
+export interface WriteConditionalMemoryOptions extends WriteMemoryOptions {
+  conditions: CASCondition[];
+}
+
 export interface PublishOptions {
   contextGraphId: string;
   quads: Quad[];
@@ -124,6 +144,23 @@ export interface PublishResult {
 export interface Publisher {
   publish(options: PublishOptions): Promise<PublishResult>;
   update(kcId: bigint, options: PublishOptions): Promise<PublishResult>;
+  share(contextGraphId: string, quads: Quad[], options: WriteMemoryOptions): Promise<WriteMemoryResult>;
+  shareConditional(
+    contextGraphId: string,
+    quads: Quad[],
+    options: WriteConditionalMemoryOptions,
+  ): Promise<WriteMemoryResult>;
+  publishFromSharedMemory(
+    contextGraphId: string,
+    selection: 'all' | { rootEntities: string[] },
+    options?: {
+      operationCtx?: OperationContext;
+      clearSharedMemoryAfter?: boolean;
+      onPhase?: PhaseCallback;
+      publishContextGraphId?: string;
+      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+    },
+  ): Promise<PublishResult>;
   autoPartition(quads: Quad[]): KAManifestEntry[];
   skolemize(rootEntity: string, quads: Quad[]): Quad[];
 }

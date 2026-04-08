@@ -70,15 +70,14 @@ export function validatePublishRequest(
   }
 
   // Rule 4: Entity exclusivity — no rootEntity may already exist in this context graph.
-  // With allowUpsert, the original creator can overwrite their own shared memory entities.
+  // With allowUpsert, the original creator can overwrite their own shared-memory entities.
   for (const m of manifest) {
     if (existingEntities.has(m.rootEntity)) {
       if (options?.allowUpsert && options.upsertableEntities?.has(m.rootEntity)) {
         continue;
       }
       errors.push(
-        `Rule 4: rootEntity "${m.rootEntity}" already exists in context graph "${contextGraphId}". ` +
-        `Use /api/update with the existing kcId to modify it, or use a unique rootEntity URI.`,
+        `Rule 4: rootEntity "${m.rootEntity}" already exists in context graph "${contextGraphId}"`,
       );
     }
   }

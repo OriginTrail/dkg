@@ -1,25 +1,25 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeSharePublishRequest, contextGraphDataUri, contextGraphMetaUri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHashV10 as computeTripleHash, computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import { computeTripleHash, computePrivateRoot, computeFlatKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
   generateConfirmedFullMetadata,
-  generateShareMetadata,
+  generateWorkspaceMetadata,
   generateOwnershipQuads,
-  generateAuthorshipProof,
-  generateShareTransitionMetadata,
   toHex,
   updateMetaMerkleRoot,
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+import { serializeQuadsToNQuads } from './nquads.js';
+import { resolveWorkspaceSelection } from './workspace-resolution.js';
 
 export interface DKGPublisherConfig {
   store: TripleStore;
@@ -35,11 +35,11 @@ export interface DKGPublisherConfig {
    * If empty, only the primary publisherPrivateKey is used for self-signing.
    */
   additionalSignerKeys?: string[];
-  /** Shared map of SWM-owned rootEntities per context graph: entity → creatorPeerId. Pass from agent so handler and publisher stay in sync. */
-  sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
-  /** Shared batch→context graph binding map. Pass to UpdateHandler so it uses trusted local bindings. */
-  knownBatchContextGraphs?: Map<string, string>;
-  /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
+  /** Shared map of workspace-owned rootEntities per paranet: entity → creatorPeerId. Pass from agent so handler and publisher stay in sync. */
+  workspaceOwnedEntities?: Map<string, Map<string, string>>;
+  /** Shared batch→paranet binding map. Pass to UpdateHandler so it uses trusted local bindings. */
+  knownBatchParanets?: Map<string, string>;
+  /** Shared write lock map. Pass to WorkspaceHandler so gossip writes serialize against CAS writes. */
   writeLocks?: Map<string, Promise<void>>;
 }
 
@@ -48,16 +48,10 @@ export interface ShareOptions {
   operationCtx?: OperationContext;
 }
 
-/** @deprecated Use ShareOptions */
-export type WriteToWorkspaceOptions = ShareOptions;
-
 export interface ShareResult {
   shareOperationId: string;
   message: Uint8Array;
 }
-
-/** @deprecated Use ShareResult */
-export type WriteToWorkspaceResult = ShareResult;
 
 export interface CASCondition {
   subject: string;
@@ -83,12 +77,9 @@ export class StaleWriteError extends Error {
   }
 }
 
-export interface ConditionalShareOptions extends ShareOptions {
+export interface ShareConditionalOptions extends ShareOptions {
   conditions: CASCondition[];
 }
-
-/** @deprecated Use ConditionalShareOptions */
-export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 
 
 export class DKGPublisher implements Publisher {
@@ -99,8 +90,8 @@ export class DKGPublisher implements Publisher {
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
   private readonly ownedEntities = new Map<string, Set<string>>();
-  private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>>;
-  readonly knownBatchContextGraphs: Map<string, string>;
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  readonly knownBatchParanets: Map<string, string>;
   private publisherNodeIdentityId: bigint;
   private readonly publisherAddress: string;
   private readonly publisherWallet?: ethers.Wallet;
@@ -135,8 +126,8 @@ export class DKGPublisher implements Publisher {
 
     this.graphManager = new GraphManager(config.store);
     this.privateStore = new PrivateContentStore(config.store, this.graphManager);
-    this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
-    this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
+    this.workspaceOwnedEntities = config.workspaceOwnedEntities ?? new Map();
+    this.knownBatchParanets = config.knownBatchParanets ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
   }
 
@@ -160,10 +151,10 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * Write quads to the context graph's shared memory (no chain, no TRAC).
-   * Validates, stores locally in SWM + SWM meta, returns encoded message for the agent to broadcast on the SWM topic.
-   * Acquires per-entity write locks to serialize against concurrent CAS writes.
-   */
+    * Write quads to the paranet's shared-memory graph (no chain, no TRAC).
+    * Validates, stores locally in shared memory + shared-memory metadata, and returns an encoded gossip message.
+    * Acquires per-entity write locks to serialize against concurrent CAS writes.
+    */
   async share(
     contextGraphId: string,
     quads: Quad[],
@@ -171,19 +162,10 @@ export class DKGPublisher implements Publisher {
   ): Promise<ShareResult> {
     const subjects = [...new Set(quads.map(q => q.subject))];
     const lockKeys = subjects.map(s => `${contextGraphId}\0${s}`);
-    return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
+    return this.withWriteLocks(lockKeys, () => this._writeToWorkspaceImpl(contextGraphId, quads, options));
   }
 
-  /** @deprecated Use share() */
-  async writeToWorkspace(
-    contextGraphId: string,
-    quads: Quad[],
-    options: ShareOptions,
-  ): Promise<ShareResult> {
-    return this.share(contextGraphId, quads, options);
-  }
-
-  private async _shareImpl(
+  private async _writeToWorkspaceImpl(
     contextGraphId: string,
     quads: Quad[],
     options: ShareOptions & { conditions?: CASCondition[] },
@@ -191,7 +173,7 @@ export class DKGPublisher implements Publisher {
     const ctx = options.operationCtx ?? createOperationContext('share');
     this.log.info(ctx, `Writing ${quads.length} quads to shared memory for context graph ${contextGraphId}`);
 
-    await this.graphManager.ensureContextGraph(contextGraphId);
+    await this.graphManager.ensureParanet(contextGraphId);
 
     const kaMap = autoPartition(quads);
     const manifestEntries: { rootEntity: string; privateMerkleRoot?: Uint8Array; privateTripleCount: number }[] = [];
@@ -212,11 +194,12 @@ export class DKGPublisher implements Publisher {
     }));
 
     const dataOwned = this.ownedEntities.get(contextGraphId) ?? new Set();
-    const swmOwned = this.sharedMemoryOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
-    const existing = new Set<string>([...dataOwned, ...swmOwned.keys()]);
+    const wsOwned = this.workspaceOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
+    const existing = new Set<string>([...dataOwned, ...wsOwned.keys()]);
 
+    // Creator-only upsert: allow overwriting entities this writer created
     const upsertable = new Set<string>();
-    for (const [entity, creator] of swmOwned) {
+    for (const [entity, creator] of wsOwned) {
       if (creator === options.publisherPeerId) {
         upsertable.add(entity);
       }
@@ -230,23 +213,18 @@ export class DKGPublisher implements Publisher {
       { allowUpsert: true, upsertableEntities: upsertable },
     );
     if (!validation.valid) {
-      throw new Error(`SWM validation failed: ${validation.errors.join('; ')}`);
+      throw new Error(`Shared-memory validation failed: ${validation.errors.join('; ')}`);
     }
 
     const shareOperationId = `swm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+    const workspaceGraph = this.graphManager.workspaceGraphUri(contextGraphId);
+    const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(contextGraphId);
 
     // Pre-encode gossip message and enforce size limit BEFORE any
-    // destructive SWM mutations to avoid leaving orphaned state.
-    const dataGraphUri = this.graphManager.dataGraphUri(contextGraphId);
-    const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: dataGraphUri }));
-    const nquadsStr = gossipQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
+    // destructive workspace mutations to avoid leaving orphaned state.
+    const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
+    const gossipQuads = [...kaMap.values()].flat().map((q) => ({ ...q, graph: dataGraph }));
+    const nquadsStr = await serializeQuadsToNQuads(gossipQuads);
 
     const casConditions = options.conditions?.map(c => ({
       subject: c.subject,
@@ -255,8 +233,8 @@ export class DKGPublisher implements Publisher {
       expectAbsent: c.expectedValue === null,
     }));
 
-    const message = encodeWorkspacePublishRequest({
-      paranetId: contextGraphId,
+    const message = encodeSharePublishRequest({
+      contextGraphId,
       nquads: new TextEncoder().encode(nquadsStr),
       manifest: manifestEntries.map((m) => ({
         rootEntity: m.rootEntity,
@@ -264,7 +242,7 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: m.privateTripleCount,
       })),
       publisherPeerId: options.publisherPeerId,
-      workspaceOperationId: shareOperationId,
+      shareOperationId,
       timestampMs: Date.now(),
       operationId: ctx.operationId,
       casConditions,
@@ -273,25 +251,25 @@ export class DKGPublisher implements Publisher {
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
     if (message.length > MAX_GOSSIP_MESSAGE_SIZE) {
       throw new Error(
-        `SWM message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
-        `Split large writes into multiple share() calls partitioned by root entity.`,
-      );
+         `Shared-memory message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
+         `Split large writes into multiple share() calls partitioned by root entity.`,
+        );
     }
 
     // Delete-then-insert for upserted entities (replace old triples).
     for (const m of manifestEntries) {
-      if (swmOwned.has(m.rootEntity)) {
-        await this.store.deleteByPattern({ graph: swmGraph, subject: m.rootEntity });
-        await this.store.deleteBySubjectPrefix(swmGraph, m.rootEntity + '/.well-known/genid/');
-        await this.deleteMetaForRoot(swmMetaGraph, m.rootEntity);
+      if (wsOwned.has(m.rootEntity)) {
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+        await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
       }
     }
 
-    const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: swmGraph }));
+    const normalized = [...kaMap.values()].flat().map((q) => ({ ...q, graph: workspaceGraph }));
     await this.store.insert(normalized);
 
     const rootEntities = manifestEntries.map((m) => m.rootEntity);
-    const metaQuads = generateShareMetadata(
+    const metaQuads = generateWorkspaceMetadata(
       {
         shareOperationId,
         contextGraphId,
@@ -299,15 +277,15 @@ export class DKGPublisher implements Publisher {
         publisherPeerId: options.publisherPeerId,
         timestamp: new Date(),
       },
-      swmMetaGraph,
+      workspaceMetaGraph,
     );
     await this.store.insert(metaQuads);
 
-    if (!this.sharedMemoryOwnedEntities.has(contextGraphId)) {
-      this.sharedMemoryOwnedEntities.set(contextGraphId, new Map());
+    if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+      this.workspaceOwnedEntities.set(contextGraphId, new Map());
     }
     const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-    const liveOwned = this.sharedMemoryOwnedEntities.get(contextGraphId)!;
+    const liveOwned = this.workspaceOwnedEntities.get(contextGraphId)!;
     for (const r of rootEntities) {
       if (!liveOwned.has(r)) {
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
@@ -316,33 +294,33 @@ export class DKGPublisher implements Publisher {
     if (newOwnershipEntries.length > 0) {
       for (const entry of newOwnershipEntries) {
         await this.store.deleteByPattern({
-          graph: swmMetaGraph,
+          graph: workspaceMetaGraph,
           subject: entry.rootEntity,
           predicate: 'http://dkg.io/ontology/workspaceOwner',
         });
       }
-      await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
+      await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
       for (const entry of newOwnershipEntries) {
         liveOwned.set(entry.rootEntity, entry.creatorPeerId);
       }
     }
 
-    this.log.info(ctx, `Shared memory write complete: ${shareOperationId}`);
+    this.log.info(ctx, `Shared-memory write complete: ${shareOperationId}`);
     return { shareOperationId, message };
   }
 
   /**
-   * Compare-and-swap shared memory write. Checks each condition against the
-   * current SWM graph state before applying the write atomically.
-   * Serializes against both CAS and plain writes via per-entity write
-   * locks so check-then-write cannot interleave with any concurrent
-   * store mutations on the same subjects.
+    * Compare-and-swap shared-memory write. Checks each condition against the
+    * current shared-memory graph state before applying the write atomically.
+    * Serializes against both CAS and plain writes via per-entity write
+    * locks so check-then-write cannot interleave with any concurrent
+    * store mutations on the same subjects.
    * Throws StaleWriteError if any condition fails.
    */
-  async conditionalShare(
+  async shareConditional(
     contextGraphId: string,
     quads: Quad[],
-    options: ConditionalShareOptions,
+    options: ShareConditionalOptions,
   ): Promise<ShareResult> {
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
@@ -359,29 +337,20 @@ export class DKGPublisher implements Publisher {
     return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
   }
 
-  /** @deprecated Use conditionalShare() */
-  async writeConditionalToWorkspace(
-    contextGraphId: string,
-    quads: Quad[],
-    options: ConditionalShareOptions,
-  ): Promise<ShareResult> {
-    return this.conditionalShare(contextGraphId, quads, options);
-  }
-
   private async _executeConditionalWrite(
     contextGraphId: string,
     quads: Quad[],
-    options: ConditionalShareOptions,
+    options: ShareConditionalOptions,
   ): Promise<ShareResult> {
     const ctx = options.operationCtx ?? createOperationContext('share');
 
-    await this.graphManager.ensureContextGraph(contextGraphId);
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
+    await this.graphManager.ensureParanet(contextGraphId);
+    const workspaceGraph = this.graphManager.workspaceGraphUri(contextGraphId);
 
     for (const cond of options.conditions) {
       const ask = cond.expectedValue === null
-        ? `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
-        : `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+        ? `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
+        : `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
       const result = await this.store.query(ask);
 
       if (result.type !== 'boolean') {
@@ -390,7 +359,7 @@ export class DKGPublisher implements Publisher {
 
       const shouldExist = cond.expectedValue !== null;
       if (result.value !== shouldExist) {
-        const sel = `SELECT ?o WHERE { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
+        const sel = `SELECT ?o WHERE { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
         const cur = await this.store.query(sel);
         const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
         throw new StaleWriteError(cond, actual);
@@ -398,16 +367,16 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `CAS conditions passed (${options.conditions.length}), proceeding with write`);
-    return this._shareImpl(contextGraphId, quads, {
+    return this._writeToWorkspaceImpl(contextGraphId, quads, {
       ...options,
       conditions: options.conditions,
     });
   }
 
   /**
-   * Read quads from the context graph's shared memory and publish them with full finality (data graph + chain).
-   * Selection: 'all' or { rootEntities: string[] } to publish only those root entities from shared memory.
-   */
+    * Read quads from the paranet's shared-memory graph and publish them with full finality (data graph + chain).
+    * Selection: 'all' or { rootEntities: string[] } to enshrine only those root entities.
+    */
   async publishFromSharedMemory(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
@@ -417,80 +386,40 @@ export class DKGPublisher implements Publisher {
       onPhase?: PhaseCallback;
       publishContextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
-      v10ACKProvider?: PublishOptions['v10ACKProvider'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
+    const publishContextGraphId = options?.publishContextGraphId ?? contextGraphId;
+    const workspaceGraph = this.graphManager.workspaceGraphUri(contextGraphId);
+    const quads = await resolveWorkspaceSelection({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      selection,
+    });
 
-    let sparql: string;
-    if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`;
-    } else {
-      const roots = [...new Set(
-        selection.rootEntities
-          .map((r) => String(r).trim())
-          .filter((r) => isSafeIri(r)),
-      )];
-      if (roots.length === 0) {
-        const hadInput = selection.rootEntities.length > 0;
-        throw new Error(
-          hadInput
-            ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
-            : `No rootEntities provided for context graph ${contextGraphId}`,
-        );
-      }
-      const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${swmGraph}> {
-          VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(
-            ?s = ?root
-            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-      }`;
-    }
-
-    const result = await this.store.query(sparql);
-    const quads: Quad[] =
-      result.type === 'quads' ? result.quads : [];
-
-    if (quads.length === 0) {
-      throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);
-    }
-
-    const ctxGraphId = options?.publishContextGraphId;
-    if (ctxGraphId !== undefined && ctxGraphId !== null) {
-      try { BigInt(ctxGraphId); } catch {
-        throw new Error(`Invalid publishContextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
-      }
-    }
-
-    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}`);
+    this.log.info(ctx, `Enshrining ${quads.length} quads from shared memory for context graph ${publishContextGraphId}`);
     const publishResult = await this.publish({
       contextGraphId,
-      quads: quads.map((q) => ({ ...q, graph: '' })),
+      quads,
       operationCtx: ctx,
       onPhase: options?.onPhase,
-      v10ACKProvider: options?.v10ACKProvider,
-      publishContextGraphId: ctxGraphId ?? undefined,
+      publishContextGraphId,
       fromSharedMemory: true,
     });
 
-    if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
+    if (publishResult.status === 'confirmed' && publishResult.onChainResult) {
       let participantSigs = options?.contextGraphSignatures ?? [];
       if (participantSigs.length === 0 && typeof this.chain.signMessage === 'function') {
         const identityId = this.publisherNodeIdentityId;
         if (identityId > 0n) {
           const digest = ethers.solidityPackedKeccak256(
             ['uint256', 'bytes32'],
-            [BigInt(ctxGraphId), ethers.hexlify(publishResult.merkleRoot)],
+            [BigInt(publishContextGraphId), ethers.hexlify(publishResult.merkleRoot)],
           );
           const sig = await this.chain.signMessage(ethers.getBytes(digest));
           participantSigs = [{ identityId, ...sig }];
-          this.log.info(ctx, `Self-signed as participant for context graph ${ctxGraphId} (identityId=${identityId})`);
+          this.log.info(ctx, `Self-signed as participant for context graph ${publishContextGraphId} (identityId=${identityId})`);
         }
       }
 
@@ -501,50 +430,53 @@ export class DKGPublisher implements Publisher {
       const maxRetries = 3;
       let attempt = 0;
       let registered = false;
+      const contextGraphChain = this.chain as ChainAdapter & {
+        addBatchToContextGraph?: (params: AddBatchToContextGraphParams) => Promise<unknown>;
+      };
       while (attempt < maxRetries && !registered) {
         attempt++;
         try {
-          if (typeof this.chain.verify !== 'function') {
-            throw new Error('verify (addBatchToContextGraph) not available on chain adapter');
+          if (typeof contextGraphChain.addBatchToContextGraph !== 'function') {
+            throw new Error('addBatchToContextGraph not available on chain adapter');
           }
-          const txResult = await this.chain.verify({
-            contextGraphId: BigInt(ctxGraphId),
+          const txResult = await contextGraphChain.addBatchToContextGraph({
+            contextGraphId: BigInt(publishContextGraphId),
             batchId: publishResult.onChainResult.batchId,
             merkleRoot: publishResult.merkleRoot,
             signerSignatures: sortedSigs,
           });
           if (txResult && typeof txResult === 'object' && 'success' in txResult && !txResult.success) {
-            throw new Error(`verify returned success=false`);
+            throw new Error(`addBatchToContextGraph returned success=false`);
           }
           registered = true;
-          this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${ctxGraphId}`);
+          this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} registered to context graph ${publishContextGraphId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           if (attempt < maxRetries) {
-            this.log.info(ctx, `verify attempt ${attempt} failed, retrying: ${msg}`);
+            this.log.info(ctx, `addBatchToContextGraph attempt ${attempt} failed, retrying: ${msg}`);
             await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
           } else {
-            this.log.warn(ctx, `verify failed after ${maxRetries} attempts: ${msg}`);
+            this.log.warn(ctx, `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`);
 
             this.eventBus.emit(DKGEvent.PUBLISH_FAILED, {
               reason: 'context_graph_registration_failed',
               batchId: String(publishResult.onChainResult.batchId),
-              contextGraphId: ctxGraphId,
+              contextGraphId: publishContextGraphId,
               error: msg,
             });
             return {
               ...publishResult,
-              contextGraphError: `verify failed after ${maxRetries} attempts: ${msg}`,
+              contextGraphError: `addBatchToContextGraph failed after ${maxRetries} attempts: ${msg}`,
             };
           }
         }
       }
 
       if (registered) {
-        const ctxDataGraph = contextGraphDataUri(contextGraphId, ctxGraphId);
-        const ctxMetaGraph = contextGraphMetaUri(contextGraphId, ctxGraphId);
+        const ctxDataGraph = contextGraphDataUri(contextGraphId, publishContextGraphId);
+        const ctxMetaGraph = contextGraphMetaUri(contextGraphId, publishContextGraphId);
         const defaultDataGraph = this.graphManager.dataGraphUri(contextGraphId);
-        const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
+        const defaultMetaGraph = this.graphManager.metaGraphUri(contextGraphId);
 
         if (publishResult.publicQuads && publishResult.publicQuads.length > 0) {
           const storedQuads = publishResult.publicQuads.map(q => ({ ...q, graph: defaultDataGraph }));
@@ -567,48 +499,30 @@ export class DKGPublisher implements Publisher {
           await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
         }
 
-        this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${ctxGraphId}`);
+        this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${publishContextGraphId}`);
       }
     }
 
-    // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
-    // Published triples must not linger in SWM — they live in LTM now.
-    // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
-    if (publishResult.status === 'confirmed') {
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+    if (options?.clearSharedMemoryAfter) {
+      const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(contextGraphId);
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
       for (const rootEntity of kaMap.keys()) {
-        await this.store.deleteByPattern({ graph: swmGraph, subject: rootEntity });
-        await this.store.deleteBySubjectPrefix(swmGraph, rootEntity + '/.well-known/genid/');
+        await this.store.deleteByPattern({ graph: workspaceGraph, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(workspaceGraph, rootEntity + '/.well-known/genid/');
         const ownerDeleted = await this.store.deleteByPattern({
-          graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+          graph: wsMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
         });
         ownerDeletedTotal += ownerDeleted;
-        await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-        this.sharedMemoryOwnedEntities.get(contextGraphId)?.delete(rootEntity);
+        await this.deleteMetaForRoot(wsMetaGraph, rootEntity);
+        this.workspaceOwnedEntities.get(contextGraphId)?.delete(rootEntity);
       }
       if (ownerDeletedTotal > 0) {
-        this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
-      }
-      // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
-      // Default is false: unpublished entities stay in SWM for future publishes.
-      if (options?.clearSharedMemoryAfter === true) {
-        const remainingCount = await this.store.deleteByPattern({ graph: swmGraph });
-        const remainingMetaCount = await this.store.deleteByPattern({ graph: swmMetaGraph });
-        if (remainingCount > 0 || remainingMetaCount > 0) {
-          this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
-        }
-        this.sharedMemoryOwnedEntities.delete(contextGraphId);
+        this.log.info(ctx, `Cleared ${ownerDeletedTotal} ownership triple(s) during enshrine cleanup`);
       }
     }
 
     return publishResult;
-  }
-
-  /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
-  async enshrineFromWorkspace(...args: Parameters<DKGPublisher['publishFromSharedMemory']>): ReturnType<DKGPublisher['publishFromSharedMemory']> {
-    return this.publishFromSharedMemory(...args);
   }
 
   /**
@@ -711,10 +625,10 @@ export class DKGPublisher implements Publisher {
     }
 
     onPhase?.('prepare', 'start');
-    onPhase?.('prepare:ensureContextGraph', 'start');
+    onPhase?.('prepare:ensureParanet', 'start');
     this.log.info(ctx, `Preparing publish: ${quads.length} public triples, ${privateQuads.length} private`);
-    await this.graphManager.ensureContextGraph(contextGraphId);
-    onPhase?.('prepare:ensureContextGraph', 'end');
+    await this.graphManager.ensureParanet(contextGraphId);
+    onPhase?.('prepare:ensureParanet', 'end');
 
     onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
@@ -795,59 +709,13 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = allSkolemizedQuads
-      .map(
-        (q) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
-      )
-      .join('\n');
+    const nquadsStr = await serializeQuadsToNQuads(allSkolemizedQuads);
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
 
-    // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
-    // For direct publish: send staging quads inline via P2P so core nodes
-    // can verify the merkle root without needing SWM pre-positioning.
-    // For publishFromSharedMemory (publishContextGraphId set): data is already in
-    // peers' SWM via shared memory gossip — do NOT send inline quads; core nodes
-    // verify against their local SWM copy (preserving storage-attestation).
-    // Skipped for private publishes because StorageACKHandler cannot
-    // recompute private merkle roots from SWM data alone.
-    const hasPrivateData = privateRoots.length > 0;
-    const isPublishFromSharedMemory = !!options.fromSharedMemory;
-    const stagingQuads = isPublishFromSharedMemory
-      ? undefined
-      : new TextEncoder().encode(nquadsStr);
-    let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
-    if (options.v10ACKProvider && !hasPrivateData) {
-      onPhase?.('collect_v10_acks', 'start');
-      try {
-        const rootEntities = manifestEntries.map(m => m.rootEntity);
-        // For SWM publishes, always use contextGraphId because that's
-        // where data lives. The sub-CG association happens via addBatchToContextGraph later.
-        const ackDomain = isPublishFromSharedMemory
-          ? contextGraphId
-          : (options.publishContextGraphId ?? contextGraphId);
-        v10ACKs = await options.v10ACKProvider(kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads);
-        this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (options.receiverSignatureProvider) {
-          this.log.warn(ctx, `V10 ACK collection failed, falling back to V9 receiver-signature path: ${msg}`);
-        } else {
-          this.log.warn(ctx, `V10 ACK collection failed and no V9 receiverSignatureProvider configured — will attempt self-signed V9 path (degraded mode, may fail on-chain if minimumRequiredSignatures > 1): ${msg}`);
-        }
-      } finally {
-        onPhase?.('collect_v10_acks', 'end');
-      }
-    } else if (options.v10ACKProvider && hasPrivateData) {
-      this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
-    }
-
-    // Collect receiver signatures from peers (replicate-then-publish).
-    // Skip if V10 ACKs were already collected — they supersede the legacy
-    // receiver signature path and the on-chain V10 contract uses ACK sigs directly.
+    // Collect receiver signatures from peers (replicate-then-publish)
     let collectedReceiverSigs: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> | undefined;
-    if (options.receiverSignatureProvider && !v10ACKs) {
+    if (options.receiverSignatureProvider) {
       onPhase?.('collect_signatures', 'start');
       try {
         collectedReceiverSigs = await options.receiverSignatureProvider(merkleRootHex, publicByteSize);
@@ -925,53 +793,19 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:submit', 'start');
       this.log.info(ctx, `Submitting on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
       try {
-        if (v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function') {
-          const ackDomain = isPublishFromSharedMemory
-            ? contextGraphId
-            : (options.publishContextGraphId ?? contextGraphId);
-          let contextGraphIdBigInt: bigint;
-          try {
-            contextGraphIdBigInt = BigInt(ackDomain);
-          } catch {
-            contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomain)));
-          }
-          onChainResult = await this.chain.createKnowledgeAssetsV10!({
-            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
-            contextGraphId: contextGraphIdBigInt,
-            merkleRoot: kcMerkleRoot,
-            knowledgeAssetsAmount: kaCount,
-            byteSize: publicByteSize,
-            epochs: 1,
-            tokenAmount,
-            isImmutable: false,
-            paymaster: ethers.ZeroAddress,
-            convictionAccountId: 0n,
-            publisherNodeIdentityId: identityId,
-            publisherSignature: {
-              r: ethers.getBytes(pubSig.r),
-              vs: ethers.getBytes(pubSig.yParityAndS),
-            },
-            ackSignatures: v10ACKs.map(ack => ({
-              identityId: ack.nodeIdentityId,
-              r: ack.signatureR,
-              vs: ack.signatureVS,
-            })),
-          });
-        } else {
-          onChainResult = await this.chain.publishKnowledgeAssets({
-            kaCount,
-            publisherNodeIdentityId: identityId,
-            merkleRoot: kcMerkleRoot,
-            publicByteSize,
-            epochs: 1,
-            tokenAmount,
-            publisherSignature: {
-              r: ethers.getBytes(pubSig.r),
-              vs: ethers.getBytes(pubSig.yParityAndS),
-            },
-            receiverSignatures,
-          });
-        }
+        onChainResult = await this.chain.publishKnowledgeAssets({
+          kaCount,
+          publisherNodeIdentityId: identityId,
+          merkleRoot: kcMerkleRoot,
+          publicByteSize,
+          epochs: 1,
+          tokenAmount,
+          publisherSignature: {
+            r: ethers.getBytes(pubSig.r),
+            vs: ethers.getBytes(pubSig.yParityAndS),
+          },
+          receiverSignatures,
+        });
 
         onChainResult.tokenAmount = tokenAmount;
 
@@ -1003,40 +837,12 @@ export class DKGPublisher implements Publisher {
           },
         );
         if (options.targetMetaGraphUri) {
-          const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
+          const defaultMeta = this.graphManager.metaGraphUri(contextGraphId);
           confirmedQuads = confirmedQuads.map((q) =>
             q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
           );
         }
         await this.store.insert(confirmedQuads);
-
-        // Agent authorship proof (spec §9.0.6): sign keccak256(merkleRoot) and store in _meta
-        if (this.publisherWallet) {
-          try {
-            const merkleHashBytes = ethers.keccak256(kcMerkleRoot);
-            const sig = await this.publisherWallet.signMessage(ethers.getBytes(merkleHashBytes));
-            const proofQuads = generateAuthorshipProof({
-              kcUal: ual,
-              contextGraphId,
-              agentAddress: this.publisherWallet.address,
-              signature: sig,
-              signedHash: merkleHashBytes,
-            });
-            if (options.targetMetaGraphUri) {
-              const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
-              const remapped = proofQuads.map((q) =>
-                q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-              );
-              await this.store.insert(remapped);
-            } else {
-              await this.store.insert(proofQuads);
-            }
-            this.log.info(ctx, `Authorship proof stored for agent ${this.publisherWallet.address}`);
-          } catch (proofErr) {
-            this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
-          }
-        }
-
         status = 'confirmed';
         onPhase?.('chain:submit', 'end');
         onPhase?.('chain:metadata', 'start');
@@ -1066,7 +872,7 @@ export class DKGPublisher implements Publisher {
         kaMetadata,
       );
       if (options.targetMetaGraphUri) {
-        const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
+        const defaultMeta = this.graphManager.metaGraphUri(contextGraphId);
         tentativeQuads = tentativeQuads.map((q) =>
           q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
         );
@@ -1075,7 +881,7 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Stored as tentative: UAL=${ual}`);
     }
 
-    // Track owned entities and batch→context graph binding on confirmed publishes
+    // Track owned entities and batch→paranet binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
       if (!this.ownedEntities.has(contextGraphId)) {
         this.ownedEntities.set(contextGraphId, new Set());
@@ -1083,7 +889,7 @@ export class DKGPublisher implements Publisher {
       for (const e of manifestEntries) {
         this.ownedEntities.get(contextGraphId)!.add(e.rootEntity);
       }
-      this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
+      this.knownBatchParanets.set(String(onChainResult.batchId), contextGraphId);
       onPhase?.('chain:metadata', 'end');
     }
 
@@ -1097,7 +903,6 @@ export class DKGPublisher implements Publisher {
       status,
       onChainResult,
       publicQuads: allSkolemizedQuads,
-      v10ACKs,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -1151,7 +956,6 @@ export class DKGPublisher implements Publisher {
       batchId: kcId,
       newMerkleRoot: kcMerkleRoot,
       newPublicByteSize: BigInt(allSkolemizedQuads.length * 100),
-      publisherAddress: this.publisherAddress,
     });
 
     if (!txResult.success) {
@@ -1236,28 +1040,33 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * Reconstruct the in-memory sharedMemoryOwnedEntities map from persisted
-   * ownership triples in SWM meta graphs. Call on startup.
+    * Remove the shared-memory metadata link for a specific rootEntity.
+   * Only deletes the entire operation subject when no rootEntity links remain,
+   * preserving metadata for other roots written in the same operation.
+   */
+  /**
+   * Reconstruct the in-memory workspaceOwnedEntities map from persisted
+    * ownership triples in shared-memory metadata graphs. Call on startup.
    *
-   * Validates each ownership triple against share-operation metadata
+   * Validates each ownership triple against workspace-operation metadata
    * (wasAttributedTo) to guard against tampered triples. Conflicts are
    * resolved deterministically by keeping the alphabetically first creator.
    */
-  async reconstructSharedMemoryOwnership(): Promise<number> {
+  async reconstructWorkspaceOwnership(): Promise<number> {
     const DKG = 'http://dkg.io/ontology/';
     const PROV = 'http://www.w3.org/ns/prov#';
     try {
-      const contextGraphs = await this.graphManager.listContextGraphs();
+      const paranets = await this.graphManager.listParanets();
       let total = 0;
-      for (const cgId of contextGraphs) {
-        const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(cgId);
+      for (const pid of paranets) {
+        const wsMetaGraph = this.graphManager.workspaceMetaGraphUri(pid);
         const result = await this.store.query(
-          `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+          `SELECT ?entity ?creator WHERE { GRAPH <${wsMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
         );
         if (result.type !== 'bindings' || result.bindings.length === 0) continue;
 
         const opsResult = await this.store.query(
-          `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
+          `SELECT ?op ?peer ?root WHERE { GRAPH <${wsMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
         );
         const validatedOwners = new Map<string, Set<string>>();
         if (opsResult.type === 'bindings') {
@@ -1273,10 +1082,10 @@ export class DKGPublisher implements Publisher {
           }
         }
 
-        if (!this.sharedMemoryOwnedEntities.has(cgId)) {
-          this.sharedMemoryOwnedEntities.set(cgId, new Map());
+        if (!this.workspaceOwnedEntities.has(pid)) {
+          this.workspaceOwnedEntities.set(pid, new Map());
         }
-        const ownedMap = this.sharedMemoryOwnedEntities.get(cgId)!;
+        const ownedMap = this.workspaceOwnedEntities.get(pid)!;
         for (const row of result.bindings) {
           const entity = row['entity'];
           const creator = row['creator'];
@@ -1314,15 +1123,10 @@ export class DKGPublisher implements Publisher {
     } catch (err) {
       this.log.warn(
         createOperationContext('reconstruct'),
-        `reconstructSharedMemoryOwnership failed: ${err instanceof Error ? err.message : String(err)}`,
+        `reconstructWorkspaceOwnership failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return 0;
     }
-  }
-
-  /** @deprecated Use reconstructSharedMemoryOwnership */
-  async reconstructWorkspaceOwnership(): Promise<number> {
-    return this.reconstructSharedMemoryOwnership();
   }
 
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
@@ -1348,90 +1152,6 @@ export class DKGPublisher implements Publisher {
         await this.store.deleteByPattern({ graph: metaGraph, subject: op });
       }
     }
-  }
-
-  // ── Working Memory Draft Operations (spec §6) ────────────────────────
-
-  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string): Promise<string> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    await this.store.createGraph(graphUri);
-    return graphUri;
-  }
-
-  async draftWrite(
-    contextGraphId: string,
-    draftName: string,
-    agentAddress: string,
-    triples: Array<{ subject: string; predicate: string; object: string }>,
-  ): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const quads = triples.map((t) => ({ ...t, graph: graphUri }));
-    await this.store.insert(quads);
-  }
-
-  async draftQuery(
-    contextGraphId: string,
-    draftName: string,
-    agentAddress: string,
-  ): Promise<Quad[]> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-    );
-    return result.type === 'quads' ? result.quads : [];
-  }
-
-  async draftPromote(
-    contextGraphId: string,
-    draftName: string,
-    agentAddress: string,
-    opts?: { entities?: string[] | 'all' },
-  ): Promise<{ promotedCount: number }> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId);
-
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-    );
-    if (result.type !== 'quads' || result.quads.length === 0) return { promotedCount: 0 };
-
-    let quadsToPromote = result.quads;
-
-    if (opts?.entities && opts.entities !== 'all') {
-      const entitySet = new Set(opts.entities);
-      const genidPrefixes = opts.entities.map((e) => `${e}/.well-known/genid/`);
-      quadsToPromote = quadsToPromote.filter(
-        (q) =>
-          entitySet.has(q.subject) ||
-          genidPrefixes.some((prefix) => q.subject.startsWith(prefix)),
-      );
-    }
-
-    const swmQuads = quadsToPromote.map((q) => ({ ...q, graph: swmGraphUri }));
-    await this.store.insert(swmQuads);
-
-    // Delete promoted triples from draft
-    await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
-
-    // Record ShareTransition metadata in _shared_memory_meta (spec §8)
-    const entities = [...new Set(quadsToPromote.map((q) => q.subject))];
-    const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const shareMetadata = generateShareTransitionMetadata({
-      contextGraphId,
-      operationId,
-      agentAddress,
-      draftName,
-      entities,
-      timestamp: new Date(),
-    });
-    await this.store.insert(shareMetadata);
-
-    return { promotedCount: swmQuads.length };
-  }
-
-  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    await this.store.dropGraph(graphUri);
   }
 }
 

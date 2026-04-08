@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad, GraphManager } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, encodeKAUpdateRequest, encodeWorkspacePublishRequest } from '@origintrail-official/dkg-core';
+import { TypedEventBus, encodeKAUpdateRequest, encodeSharePublishRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -113,8 +113,8 @@ describe('Prefix deletion safety', () => {
     it('gossip upsert of urn:x:foo does NOT delete urn:x:foobar triples', async () => {
       const peerId = '12D3KooWPrefixTest';
 
-      const msg1 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg1 = encodeSharePublishRequest({
+        contextGraphId: PARANET,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
@@ -123,8 +123,8 @@ describe('Prefix deletion safety', () => {
       });
       await handler.handle(msg1, peerId);
 
-      const msg2 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg2 = encodeSharePublishRequest({
+        contextGraphId: PARANET,
         nquads: new TextEncoder().encode(`<urn:x:foobar> <http://schema.org/name> "Foobar" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foobar', privateTripleCount: 0 }],
         publisherPeerId: peerId,
@@ -134,8 +134,8 @@ describe('Prefix deletion safety', () => {
       await handler.handle(msg2, peerId);
 
       // Upsert urn:x:foo
-      const msg3 = encodeWorkspacePublishRequest({
-        paranetId: PARANET,
+      const msg3 = encodeSharePublishRequest({
+        contextGraphId: PARANET,
         nquads: new TextEncoder().encode(`<urn:x:foo> <http://schema.org/name> "Foo Updated" <${DATA_GRAPH}> .`),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
         publisherPeerId: peerId,
@@ -190,7 +190,7 @@ describe('Prefix deletion safety', () => {
       });
 
       const gossipMsg = encodeKAUpdateRequest({
-        paranetId: PARANET,
+        contextGraphId: PARANET,
         batchId: 1n,
         nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:x:foo', privateTripleCount: 0 }],
@@ -302,7 +302,7 @@ describe('chainId=none validation', () => {
     const fakeRoot = new Uint8Array(32).fill(0xDE);
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: 1n,
       nquads: quadsToNQuads(quads, dataGraph),
       manifest: [{ rootEntity: 'urn:existing', privateTripleCount: 0 }],
@@ -335,7 +335,7 @@ describe('chainId=none validation', () => {
     const correctRoot = computeGossipMerkleRoot(quads, manifest);
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: 1n,
       nquads: quadsToNQuads(quads, dataGraph),
       manifest,
@@ -364,7 +364,7 @@ describe('chainId=none validation', () => {
 
     const quads = [q('urn:new', 'http://schema.org/name', '"Should not apply"')];
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: 1n,
       nquads: quadsToNQuads(quads, gm.dataGraphUri(PARANET)),
       manifest: [{ rootEntity: 'urn:new', privateTripleCount: 0 }],
@@ -514,7 +514,7 @@ describe('Same-block ordering', () => {
 
     const buildMsg = (quads: Quad[], txHash: string, blockNumber: number) =>
       encodeKAUpdateRequest({
-        paranetId: PARANET,
+        contextGraphId: PARANET,
         batchId: original.kcId,
         nquads: quadsToNQuads(quads, DATA_GRAPH),
         manifest: [{ rootEntity: 'urn:same:block', privateTripleCount: 0 }],
@@ -571,7 +571,7 @@ describe('Same-block ordering', () => {
     });
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(updateQuads, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:replay', privateTripleCount: 0 }],
@@ -687,8 +687,8 @@ describe('Workspace peerId spoofing', () => {
     const victimPeerId = '12D3KooWVictim';
     const attackerPeerId = '12D3KooWAttacker';
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<urn:spoof> <http://schema.org/name> "Spoofed" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: 'urn:spoof', privateTripleCount: 0 }],
       publisherPeerId: victimPeerId,
@@ -712,8 +712,8 @@ describe('Workspace peerId spoofing', () => {
   it('accepts message where publisherPeerId matches fromPeerId', async () => {
     const peerId = '12D3KooWLegit';
 
-    const msg = encodeWorkspacePublishRequest({
-      paranetId: PARANET,
+    const msg = encodeSharePublishRequest({
+      contextGraphId: PARANET,
       nquads: new TextEncoder().encode(`<urn:legit> <http://schema.org/name> "Legit" <${DATA_GRAPH}> .`),
       manifest: [{ rootEntity: 'urn:legit', privateTripleCount: 0 }],
       publisherPeerId: peerId,
@@ -772,7 +772,7 @@ describe('Cross-paranet binding (trusted source)', () => {
     });
 
     const attackMsg = encodeKAUpdateRequest({
-      paranetId: 'attacker-paranet',
+      contextGraphId: 'attacker-paranet',
       batchId: original.kcId,
       nquads: quadsToNQuads(updateQuads, 'did:dkg:context-graph:attacker-paranet'),
       manifest: [{ rootEntity: 'urn:trusted:bind', privateTripleCount: 0 }],
@@ -883,7 +883,7 @@ describe('Mock same-block txIndex ordering', () => {
 
     // Apply update2 (txIndex=1) first
     const msg2 = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
@@ -898,7 +898,7 @@ describe('Mock same-block txIndex ordering', () => {
 
     // Now try update1 (txIndex=0, same block) — should be rejected (lower txIndex)
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(q1, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:txidx', privateTripleCount: 0 }],
@@ -953,7 +953,7 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:typed-lit', privateTripleCount: 0 }],
@@ -1001,7 +1001,7 @@ describe('lookupBatchParanet typed-literal SPARQL', () => {
     expect(update.status).toBe('confirmed');
 
     const msg = encodeKAUpdateRequest({
-      paranetId: evilParanet,
+      contextGraphId: evilParanet,
       batchId: original.kcId,
       nquads: quadsToNQuads(q2, `did:dkg:context-graph:${evilParanet}`),
       manifest: [{ rootEntity: 'urn:xpara-lookup', privateTripleCount: 0 }],
@@ -1100,7 +1100,7 @@ describe('Gossip-only batch→paranet binding rejected', () => {
 
     // First update on correct paranet should go through (discovered via SPARQL lookup)
     const msg1 = encodeKAUpdateRequest({
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       batchId: original.kcId,
       nquads: quadsToNQuads(q2, DATA_GRAPH),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],
@@ -1120,7 +1120,7 @@ describe('Gossip-only batch→paranet binding rejected', () => {
 
     const evilParanet = 'evil-gossip';
     const msg2 = encodeKAUpdateRequest({
-      paranetId: evilParanet,
+      contextGraphId: evilParanet,
       batchId: original.kcId,
       nquads: quadsToNQuads(q3, `did:dkg:context-graph:${evilParanet}`),
       manifest: [{ rootEntity: 'urn:gossip-bind', privateTripleCount: 0 }],

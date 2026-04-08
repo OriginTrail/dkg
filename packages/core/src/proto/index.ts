@@ -42,11 +42,6 @@ export {
 } from './message.js';
 
 export {
-  type WorkspacePublishRequestMsg,
-  type WorkspaceManifestEntryMsg,
-  type WorkspaceCASConditionMsg,
-  encodeWorkspacePublishRequest,
-  decodeWorkspacePublishRequest,
   type SharePublishRequestMsg,
   type ShareManifestEntryMsg,
   type ShareCASConditionMsg,

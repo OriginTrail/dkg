@@ -211,7 +211,7 @@ export class PublishHandler {
     const ctx = createOperationContext('publish');
     try {
       const request = decodePublishRequest(data);
-      const contextGraphId = request.paranetId;
+      const contextGraphId = request.contextGraphId;
       this.log.info(ctx, `Received publish request from ${fromPeerId} for context graph ${contextGraphId}`);
       await this.graphManager.ensureContextGraph(contextGraphId);
 
@@ -420,7 +420,7 @@ export class PublishHandler {
     for (const p of this.pendingPublishes.values()) {
       entries.push({
         ual: p.ual,
-        paranetId: p.contextGraphId,
+        contextGraphId: p.contextGraphId,
         expectedPublisherAddress: p.expectedPublisherAddress,
         expectedMerkleRoot: ethers.hexlify(p.expectedMerkleRoot),
         expectedStartKAId: p.expectedStartKAId.toString(),
@@ -487,7 +487,7 @@ export class PublishHandler {
 
       this.pendingPublishes.set(entry.ual, {
         ual: entry.ual,
-        contextGraphId: entry.paranetId,
+        contextGraphId: entry.contextGraphId,
         dataQuads: [],
         metadataQuads: [],
         timeout,

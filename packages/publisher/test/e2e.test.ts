@@ -114,7 +114,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const publishRequest = encodePublishRequest({
       ual: `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: publishResult.kaManifest.map((m) => ({
         tokenId: Number(m.tokenId),
         rootEntity: m.rootEntity,
@@ -290,7 +290,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -323,7 +323,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -354,7 +354,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/0`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmNoSig', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '',
@@ -388,7 +388,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmConfirm', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -431,7 +431,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmPromote', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -490,7 +490,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/11`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [
         { tokenId: 1, rootEntity: 'did:dkg:agent:QmRootMatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
       ],
@@ -537,7 +537,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMismatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,

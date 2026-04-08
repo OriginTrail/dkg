@@ -12,7 +12,7 @@ export const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
   .add(new Field('privateTripleCount', 3, 'uint32'));
 
 export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
-  .add(new Field('paranetId', 1, 'string'))
+  .add(new Field('contextGraphId', 1, 'string'))
   .add(new Field('batchId', 2, 'uint64'))
   .add(new Field('nquads', 3, 'bytes'))
   .add(new Field('manifest', 4, 'KAUpdateManifestEntry', 'repeated'))
@@ -35,7 +35,7 @@ export interface KAUpdateManifestEntryMsg {
 
 /** Input type for encoding — accepts number, bigint, or protobuf Long. */
 export interface KAUpdateRequestMsg {
-  paranetId: string;
+  contextGraphId: string;
   batchId: number | bigint;
   nquads: Uint8Array;
   manifest: KAUpdateManifestEntryMsg[];

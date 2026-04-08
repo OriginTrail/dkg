@@ -21,7 +21,7 @@ function makeStore() {
 function baseEntry(overrides: Partial<JournalEntry> = {}): JournalEntry {
   return {
     ual: 'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/1',
-    paranetId: 'paranet-1',
+    contextGraphId: 'paranet-1',
     expectedPublisherAddress: '0x2222222222222222222222222222222222222222',
     expectedMerkleRoot: ethers.hexlify(ethers.randomBytes(32)),
     expectedStartKAId: '1',

@@ -11,7 +11,7 @@ export const KAManifestEntrySchema = new Type('KAManifestEntry')
 export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('ual', 1, 'string'))
   .add(new Field('nquads', 2, 'bytes'))
-  .add(new Field('paranetId', 3, 'string'))
+  .add(new Field('contextGraphId', 3, 'string'))
   .add(new Field('kas', 4, 'KAManifestEntry', 'repeated'))
   .add(new Field('publisherIdentity', 5, 'bytes'))
   .add(new Field('publisherAddress', 6, 'string'))
@@ -44,7 +44,7 @@ export interface KAManifestEntryMsg {
 export interface PublishRequestMsg {
   ual: string;
   nquads: Uint8Array;
-  paranetId: string;
+  contextGraphId: string;
   kas: KAManifestEntryMsg[];
   publisherIdentity: Uint8Array;
   publisherAddress: string;

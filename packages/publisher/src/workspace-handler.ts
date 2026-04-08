@@ -3,40 +3,40 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
+import { decodeSharePublishRequest, assertSafeIri, assertSafeRdfTerm } from '@origintrail-official/dkg-core';
+import type { ShareCASConditionMsg } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
-import { generateShareMetadata, generateOwnershipQuads } from './metadata.js';
+import { generateWorkspaceMetadata, generateOwnershipQuads } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
 
 /**
- * Handles incoming shared memory topic messages (GossipSub).
- * Validates the request, stores public triples into SWM graph
- * and metadata into SWM meta graph. No chain, no UAL.
+ * Handles incoming shared-memory topic messages (GossipSub).
+ * Validates the request, stores public triples into shared memory,
+ * and stores metadata into the shared-memory metadata graph. No chain, no UAL.
  */
-export class SharedMemoryHandler {
+export class WorkspaceHandler {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
   private readonly eventBus: EventBus;
-  /** Per-context-graph map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
-  private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
+   /** Per-paranet map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
+  private readonly workspaceOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
-  private readonly log = new Logger('SharedMemoryHandler');
+  private readonly log = new Logger('WorkspaceHandler');
 
   constructor(
     store: TripleStore,
     eventBus: EventBus,
     options?: {
-      sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
+      workspaceOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
     },
   ) {
     this.store = store;
     this.graphManager = new GraphManager(store);
     this.eventBus = eventBus;
-    if (options?.sharedMemoryOwnedEntities) {
-      this.sharedMemoryOwnedEntities = options.sharedMemoryOwnedEntities;
+    if (options?.workspaceOwnedEntities) {
+      this.workspaceOwnedEntities = options.workspaceOwnedEntities;
     }
     this.writeLocks = options?.writeLocks ?? new Map();
   }
@@ -67,8 +67,8 @@ export class SharedMemoryHandler {
    * Returns false if any condition fails (write should be skipped).
    */
   private async enforceCASConditions(
-    conditions: WorkspaceCASConditionMsg[],
-    swmGraph: string,
+    conditions: ShareCASConditionMsg[],
+    workspaceGraph: string,
     ctx: import('@origintrail-official/dkg-core').OperationContext,
   ): Promise<boolean> {
     for (const cond of conditions) {
@@ -89,14 +89,14 @@ export class SharedMemoryHandler {
 
       try {
         if (cond.expectAbsent) {
-          const ask = `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`;
           const result = await this.store.query(ask);
           if (result.type !== 'boolean' || result.value) {
             this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected absent`);
             return false;
           }
         } else {
-          const ask = `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
+          const ask = `ASK { GRAPH <${workspaceGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
           const result = await this.store.query(ask);
           if (result.type !== 'boolean' || !result.value) {
             this.log.warn(ctx, `CAS rejected: <${cond.subject}> <${cond.predicate}> expected ${cond.expectedValue}`);
@@ -113,27 +113,34 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * Handler for GossipSub shared memory topic: (data, fromPeerId) => void.
-   * Validates, stores to SWM + SWM meta, updates sharedMemoryOwnedEntities.
+    * Handler for the GossipSub shared-memory topic: (data, fromPeerId) => void.
+    * Validates, stores to shared memory + metadata, and updates ownership state.
    */
   async handle(data: Uint8Array, fromPeerId: string, onPhase?: PhaseCallback): Promise<void> {
     let ctx = createOperationContext('share');
     try {
       onPhase?.('decode', 'start');
-      const request = decodeWorkspacePublishRequest(data);
+      const request = decodeSharePublishRequest(data);
       if (request.operationId) {
         ctx = createOperationContext('share', request.operationId);
       }
-      const contextGraphId = request.paranetId;
-      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions } = request;
-      this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId} op=${shareOperationId}`);
+      const {
+        contextGraphId,
+        nquads,
+        manifest,
+        publisherPeerId,
+        shareOperationId,
+        timestampMs,
+        casConditions,
+      } = request;
+      this.log.info(ctx, `Shared-memory write from ${fromPeerId} for context graph ${contextGraphId} op=${shareOperationId}`);
 
       if (publisherPeerId !== fromPeerId) {
-        this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
+        this.log.warn(ctx, `Workspace write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
         return;
       }
 
-      await this.graphManager.ensureContextGraph(contextGraphId);
+      await this.graphManager.ensureParanet(contextGraphId);
 
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
@@ -146,8 +153,8 @@ export class SharedMemoryHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+      const workspaceGraph = this.graphManager.workspaceGraphUri(contextGraphId);
+      const workspaceMetaGraph = this.graphManager.workspaceMetaGraphUri(contextGraphId);
 
       const condSubjects = (casConditions ?? []).map(c => c.subject);
       const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
@@ -155,11 +162,11 @@ export class SharedMemoryHandler {
 
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
-        const swmOwned = this.sharedMemoryOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
-        const existing = new Set<string>([...swmOwned.keys()]);
+        const wsOwned = this.workspaceOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
+        const existing = new Set<string>([...wsOwned.keys()]);
 
         const upsertable = new Set<string>();
-        for (const [entity, creator] of swmOwned) {
+        for (const [entity, creator] of wsOwned) {
           if (creator === publisherPeerId) {
             upsertable.add(entity);
           }
@@ -171,37 +178,37 @@ export class SharedMemoryHandler {
           { allowUpsert: true, upsertableEntities: upsertable },
         );
         if (!validation.valid) {
-          this.log.warn(ctx, `SWM validation rejected: ${validation.errors.join('; ')}`);
+          this.log.warn(ctx, `Workspace validation rejected: ${validation.errors.join('; ')}`);
           return false;
         }
         onPhase?.('validate', 'end');
 
         if (casConditions && casConditions.length > 0) {
-          const passed = await this.enforceCASConditions(casConditions, swmGraph, ctx);
+          const passed = await this.enforceCASConditions(casConditions, workspaceGraph, ctx);
           if (!passed) {
             // Intentional: we reject writes whose CAS pre-conditions don't hold
             // locally. This can cause temporary divergence if gossip delivers
-            // writes out-of-order, but the originator's SWM-sync protocol
+            // writes out-of-order, but the originator's workspace-sync protocol
             // replays missed writes on reconnect, converging replicas eventually.
             // Accepting stale-CAS writes would silently corrupt local state.
-            this.log.info(ctx, `Skipping SWM write ${shareOperationId} — remote CAS conditions not met`);
+            this.log.info(ctx, `Skipping shared-memory write ${shareOperationId} — remote CAS conditions not met`);
             return false;
           }
         }
 
         for (const m of manifestForValidation) {
-          if (swmOwned.has(m.rootEntity)) {
-            await this.store.deleteByPattern({ graph: swmGraph, subject: m.rootEntity });
-            await this.store.deleteBySubjectPrefix(swmGraph, m.rootEntity + '/.well-known/genid/');
-            await this.deleteMetaForRoot(swmMetaGraph, m.rootEntity);
+          if (wsOwned.has(m.rootEntity)) {
+            await this.store.deleteByPattern({ graph: workspaceGraph, subject: m.rootEntity });
+            await this.store.deleteBySubjectPrefix(workspaceGraph, m.rootEntity + '/.well-known/genid/');
+            await this.deleteMetaForRoot(workspaceMetaGraph, m.rootEntity);
           }
         }
 
-        const normalized = quads.map((q) => ({ ...q, graph: swmGraph }));
+        const normalized = quads.map((q) => ({ ...q, graph: workspaceGraph }));
         await this.store.insert(normalized);
 
         const rootEntities = manifestForValidation.map((m) => m.rootEntity);
-        const metaQuads = generateShareMetadata(
+        const metaQuads = generateWorkspaceMetadata(
           {
             shareOperationId,
             contextGraphId,
@@ -209,7 +216,7 @@ export class SharedMemoryHandler {
             publisherPeerId,
             timestamp: new Date(Number(timestampMs)),
           },
-          swmMetaGraph,
+          workspaceMetaGraph,
         );
 
         for (const m of manifestForValidation) {
@@ -219,17 +226,17 @@ export class SharedMemoryHandler {
               subject: m.rootEntity,
               predicate: 'http://dkg.io/ontology/privateMerkleRoot',
               object: `"${hex}"`,
-              graph: swmMetaGraph,
+              graph: workspaceMetaGraph,
             });
           }
         }
 
         await this.store.insert(metaQuads);
 
-        if (!this.sharedMemoryOwnedEntities.has(contextGraphId)) {
-          this.sharedMemoryOwnedEntities.set(contextGraphId, new Map());
+        if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+          this.workspaceOwnedEntities.set(contextGraphId, new Map());
         }
-        const liveOwned = this.sharedMemoryOwnedEntities.get(contextGraphId)!;
+        const liveOwned = this.workspaceOwnedEntities.get(contextGraphId)!;
         const newOwnershipEntries: Array<{ rootEntity: string; creatorPeerId: string }> = [];
         for (const r of rootEntities) {
           if (!liveOwned.has(r)) {
@@ -239,12 +246,12 @@ export class SharedMemoryHandler {
         if (newOwnershipEntries.length > 0) {
           for (const entry of newOwnershipEntries) {
             await this.store.deleteByPattern({
-              graph: swmMetaGraph,
+              graph: workspaceMetaGraph,
               subject: entry.rootEntity,
               predicate: 'http://dkg.io/ontology/workspaceOwner',
             });
           }
-          await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
+          await this.store.insert(generateOwnershipQuads(newOwnershipEntries, workspaceMetaGraph));
           for (const entry of newOwnershipEntries) {
             liveOwned.set(entry.rootEntity, entry.creatorPeerId);
           }
@@ -255,15 +262,15 @@ export class SharedMemoryHandler {
 
       onPhase?.('store', 'end');
       if (applied) {
-        this.log.info(ctx, `Stored SWM write ${shareOperationId} (${quads.length} quads)`);
+        this.log.info(ctx, `Stored shared-memory write ${shareOperationId} (${quads.length} quads)`);
       }
     } catch (err) {
-      this.log.error(ctx, `SWM handle failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.log.error(ctx, `Workspace handle failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   /**
-   * Remove the SWM meta link for a specific rootEntity.
+    * Remove the shared-memory metadata link for a specific rootEntity.
    * Only deletes the entire operation subject when no rootEntity links remain,
    * preserving metadata for other roots written in the same operation.
    */
@@ -292,9 +299,6 @@ export class SharedMemoryHandler {
     }
   }
 }
-
-/** @deprecated Use SharedMemoryHandler */
-export const WorkspaceHandler = SharedMemoryHandler;
 
 function parseCountLiteral(val: string | false | undefined): number {
   if (!val) return NaN;

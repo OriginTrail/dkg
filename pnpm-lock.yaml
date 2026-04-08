@@ -207,6 +207,9 @@ importers:
       '@origintrail-official/dkg-app-origin-trail-game':
         specifier: workspace:*
         version: link:../origin-trail-game
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../chain
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
@@ -216,6 +219,12 @@ importers:
       '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui
+      '@origintrail-official/dkg-publisher':
+        specifier: workspace:*
+        version: link:../publisher
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       commander:
         specifier: ^13
         version: 13.1.0
@@ -656,7 +665,13 @@ importers:
       ethers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+      n3:
+        specifier: ^1.17.4
+        version: 1.26.0
     devDependencies:
+      '@types/n3':
+        specifier: ^1.26.1
+        version: 1.26.1
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(tsx@4.21.0))
