@@ -1,5 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
+import { TrustLevel } from '@origintrail-official/dkg-core';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
@@ -23,6 +24,8 @@ export interface QueryOptions {
   agentAddress?: string;
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;
+  /** Minimum trust level for verified-memory queries. Filters out triples below this trust threshold. */
+  minTrust?: TrustLevel;
 }
 
 export interface QueryEngine {

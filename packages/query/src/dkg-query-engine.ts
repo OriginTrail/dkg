@@ -5,6 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
   assertSafeIri, escapeSparqlLiteral,
   type GetView,
+  TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { validateReadOnlySparql } from './sparql-guard.js';
 
@@ -20,8 +21,6 @@ export interface ViewResolution {
    * drafts) and verified-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-  /** When true the engine merges results with VM-wins-on-conflict semantics. */
-  vmWinsOnConflict: boolean;
 }
 
 /**
@@ -44,47 +43,30 @@ export function resolveViewGraphs(
         return {
           graphs: [contextGraphDraftUri(contextGraphId, opts.agentAddress, opts.draftName)],
           graphPrefixes: [],
-          vmWinsOnConflict: false,
         };
       }
       return {
         graphs: [],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/draft/${opts.agentAddress}/`],
-        vmWinsOnConflict: false,
       };
     }
     case 'shared-working-memory':
       return {
         graphs: [contextGraphSharedMemoryUri(contextGraphId)],
         graphPrefixes: [],
-        vmWinsOnConflict: false,
-      };
-    case 'long-term-memory':
-      return {
-        graphs: [contextGraphDataUri(contextGraphId)],
-        graphPrefixes: [],
-        vmWinsOnConflict: false,
       };
     case 'verified-memory': {
       if (opts?.verifiedGraph) {
         return {
           graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
           graphPrefixes: [],
-          vmWinsOnConflict: false,
         };
       }
       return {
         graphs: [],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
-        vmWinsOnConflict: false,
       };
     }
-    case 'authoritative':
-      return {
-        graphs: [contextGraphDataUri(contextGraphId)],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
-        vmWinsOnConflict: true,
-      };
   }
 }
 
@@ -170,14 +152,6 @@ export class DKGQueryEngine implements QueryEngine {
 
     if (allGraphs.length === 1) {
       return this.execAndNormalize(wrapWithGraph(sparql, allGraphs[0]));
-    }
-
-    if (resolution.vmWinsOnConflict) {
-      const ltmGraphs = resolution.graphs;
-      const vmGraphs = allGraphs.filter((g) => !ltmGraphs.includes(g));
-      const ltmResults = await this.queryMultipleGraphs(sparql, ltmGraphs);
-      const vmResults = await this.queryMultipleGraphs(sparql, vmGraphs);
-      return mergeAuthoritativeResults(ltmResults, vmResults);
     }
 
     return this.queryMultipleGraphs(sparql, allGraphs);
@@ -401,65 +375,5 @@ function dedupeQuads(quads: Quad[]): Quad[] {
     out.push(q);
   }
   return out;
-}
-
-/**
- * Merge LTM and VM results for the 'authoritative' view.
- * VM wins on conflict: when the same subject+predicate appears in both
- * result sets, the VM value is kept and the LTM one is dropped.
- *
- * Conflict resolution applies at two levels:
- * 1. Binding rows — when `?s` and `?p` are projected (SELECT queries).
- * 2. Quads — when the result contains quads (CONSTRUCT/DESCRIBE queries),
- *    subject+predicate dedup happens directly on the triples so conflict
- *    resolution works regardless of the projection shape.
- */
-function mergeAuthoritativeResults(
-  ltmResult: QueryResult,
-  vmResult: QueryResult,
-): QueryResult {
-  if (vmResult.bindings.length === 0 && !vmResult.quads?.length) {
-    return ltmResult;
-  }
-
-  // --- Binding-level merge (SELECT queries with ?s/?p projection) ---
-  const vmSubjectPredicates = new Set<string>();
-  for (const row of vmResult.bindings) {
-    if (row['s'] && row['p']) {
-      vmSubjectPredicates.add(`${row['s']}\u0000${row['p']}`);
-    }
-  }
-
-  const filteredLtm = vmSubjectPredicates.size > 0
-    ? ltmResult.bindings.filter((row) => {
-        if (!row['s'] || !row['p']) return true;
-        return !vmSubjectPredicates.has(`${row['s']}\u0000${row['p']}`);
-      })
-    : ltmResult.bindings;
-
-  const mergedBindings = dedupeBindings([...filteredLtm, ...vmResult.bindings]);
-
-  // --- Quad-level merge (CONSTRUCT/DESCRIBE queries) ---
-  const ltmQuads = ltmResult.quads ?? [];
-  const vmQuads = vmResult.quads ?? [];
-  let mergedQuads: Quad[];
-
-  if (vmQuads.length > 0 && ltmQuads.length > 0) {
-    const vmQuadSP = new Set<string>();
-    for (const q of vmQuads) {
-      vmQuadSP.add(`${q.subject}\u0000${q.predicate}`);
-    }
-    const filteredLtmQuads = ltmQuads.filter(
-      (q) => !vmQuadSP.has(`${q.subject}\u0000${q.predicate}`),
-    );
-    mergedQuads = dedupeQuads([...filteredLtmQuads, ...vmQuads]);
-  } else {
-    mergedQuads = dedupeQuads([...ltmQuads, ...vmQuads]);
-  }
-
-  return {
-    bindings: mergedBindings,
-    ...(mergedQuads.length > 0 ? { quads: mergedQuads } : {}),
-  };
 }
 

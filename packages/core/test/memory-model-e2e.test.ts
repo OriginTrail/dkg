@@ -16,12 +16,11 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
   const CG_ID = 'cg-42';
   const AGENT = '0xAbc123';
 
-  it('WM → SWM → LTM → VM: complete forward progression', () => {
+  it('WM → SWM → VM: complete forward progression', () => {
     const transitions: MemoryTransition[] = [];
     const layers: MemoryLayer[] = [
       MemoryLayer.WorkingMemory,
       MemoryLayer.SharedWorkingMemory,
-      MemoryLayer.LongTermMemory,
       MemoryLayer.VerifiedMemory,
     ];
 
@@ -37,15 +36,14 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
       });
     }
 
-    expect(transitions).toHaveLength(3);
+    expect(transitions).toHaveLength(2);
     expect(transitions[0].from).toBe(MemoryLayer.WorkingMemory);
-    expect(transitions[2].to).toBe(MemoryLayer.VerifiedMemory);
+    expect(transitions[1].to).toBe(MemoryLayer.VerifiedMemory);
   });
 
   it('illegal backward transitions are rejected', () => {
     const layers = [
       MemoryLayer.VerifiedMemory,
-      MemoryLayer.LongTermMemory,
       MemoryLayer.SharedWorkingMemory,
       MemoryLayer.WorkingMemory,
     ];
@@ -56,9 +54,7 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
   });
 
   it('skip transitions are rejected', () => {
-    expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.LongTermMemory)).toBe(false);
     expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.VerifiedMemory)).toBe(false);
-    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiedMemory)).toBe(false);
   });
 
   it('Publication progresses through all states', () => {
@@ -177,17 +173,14 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
     expect(isValidTransition(MemoryLayer.WorkingMemory, MemoryLayer.SharedWorkingMemory)).toBe(true);
     expect(share.entities).toHaveLength(2);
 
-    // Step 3: Publish from SWM → LTM
+    // Step 3: Publish from SWM → VM (3-layer model: anchoring = verification)
     const pubRequest: PublicationRequest = {
       contextGraphId: CG_ID,
       transitionType: TransitionType.CREATE,
       authority: { type: 'owner', proofRef: 'sig:0x...' },
       swmOperationId: share.operationId,
     };
-    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.LongTermMemory)).toBe(true);
+    expect(isValidTransition(MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiedMemory)).toBe(true);
     expect(pubRequest.swmOperationId).toBe('op-share-1');
-
-    // Step 4: Verify from LTM → VM
-    expect(isValidTransition(MemoryLayer.LongTermMemory, MemoryLayer.VerifiedMemory)).toBe(true);
   });
 });

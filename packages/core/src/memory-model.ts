@@ -1,21 +1,30 @@
 /**
  * V10 Memory Model Types
  *
- * Formalizes the four-layer memory hierarchy and transition semantics
+ * Formalizes the three-layer memory hierarchy and transition semantics
  * for the DKG V10 protocol.
  *
  * Memory layers (ordered by trust/permanence):
  *   WM  → Working Memory: local agent drafts, not shared
  *   SWM → Shared Working Memory: published to peers, not anchored
- *   LTM → Long-term Memory: anchored on-chain via PUBLISH
- *   VM  → Verified Memory: M-of-N verified via VERIFY
+ *   VM  → Verified Memory: anchored on-chain and M-of-N verified
  */
 
 export enum MemoryLayer {
   WorkingMemory = 'WM',
   SharedWorkingMemory = 'SWM',
-  LongTermMemory = 'LTM',
   VerifiedMemory = 'VM',
+}
+
+/**
+ * Trust levels for Verified Memory triples, ordered by ascending trust.
+ * Used with `minTrust` on verified-memory queries to filter results.
+ */
+export enum TrustLevel {
+  SelfAttested = 0,
+  Endorsed = 1,
+  PartiallyVerified = 2,
+  ConsensusVerified = 3,
 }
 
 export enum TransitionType {
@@ -98,25 +107,20 @@ export interface Publication {
  *
  *   working-memory        → WM  (agent's own draft graphs, local-only)
  *   shared-working-memory → SWM (provisional, gossip-replicated)
- *   long-term-memory      → LTM (chain-confirmed, published)
- *   verified-memory       → VM  (M-of-N quorum verified)
- *   authoritative         → LTM ∪ VM (VM wins on conflict)
+ *   verified-memory       → VM  (on-chain anchored, M-of-N quorum verified)
  */
 export type GetView =
   | 'working-memory'
   | 'shared-working-memory'
-  | 'long-term-memory'
-  | 'verified-memory'
-  | 'authoritative';
+  | 'verified-memory';
 
 /**
  * Valid memory layer transitions. The protocol enforces a strict
- * forward-only progression: WM → SWM → LTM → VM.
+ * forward-only progression: WM → SWM → VM.
  */
 export const VALID_TRANSITIONS: ReadonlyMap<MemoryLayer, readonly MemoryLayer[]> = new Map([
   [MemoryLayer.WorkingMemory, [MemoryLayer.SharedWorkingMemory] as const],
-  [MemoryLayer.SharedWorkingMemory, [MemoryLayer.LongTermMemory] as const],
-  [MemoryLayer.LongTermMemory, [MemoryLayer.VerifiedMemory] as const],
+  [MemoryLayer.SharedWorkingMemory, [MemoryLayer.VerifiedMemory] as const],
 ]);
 
 export function isValidTransition(from: MemoryLayer, to: MemoryLayer): boolean {
@@ -131,8 +135,8 @@ export const PUBLICATION_STATES: readonly PublicationState[] = [
 ] as const;
 
 /**
- * All five GET views, ordered by trust level (ascending).
+ * All three GET views, ordered by trust level (ascending).
  */
 export const GET_VIEWS: readonly GetView[] = [
-  'working-memory', 'shared-working-memory', 'long-term-memory', 'verified-memory', 'authoritative',
+  'working-memory', 'shared-working-memory', 'verified-memory',
 ] as const;

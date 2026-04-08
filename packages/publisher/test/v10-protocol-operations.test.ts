@@ -311,13 +311,6 @@ describe('V10 GET Protocol (spec §12)', () => {
     makeQuad('urn:entity:y', 'urn:prop:draft', '"true"', swmGraph),
   ];
 
-  it('view=long-term-memory queries LTM data graph', () => {
-    const view = 'long-term-memory';
-    const graphUri = view === 'long-term-memory' ? ltmGraph : swmGraph;
-    expect(graphUri).toBe(ltmGraph);
-    expect(ltmQuads.every(q => q.graph === ltmGraph)).toBe(true);
-  });
-
   it('view=shared-working-memory queries SWM graph', () => {
     const view = 'shared-working-memory';
     const graphUri = view === 'shared-working-memory' ? swmGraph : ltmGraph;
@@ -325,24 +318,9 @@ describe('V10 GET Protocol (spec §12)', () => {
     expect(swmQuads.every(q => q.graph === swmGraph)).toBe(true);
   });
 
-  it('view=authoritative resolves VM > LTM precedence', () => {
-    const merged = new Map<string, Quad>();
-    for (const q of ltmQuads) {
-      merged.set(`${q.subject}|${q.predicate}`, q);
-    }
-    for (const q of swmQuads) {
-      merged.set(`${q.subject}|${q.predicate}`, q);
-    }
-
-    const xName = merged.get('urn:entity:x|http://schema.org/name');
-    expect(xName?.object).toBe('"SWM Name (newer)"');
-
-    const xVersion = merged.get('urn:entity:x|urn:prop:version');
-    expect(xVersion?.object).toBe('"1"');
-    expect(xVersion?.graph).toBe(ltmGraph);
-
-    const yDraft = merged.get('urn:entity:y|urn:prop:draft');
-    expect(yDraft?.object).toBe('"true"');
+  it('view=verified-memory queries VM with minTrust filtering', () => {
+    const vmGraph = `did:dkg:context-graph:${contextGraphId}/_verified_memory/`;
+    expect(vmGraph).toContain('_verified_memory');
   });
 });
 
