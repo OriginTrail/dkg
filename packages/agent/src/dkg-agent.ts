@@ -118,6 +118,8 @@ export interface ContextGraphSub {
   synced: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
+  /** Local participant identities used for private SWM authorization before anchoring. */
+  participantIdentityIds?: bigint[];
 }
 
 /** @deprecated Use ContextGraphSub */
@@ -1620,6 +1622,12 @@ export class DKGAgent {
     const ctx = opts.operationCtx ?? createOperationContext('query');
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+
+    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
+      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
+      return { bindings: [] };
+    }
+
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
@@ -1630,6 +1638,24 @@ export class DKGAgent {
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
+  }
+
+  private async canReadContextGraph(contextGraphId: string): Promise<boolean> {
+    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+      return true;
+    }
+
+    const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    if (!participants || participants.length === 0) {
+      return false;
+    }
+
+    const identityId = await this.chain.getIdentityId();
+    if (identityId === 0n) {
+      return false;
+    }
+
+    return participants.some((id) => id === identityId);
   }
 
   /**
@@ -1842,6 +1868,7 @@ export class DKGAgent {
     replicationPolicy?: string;
     accessPolicy?: number;
     revealOnChain?: boolean;
+    participantIdentityIds?: bigint[];
     /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
     private?: boolean;
   }): Promise<void> {
@@ -1892,6 +1919,19 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
     ];
 
+    const creatorIdentityId = await this.chain.getIdentityId();
+    const participantIdentityIds = new Set<bigint>(opts.participantIdentityIds ?? []);
+    if (creatorIdentityId > 0n) {
+      participantIdentityIds.add(creatorIdentityId);
+    }
+    for (const participantIdentityId of participantIdentityIds) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+        object: `"${participantIdentityId.toString()}"`,
+        graph: ontologyGraph,
+      });
+    }
     if (onChainId) {
       quads.push({
         subject: paranetUri,
@@ -1930,6 +1970,7 @@ export class DKGAgent {
       subscribed: !opts.private,
       synced: true,
       onChainId: onChainId,
+      participantIdentityIds: participantIdentityIds.size > 0 ? [...participantIdentityIds] : undefined,
     });
 
     if (!opts.private) {
@@ -2990,11 +3031,6 @@ export class DKGAgent {
       return false;
     }
 
-    const onChainId = this.subscribedContextGraphs.get(request.contextGraphId)?.onChainId;
-    if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
-      return false;
-    }
-
     const digest = this.computeSyncDigest(
       request.contextGraphId,
       request.offset,
@@ -3021,7 +3057,7 @@ export class DKGAgent {
       return false;
     }
 
-    const participants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
+    const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
     const allowed = participants?.some((id) => id === requesterIdentityId) ?? false;
     if (allowed) {
       this.seenPrivateSyncRequestIds.set(request.requestId, now);
@@ -3050,6 +3086,37 @@ export class DKGAgent {
     );
 
     return result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"';
+  }
+
+  private async getPrivateContextGraphParticipants(contextGraphId: string): Promise<bigint[] | null> {
+    const localParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantIdentityIds;
+    if (localParticipants && localParticipants.length > 0) {
+      return localParticipants;
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?identityId WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
+        }
+      }`,
+    );
+
+    if (result.type === 'bindings' && result.bindings.length > 0) {
+      return result.bindings
+        .map((row) => row['identityId'])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
+    }
+
+    const onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
+      return null;
+    }
+
+    return this.chain.getContextGraphParticipants(BigInt(onChainId));
   }
 
   /**

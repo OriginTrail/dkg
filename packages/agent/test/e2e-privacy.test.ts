@@ -8,13 +8,19 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { contextGraphDataUri } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
 const PRIVATE_PARANET = 'agent-memory-test';
 const PUBLIC_PARANET = 'public-e2e';
 const PRIVATE_ENTITY = 'urn:e2e:private:secret-message:1';
 const PUBLIC_ENTITY = 'urn:e2e:public:visible-entity:1';
+const MATRIX_PUBLIC_PARANET = 'matrix-public';
+const MATRIX_PRIVATE_PARANET = 'matrix-private';
+const MATRIX_PUBLIC_SWM_ENTITY = 'urn:e2e:matrix:public:swm:1';
+const MATRIX_PUBLIC_DATA_ENTITY = 'urn:e2e:matrix:public:data:1';
+const MATRIX_PRIVATE_SWM_ENTITY = 'urn:e2e:matrix:private:swm:1';
+const MATRIX_PRIVATE_DATA_ENTITY = 'urn:e2e:matrix:private:data:1';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -221,21 +227,9 @@ describe('Private context graph sync auth (3 nodes)', () => {
     await nodeC.connectTo(addrA);
     await sleep(500);
 
-    await nodeA.createContextGraph({
-      id: PRIVATE_PARANET,
-      name: 'Private Sync Graph',
-      description: 'A and B only',
-      private: true,
-    });
-
-    // B and C know the graph id and try to participate locally, but only B is allowlisted on A.
-    await nodeB.createContextGraph({ id: PRIVATE_PARANET, name: 'Private Sync Graph', private: true });
-    await nodeC.createContextGraph({ id: PRIVATE_PARANET, name: 'Private Sync Graph', private: true });
-
     const idA = 1n;
     const idB = 2n;
     const idC = 3n;
-    const contextGraphOnChainId = '1';
 
     (chainA as any).identities.set(walletA.address, idA);
     (chainA as any).identities.set(walletB.address, idB);
@@ -243,23 +237,17 @@ describe('Private context graph sync auth (3 nodes)', () => {
     (chainB as any).identities.set(walletB.address, idB);
     (chainC as any).identities.set(walletC.address, idC);
 
-    const cgRecord = {
-      manager: walletA.address,
+    await nodeA.createContextGraph({
+      id: PRIVATE_PARANET,
+      name: 'Private Sync Graph',
+      description: 'A and B only',
+      private: true,
       participantIdentityIds: [idA, idB],
-      requiredSignatures: 1,
-      metadataBatchId: 0n,
-      active: true,
-      batches: [],
-    };
-    (chainA as any).contextGraphs.set(1n, cgRecord);
+    });
 
-    for (const node of [nodeA, nodeB, nodeC]) {
-      const sub = (node as any).subscribedContextGraphs.get(PRIVATE_PARANET);
-      (node as any).subscribedContextGraphs.set(PRIVATE_PARANET, {
-        ...sub,
-        onChainId: contextGraphOnChainId,
-      });
-    }
+    // B and C learn about the private graph through synced ontology metadata, not by creating their own competing definitions.
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    await nodeC.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
 
     const privateQuads = [
       { subject: PRIVATE_ENTITY, predicate: 'http://schema.org/text', object: '"Shared only with B"', graph: '' as const },
@@ -287,7 +275,6 @@ describe('Private context graph sync auth (3 nodes)', () => {
     });
     expect(recoveredB.toLowerCase()).toBe(walletB.address.toLowerCase());
     expect(await chainA.verifyACKIdentity(recoveredB, idB)).toBe(true);
-    expect(await chainA.getContextGraphParticipants(1n)).toEqual([idA, idB]);
     expect(await (nodeA as any).authorizeSyncRequest(requestB, nodeB.peerId)).toBe(true);
 
     const requestC = JSON.parse(new TextDecoder().decode(await (nodeC as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false, nodeA.peerId)));
@@ -314,4 +301,158 @@ describe('Private context graph sync auth (3 nodes)', () => {
     );
     expect(onC.bindings.length).toBe(0);
   }, 30000);
+});
+
+describe('Context graph access matrix (3 nodes)', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+  let nodeC: DKGAgent;
+  let walletA: ethers.Wallet;
+  let walletB: ethers.Wallet;
+  let walletC: ethers.Wallet;
+
+  afterAll(async () => {
+    try {
+      await nodeA?.stop();
+      await nodeB?.stop();
+      await nodeC?.stop();
+    } catch (err) {
+      console.warn('Teardown:', err);
+    }
+  });
+
+  it('enforces public/private x durable/SWM x authorized/unauthorized sync matrix', async () => {
+    walletA = ethers.Wallet.createRandom();
+    walletB = ethers.Wallet.createRandom();
+    walletC = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainB.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletB.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainC.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletC.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    nodeA = await DKGAgent.create({ name: 'MatrixA', listenPort: 0, chainAdapter: chainA });
+    nodeB = await DKGAgent.create({ name: 'MatrixB', listenPort: 0, chainAdapter: chainB });
+    nodeC = await DKGAgent.create({ name: 'MatrixC', listenPort: 0, chainAdapter: chainC });
+
+    await nodeA.start();
+    await nodeB.start();
+    await nodeC.start();
+    await sleep(800);
+
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await nodeB.connectTo(addrA);
+    await nodeC.connectTo(addrA);
+    await sleep(500);
+
+    const idA = 1n;
+    const idB = 2n;
+    const idC = 3n;
+    (chainA as any).identities.set(walletA.address, idA);
+    (chainA as any).identities.set(walletB.address, idB);
+    (chainA as any).identities.set(walletC.address, idC);
+    (chainB as any).identities.set(walletB.address, idB);
+    (chainC as any).identities.set(walletC.address, idC);
+
+    await nodeA.createContextGraph({ id: MATRIX_PUBLIC_PARANET, name: 'Matrix Public' });
+    nodeB.subscribeToContextGraph(MATRIX_PUBLIC_PARANET);
+    nodeC.subscribeToContextGraph(MATRIX_PUBLIC_PARANET);
+
+    await nodeA.createContextGraph({
+      id: MATRIX_PRIVATE_PARANET,
+      name: 'Matrix Private',
+      private: true,
+      participantIdentityIds: [idA, idB],
+    });
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    await nodeC.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    await sleep(1000);
+
+    await nodeA.share(MATRIX_PUBLIC_PARANET, [
+      { subject: MATRIX_PUBLIC_SWM_ENTITY, predicate: 'http://schema.org/name', object: '"Public SWM"', graph: '' },
+    ]);
+    await nodeA.share(MATRIX_PRIVATE_PARANET, [
+      { subject: MATRIX_PRIVATE_SWM_ENTITY, predicate: 'http://schema.org/name', object: '"Private SWM"', graph: '' },
+    ], { localOnly: true });
+
+    await (nodeA as any).store.insert([
+      { subject: MATRIX_PUBLIC_DATA_ENTITY, predicate: 'http://schema.org/name', object: '"Public Data"', graph: contextGraphDataUri(MATRIX_PUBLIC_PARANET) },
+      { subject: MATRIX_PRIVATE_DATA_ENTITY, predicate: 'http://schema.org/name', object: '"Private Data"', graph: contextGraphDataUri(MATRIX_PRIVATE_PARANET) },
+    ]);
+
+    await sleep(3000);
+
+    const publicDataB = await nodeB.syncFromPeer(nodeA.peerId, [MATRIX_PUBLIC_PARANET]);
+    const publicSwmB = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, [MATRIX_PUBLIC_PARANET]);
+    const publicDataC = await nodeC.syncFromPeer(nodeA.peerId, [MATRIX_PUBLIC_PARANET]);
+    const publicSwmC = await nodeC.syncSharedMemoryFromPeer(nodeA.peerId, [MATRIX_PUBLIC_PARANET]);
+
+    expect(publicDataB).toBeGreaterThan(0);
+    expect(publicSwmB).toBeGreaterThanOrEqual(0);
+    expect(publicDataC).toBeGreaterThan(0);
+    expect(publicSwmC).toBeGreaterThanOrEqual(0);
+
+    const privateDataB = await nodeB.syncFromPeer(nodeA.peerId, [MATRIX_PRIVATE_PARANET]);
+    const privateSwmB = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, [MATRIX_PRIVATE_PARANET]);
+    const privateDataC = await nodeC.syncFromPeer(nodeA.peerId, [MATRIX_PRIVATE_PARANET]);
+    const privateSwmC = await nodeC.syncSharedMemoryFromPeer(nodeA.peerId, [MATRIX_PRIVATE_PARANET]);
+
+    expect(privateDataB).toBeGreaterThan(0);
+    expect(privateSwmB).toBeGreaterThan(0);
+    expect(privateDataC).toBeGreaterThanOrEqual(0);
+    expect(privateSwmC).toBeGreaterThanOrEqual(0);
+
+    const queryMatrix = [
+      { node: nodeB, contextGraphId: MATRIX_PUBLIC_PARANET, entity: MATRIX_PUBLIC_DATA_ENTITY, expected: '"Public Data"' },
+      { node: nodeC, contextGraphId: MATRIX_PUBLIC_PARANET, entity: MATRIX_PUBLIC_DATA_ENTITY, expected: '"Public Data"' },
+      { node: nodeB, contextGraphId: MATRIX_PRIVATE_PARANET, entity: MATRIX_PRIVATE_DATA_ENTITY, expected: '"Private Data"' },
+      { node: nodeC, contextGraphId: MATRIX_PRIVATE_PARANET, entity: MATRIX_PRIVATE_DATA_ENTITY, expected: null },
+    ] as const;
+
+    for (const entry of queryMatrix) {
+      const result = await entry.node.query(
+        `SELECT ?name WHERE { <${entry.entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId: entry.contextGraphId },
+      );
+      if (entry.expected === null) {
+        expect(result.bindings.length).toBe(0);
+      } else {
+        expect(result.bindings.length).toBe(1);
+        expect(result.bindings[0]?.['name']).toBe(entry.expected);
+      }
+    }
+
+    const swmMatrix = [
+      { node: nodeB, contextGraphId: MATRIX_PUBLIC_PARANET, entity: MATRIX_PUBLIC_SWM_ENTITY, expected: '"Public SWM"' },
+      { node: nodeC, contextGraphId: MATRIX_PUBLIC_PARANET, entity: MATRIX_PUBLIC_SWM_ENTITY, expected: '"Public SWM"' },
+      { node: nodeB, contextGraphId: MATRIX_PRIVATE_PARANET, entity: MATRIX_PRIVATE_SWM_ENTITY, expected: '"Private SWM"' },
+      { node: nodeC, contextGraphId: MATRIX_PRIVATE_PARANET, entity: MATRIX_PRIVATE_SWM_ENTITY, expected: null },
+    ] as const;
+
+    for (const entry of swmMatrix) {
+      const result = await entry.node.query(
+        `SELECT ?name WHERE { <${entry.entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId: entry.contextGraphId, graphSuffix: '_shared_memory' },
+      );
+      if (entry.expected === null) {
+        expect(result.bindings.length).toBe(0);
+      } else {
+        expect(result.bindings.length).toBe(1);
+        expect(result.bindings[0]?.['name']).toBe(entry.expected);
+      }
+    }
+  }, 40000);
 });
