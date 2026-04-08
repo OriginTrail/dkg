@@ -385,7 +385,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert KnowledgeAssetsLib.NotBatchPublisher(id, msg.sender);
         }
 
-        (, , , , , uint40 endEpoch, uint96 existingTokenAmount, bool isImmutable) =
+        (, , , uint88 oldByteSize, , uint40 endEpoch, uint96 existingTokenAmount, bool isImmutable) =
             kcs.getKnowledgeCollectionMetadata(id);
 
         if (isImmutable) {
@@ -396,6 +396,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         if (currentEpoch > endEpoch) {
             revert KnowledgeCollectionLib.KnowledgeCollectionExpired(id, currentEpoch, endEpoch);
         }
+
+        require(newByteSize <= oldByteSize, "Cannot increase byte size without additional payment");
 
         kcs.updateKnowledgeCollection(
             msg.sender,

@@ -28,8 +28,8 @@ function makeEventBus() {
   return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize);
+async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
+  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount);
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -753,7 +753,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(ethers.hexlify(decodedRoot)).toBe(ethers.hexlify(merkleRoot));
 
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, BigInt(stagingBytes.length));
+    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, BigInt(stagingBytes.length), 1, 0n);
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array

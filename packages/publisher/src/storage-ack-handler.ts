@@ -162,9 +162,9 @@ export class StorageACKHandler {
     } catch {
       contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
     }
-    const intentEpochs = typeof intent.epochs === 'number' ? intent.epochs : 1;
-    const intentTokenAmount = intent.tokenAmount != null
-      ? BigInt(typeof intent.tokenAmount === 'number' ? intent.tokenAmount : Number(intent.tokenAmount))
+    const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
+    const intentTokenAmount = intent.tokenAmountStr
+      ? BigInt(intent.tokenAmountStr)
       : 0n;
     const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, verifiedKACount, verifiedByteSize, intentEpochs, intentTokenAmount);
     const signature = ethers.Signature.from(

@@ -22,7 +22,7 @@ export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('rootEntities', 7, 'string', 'repeated'))
   .add(new Field('stagingQuads', 8, 'bytes'))
   .add(new Field('epochs', 9, 'uint32'))
-  .add(new Field('tokenAmount', 10, 'uint64'));
+  .add(new Field('tokenAmountStr', 10, 'string'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -36,7 +36,8 @@ export interface PublishIntentMsg {
   rootEntities: string[];
   stagingQuads?: Uint8Array;
   epochs?: number;
-  tokenAmount?: number | Long;
+  /** Decimal string representation of tokenAmount for lossless bigint transport. */
+  tokenAmountStr?: string;
 }
 
 export function encodePublishIntent(msg: PublishIntentMsg): Uint8Array {

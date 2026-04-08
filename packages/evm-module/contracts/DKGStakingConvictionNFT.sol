@@ -84,6 +84,12 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
      * @notice Create a new staking position NFT.
      * Locks `amount` TRAC for `lockEpochs` on node `identityId`.
      * The TRAC is transferred to StakingStorage.
+     *
+     * TODO: Integrate with Staking.stakeWithLock() instead of direct transfer.
+     * Currently this only transfers TRAC to StakingStorage without registering
+     * the position in the Staking protocol (no rewards/slashing tracking).
+     * Requires a stakeOnBehalf() function in Staking.sol since stakeWithLock
+     * uses msg.sender as delegator, which would be this contract's address.
      */
     function stake(
         uint72 identityId,

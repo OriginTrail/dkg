@@ -24,7 +24,11 @@ export interface QueryOptions {
   agentAddress?: string;
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;
-  /** Minimum trust level for verified-memory queries. Filters out triples below this trust threshold. */
+  /**
+   * Minimum trust level for verified-memory queries. Filters out triples below this trust threshold.
+   * NOTE: Not yet enforced by DKGQueryEngine — reserved for future implementation when trust
+   * metadata is available in verified-memory graphs.
+   */
   minTrust?: TrustLevel;
 }
 

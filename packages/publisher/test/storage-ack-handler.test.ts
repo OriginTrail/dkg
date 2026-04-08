@@ -75,6 +75,8 @@ describe('StorageACKHandler', () => {
       isPrivate: false,
       kaCount: 2,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
     });
 
     const response = await handler.handler(intent, fakePeerId);
@@ -86,8 +88,8 @@ describe('StorageACKHandler', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(Buffer.from(decodedRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
-    // Verify signature recovers to core wallet address (kaCount=2 included in digest)
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, 300n);
+    // Verify signature recovers to core wallet address (6-field digest)
+    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, 300n, 1, 1000n);
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array

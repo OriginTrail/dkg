@@ -83,7 +83,7 @@ export class ACKCollector {
       rootEntities,
       stagingQuads: params.stagingQuads,
       epochs: params.epochs ?? 1,
-      tokenAmount: params.tokenAmount != null ? Number(params.tokenAmount) : undefined,
+      tokenAmountStr: params.tokenAmount != null ? params.tokenAmount.toString() : undefined,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 

@@ -1216,7 +1216,23 @@ export class EVMChainAdapter implements ChainAdapter {
 
     let signer: Wallet | undefined;
 
-    if (params.publisherAddress) {
+    // Look up the on-chain publisher to select the correct signer from the pool.
+    // The V10 contract's updateKnowledgeCollection requires msg.sender == latestPublisher.
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (kcs) {
+      try {
+        const onChainPublisher: string = await kcs.getLatestMerkleRootPublisher(params.kcId);
+        if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
+          signer = this.signerPool.find(
+            (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
+          );
+        }
+      } catch {
+        // Fall through to hint-based or round-robin
+      }
+    }
+
+    if (!signer && params.publisherAddress) {
       signer = this.signerPool.find(
         (s) => s.address.toLowerCase() === params.publisherAddress!.toLowerCase(),
       );

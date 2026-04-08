@@ -897,7 +897,8 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
 
       const tokenAmount = precomputedTokenAmount;
-      const useV10 = v10ACKs && v10ACKs.length > 0 && typeof this.chain.createKnowledgeAssetsV10 === 'function';
+      const v10Ready = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
+      const useV10 = v10ACKs && v10ACKs.length > 0 && v10Ready;
 
       // Resolve contextGraphId for V10 signature (must match on-chain digest)
       const ackDomainForSig = isPublishFromSharedMemory
@@ -1165,9 +1166,11 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
     let txResult;
-    if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
+    const updateV10Ready = typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()
+      && typeof this.chain.updateKnowledgeCollectionV10 === 'function';
+    if (updateV10Ready) {
       this.log.info(ctx, `Using V10 updateKnowledgeCollection path for kcId=${kcId}`);
-      txResult = await this.chain.updateKnowledgeCollectionV10({
+      txResult = await this.chain.updateKnowledgeCollectionV10!({
         kcId,
         newMerkleRoot: kcMerkleRoot,
         newByteSize: BigInt(allSkolemizedQuads.length * 100),
