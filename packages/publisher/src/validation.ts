@@ -12,6 +12,8 @@ export interface ValidationOptions {
   allowUpsert?: boolean;
   /** Root entities the current writer is allowed to upsert (creator-only). */
   upsertableEntities?: Set<string>;
+  /** Override the expected named graph URI for Rule 1 (default: `did:dkg:context-graph:{contextGraphId}`). */
+  expectedGraph?: string;
 }
 
 /**
@@ -25,10 +27,11 @@ export function validatePublishRequest(
   options?: ValidationOptions,
 ): ValidationResult {
   const errors: string[] = [];
-  const contextGraph = `did:dkg:context-graph:${contextGraphId}`;
+  const contextGraph = options?.expectedGraph ?? `did:dkg:context-graph:${contextGraphId}`;
   const rootEntities = new Set(manifest.map((m) => m.rootEntity));
 
-  // Rule 1: Every quad's named graph MUST be the target context graph URI.
+  // Rule 1: Every quad's named graph MUST be the target context graph URI
+  // (or the sub-graph URI when expectedGraph is overridden).
   for (const q of nquads) {
     if (q.graph && q.graph !== contextGraph) {
       errors.push(

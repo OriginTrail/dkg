@@ -1302,10 +1302,6 @@ export class DKGAgent {
     }
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
-    // V10.0: subGraphName routes data locally into the sub-graph named graph.
-    // The gossip broadcast still sends raw triples without sub-graph context;
-    // receivers will store them in the root data graph. Sub-graph-aware
-    // replication is deferred to V10.x.
     const result = await this.publisher.publish({
       contextGraphId,
       quads,
@@ -1489,6 +1485,7 @@ export class DKGAgent {
         timestampMs: Date.now(),
         operationId: ctx.operationId,
         contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+        subGraphName: options?.subGraphName,
       };
 
       const topic = paranetFinalizationTopic(contextGraphId);
@@ -2056,7 +2053,6 @@ export class DKGAgent {
       await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
-      const { subGraphDiscoverySparql } = await import('@origintrail-official/dkg-publisher');
       const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
       await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
@@ -2069,6 +2065,19 @@ export class DKGAgent {
     for (const uri of [dataUri, metaUri, swmUri, swmMetaUri]) {
       try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
     }
+
+    // Drop assertion/draft graphs under the sub-graph prefix
+    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/`;
+    const allGraphs = await this.store.listGraphs();
+    for (const g of allGraphs) {
+      if (g.startsWith(sgPrefix)) {
+        try { await this.store.dropGraph(g); } catch { /* graph may not exist */ }
+      }
+    }
+
+    // Clear SWM ownership cache for this sub-graph
+    const ownershipKey = `${contextGraphId}\0${subGraphName}`;
+    this.publisher.clearSubGraphOwnership(ownershipKey);
 
     this.log.info(
       createOperationContext('system'),
@@ -3619,6 +3628,7 @@ export class DKGAgent {
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
+      subGraphName: result.subGraphName,
     });
 
     const topic = paranetPublishTopic(contextGraphId);

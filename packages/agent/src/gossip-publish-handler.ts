@@ -1,7 +1,8 @@
 import {
   decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  isSafeIri,
+  isSafeIri, validateSubGraphName,
+  contextGraphSubGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -78,7 +79,22 @@ export class GossipPublishHandler {
 
       const graphManager = new GraphManager(this.store);
       await graphManager.ensureParanet(request.paranetId);
-      const dataGraph = graphManager.dataGraphUri(request.paranetId);
+
+      // Sub-graph routing: if the publish specifies a sub-graph, store data there
+      let subGraphName: string | undefined;
+      if (request.subGraphName) {
+        const sgVal = validateSubGraphName(request.subGraphName);
+        if (!sgVal.valid) {
+          this.log.warn(ctx, `Gossip: invalid subGraphName "${request.subGraphName}", storing in root data graph`);
+        } else {
+          subGraphName = request.subGraphName;
+          await graphManager.ensureSubGraph(request.paranetId, subGraphName);
+        }
+      }
+
+      const dataGraph = subGraphName
+        ? contextGraphSubGraphUri(request.paranetId, subGraphName)
+        : graphManager.dataGraphUri(request.paranetId);
       let normalized = quads.map(q => ({ ...q, graph: dataGraph }));
 
       // When receiving ontology-topic broadcasts, skip context graph definition
@@ -156,7 +172,9 @@ export class GossipPublishHandler {
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
 
-        const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities);
+        const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities, {
+          expectedGraph: subGraphName ? dataGraph : undefined,
+        });
         if (!validation.valid) {
           const allRule4 = validation.errors.every(e => e.startsWith('Rule 4'));
           if (!allRule4) {
@@ -205,6 +223,7 @@ export class GossipPublishHandler {
           kaCount: kaMetadata.length,
           publisherPeerId: request.publisherAddress || 'unknown',
           timestamp: new Date(),
+          subGraphName,
         };
 
         // Always store gossip-received data as tentative first —

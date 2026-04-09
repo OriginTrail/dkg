@@ -705,9 +705,21 @@ export class DKGPublisher implements Publisher {
     if (options.subGraphName && !options.targetGraphUri) {
       const sgValidation = validateSubGraphName(options.subGraphName);
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
+
+      const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
+      const registered = await this.store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(options.contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> ?p ?o } }`,
+      );
+      if (registered.type === 'boolean' && !registered.value) {
+        throw new Error(
+          `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
+          `Call createSubGraph() first.`,
+        );
+      }
+
       options = {
         ...options,
-        targetGraphUri: contextGraphSubGraphUri(options.contextGraphId, options.subGraphName),
+        targetGraphUri: sgUri,
       };
     }
 
@@ -1006,6 +1018,7 @@ export class DKGPublisher implements Publisher {
             accessPolicy: effectiveAccessPolicy,
             allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
+            subGraphName: options.subGraphName,
           },
           kaMetadata,
           {
@@ -1115,6 +1128,7 @@ export class DKGPublisher implements Publisher {
       publicQuads: allSkolemizedQuads,
       v10ACKs,
       v10Origin: usedV10Path,
+      subGraphName: options.subGraphName,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -1412,6 +1426,10 @@ export class DKGPublisher implements Publisher {
       const v = validateSubGraphName(subGraphName);
       if (!v.valid) throw new Error(`Invalid sub-graph name: ${v.reason}`);
     }
+  }
+
+  clearSubGraphOwnership(ownershipKey: string): void {
+    this.sharedMemoryOwnedEntities.delete(ownershipKey);
   }
 
   async draftCreate(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<string> {

@@ -23,6 +23,7 @@ export const PublishRequestSchema = new Type('PublishRequest')
   .add(new Field('txHash', 12, 'string'))
   .add(new Field('blockNumber', 13, 'uint64'))
   .add(new Field('operationId', 14, 'string'))
+  .add(new Field('subGraphName', 15, 'string'))
   .add(KAManifestEntrySchema);
 
 export const PublishAckSchema = new Type('PublishAck')
@@ -59,6 +60,8 @@ export interface PublishRequestMsg {
   blockNumber?: number | Long;
   /** Originator's operation ID for cross-node log correlation. */
   operationId?: string;
+  /** Sub-graph within the context graph. Receivers store in sub-graph data graph if set. */
+  subGraphName?: string;
 }
 
 export interface PublishAckMsg {

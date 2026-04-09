@@ -128,6 +128,8 @@ export interface PublishResult {
   v10ACKs?: V10CoreNodeACK[];
   /** True when the KC was created via KnowledgeAssetsV10 (V10 storage path). */
   v10Origin?: boolean;
+  /** Sub-graph the data was published into (for gossip propagation). */
+  subGraphName?: string;
 }
 
 export interface Publisher {
