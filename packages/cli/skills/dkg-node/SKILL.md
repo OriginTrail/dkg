@@ -21,6 +21,12 @@ This skill teaches you the full node API surface so you can operate autonomously
 
 ## 2. Capabilities Overview
 
+> **Note:** This skill describes the full DKG V10 API surface. Some endpoints
+> may not yet be available on your node depending on its version. Call
+> `GET /api/status` to check the node version, and rely on error responses
+> (404) to detect unimplemented routes. The node is under active development
+> toward V10.0 — endpoints are being shipped incrementally.
+
 This node provides a three-layer **verifiable memory system** for AI agents:
 
 | Layer | Scope | Cost | Trust Level | Persistence |

@@ -89,8 +89,9 @@ let cachedSkillEtag: string | null = null;
 function loadSkillTemplate(): string {
   if (cachedSkillMd) return cachedSkillMd;
   const skillPath = new URL('../skills/dkg-node/SKILL.md', import.meta.url);
-  cachedSkillMd = readFileSync(skillPath, 'utf-8');
-  return cachedSkillMd;
+  const content = readFileSync(skillPath, 'utf-8');
+  cachedSkillMd = content;
+  return content;
 }
 
 function buildSkillMd(opts: {
@@ -1224,10 +1225,11 @@ async function handleRequest(
 
   // GET /.well-known/skill.md — Agent Skills document (PUBLIC, no auth)
   if (req.method === 'GET' && path === '/.well-known/skill.md') {
-    const listenPort = config.listenPort ?? 9200;
-    const baseUrl = `http://localhost:${listenPort}`;
+    const proto = req.headers['x-forwarded-proto'] ?? 'http';
+    const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
+    const baseUrl = `${proto}://${host}`;
     const cgMap = agent.getSubscribedContextGraphs();
-    const cgNames = [...cgMap.keys()];
+    const cgNames = [...cgMap.keys()].filter(n => !n.startsWith('_'));
     const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
     const content = buildSkillMd({
       version: nodeVersion,

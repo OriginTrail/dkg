@@ -12,6 +12,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
+import { fileURLToPath } from 'node:url';
 import type { ExtractionPipeline, ExtractionInput, ExtractionOutput } from '@origintrail-official/dkg-core';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
@@ -19,7 +20,7 @@ const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
 function resolveMarkItDownBin(): string | null {
   const suffix = platform === 'win32' ? '.exe' : '';
   const binaryName = `markitdown-${platform}-${arch}${suffix}`;
-  const binDir = resolve(new URL('../../bin', import.meta.url).pathname);
+  const binDir = resolve(fileURLToPath(new URL('../../bin', import.meta.url)));
   const candidate = join(binDir, binaryName);
   if (existsSync(candidate)) return candidate;
 
