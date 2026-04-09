@@ -942,7 +942,7 @@ export class EVMChainAdapter implements ChainAdapter {
       identityIds,
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
-      params.publishPolicy ?? 1,
+      params.publishPolicy ?? 0,
       params.publishAuthority ?? ethers.ZeroAddress,
     );
     const receipt = await tx.wait();

@@ -17,8 +17,7 @@ function makeEventBus() {
 
 describe('StorageACKHandler', () => {
   const contextGraphId = 'test-project';
-  const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
-  const cgIdBigInt = BigInt(cgIdHash);
+  const cgIdBigInt = 0n;
 
   const swmQuads: Quad[] = [
     makeQuad('urn:entity:1', 'urn:p', 'urn:o1'),

@@ -83,11 +83,7 @@ export interface PublishOptions {
   targetGraphUri?: string;
   /** Override the meta graph URI (used for context graph publishing). */
   targetMetaGraphUri?: string;
-  /**
-   * If provided, publisher calls this to collect receiver signatures
-   * from peers BEFORE the on-chain tx (replicate-then-publish).
-   * If absent, falls back to self-signing (legacy behavior).
-   */
+  /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
   receiverSignatureProvider?: ReceiverSignatureProvider;
   /**
    * V10 ACK provider: collects core node StorageACKs via P2P.

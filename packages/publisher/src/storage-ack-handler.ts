@@ -160,7 +160,7 @@ export class StorageACKHandler {
     try {
       contextGraphIdBigInt = BigInt(cgId);
     } catch {
-      contextGraphIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(cgId)));
+      contextGraphIdBigInt = 0n;
     }
     const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
     const intentTokenAmount = intent.tokenAmountStr

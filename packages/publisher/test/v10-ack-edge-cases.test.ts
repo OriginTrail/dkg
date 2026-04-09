@@ -43,8 +43,7 @@ const testQuads: Quad[] = [
 ];
 const merkleRoot = computeFlatKCRoot(testQuads, []);
 const testCGIdStr = 'test-context-graph';
-const testCGIdHash = ethers.keccak256(ethers.toUtf8Bytes(testCGIdStr));
-const testCGId = BigInt(testCGIdHash);
+const testCGId = 0n;
 
 const coreWallets = Array.from({ length: 6 }, () => ethers.Wallet.createRandom());
 
@@ -676,7 +675,7 @@ describe('StorageACKHandler signature format', () => {
     };
   }
 
-  it('ACK signature matches EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))', async () => {
+  it('ACK signature matches EIP-191 digest (0n context graph id for non-numeric CG)', async () => {
     const store = createMockStore(testQuads);
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 

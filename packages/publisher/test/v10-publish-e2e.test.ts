@@ -16,8 +16,7 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
 
 describe('V10 Publish E2E', () => {
   const contextGraphId = 'my-research-project';
-  const cgIdHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
-  const cgIdBigInt = BigInt(cgIdHash);
+  const cgIdBigInt = 0n;
   const swmGraphUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
   const publishQuads: Quad[] = [
@@ -47,7 +46,7 @@ describe('V10 Publish E2E', () => {
         const localRoot = computeFlatKCRoot(publishQuads, []);
         expect(Buffer.from(localRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
-        // Core node signs ACK: EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+        // Core node signs ACK: digest uses 0n for non-numeric context graph id strings.
         const digest = computeACKDigest(cgIdBigInt, merkleRoot);
         const sig = ethers.Signature.from(await wallet.signMessage(digest));
 

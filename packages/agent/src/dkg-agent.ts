@@ -3431,7 +3431,9 @@ export class DKGAgent {
       try {
         cgIdBigInt = BigInt(contextGraphId);
       } catch {
-        cgIdBigInt = BigInt(ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)));
+        // Non-numeric CG names are off-chain — use 0 so ACK digest matches
+        // the on-chain call which passes 0 for virtual context graphs.
+        cgIdBigInt = 0n;
       }
 
       const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'

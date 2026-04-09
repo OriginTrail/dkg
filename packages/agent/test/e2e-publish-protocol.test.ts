@@ -175,16 +175,10 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     expect(cBindings.length).toBe(1);
   }, 30_000);
 
-  it('on-chain publish includes receiver sigs from B and C (not self-signed)', async () => {
-    /**
-     * Verify that the on-chain transaction actually includes receiver signatures
-     * from distinct nodes (B and C), not the publisher self-signing.
-     *
-     * We check the mock chain's stored events to verify the publish parameters.
-     */
+  it('on-chain V10 publish emits KCCreated event with publisher address', async () => {
     const events = [];
     for await (const event of sharedChain.listenForEvents({
-      eventTypes: ['KnowledgeBatchCreated'],
+      eventTypes: ['KCCreated'],
     })) {
       events.push(event);
     }

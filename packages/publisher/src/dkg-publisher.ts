@@ -844,11 +844,7 @@ export class DKGPublisher implements Publisher {
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (options.receiverSignatureProvider) {
-          this.log.warn(ctx, `V10 ACK collection failed, falling back to V9 receiver-signature path: ${msg}`);
-        } else {
-          this.log.warn(ctx, `V10 ACK collection failed and no V9 receiverSignatureProvider configured — will attempt self-signed V9 path (degraded mode, may fail on-chain if minimumRequiredSignatures > 1): ${msg}`);
-        }
+        this.log.warn(ctx, `V10 ACK collection failed — will attempt self-signed ACK fallback: ${msg}`);
       } finally {
         onPhase?.('collect_v10_acks', 'end');
       }
@@ -862,7 +858,7 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `No v10ACKProvider — self-signing ACK (single-node mode)`);
       const cgIdForACK = (() => {
         const raw = options.publishContextGraphId ?? contextGraphId;
-        try { return BigInt(raw); } catch { return BigInt(ethers.keccak256(ethers.toUtf8Bytes(raw))); }
+        try { return BigInt(raw); } catch { return 0n; }
       })();
       const ackDigest = computeACKDigest(
         cgIdForACK, kcMerkleRoot, kaCount, publicByteSize, publishEpochs, precomputedTokenAmount,
@@ -909,7 +905,9 @@ export class DKGPublisher implements Publisher {
       try {
         cgIdForSig = BigInt(ackDomainForSig);
       } catch {
-        cgIdForSig = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomainForSig)));
+        // Non-numeric CG names are virtual/off-chain — pass 0 so the contract
+        // skips on-chain CG authorization (only on-chain CGs have governance).
+        cgIdForSig = 0n;
       }
 
       onPhase?.('chain:sign', 'end');
