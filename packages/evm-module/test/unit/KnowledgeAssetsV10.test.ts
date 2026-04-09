@@ -99,7 +99,8 @@ describe('@unit KnowledgeAssetsV10', () => {
   let Profile: Profile;
   let StakingContract: Staking;
 
-  const CONTEXT_GRAPH_ID = 42n;
+  // Use 0 to skip isAuthorizedPublisher (these tests focus on ACK digest verification)
+  const CONTEXT_GRAPH_ID = 0n;
   const STAKE_AMOUNT = ethers.parseEther('50000');
 
   async function stakeForNode(

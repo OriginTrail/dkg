@@ -354,7 +354,7 @@ describe('V10 E2E Conviction System', function () {
       await PCA.connect(publisher).createAccount(LOCK_AMOUNT, LOCK_EPOCHS);
       await PCA.connect(publisher).addAuthorizedKey(1, accounts[9].address);
 
-      const CONTEXT_GRAPH_ID = 42n;
+      const CONTEXT_GRAPH_ID = 0n;
       const STAKE_AMOUNT = ethers.parseEther('50000');
 
       const publishingNode = getDefaultPublishingNode(accounts);

@@ -820,11 +820,14 @@ export class DKGPublisher implements Publisher {
 
     // Pre-compute tokenAmount and epochs so they can be included in the 6-field ACK digest.
     const publishEpochs = 1;
-    let precomputedTokenAmount =
-      this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function'
-        ? await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs)
-        : 1n;
-    if (precomputedTokenAmount <= 0n) precomputedTokenAmount = 1n;
+    let precomputedTokenAmount = 0n;
+    if (this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
+      precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs);
+      if (precomputedTokenAmount <= 0n) {
+        this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${publicByteSize} — using 1n as minimum`);
+        precomputedTokenAmount = 1n;
+      }
+    }
 
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
