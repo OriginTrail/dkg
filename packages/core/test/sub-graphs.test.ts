@@ -2,6 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   contextGraphSubGraphUri,
   contextGraphSubGraphMetaUri,
+  contextGraphSharedMemoryUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphDraftUri,
   validateSubGraphName,
 } from '../src/constants.js';
 
@@ -24,6 +27,36 @@ describe('sub-graph URI helpers', () => {
     const code = contextGraphSubGraphUri(cgId, 'code');
     const decisions = contextGraphSubGraphUri(cgId, 'decisions');
     expect(code).not.toBe(decisions);
+  });
+
+  it('contextGraphSharedMemoryUri with subGraphName produces sub-graph SWM URI', () => {
+    expect(contextGraphSharedMemoryUri(cgId, 'code')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/code/_shared_memory',
+    );
+  });
+
+  it('contextGraphSharedMemoryUri without subGraphName produces root SWM URI', () => {
+    expect(contextGraphSharedMemoryUri(cgId)).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/_shared_memory',
+    );
+  });
+
+  it('contextGraphSharedMemoryMetaUri with subGraphName', () => {
+    expect(contextGraphSharedMemoryMetaUri(cgId, 'code')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/code/_shared_memory_meta',
+    );
+  });
+
+  it('contextGraphDraftUri with subGraphName places sub-graph before draft', () => {
+    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan', 'code')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/code/draft/0xAgent/scan',
+    );
+  });
+
+  it('contextGraphDraftUri without subGraphName produces flat URI', () => {
+    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/draft/0xAgent/scan',
+    );
   });
 });
 

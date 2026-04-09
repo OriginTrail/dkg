@@ -1386,12 +1386,14 @@ export class DKGAgent {
    * When localOnly is false (default), replicates via GossipSub shared memory topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ shareOperationId: string }> {
+  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string }): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
@@ -1984,6 +1986,16 @@ export class DKGAgent {
     const gm = new GraphManager(this.store);
     const uri = sgUri(contextGraphId, subGraphName);
 
+    // Idempotency: check if already registered before inserting
+    const existing = await this.listSubGraphs(contextGraphId);
+    if (existing.some(sg => sg.name === subGraphName)) {
+      this.log.info(
+        createOperationContext('system'),
+        `Sub-graph "${subGraphName}" already exists in context graph "${contextGraphId}" → ${uri}`,
+      );
+      return { uri };
+    }
+
     const { generateSubGraphRegistration } = await import('@origintrail-official/dkg-publisher');
     const registrationQuads = generateSubGraphRegistration({
       contextGraphId,
@@ -2052,8 +2064,11 @@ export class DKGAgent {
 
     const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
     const metaUri = gm.subGraphMetaUri(contextGraphId, subGraphName);
-    try { await this.store.dropGraph(dataUri); } catch { /* graph may not exist */ }
-    try { await this.store.dropGraph(metaUri); } catch { /* graph may not exist */ }
+    const swmUri = gm.sharedMemoryUri(contextGraphId, subGraphName);
+    const swmMetaUri = gm.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    for (const uri of [dataUri, metaUri, swmUri, swmMetaUri]) {
+      try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
+    }
 
     this.log.info(
       createOperationContext('system'),
@@ -3621,20 +3636,20 @@ export class DKGAgent {
     const agent = this;
     const agentAddress = this.peerId;
     return {
-      async create(contextGraphId: string, draftName: string): Promise<string> {
-        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);
+      async create(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<string> {
+        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
-      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>): Promise<void> {
-        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples);
+      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>, opts?: { subGraphName?: string }): Promise<void> {
+        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples, opts?.subGraphName);
       },
-      async query(contextGraphId: string, draftName: string): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
-        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress);
+      async query(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
-      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all' }): Promise<{ promotedCount: number }> {
+      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
         return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
       },
-      async discard(contextGraphId: string, draftName: string): Promise<void> {
-        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress);
+      async discard(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<void> {
+        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
     };
   }

@@ -243,16 +243,16 @@ describe('Sub-graph publish + query (single agent)', () => {
     await agent.createContextGraph({ id: 'sg-swm', name: 'SWM', description: '' });
     await agent.createSubGraph('sg-swm', 'tasks');
 
-    // Share to SWM first
+    // Share to sub-graph SWM
     await agent.share('sg-swm', [
       { subject: 'urn:task:1', predicate: 'http://ex.org/title', object: '"Implement sub-graphs"', graph: '' },
       { subject: 'urn:task:1', predicate: 'http://ex.org/status', object: '"done"', graph: '' },
-    ], { localOnly: true });
+    ], { localOnly: true, subGraphName: 'tasks' });
 
-    // Verify in SWM
+    // Verify in sub-graph SWM
     const swmResult = await agent.query(
       'SELECT ?title WHERE { ?s <http://ex.org/title> ?title }',
-      { contextGraphId: 'sg-swm', graphSuffix: '_shared_memory' },
+      { contextGraphId: 'sg-swm', graphSuffix: '_shared_memory', subGraphName: 'tasks' },
     );
     expect(swmResult.bindings).toHaveLength(1);
 
@@ -339,4 +339,187 @@ describe('Sub-graph replication (two agents)', () => {
     expect(bResult.bindings.length).toBeGreaterThanOrEqual(1);
     expect(bResult.bindings[0]['label']).toBe('"Replicated Entity"');
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// Cross-layer sub-graphs: WM → SWM → VM pipeline
+// ---------------------------------------------------------------------------
+describe('Sub-graph across memory layers (single agent)', () => {
+  it('shares to sub-graph SWM and queries it back', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SwmSubBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-swm-layer', name: 'SWM Layer', description: '' });
+    await agent.createSubGraph('sg-swm-layer', 'code');
+
+    // Share directly to sub-graph SWM
+    await agent.share('sg-swm-layer', [
+      { subject: 'urn:fn:parse', predicate: 'http://ex.org/type', object: '"Function"', graph: '' },
+    ], { subGraphName: 'code', localOnly: true });
+
+    // Query sub-graph SWM
+    const sgResult = await agent.query(
+      'SELECT ?type WHERE { ?s <http://ex.org/type> ?type }',
+      { contextGraphId: 'sg-swm-layer', graphSuffix: '_shared_memory', subGraphName: 'code' },
+    );
+    expect(sgResult.bindings).toHaveLength(1);
+    expect(sgResult.bindings[0]['type']).toBe('"Function"');
+
+    // Root SWM should NOT have sub-graph data
+    const rootResult = await agent.query(
+      'SELECT ?type WHERE { ?s <http://ex.org/type> ?type }',
+      { contextGraphId: 'sg-swm-layer', graphSuffix: '_shared_memory' },
+    );
+    expect(rootResult.bindings).toHaveLength(0);
+  }, 15_000);
+
+  it('WM draft with subGraphName → promote to sub-graph SWM', async () => {
+    const agent = await DKGAgent.create({
+      name: 'DraftSubBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-wm-layer', name: 'WM Layer', description: '' });
+    await agent.createSubGraph('sg-wm-layer', 'decisions');
+
+    // Create draft in sub-graph WM
+    const draftUri = await agent.draft.create('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(draftUri).toContain('/decisions/draft/');
+
+    // Write to draft
+    await agent.draft.write('sg-wm-layer', 'arch-review', [
+      { subject: 'urn:dec:1', predicate: 'http://ex.org/title', object: '"Use TypeScript"' },
+    ], { subGraphName: 'decisions' });
+
+    // Query draft
+    const draftQuads = await agent.draft.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(draftQuads).toHaveLength(1);
+
+    // Promote to sub-graph SWM
+    const result = await agent.draft.promote('sg-wm-layer', 'arch-review', {
+      entities: 'all',
+      subGraphName: 'decisions',
+    });
+    expect(result.promotedCount).toBe(1);
+
+    // Query sub-graph SWM for promoted data
+    const swmResult = await agent.query(
+      'SELECT ?title WHERE { ?s <http://ex.org/title> ?title }',
+      { contextGraphId: 'sg-wm-layer', graphSuffix: '_shared_memory', subGraphName: 'decisions' },
+    );
+    expect(swmResult.bindings).toHaveLength(1);
+    expect(swmResult.bindings[0]['title']).toBe('"Use TypeScript"');
+
+    // Root SWM should be empty
+    const rootSwm = await agent.query(
+      'SELECT ?title WHERE { ?s <http://ex.org/title> ?title }',
+      { contextGraphId: 'sg-wm-layer', graphSuffix: '_shared_memory' },
+    );
+    expect(rootSwm.bindings).toHaveLength(0);
+
+    // Draft should be empty after promotion
+    const emptyDraft = await agent.draft.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(emptyDraft).toHaveLength(0);
+  }, 15_000);
+
+  it('full pipeline: WM draft → SWM → VM (sub-graph scoped)', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PipelineBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-pipeline', name: 'Pipeline', description: '' });
+    await agent.createSubGraph('sg-pipeline', 'code');
+
+    // Step 1: Draft in WM/code
+    await agent.draft.create('sg-pipeline', 'scan', { subGraphName: 'code' });
+    await agent.draft.write('sg-pipeline', 'scan', [
+      { subject: 'urn:fn:main', predicate: 'http://ex.org/sig', object: '"main()"' },
+    ], { subGraphName: 'code' });
+
+    // Step 2: Promote WM/code → SWM/code
+    await agent.draft.promote('sg-pipeline', 'scan', {
+      entities: 'all',
+      subGraphName: 'code',
+    });
+
+    // Verify in SWM/code
+    const swmCheck = await agent.query(
+      'SELECT ?sig WHERE { ?s <http://ex.org/sig> ?sig }',
+      { contextGraphId: 'sg-pipeline', graphSuffix: '_shared_memory', subGraphName: 'code' },
+    );
+    expect(swmCheck.bindings).toHaveLength(1);
+
+    // Step 3: Publish from SWM to VM/code
+    const publishResult = await agent.publishFromSharedMemory('sg-pipeline', 'all', {
+      subGraphName: 'code',
+    });
+    expect(publishResult.status).toBe('confirmed');
+
+    // Verify in VM/code
+    const vmResult = await agent.query(
+      'SELECT ?sig WHERE { ?s <http://ex.org/sig> ?sig }',
+      { contextGraphId: 'sg-pipeline', subGraphName: 'code' },
+    );
+    expect(vmResult.bindings).toHaveLength(1);
+    expect(vmResult.bindings[0]['sig']).toBe('"main()"');
+
+    // Root VM should be empty
+    const rootVm = await agent.query(
+      'SELECT ?sig WHERE { ?s <http://ex.org/sig> ?sig }',
+      { contextGraphId: 'sg-pipeline' },
+    );
+    expect(rootVm.bindings).toHaveLength(0);
+  }, 20_000);
+
+  it('sub-graph SWM data is isolated between sub-graphs', async () => {
+    const agent = await DKGAgent.create({
+      name: 'IsoSwmBot',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    agents.push(agent);
+    await agent.start();
+
+    await agent.createContextGraph({ id: 'sg-iso-swm', name: 'Iso SWM', description: '' });
+    await agent.createSubGraph('sg-iso-swm', 'code');
+    await agent.createSubGraph('sg-iso-swm', 'decisions');
+
+    await agent.share('sg-iso-swm', [
+      { subject: 'urn:fn:1', predicate: 'http://ex.org/type', object: '"Function"', graph: '' },
+    ], { subGraphName: 'code', localOnly: true });
+
+    await agent.share('sg-iso-swm', [
+      { subject: 'urn:dec:1', predicate: 'http://ex.org/type', object: '"Decision"', graph: '' },
+    ], { subGraphName: 'decisions', localOnly: true });
+
+    const codeSwm = await agent.query(
+      'SELECT ?type WHERE { ?s <http://ex.org/type> ?type }',
+      { contextGraphId: 'sg-iso-swm', graphSuffix: '_shared_memory', subGraphName: 'code' },
+    );
+    expect(codeSwm.bindings).toHaveLength(1);
+    expect(codeSwm.bindings[0]['type']).toBe('"Function"');
+
+    const decSwm = await agent.query(
+      'SELECT ?type WHERE { ?s <http://ex.org/type> ?type }',
+      { contextGraphId: 'sg-iso-swm', graphSuffix: '_shared_memory', subGraphName: 'decisions' },
+    );
+    expect(decSwm.bindings).toHaveLength(1);
+    expect(decSwm.bindings[0]['type']).toBe('"Decision"');
+  }, 15_000);
 });

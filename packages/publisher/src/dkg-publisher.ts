@@ -46,6 +46,7 @@ export interface DKGPublisherConfig {
 export interface ShareOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
+  subGraphName?: string;
 }
 
 /** @deprecated Use ShareOptions */
@@ -188,6 +189,10 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ShareOptions & { conditions?: CASCondition[] },
   ): Promise<ShareResult> {
+    if (options.subGraphName !== undefined) {
+      const v = validateSubGraphName(options.subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name for share: ${v.reason}`);
+    }
     const ctx = options.operationCtx ?? createOperationContext('share');
     this.log.info(ctx, `Writing ${quads.length} quads to shared memory for context graph ${contextGraphId}`);
 
@@ -234,8 +239,8 @@ export class DKGPublisher implements Publisher {
     }
 
     const shareOperationId = `swm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options.subGraphName);
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options.subGraphName);
 
     // Pre-encode gossip message and enforce size limit BEFORE any
     // destructive SWM mutations to avoid leaving orphaned state.
@@ -268,6 +273,7 @@ export class DKGPublisher implements Publisher {
       timestampMs: Date.now(),
       operationId: ctx.operationId,
       casConditions,
+      subGraphName: options.subGraphName,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -422,7 +428,7 @@ export class DKGPublisher implements Publisher {
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
     let sparql: string;
     if (selection === 'all') {
@@ -1398,8 +1404,16 @@ export class DKGPublisher implements Publisher {
 
   // ── Working Memory Draft Operations (spec §6) ────────────────────────
 
-  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string): Promise<string> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+  private static validateOptionalSubGraph(subGraphName: string | undefined): void {
+    if (subGraphName !== undefined) {
+      const v = validateSubGraphName(subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name: ${v.reason}`);
+    }
+  }
+
+  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<string> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     await this.store.createGraph(graphUri);
     return graphUri;
   }
@@ -1409,8 +1423,10 @@ export class DKGPublisher implements Publisher {
     draftName: string,
     agentAddress: string,
     triples: Array<{ subject: string; predicate: string; object: string }>,
+    subGraphName?: string,
   ): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     const quads = triples.map((t) => ({ ...t, graph: graphUri }));
     await this.store.insert(quads);
   }
@@ -1419,8 +1435,10 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
+    subGraphName?: string,
   ): Promise<Quad[]> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
     );
@@ -1431,10 +1449,10 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
-    opts?: { entities?: string[] | 'all' },
+    opts?: { entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<{ promotedCount: number }> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, opts?.subGraphName);
+    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
 
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
@@ -1475,8 +1493,9 @@ export class DKGPublisher implements Publisher {
     return { promotedCount: swmQuads.length };
   }
 
-  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<void> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     await this.store.dropGraph(graphUri);
   }
 }

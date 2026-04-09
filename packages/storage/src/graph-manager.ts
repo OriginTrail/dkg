@@ -34,12 +34,12 @@ export class ContextGraphManager {
     return contextGraphPrivateUri(contextGraphId);
   }
 
-  sharedMemoryUri(contextGraphId: string): string {
-    return contextGraphSharedMemoryUri(contextGraphId);
+  sharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
+    return contextGraphSharedMemoryUri(contextGraphId, subGraphName);
   }
 
-  sharedMemoryMetaUri(contextGraphId: string): string {
-    return contextGraphSharedMemoryMetaUri(contextGraphId);
+  sharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {
+    return contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
   }
 
   verifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string): string {
@@ -66,6 +66,8 @@ export class ContextGraphManager {
     await this.ensureContextGraph(contextGraphId);
     await this.store.createGraph(this.subGraphUri(contextGraphId, subGraphName));
     await this.store.createGraph(this.subGraphMetaUri(contextGraphId, subGraphName));
+    await this.store.createGraph(contextGraphSharedMemoryUri(contextGraphId, subGraphName));
+    await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
   }
 
   async ensureContextGraph(contextGraphId: string): Promise<void> {

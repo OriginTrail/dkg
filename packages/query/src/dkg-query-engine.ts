@@ -129,7 +129,7 @@ export class DKGQueryEngine implements QueryEngine {
       const dataGraph = options?.subGraphName
         ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
         : contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
+      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);
         const sharedMemorySparql = wrapWithGraph(sparql, sharedMemoryGraph);

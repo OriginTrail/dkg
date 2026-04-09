@@ -24,6 +24,7 @@ export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
   .add(new Field('timestampMs', 6, 'uint64'))
   .add(new Field('operationId', 7, 'string'))
   .add(new Field('casConditions', 8, 'WorkspaceCASCondition', 'repeated'))
+  .add(new Field('subGraphName', 9, 'string'))
   .add(WorkspaceManifestEntrySchema)
   .add(WorkspaceCASConditionSchema);
 
@@ -53,6 +54,8 @@ export interface WorkspacePublishRequestMsg {
   operationId?: string;
   /** CAS conditions that receiving peers must enforce before applying this write. */
   casConditions?: WorkspaceCASConditionMsg[];
+  /** Sub-graph within the context graph. Receivers store in sub-graph SWM if set. */
+  subGraphName?: string;
 }
 
 export function encodeWorkspacePublishRequest(msg: WorkspacePublishRequestMsg): Uint8Array {

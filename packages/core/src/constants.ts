@@ -67,11 +67,13 @@ export function contextGraphPrivateUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_private`;
 }
 
-export function contextGraphSharedMemoryUri(contextGraphId: string): string {
+export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 }
 
-export function contextGraphSharedMemoryMetaUri(contextGraphId: string): string {
+export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory_meta`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
 }
 
@@ -83,7 +85,8 @@ export function contextGraphVerifiedMemoryMetaUri(contextGraphId: string, verifi
   return `did:dkg:context-graph:${contextGraphId}/_verified_memory/${verifiedMemoryId}/_meta`;
 }
 
-export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string): string {
+export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/${agentAddress}/${name}`;
   return `did:dkg:context-graph:${contextGraphId}/draft/${agentAddress}/${name}`;
 }
 

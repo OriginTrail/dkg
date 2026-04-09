@@ -125,8 +125,9 @@ export class SharedMemoryHandler {
         ctx = createOperationContext('share', request.operationId);
       }
       const contextGraphId = request.paranetId;
-      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions } = request;
-      this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId} op=${shareOperationId}`);
+      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions, subGraphName } = request;
+      const sgLabel = subGraphName ? `/${subGraphName}` : '';
+      this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
 
       if (publisherPeerId !== fromPeerId) {
         this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
@@ -146,8 +147,8 @@ export class SharedMemoryHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+      const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
 
       const condSubjects = (casConditions ?? []).map(c => c.subject);
       const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
