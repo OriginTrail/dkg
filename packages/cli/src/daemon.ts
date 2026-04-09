@@ -2088,6 +2088,11 @@ async function handleRequest(
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
+    const view = parsed.view;
+    const agentAddress = parsed.agentAddress;
+    const verifiedGraph = parsed.verifiedGraph;
+    const assertionName = parsed.assertionName;
+    const subGraphName = parsed.subGraphName;
     if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
     const ctx = createOperationContext('query');
     tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
@@ -2096,7 +2101,7 @@ async function handleRequest(
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, operationCtx: ctx });
+      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, view, agentAddress, verifiedGraph, assertionName, subGraphName, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });

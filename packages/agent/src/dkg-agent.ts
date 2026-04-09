@@ -1596,7 +1596,9 @@ export class DKGAgent {
       includeWorkspace?: boolean;
       operationCtx?: OperationContext;
       view?: GetView;
+      agentAddress?: string;
       verifiedGraph?: string;
+      assertionName?: string;
       subGraphName?: string;
     },
   ) {
@@ -1615,8 +1617,9 @@ export class DKGAgent {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
-      agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
+      agentAddress: opts.agentAddress ?? (opts.view === 'working-memory' ? this.peerId : undefined),
       verifiedGraph: opts.verifiedGraph,
+      assertionName: opts.assertionName,
       subGraphName: opts.subGraphName,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
@@ -2067,8 +2070,8 @@ export class DKGAgent {
       try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
     }
 
-    // Drop assertion/draft graphs under the sub-graph prefix
-    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/`;
+    // Drop assertion graphs under the sub-graph prefix
+    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/`;
     const allGraphs = await this.store.listGraphs();
     for (const g of allGraphs) {
       if (g.startsWith(sgPrefix)) {
@@ -3668,7 +3671,17 @@ export class DKGAgent {
           quads = input as import('@origintrail-official/dkg-storage').Quad[];
         } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
           const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
-          quads = [...publicQuads, ...privateQuads];
+          const isEnvelope = !Array.isArray(input) && ('public' in (input as Record<string, unknown>) || 'private' in (input as Record<string, unknown>));
+          if (isEnvelope && privateQuads.length > 0) {
+            new Logger('DKGAgent').warn(
+              createOperationContext('system'),
+              `Dropped ${privateQuads.length} private quads from JSON-LD envelope — WM assertions do not support private data; ` +
+              `use publish() with accessPolicy for private triples`,
+            );
+            quads = publicQuads;
+          } else {
+            quads = [...publicQuads, ...privateQuads];
+          }
         } else {
           quads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));

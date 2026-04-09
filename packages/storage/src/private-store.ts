@@ -19,6 +19,10 @@ export class PrivateContentStore {
     this.graphManager = graphManager;
   }
 
+  clearCache(key: string): void {
+    this.privateEntities.delete(key);
+  }
+
   private privateGraph(contextGraphId: string, subGraphName?: string): string {
     return subGraphName
       ? this.graphManager.subGraphPrivateUri(contextGraphId, subGraphName)

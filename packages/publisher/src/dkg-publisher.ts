@@ -361,7 +361,8 @@ export class DKGPublisher implements Publisher {
 
     const conditionSubjects = options.conditions.map(c => c.subject);
     const quadSubjects = [...new Set(quads.map(q => q.subject))];
-    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${contextGraphId}\0${s}`);
+    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${lockPrefix}\0${s}`);
 
     return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
   }
@@ -383,7 +384,7 @@ export class DKGPublisher implements Publisher {
     const ctx = options.operationCtx ?? createOperationContext('share');
 
     await this.graphManager.ensureContextGraph(contextGraphId);
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options.subGraphName);
 
     for (const cond of options.conditions) {
       const ask = cond.expectedValue === null
@@ -1466,6 +1467,8 @@ export class DKGPublisher implements Publisher {
 
   clearSubGraphOwnership(ownershipKey: string): void {
     this.sharedMemoryOwnedEntities.delete(ownershipKey);
+    this.ownedEntities.delete(ownershipKey);
+    this.privateStore.clearCache(ownershipKey);
   }
 
   async assertionCreate(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<string> {

@@ -322,22 +322,18 @@ describe('Sub-graph replication (two agents)', () => {
         { contextGraphId: 'sg-replica', subGraphName: 'data' },
       );
       if (bResult.bindings.length > 0) break;
-
-      // Also check root graph in case it landed there
-      const rootCheck = await agentB.query(
-        'SELECT ?label WHERE { ?s <http://ex.org/label> ?label }',
-        { contextGraphId: 'sg-replica' },
-      );
-      if (rootCheck.bindings.length > 0) {
-        // Data replicated but to root graph — still valid for replication test
-        bResult = rootCheck;
-        break;
-      }
       await sleep(500);
     }
 
     expect(bResult.bindings.length).toBeGreaterThanOrEqual(1);
     expect(bResult.bindings[0]['label']).toBe('"Replicated Entity"');
+
+    // Sub-graph isolation on replica: data must NOT be in root graph
+    const rootCheck = await agentB.query(
+      'SELECT ?label WHERE { ?s <http://ex.org/label> ?label }',
+      { contextGraphId: 'sg-replica' },
+    );
+    expect(rootCheck.bindings).toHaveLength(0);
   }, 30_000);
 });
 
@@ -379,7 +375,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     expect(rootResult.bindings).toHaveLength(0);
   }, 15_000);
 
-  it('draft.write accepts Quad[] input', async () => {
+  it('assertion.write accepts Quad[] input', async () => {
     const agent = await DKGAgent.create({
       name: 'QuadDraftBot',
       listenPort: 0,
@@ -392,19 +388,19 @@ describe('Sub-graph across memory layers (single agent)', () => {
     await agent.createContextGraph({ id: 'sg-quad-draft', name: 'Quad Draft', description: '' });
     await agent.createSubGraph('sg-quad-draft', 'code');
 
-    await agent.draft.create('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+    await agent.assertion.create('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
 
     // Write using Quad[] (standard format, same as publish/share)
-    await agent.draft.write('sg-quad-draft', 'quad-test', [
+    await agent.assertion.write('sg-quad-draft', 'quad-test', [
       { subject: 'urn:fn:main', predicate: 'http://ex.org/sig', object: '"main()"', graph: '' },
       { subject: 'urn:fn:main', predicate: 'http://ex.org/lang', object: '"TypeScript"', graph: '' },
     ], { subGraphName: 'code' });
 
-    const quads = await agent.draft.query('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
+    const quads = await agent.assertion.query('sg-quad-draft', 'quad-test', { subGraphName: 'code' });
     expect(quads).toHaveLength(2);
   }, 15_000);
 
-  it('draft.write accepts JSON-LD input', async () => {
+  it('assertion.write accepts JSON-LD input', async () => {
     const agent = await DKGAgent.create({
       name: 'JsonLdDraftBot',
       listenPort: 0,
@@ -417,22 +413,22 @@ describe('Sub-graph across memory layers (single agent)', () => {
     await agent.createContextGraph({ id: 'sg-jsonld-draft', name: 'JSONLD Draft', description: '' });
     await agent.createSubGraph('sg-jsonld-draft', 'entities');
 
-    await agent.draft.create('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+    await agent.assertion.create('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
 
     // Write using JSON-LD (auto-converted to quads)
-    await agent.draft.write('sg-jsonld-draft', 'ld-test', {
+    await agent.assertion.write('sg-jsonld-draft', 'ld-test', {
       '@id': 'urn:entity:alice',
       'http://schema.org/name': 'Alice',
       'http://schema.org/jobTitle': 'Engineer',
     }, { subGraphName: 'entities' });
 
-    const quads = await agent.draft.query('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
+    const quads = await agent.assertion.query('sg-jsonld-draft', 'ld-test', { subGraphName: 'entities' });
     expect(quads.length).toBeGreaterThanOrEqual(2);
     const names = quads.filter(q => q.predicate === 'http://schema.org/name');
     expect(names).toHaveLength(1);
   }, 15_000);
 
-  it('WM draft with subGraphName → promote to sub-graph SWM', async () => {
+  it('WM assertion with subGraphName → promote to sub-graph SWM', async () => {
     const agent = await DKGAgent.create({
       name: 'DraftSubBot',
       listenPort: 0,
@@ -445,21 +441,21 @@ describe('Sub-graph across memory layers (single agent)', () => {
     await agent.createContextGraph({ id: 'sg-wm-layer', name: 'WM Layer', description: '' });
     await agent.createSubGraph('sg-wm-layer', 'decisions');
 
-    // Create draft in sub-graph WM
-    const draftUri = await agent.draft.create('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
-    expect(draftUri).toContain('/decisions/draft/');
+    // Create assertion in sub-graph WM
+    const assertionUri = await agent.assertion.create('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(assertionUri).toContain('/decisions/assertion/');
 
-    // Write to draft
-    await agent.draft.write('sg-wm-layer', 'arch-review', [
+    // Write to assertion
+    await agent.assertion.write('sg-wm-layer', 'arch-review', [
       { subject: 'urn:dec:1', predicate: 'http://ex.org/title', object: '"Use TypeScript"' },
     ], { subGraphName: 'decisions' });
 
-    // Query draft
-    const draftQuads = await agent.draft.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
-    expect(draftQuads).toHaveLength(1);
+    // Query assertion
+    const assertionQuads = await agent.assertion.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(assertionQuads).toHaveLength(1);
 
     // Promote to sub-graph SWM
-    const result = await agent.draft.promote('sg-wm-layer', 'arch-review', {
+    const result = await agent.assertion.promote('sg-wm-layer', 'arch-review', {
       entities: 'all',
       subGraphName: 'decisions',
     });
@@ -480,9 +476,9 @@ describe('Sub-graph across memory layers (single agent)', () => {
     );
     expect(rootSwm.bindings).toHaveLength(0);
 
-    // Draft should be empty after promotion
-    const emptyDraft = await agent.draft.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
-    expect(emptyDraft).toHaveLength(0);
+    // Assertion should be empty after promotion
+    const emptyAssertion = await agent.assertion.query('sg-wm-layer', 'arch-review', { subGraphName: 'decisions' });
+    expect(emptyAssertion).toHaveLength(0);
   }, 15_000);
 
   it('full pipeline: WM draft → SWM → VM (sub-graph scoped)', async () => {
@@ -498,14 +494,14 @@ describe('Sub-graph across memory layers (single agent)', () => {
     await agent.createContextGraph({ id: 'sg-pipeline', name: 'Pipeline', description: '' });
     await agent.createSubGraph('sg-pipeline', 'code');
 
-    // Step 1: Draft in WM/code
-    await agent.draft.create('sg-pipeline', 'scan', { subGraphName: 'code' });
-    await agent.draft.write('sg-pipeline', 'scan', [
+    // Step 1: Assertion in WM/code
+    await agent.assertion.create('sg-pipeline', 'scan', { subGraphName: 'code' });
+    await agent.assertion.write('sg-pipeline', 'scan', [
       { subject: 'urn:fn:main', predicate: 'http://ex.org/sig', object: '"main()"' },
     ], { subGraphName: 'code' });
 
     // Step 2: Promote WM/code → SWM/code
-    await agent.draft.promote('sg-pipeline', 'scan', {
+    await agent.assertion.promote('sg-pipeline', 'scan', {
       entities: 'all',
       subGraphName: 'code',
     });

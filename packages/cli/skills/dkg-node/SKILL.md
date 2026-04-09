@@ -35,7 +35,7 @@ This node provides a three-layer **verifiable memory system** for AI agents:
 | **Shared Working Memory (SWM)** | Visible to team | Free | Self-attested (gossip replicated) | TTL-bounded |
 | **Verified Memory (VM)** | Permanent, on-chain | TRAC tokens | Self-attested → endorsed → consensus-verified | Permanent |
 
-**What you can do:** create knowledge drafts, import files (PDF, DOCX, Markdown),
+**What you can do:** create knowledge assertions, import files (PDF, DOCX, Markdown),
 share knowledge with peers, publish to the blockchain, endorse others' knowledge,
 propose M-of-N consensus verification, query across all memory layers, and
 discover other agents on the network.
@@ -58,7 +58,7 @@ curl -X POST $BASE_URL/api/shared-memory/write \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "paranetId": "my-context-graph",
+    "contextGraphId": "my-context-graph",
     "quads": [
       {"subject": "https://example.org/alice", "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "object": "https://schema.org/Person", "graph": "urn:default"},
       {"subject": "https://example.org/alice", "predicate": "https://schema.org/name", "object": "Alice", "graph": "urn:default"}
@@ -72,7 +72,7 @@ curl -X POST $BASE_URL/api/shared-memory/write \
 curl -X POST $BASE_URL/api/publish \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"paranetId": "my-context-graph", "quads": [...]}'
+  -d '{"contextGraphId": "my-context-graph", "quads": [...]}'
 ```
 
 **Step 4 — Query:**
@@ -81,7 +81,7 @@ curl -X POST $BASE_URL/api/publish \
 curl -X POST $BASE_URL/api/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "view": "shared-working-memory"}'
+  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "includeSharedMemory": true}'
 ```
 
 ## 4. Authentication
@@ -111,20 +111,20 @@ The token is configured in the node's config file or provided at startup.
 
 ### Querying
 
-- `POST /api/query` — SPARQL query with `view` parameter (`working-memory`, `shared-working-memory`, `verified-memory`), optional `minTrust` and `verifiedGraph` filters
+- `POST /api/query` — SPARQL query with optional `view` (`working-memory`, `shared-working-memory`, `verified-memory`), `agentAddress`, `assertionName`, `verifiedGraph`, `subGraphName`, `includeSharedMemory`, `contextGraphId` parameters
 - `POST /api/query-remote` — query a remote peer via P2P
 
-### Working Memory (WM) — Private drafts (🚧 Planned)
+### Working Memory (WM) — Private assertions (🚧 Planned)
 
-> The following WM draft endpoints are planned for a future release:
+> The following WM assertion endpoints are planned for a future release:
 
-- `POST /api/draft/create` — create a named private draft
-- `PUT /api/draft/{name}` — write triples to a draft
-- `POST /api/draft/{name}/import` — import N-Triples/Turtle/JSON-LD
-- `POST /api/draft/{name}/import-file` — import PDF/DOCX/Markdown (multipart)
-- `GET /api/draft/{name}` — read draft contents
-- `DELETE /api/draft/{name}` — delete draft
-- `POST /api/draft/{name}/promote` — promote draft to SWM
+- `POST /api/assertion/create` — create a named private assertion
+- `PUT /api/assertion/{name}` — write triples to an assertion
+- `POST /api/assertion/{name}/import` — import N-Triples/Turtle/JSON-LD
+- `POST /api/assertion/{name}/import-file` — import PDF/DOCX/Markdown (multipart)
+- `GET /api/assertion/{name}` — read assertion contents
+- `DELETE /api/assertion/{name}` — delete assertion
+- `POST /api/assertion/{name}/promote` — promote assertion to SWM
 
 ## 6. Context Graphs
 
@@ -140,7 +140,7 @@ Context Graphs are scoped knowledge domains with configurable access and governa
 
 ## 7. File Ingestion (🚧 Planned)
 
-> File ingestion via `import-file` depends on the Working Memory draft API (§5)
+> File ingestion via `import-file` depends on the Working Memory assertion API (§5)
 > and will be available when those endpoints ship. The extraction pipeline
 > infrastructure (MarkItDown converter) is already in place on the node.
 
@@ -148,7 +148,7 @@ Supported formats depend on available extraction pipelines (see Node Info §1).
 When available, usage will be:
 
 ```bash
-curl -X POST $BASE_URL/api/draft/my-draft/import-file \
+curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@paper.pdf" \
   -F "contextGraph=my-context-graph"

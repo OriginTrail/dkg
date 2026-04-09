@@ -24,6 +24,8 @@ export interface QueryOptions {
   agentAddress?: string;
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;
+  /** Specific assertion name — used with view='working-memory' to target a single assertion graph. */
+  assertionName?: string;
   /**
    * Scope the query to a specific sub-graph within the context graph.
    * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`

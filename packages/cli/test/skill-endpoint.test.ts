@@ -98,8 +98,8 @@ describe('SKILL.md file', () => {
 
   it('marks planned endpoints clearly', () => {
     expect(skillContent).toContain('🚧 Planned');
-    expect(skillContent).toContain('/api/draft/create');
-    expect(skillContent).toContain('/api/draft/{name}/import-file');
+    expect(skillContent).toContain('/api/assertion/create');
+    expect(skillContent).toContain('/api/assertion/{name}/import-file');
   });
 
   it('documents error status codes', () => {

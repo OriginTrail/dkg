@@ -4,6 +4,7 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
+  contextGraphAssertionUri,
   contextGraphDraftUri,
   validateSubGraphName,
 } from '../src/constants.js';
@@ -47,15 +48,21 @@ describe('sub-graph URI helpers', () => {
     );
   });
 
-  it('contextGraphDraftUri with subGraphName places sub-graph before draft', () => {
-    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan', 'code')).toBe(
-      'did:dkg:context-graph:dkg-v10-dev/code/draft/0xAgent/scan',
+  it('contextGraphAssertionUri with subGraphName places sub-graph before assertion', () => {
+    expect(contextGraphAssertionUri(cgId, '0xAgent', 'scan', 'code')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/code/assertion/0xAgent/scan',
     );
   });
 
-  it('contextGraphDraftUri without subGraphName produces flat URI', () => {
-    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan')).toBe(
-      'did:dkg:context-graph:dkg-v10-dev/draft/0xAgent/scan',
+  it('contextGraphAssertionUri without subGraphName produces flat URI', () => {
+    expect(contextGraphAssertionUri(cgId, '0xAgent', 'scan')).toBe(
+      'did:dkg:context-graph:dkg-v10-dev/assertion/0xAgent/scan',
+    );
+  });
+
+  it('contextGraphDraftUri alias delegates to contextGraphAssertionUri', () => {
+    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan', 'code')).toBe(
+      contextGraphAssertionUri(cgId, '0xAgent', 'scan', 'code'),
     );
   });
 });
