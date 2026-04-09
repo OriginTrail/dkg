@@ -85,9 +85,9 @@ export function contextGraphVerifiedMemoryMetaUri(contextGraphId: string, verifi
   return `did:dkg:context-graph:${contextGraphId}/_verified_memory/${verifiedMemoryId}/_meta`;
 }
 
-export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
-  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/${agentAddress}/${name}`;
-  return `did:dkg:context-graph:${contextGraphId}/draft/${agentAddress}/${name}`;
+export function contextGraphAssertionUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/${agentAddress}/${name}`;
+  return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
 export function contextGraphRulesUri(contextGraphId: string): string {
@@ -115,7 +115,7 @@ export function validateSubGraphName(name: string): { valid: boolean; reason?: s
   if (name.startsWith('_')) return { valid: false, reason: 'Sub-graph names starting with "_" are reserved for protocol graphs' };
   if (name.includes('/')) return { valid: false, reason: 'Sub-graph names cannot contain "/"' };
   if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Sub-graph name contains characters unsafe for IRIs' };
-  if (name === 'context' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
+  if (name === 'context' || name === 'assertion' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
   return { valid: true };
 }
 

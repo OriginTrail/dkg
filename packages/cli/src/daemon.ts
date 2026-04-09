@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -51,6 +52,8 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
+import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
+import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
@@ -75,6 +78,55 @@ function getCurrentCommitShort(): string {
     } catch { return ''; }
   }
 }
+
+// ---------------------------------------------------------------------------
+// SKILL.MD serving — Agent Skills standard (https://agentskills.io)
+// ---------------------------------------------------------------------------
+
+let cachedSkillMd: string | null = null;
+let cachedSkillEtag: string | null = null;
+
+function loadSkillTemplate(): string {
+  if (cachedSkillMd) return cachedSkillMd;
+  const skillPath = new URL('../skills/dkg-node/SKILL.md', import.meta.url);
+  const content = readFileSync(skillPath, 'utf-8');
+  cachedSkillMd = content;
+  return content;
+}
+
+function buildSkillMd(opts: {
+  version: string;
+  baseUrl: string;
+  peerId: string;
+  nodeRole: string;
+  extractionPipelines: string[];
+}): string {
+  const template = loadSkillTemplate();
+  const dynamicSection = [
+    `- **Node version:** ${opts.version}`,
+    `- **Base URL:** ${opts.baseUrl}`,
+    `- **Peer ID:** ${opts.peerId}`,
+    `- **Node role:** ${opts.nodeRole}`,
+    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'text/markdown'}`,
+    `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
+  ].join('\n');
+
+  const staticPlaceholder =
+    '> This section is dynamically generated from node state at serve-time.\n\n'
+    + '- **Node version:** (dynamic)\n'
+    + '- **Base URL:** (dynamic)\n'
+    + '- **Peer ID:** (dynamic)\n'
+    + '- **Node role:** (dynamic — `core` or `edge`)\n'
+    + '- **Available extraction pipelines:** (dynamic)\n'
+    + '- **Subscribed Context Graphs:** (dynamic)';
+
+  return template.replace(staticPlaceholder, dynamicSection);
+}
+
+function skillEtag(content: string): string {
+  return '"' + createHash('md5').update(content).digest('hex').slice(0, 16) + '"';
+}
+
 import { loadApps, handleAppRequest, startAppStaticServer, type LoadedApp } from './app-loader.js';
 
 export const DAEMON_EXIT_CODE_RESTART = 75;
@@ -741,11 +793,21 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     latestByParanet: new Map(),
   };
 
+  // --- Extraction Pipelines ---
+
+  const extractionRegistry = new ExtractionPipelineRegistry();
+  if (isMarkItDownAvailable()) {
+    extractionRegistry.register(new MarkItDownConverter());
+    log(`Extraction pipelines: ${extractionRegistry.availableContentTypes().join(', ')}`);
+  } else {
+    log('MarkItDown binary not found — document extraction unavailable (files stored as blobs)');
+  }
+
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
     config.rateLimit?.requestsPerMinute ?? 120,
-    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health'],
+    config.rateLimit?.exempt ?? ['/api/status', '/api/chain/rpc-health', '/.well-known/skill.md'],
   );
   let corsAllowed: CorsAllowlist = '*';
 
@@ -848,6 +910,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         nodeVersion,
         nodeCommit,
         catchupTracker,
+        extractionRegistry,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -1154,9 +1217,37 @@ async function handleRequest(
   nodeVersion: string,
   nodeCommit: string,
   catchupTracker: CatchupTracker,
+  extractionRegistry: ExtractionPipelineRegistry,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
+
+  // GET /.well-known/skill.md — Agent Skills document (PUBLIC, no auth)
+  if (req.method === 'GET' && path === '/.well-known/skill.md') {
+    const proto = req.headers['x-forwarded-proto'] ?? 'http';
+    const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
+    const baseUrl = `${proto}://${host}`;
+    const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
+    const content = buildSkillMd({
+      version: nodeVersion,
+      baseUrl,
+      peerId: agent.peerId,
+      nodeRole: config.nodeRole ?? 'edge',
+      extractionPipelines: [...new Set(pipelines)],
+    });
+    const etag = skillEtag(content);
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304).end();
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'ETag': etag,
+      'Cache-Control': 'public, max-age=300',
+    });
+    res.end(content);
+    return;
+  }
 
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {
@@ -1997,7 +2088,15 @@ async function handleRequest(
     const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory = parsed.includeSharedMemory ?? parsed.includeWorkspace;
+    const view = parsed.view;
+    const agentAddress = parsed.agentAddress;
+    const verifiedGraph = parsed.verifiedGraph;
+    const assertionName = parsed.assertionName;
+    const subGraphName = parsed.subGraphName;
     if (!sparql || !String(sparql).trim()) return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
+      return jsonResponse(res, 400, { error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(', ')}` });
+    }
     const ctx = createOperationContext('query');
     tracker.start(ctx, { contextGraphId, details: { sparql: sparql.slice(0, 200) } });
     tracker.startPhase(ctx, 'parse');
@@ -2005,7 +2104,7 @@ async function handleRequest(
       tracker.completePhase(ctx, 'parse');
       tracker.startPhase(ctx, 'execute');
       const execT0 = Date.now();
-      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, operationCtx: ctx });
+      const result = await agent.query(sparql, { contextGraphId, graphSuffix, includeSharedMemory, view, agentAddress, verifiedGraph, assertionName, subGraphName, operationCtx: ctx });
       const execDur = Date.now() - execT0;
       tracker.completePhase(ctx, 'execute');
       tracker.complete(ctx, { tripleCount: result?.bindings?.length ?? 0 });
@@ -2013,7 +2112,13 @@ async function handleRequest(
     } catch (err: any) {
       tracker.fail(ctx, err);
       const msg = err?.message ?? '';
-      if (msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') || /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg)) {
+      if (
+        msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') ||
+        /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
+        msg.includes('was removed in V10') ||
+        msg.includes('requires agentAddress') || msg.includes('requires contextGraphId') ||
+        msg.includes('cannot be combined with')
+      ) {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

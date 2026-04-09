@@ -106,6 +106,7 @@ export function extractBearerToken(headerValue: string | undefined): string | un
 const PUBLIC_PATHS = new Set([
   '/api/status',
   '/api/chain/rpc-health',
+  '/.well-known/skill.md',
 ]);
 
 const PUBLIC_PREFIXES = [

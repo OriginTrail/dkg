@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair, contextGraphDraftUri } from '@origintrail-official/dkg-core';
+import { TypedEventBus, generateEd25519Keypair, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { ethers } from 'ethers';
 
-const CG_ID = 'test-draft-cg';
+const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
-const DRAFT = 'my-draft';
+const ASSERTION_NAME = 'my-assertion';
 
 const TRIPLES = [
   { subject: 'urn:test:entity:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
@@ -17,7 +17,7 @@ const TRIPLES = [
   { subject: 'urn:test:entity:bob', predicate: 'http://schema.org/name', object: '"Bob"' },
 ];
 
-describe('Working Memory Draft Lifecycle', () => {
+describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
 
@@ -36,47 +36,47 @@ describe('Working Memory Draft Lifecycle', () => {
     });
   });
 
-  it('create returns the correct draft graph URI', async () => {
-    const uri = await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    expect(uri).toBe(contextGraphDraftUri(CG_ID, AGENT, DRAFT));
+  it('create returns the correct assertion graph URI', async () => {
+    const uri = await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    expect(uri).toBe(contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME));
   });
 
-  it('write inserts triples into the draft graph', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
+  it('write inserts triples into the assertion graph', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    const quads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
+    const quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(quads.length).toBe(3);
     const subjects = new Set(quads.map((q: Quad) => q.subject));
     expect(subjects.has('urn:test:entity:alice')).toBe(true);
     expect(subjects.has('urn:test:entity:bob')).toBe(true);
   });
 
-  it('query returns triples from the draft only', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
+  it('query returns triples from the assertion only', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    // Write something to a different draft — should not appear
-    await publisher.draftCreate(CG_ID, 'other-draft', AGENT);
-    await publisher.draftWrite(CG_ID, 'other-draft', AGENT, [
+    // Write something to a different assertion — should not appear
+    await publisher.assertionCreate(CG_ID, 'other-assertion', AGENT);
+    await publisher.assertionWrite(CG_ID, 'other-assertion', AGENT, [
       { subject: 'urn:test:entity:charlie', predicate: 'http://schema.org/name', object: '"Charlie"' },
     ]);
 
-    const quads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
+    const quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(quads.length).toBe(3);
     const subjects = new Set(quads.map((q: Quad) => q.subject));
     expect(subjects.has('urn:test:entity:charlie')).toBe(false);
   });
 
-  it('promote moves all triples to SWM and empties draft', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
+  it('promote moves all triples to SWM and empties assertion', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    const result = await publisher.draftPromote(CG_ID, DRAFT, AGENT);
+    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
     expect(result.promotedCount).toBe(3);
 
-    const draftQuads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
-    expect(draftQuads.length).toBe(0);
+    const assertionQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(assertionQuads.length).toBe(0);
 
     const swmResult = await store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
@@ -88,15 +88,15 @@ describe('Working Memory Draft Lifecycle', () => {
   });
 
   it('promote with entity filter only moves selected entities', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    const result = await publisher.draftPromote(CG_ID, DRAFT, AGENT, {
+    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, {
       entities: ['urn:test:entity:alice'],
     });
     expect(result.promotedCount).toBe(2);
 
-    const remaining = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
+    const remaining = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(remaining.length).toBe(1);
     expect(remaining[0].subject).toBe('urn:test:entity:bob');
 
@@ -111,46 +111,46 @@ describe('Working Memory Draft Lifecycle', () => {
     }
   });
 
-  it('discard drops the draft graph', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
-    await publisher.draftDiscard(CG_ID, DRAFT, AGENT);
+  it('discard drops the assertion graph', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
 
-    const quads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
+    const quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(quads.length).toBe(0);
   });
 
-  it('different agents have isolated draft graphs', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT_B);
+  it('different agents have isolated assertion graphs', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT_B);
 
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, [
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [
       { subject: 'urn:test:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
     ]);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT_B, [
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT_B, [
       { subject: 'urn:test:bob', predicate: 'http://schema.org/name', object: '"Bob"' },
     ]);
 
-    const agentAQuads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
+    const agentAQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
     expect(agentAQuads.length).toBe(1);
     expect(agentAQuads[0].subject).toBe('urn:test:alice');
 
-    const agentBQuads = await publisher.draftQuery(CG_ID, DRAFT, AGENT_B);
+    const agentBQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT_B);
     expect(agentBQuads.length).toBe(1);
     expect(agentBQuads[0].subject).toBe('urn:test:bob');
   });
 
-  it('promote on empty draft returns 0', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    const result = await publisher.draftPromote(CG_ID, DRAFT, AGENT);
+  it('promote on empty assertion returns 0', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const result = await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
     expect(result.promotedCount).toBe(0);
   });
 
   it('promote records ShareTransition metadata in _shared_memory_meta', async () => {
     const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
-    await publisher.draftPromote(CG_ID, DRAFT, AGENT);
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
     const result = await store.query(
       `SELECT ?s ?type WHERE {
@@ -170,16 +170,16 @@ describe('Working Memory Draft Lifecycle', () => {
   });
 
   it('full lifecycle: create → write → promote → verify SWM → discard', async () => {
-    await publisher.draftCreate(CG_ID, DRAFT, AGENT);
-    await publisher.draftWrite(CG_ID, DRAFT, AGENT, TRIPLES);
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
 
-    let draftQuads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
-    expect(draftQuads.length).toBe(3);
+    let quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(quads.length).toBe(3);
 
-    await publisher.draftPromote(CG_ID, DRAFT, AGENT);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
 
-    draftQuads = await publisher.draftQuery(CG_ID, DRAFT, AGENT);
-    expect(draftQuads.length).toBe(0);
+    quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(quads.length).toBe(0);
 
     const swmResult = await store.query(
       `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
@@ -190,6 +190,6 @@ describe('Working Memory Draft Lifecycle', () => {
       expect(count).toBe(3);
     }
 
-    await publisher.draftDiscard(CG_ID, DRAFT, AGENT);
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
   });
 });

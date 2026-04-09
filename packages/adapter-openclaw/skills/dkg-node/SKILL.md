@@ -52,7 +52,7 @@ Use `dkg_list_paranets` first to check if the paranet already exists.
 Subscribe to a paranet to receive its data and updates. Subscription is immediate; data sync from peers happens in the background.
 
 - `paranet_id` (required): paranet ID to subscribe to
-- `include_workspace` (optional): set to `"false"` to skip syncing draft data (default: true)
+- `include_workspace` (optional): set to `"false"` to skip syncing shared memory data (default: true)
 
 Use `dkg_list_paranets` to check sync status afterward.
 
@@ -130,7 +130,7 @@ Run a read-only SPARQL query (`SELECT`, `CONSTRUCT`, `ASK`, `DESCRIBE`) against 
 
 - `sparql` (required): SPARQL query string
 - `paranet_id` (optional): limit query scope to a specific paranet
-- `include_workspace` (optional): set to `"true"` to also search workspace (draft/ephemeral) data
+- `include_workspace` (optional): set to `"true"` to also search shared memory (working/ephemeral) data
 
 Example queries:
 - list everything: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20`

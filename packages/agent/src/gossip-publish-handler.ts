@@ -91,23 +91,6 @@ export class GossipPublishHandler {
         }
         subGraphName = request.subGraphName;
         await graphManager.ensureSubGraph(request.paranetId, subGraphName);
-
-        // Persist discovery registration so listSubGraphs() works on replicas
-        const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.paranetId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId: request.paranetId,
-            subGraphName,
-            createdBy: request.publisherAddress || 'gossip-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.paranetId}" from gossip`);
-        }
       }
 
       const dataGraph = subGraphName
@@ -205,6 +188,26 @@ export class GossipPublishHandler {
       }
 
       phase?.('validate', 'end');
+
+      // Auto-register sub-graph in _meta AFTER validation passes.
+      // This prevents polluting metadata when invalid messages are rejected.
+      if (subGraphName) {
+        const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.paranetId)}/_meta`;
+        const alreadyRegistered = await this.store.query(
+          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+        );
+        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+          const regQuads = generateSubGraphRegistration({
+            contextGraphId: request.paranetId,
+            subGraphName,
+            createdBy: request.publisherAddress || 'gossip-discovery',
+            timestamp: new Date(),
+          });
+          await this.store.insert(regQuads);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.paranetId}" from gossip`);
+        }
+      }
 
       phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {

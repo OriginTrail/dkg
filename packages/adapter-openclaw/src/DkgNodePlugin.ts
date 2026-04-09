@@ -361,7 +361,7 @@ export class DkgNodePlugin {
             },
             include_shared_memory: {
               type: 'string',
-              description: 'Set to "false" to skip syncing shared memory/draft data. Default: true.',
+              description: 'Set to "false" to skip syncing shared memory data. Default: true.',
             },
           },
           required: ['context_graph_id'],
@@ -424,7 +424,7 @@ export class DkgNodePlugin {
           properties: {
             sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE)' },
             context_graph_id: { type: 'string', description: 'Optional context graph scope — omit to query all data' },
-            include_shared_memory: { type: 'string', description: 'Set to "true" to also search shared memory (draft/ephemeral) data. Default: false.' },
+            include_shared_memory: { type: 'string', description: 'Set to "true" to also search shared memory (working/ephemeral) data. Default: false.' },
           },
           required: ['sparql'],
         },

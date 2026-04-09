@@ -35,6 +35,7 @@
   "files": [
     "dist",
     "network",
+    "skills",
     "README.md",
     "LICENSE"
   ],

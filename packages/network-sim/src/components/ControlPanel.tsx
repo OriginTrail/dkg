@@ -588,7 +588,7 @@ function SharedMemoryTab() {
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write draft triples to shared memory (free, no gas). When ready, publish them to the chain with full finality.
+        Write triples to shared memory (free, no gas). When ready, publish them to the chain with full finality.
       </div>
 
       <div className="form-group">
