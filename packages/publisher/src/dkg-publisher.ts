@@ -216,9 +216,9 @@ export class DKGPublisher implements Publisher {
       privateTripleCount: m.privateTripleCount,
     }));
 
-    const swmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const dataOwned = this.ownedEntities.get(contextGraphId) ?? new Set();
-    const swmOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey) ?? new Map<string, string>();
+    const ownershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const dataOwned = this.ownedEntities.get(ownershipKey) ?? new Set();
+    const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
     const existing = new Set<string>([...dataOwned, ...swmOwned.keys()]);
 
     const upsertable = new Set<string>();
@@ -310,11 +310,11 @@ export class DKGPublisher implements Publisher {
     );
     await this.store.insert(metaQuads);
 
-    if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {
-      this.sharedMemoryOwnedEntities.set(swmOwnershipKey, new Map());
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
     const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-    const liveOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey)!;
+    const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
     for (const r of rootEntities) {
       if (!liveOwned.has(r)) {
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
@@ -799,7 +799,8 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:validate', 'start');
-    const existing = this.ownedEntities.get(contextGraphId) ?? new Set();
+    const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
     const validation = validatePublishRequest(allSkolemizedQuads, manifestEntries, contextGraphId, existing);
     if (!validation.valid) {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
@@ -1106,11 +1107,12 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
-      if (!this.ownedEntities.has(contextGraphId)) {
-        this.ownedEntities.set(contextGraphId, new Set());
+      const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+      if (!this.ownedEntities.has(confirmOwnershipKey)) {
+        this.ownedEntities.set(confirmOwnershipKey, new Set());
       }
       for (const e of manifestEntries) {
-        this.ownedEntities.get(contextGraphId)!.add(e.rootEntity);
+        this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
       }
       this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
       onPhase?.('chain:metadata', 'end');

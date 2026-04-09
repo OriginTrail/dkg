@@ -336,7 +336,7 @@ export class FinalizationHandler {
     const canonicalQuads = sharedMemoryQuads.map(q => ({ ...q, graph: dataGraph }));
     await this.store.insert(canonicalQuads);
 
-    const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities);
+    const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities, subGraphName);
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
 
     const partitioned = autoPartition(canonicalQuads);

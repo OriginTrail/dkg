@@ -1,7 +1,7 @@
 import {
   decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  isSafeIri, validateSubGraphName,
+  isSafeIri, assertSafeIri, validateSubGraphName,
   contextGraphSubGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -94,9 +94,9 @@ export class GossipPublishHandler {
 
         // Persist discovery registration so listSubGraphs() works on replicas
         const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${request.paranetId}/_meta`;
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.paranetId)}/_meta`;
         const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> { <${sgUri}> a <http://dkg.io/ontology/SubGraph> } }`,
+          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
         );
         if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
           const regQuads = generateSubGraphRegistration({
