@@ -102,6 +102,10 @@ export function contextGraphSubGraphMetaUri(contextGraphId: string, subGraphName
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_meta`;
 }
 
+export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphName: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
+}
+
 /**
  * Validates a sub-graph name: must be non-empty, no leading underscore
  * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.

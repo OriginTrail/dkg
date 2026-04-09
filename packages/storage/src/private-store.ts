@@ -19,21 +19,33 @@ export class PrivateContentStore {
     this.graphManager = graphManager;
   }
 
+  private privateGraph(contextGraphId: string, subGraphName?: string): string {
+    return subGraphName
+      ? this.graphManager.subGraphPrivateUri(contextGraphId, subGraphName)
+      : this.graphManager.privateGraphUri(contextGraphId);
+  }
+
+  private privateKey(contextGraphId: string, subGraphName?: string): string {
+    return subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+  }
+
   async storePrivateTriples(
     contextGraphId: string,
     rootEntity: string,
     quads: Quad[],
+    subGraphName?: string,
   ): Promise<void> {
     if (quads.length === 0) return;
 
-    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
+    const graphUri = this.privateGraph(contextGraphId, subGraphName);
     const normalized = quads.map((q) => ({ ...q, graph: graphUri }));
     await this.store.insert(normalized);
 
-    let entities = this.privateEntities.get(contextGraphId);
+    const key = this.privateKey(contextGraphId, subGraphName);
+    let entities = this.privateEntities.get(key);
     if (!entities) {
       entities = new Set();
-      this.privateEntities.set(contextGraphId, entities);
+      this.privateEntities.set(key, entities);
     }
     entities.add(rootEntity);
   }
@@ -41,8 +53,9 @@ export class PrivateContentStore {
   async getPrivateTriples(
     contextGraphId: string,
     rootEntity: string,
+    subGraphName?: string,
   ): Promise<Quad[]> {
-    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
+    const graphUri = this.privateGraph(contextGraphId, subGraphName);
     const sparql = `
       SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(graphUri)}> {
@@ -65,8 +78,9 @@ export class PrivateContentStore {
     }));
   }
 
-  hasPrivateTriples(contextGraphId: string, rootEntity: string): boolean {
-    const entities = this.privateEntities.get(contextGraphId);
+  hasPrivateTriples(contextGraphId: string, rootEntity: string, subGraphName?: string): boolean {
+    const key = this.privateKey(contextGraphId, subGraphName);
+    const entities = this.privateEntities.get(key);
     return entities?.has(rootEntity) ?? false;
   }
 
@@ -78,18 +92,21 @@ export class PrivateContentStore {
   async hasPrivateTriplesInStore(
     contextGraphId: string,
     rootEntity: string,
+    subGraphName?: string,
   ): Promise<boolean> {
-    const quads = await this.getPrivateTriples(contextGraphId, rootEntity);
+    const quads = await this.getPrivateTriples(contextGraphId, rootEntity, subGraphName);
     return quads.length > 0;
   }
 
   async deletePrivateTriples(
     contextGraphId: string,
     rootEntity: string,
+    subGraphName?: string,
   ): Promise<void> {
-    const graphUri = this.graphManager.privateGraphUri(contextGraphId);
+    const graphUri = this.privateGraph(contextGraphId, subGraphName);
     await this.store.deleteBySubjectPrefix(graphUri, rootEntity);
-    const entities = this.privateEntities.get(contextGraphId);
+    const key = this.privateKey(contextGraphId, subGraphName);
+    const entities = this.privateEntities.get(key);
     if (entities) entities.delete(rootEntity);
   }
 }

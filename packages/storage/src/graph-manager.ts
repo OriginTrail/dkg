@@ -10,6 +10,7 @@ import {
   contextGraphDraftUri,
   contextGraphSubGraphUri,
   contextGraphSubGraphMetaUri,
+  contextGraphSubGraphPrivateUri,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -62,10 +63,15 @@ export class ContextGraphManager {
     return contextGraphSubGraphMetaUri(contextGraphId, subGraphName);
   }
 
+  subGraphPrivateUri(contextGraphId: string, subGraphName: string): string {
+    return contextGraphSubGraphPrivateUri(contextGraphId, subGraphName);
+  }
+
   async ensureSubGraph(contextGraphId: string, subGraphName: string): Promise<void> {
     await this.ensureContextGraph(contextGraphId);
     await this.store.createGraph(this.subGraphUri(contextGraphId, subGraphName));
     await this.store.createGraph(this.subGraphMetaUri(contextGraphId, subGraphName));
+    await this.store.createGraph(this.subGraphPrivateUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryUri(contextGraphId, subGraphName));
     await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
   }

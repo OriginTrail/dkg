@@ -831,7 +831,7 @@ export class DKGPublisher implements Publisher {
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
       if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads);
+        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
       }
     }
 
@@ -1244,14 +1244,14 @@ export class DKGPublisher implements Publisher {
     for (const [rootEntity, publicQuads] of kaMap) {
       await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
-      await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity);
+      await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity, options.subGraphName);
 
       const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
 
       const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
       if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads);
+        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
       }
     }
 
@@ -1317,69 +1317,32 @@ export class DKGPublisher implements Publisher {
   async reconstructSharedMemoryOwnership(): Promise<number> {
     const DKG = 'http://dkg.io/ontology/';
     const PROV = 'http://www.w3.org/ns/prov#';
+    const SWM_META_SUFFIX = '/_shared_memory_meta';
+    const CG_PREFIX = 'did:dkg:context-graph:';
     try {
       const contextGraphs = await this.graphManager.listContextGraphs();
       let total = 0;
+
+      // Build list of (ownershipKey, swmMetaGraphUri) pairs: root + sub-graph scoped
+      const targets: Array<{ ownershipKey: string; swmMetaGraph: string }> = [];
+      const allGraphs = await this.store.listGraphs();
       for (const cgId of contextGraphs) {
-        const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(cgId);
-        const result = await this.store.query(
-          `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
-        );
-        if (result.type !== 'bindings' || result.bindings.length === 0) continue;
+        targets.push({ ownershipKey: cgId, swmMetaGraph: this.graphManager.sharedMemoryMetaUri(cgId) });
 
-        const opsResult = await this.store.query(
-          `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
-        );
-        const validatedOwners = new Map<string, Set<string>>();
-        if (opsResult.type === 'bindings') {
-          for (const row of opsResult.bindings) {
-            const root = row['root'];
-            const peer = row['peer'];
-            if (!root || !peer) continue;
-            const peerStr = peer.startsWith('"')
-              ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-              : peer;
-            if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
-            validatedOwners.get(root)!.add(peerStr);
-          }
-        }
-
-        if (!this.sharedMemoryOwnedEntities.has(cgId)) {
-          this.sharedMemoryOwnedEntities.set(cgId, new Map());
-        }
-        const ownedMap = this.sharedMemoryOwnedEntities.get(cgId)!;
-        for (const row of result.bindings) {
-          const entity = row['entity'];
-          const creator = row['creator'];
-          if (!entity || !creator) continue;
-          const creatorStr = creator.startsWith('"')
-            ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-            : creator;
-
-          const validPeers = validatedOwners.get(entity);
-          if (!validPeers || !validPeers.has(creatorStr)) {
-            this.log.warn(
-              createOperationContext('reconstruct'),
-              `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
-            );
-            continue;
-          }
-
-          if (ownedMap.has(entity)) {
-            const existing = ownedMap.get(entity)!;
-            if (existing !== creatorStr) {
-              this.log.warn(
-                createOperationContext('reconstruct'),
-                `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
-              );
-              if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+        // Discover sub-graph SWM meta graphs: did:dkg:context-graph:{cgId}/{sgName}/_shared_memory_meta
+        const sgPrefix = `${CG_PREFIX}${cgId}/`;
+        for (const g of allGraphs) {
+          if (g.startsWith(sgPrefix) && g.endsWith(SWM_META_SUFFIX)) {
+            const middle = g.slice(sgPrefix.length, g.length - SWM_META_SUFFIX.length);
+            if (middle && !middle.includes('/')) {
+              targets.push({ ownershipKey: `${cgId}\0${middle}`, swmMetaGraph: g });
             }
-            continue;
           }
-
-          ownedMap.set(entity, creatorStr);
-          total++;
         }
+      }
+
+      for (const { ownershipKey, swmMetaGraph } of targets) {
+        total += await this.reconstructOwnershipFromGraph(ownershipKey, swmMetaGraph, DKG, PROV);
       }
       return total;
     } catch (err) {
@@ -1389,6 +1352,71 @@ export class DKGPublisher implements Publisher {
       );
       return 0;
     }
+  }
+
+  private async reconstructOwnershipFromGraph(
+    ownershipKey: string, swmMetaGraph: string, DKG: string, PROV: string,
+  ): Promise<number> {
+    const result = await this.store.query(
+      `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
+
+    const opsResult = await this.store.query(
+      `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
+    );
+    const validatedOwners = new Map<string, Set<string>>();
+    if (opsResult.type === 'bindings') {
+      for (const row of opsResult.bindings) {
+        const root = row['root'];
+        const peer = row['peer'];
+        if (!root || !peer) continue;
+        const peerStr = peer.startsWith('"')
+          ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+          : peer;
+        if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
+        validatedOwners.get(root)!.add(peerStr);
+      }
+    }
+
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+    }
+    const ownedMap = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+    let count = 0;
+    for (const row of result.bindings) {
+      const entity = row['entity'];
+      const creator = row['creator'];
+      if (!entity || !creator) continue;
+      const creatorStr = creator.startsWith('"')
+        ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+        : creator;
+
+      const validPeers = validatedOwners.get(entity);
+      if (!validPeers || !validPeers.has(creatorStr)) {
+        this.log.warn(
+          createOperationContext('reconstruct'),
+          `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
+        );
+        continue;
+      }
+
+      if (ownedMap.has(entity)) {
+        const existing = ownedMap.get(entity)!;
+        if (existing !== creatorStr) {
+          this.log.warn(
+            createOperationContext('reconstruct'),
+            `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
+          );
+          if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+        }
+        continue;
+      }
+
+      ownedMap.set(entity, creatorStr);
+      count++;
+    }
+    return count;
   }
 
   /** @deprecated Use reconstructSharedMemoryOwnership */
