@@ -23,6 +23,7 @@ export interface KCMetadata {
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
   timestamp: Date;
+  subGraphName?: string;
 }
 
 export interface KAMetadata {
@@ -93,6 +94,10 @@ export function generateKCMetadata(
     ),
     mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
   );
+
+  if (meta.subGraphName) {
+    quads.push(mq(meta.ual, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));
+  }
 
   if (meta.allowedPeers?.length) {
     for (const peerId of meta.allowedPeers) {
@@ -224,7 +229,12 @@ function mq(s: string, p: string, o: string, g: string): Quad {
 }
 
 function lit(val: string): string {
-  return `"${val}"`;
+  const escaped = val
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+  return `"${escaped}"`;
 }
 
 function intLit(val: number | bigint): string {

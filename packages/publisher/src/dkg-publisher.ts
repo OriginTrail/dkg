@@ -216,8 +216,9 @@ export class DKGPublisher implements Publisher {
       privateTripleCount: m.privateTripleCount,
     }));
 
+    const swmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const dataOwned = this.ownedEntities.get(contextGraphId) ?? new Set();
-    const swmOwned = this.sharedMemoryOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
+    const swmOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey) ?? new Map<string, string>();
     const existing = new Set<string>([...dataOwned, ...swmOwned.keys()]);
 
     const upsertable = new Set<string>();
@@ -309,11 +310,11 @@ export class DKGPublisher implements Publisher {
     );
     await this.store.insert(metaQuads);
 
-    if (!this.sharedMemoryOwnedEntities.has(contextGraphId)) {
-      this.sharedMemoryOwnedEntities.set(contextGraphId, new Map());
+    if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {
+      this.sharedMemoryOwnedEntities.set(swmOwnershipKey, new Map());
     }
     const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-    const liveOwned = this.sharedMemoryOwnedEntities.get(contextGraphId)!;
+    const liveOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey)!;
     for (const r of rootEntities) {
       if (!liveOwned.has(r)) {
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
@@ -590,7 +591,8 @@ export class DKGPublisher implements Publisher {
     // Published triples must not linger in SWM — they live in LTM now.
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options?.subGraphName);
+      const swmOwnershipKey = options?.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
       for (const rootEntity of kaMap.keys()) {
@@ -601,7 +603,7 @@ export class DKGPublisher implements Publisher {
         });
         ownerDeletedTotal += ownerDeleted;
         await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-        this.sharedMemoryOwnedEntities.get(contextGraphId)?.delete(rootEntity);
+        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
       }
       if (ownerDeletedTotal > 0) {
         this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
@@ -614,7 +616,7 @@ export class DKGPublisher implements Publisher {
         if (remainingCount > 0 || remainingMetaCount > 0) {
           this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
         }
-        this.sharedMemoryOwnedEntities.delete(contextGraphId);
+        this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
       }
     }
 
@@ -1075,6 +1077,7 @@ export class DKGPublisher implements Publisher {
           accessPolicy: effectiveAccessPolicy,
           allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),
+          subGraphName: options.subGraphName,
         },
         kaMetadata,
       );
@@ -1451,6 +1454,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: { entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<{ promotedCount: number }> {
+    DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
     const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, opts?.subGraphName);
     const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
 
