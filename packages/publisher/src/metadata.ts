@@ -1,5 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
+import { validateSubGraphName } from '@origintrail-official/dkg-core';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
@@ -43,10 +44,14 @@ export interface OnChainProvenance {
 }
 
 function assertSafeContextGraphIdForSparql(contextGraphId: string): void {
-  // Reject characters that can break GRAPH <...> IRI delimiters and enable injection.
   if (/[<>"{}|^`\\\s]/.test(contextGraphId)) {
     throw new Error(`Unsafe contextGraphId for SPARQL graph IRI: "${contextGraphId}"`);
   }
+}
+
+function assertSafeSubGraphNameForSparql(subGraphName: string): void {
+  const v = validateSubGraphName(subGraphName);
+  if (!v.valid) throw new Error(`Unsafe sub-graph name for SPARQL: ${v.reason}`);
 }
 
 function assertSafeGraphIriForSparql(graphIri: string): void {
@@ -468,6 +473,7 @@ export function generateSubGraphRegistration(reg: SubGraphRegistration): Quad[] 
  */
 export function subGraphDeregistrationSparql(contextGraphId: string, subGraphName: string): string {
   assertSafeContextGraphIdForSparql(contextGraphId);
+  assertSafeSubGraphNameForSparql(subGraphName);
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
   return `DELETE WHERE { GRAPH <${metaGraph}> { <${subGraphUri}> ?p ?o } }`;
@@ -495,6 +501,7 @@ export function subGraphDiscoverySparql(contextGraphId: string): string {
  */
 export function subGraphWritersSparql(contextGraphId: string, subGraphName: string): string {
   assertSafeContextGraphIdForSparql(contextGraphId);
+  assertSafeSubGraphNameForSparql(subGraphName);
   const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
   return `SELECT ?writer WHERE {

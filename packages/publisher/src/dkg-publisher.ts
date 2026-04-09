@@ -469,6 +469,13 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    if (options?.subGraphName && ctxGraphId) {
+      throw new Error(
+        'subGraphName and publishContextGraphId cannot be used together — ' +
+        'the remap flow targets /context/{id} which is incompatible with sub-graph URIs',
+      );
+    }
+
     this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
     const publishResult = await this.publish({
       contextGraphId,
@@ -683,6 +690,11 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
+    // Sub-graph routing: data is stored in `did:dkg:context-graph:{id}/{subGraph}`.
+    // V10.0 limitation: UAL-based lookups (`resolveKA`) derive the data graph from
+    // `contextGraphId` alone and won't find sub-graph data. Sub-graph queries must
+    // use the `subGraphName` option explicitly. Full sub-graph metadata tracking in
+    // KC manifests is deferred to V10.x.
     if (options.subGraphName && !options.targetGraphUri) {
       const sgValidation = validateSubGraphName(options.subGraphName);
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);

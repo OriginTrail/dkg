@@ -1275,12 +1275,10 @@ export class DKGAgent {
       return this._publish(contextGraphId, publicQuads, privateQuads, thirdArg as PublishOpts);
     }
     // Quad[]: pass through directly
-    return this._publish(
-      contextGraphId,
-      input as Quad[],
-      Array.isArray(thirdArg) ? thirdArg : undefined,
-      Array.isArray(thirdArg) ? fourthArg : (thirdArg as PublishOpts),
-    );
+    if (Array.isArray(thirdArg)) {
+      return this._publish(contextGraphId, input as Quad[], thirdArg, fourthArg);
+    }
+    return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
   private async _publish(
@@ -1596,6 +1594,7 @@ export class DKGAgent {
       operationCtx?: OperationContext;
       view?: GetView;
       verifiedGraph?: string;
+      subGraphName?: string;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -1605,8 +1604,9 @@ export class DKGAgent {
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
     const ctx = opts.operationCtx ?? createOperationContext('query');
+    const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
-    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
@@ -1614,6 +1614,7 @@ export class DKGAgent {
       view: opts.view,
       agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
       verifiedGraph: opts.verifiedGraph,
+      subGraphName: opts.subGraphName,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;

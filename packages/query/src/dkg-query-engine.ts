@@ -107,10 +107,8 @@ export class DKGQueryEngine implements QueryEngine {
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
         );
       }
-      if (options.subGraphName && options.view === 'verified-memory' && !options.verifiedGraph) {
-        const subGraphUri = contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName);
-        return this.execAndNormalize(wrapWithGraph(sparql, subGraphUri));
-      }
+      // Sub-graph scoping within view-based routing is deferred to V10.x.
+      // Verified-memory graphs don't have per-sub-graph partitioning yet.
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
 
