@@ -3701,11 +3701,6 @@ export class DKGAgent {
     };
   }
 
-  /** @deprecated Use `assertion`. Will be removed in V10.1. */
-  get draft() {
-    return this.assertion;
-  }
-
 }
 
 function splitNQuadLine(line: string): string[] {

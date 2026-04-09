@@ -159,7 +159,7 @@ export class DKGQueryEngine implements QueryEngine {
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
-      assertionName: options.assertionName ?? options.draftName,
+      assertionName: options.assertionName,
     });
 
     const allGraphs = [...resolution.graphs];

@@ -5,7 +5,6 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
   contextGraphAssertionUri,
-  contextGraphDraftUri,
   validateSubGraphName,
 } from '../src/constants.js';
 
@@ -60,11 +59,6 @@ describe('sub-graph URI helpers', () => {
     );
   });
 
-  it('contextGraphDraftUri alias delegates to contextGraphAssertionUri', () => {
-    expect(contextGraphDraftUri(cgId, '0xAgent', 'scan', 'code')).toBe(
-      contextGraphAssertionUri(cgId, '0xAgent', 'scan', 'code'),
-    );
-  });
 });
 
 describe('validateSubGraphName', () => {

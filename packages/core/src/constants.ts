@@ -90,9 +90,6 @@ export function contextGraphAssertionUri(contextGraphId: string, agentAddress: s
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
 
-/** @deprecated Use contextGraphAssertionUri */
-export const contextGraphDraftUri = contextGraphAssertionUri;
-
 export function contextGraphRulesUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_rules`;
 }

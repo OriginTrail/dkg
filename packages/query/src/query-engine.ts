@@ -26,8 +26,6 @@ export interface QueryOptions {
   verifiedGraph?: string;
   /** Specific assertion name — used with view='working-memory' to target a single assertion graph. */
   assertionName?: string;
-  /** @deprecated Use assertionName. */
-  draftName?: string;
   /**
    * Scope the query to a specific sub-graph within the context graph.
    * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`
