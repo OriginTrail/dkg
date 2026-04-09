@@ -277,7 +277,7 @@ export interface ShareTransitionMetadata {
   contextGraphId: string;
   operationId: string;
   agentAddress: string;
-  draftName: string;
+  assertionName: string;
   entities: string[];
   timestamp: Date;
 }
@@ -287,7 +287,7 @@ export function generateShareTransitionMetadata(meta: ShareTransitionMetadata): 
   const subject = `urn:dkg:share:${meta.operationId}`;
   const quads: Quad[] = [
     mq(subject, `${RDF}type`, `${DKG}ShareTransition`, metaGraph),
-    mq(subject, `${DKG}source`, lit(`draft/${meta.agentAddress}/${meta.draftName}`), metaGraph),
+    mq(subject, `${DKG}source`, lit(`assertion/${meta.agentAddress}/${meta.assertionName}`), metaGraph),
     mq(subject, `${DKG}agent`, `did:dkg:agent:${meta.agentAddress}`, metaGraph),
     mq(subject, `${DKG}timestamp`, dateLit(meta.timestamp), metaGraph),
   ];

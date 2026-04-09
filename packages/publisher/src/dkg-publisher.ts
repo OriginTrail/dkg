@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -1455,7 +1455,7 @@ export class DKGPublisher implements Publisher {
     }
   }
 
-  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+  // ── Working Memory Assertion Operations (spec §6) ───────────────────
 
   private static validateOptionalSubGraph(subGraphName: string | undefined): void {
     if (subGraphName !== undefined) {
@@ -1468,53 +1468,50 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities.delete(ownershipKey);
   }
 
-  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<string> {
+  async assertionCreate(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<string> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.createGraph(graphUri);
     return graphUri;
   }
 
-  async draftWrite(
+  async assertionWrite(
     contextGraphId: string,
-    draftName: string,
+    name: string,
     agentAddress: string,
     input: Quad[] | Array<{ subject: string; predicate: string; object: string }>,
     subGraphName?: string,
   ): Promise<void> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const quads = input.map((t) => ({
-      subject: t.subject,
-      predicate: t.predicate,
-      object: t.object,
-      graph: graphUri,
+      subject: t.subject, predicate: t.predicate, object: t.object, graph: graphUri,
     }));
     await this.store.insert(quads);
   }
 
-  async draftQuery(
+  async assertionQuery(
     contextGraphId: string,
-    draftName: string,
+    name: string,
     agentAddress: string,
     subGraphName?: string,
   ): Promise<Quad[]> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
     );
     return result.type === 'quads' ? result.quads : [];
   }
 
-  async draftPromote(
+  async assertionPromote(
     contextGraphId: string,
-    draftName: string,
+    name: string,
     agentAddress: string,
     opts?: { entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<{ promotedCount: number }> {
     DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, opts?.subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
 
     const result = await this.store.query(
@@ -1537,7 +1534,7 @@ export class DKGPublisher implements Publisher {
     const swmQuads = quadsToPromote.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
 
-    // Delete promoted triples from draft
+    // Delete promoted triples from assertion graph
     await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
@@ -1547,7 +1544,7 @@ export class DKGPublisher implements Publisher {
       contextGraphId,
       operationId,
       agentAddress,
-      draftName,
+      assertionName: name,
       entities,
       timestamp: new Date(),
     });
@@ -1556,9 +1553,9 @@ export class DKGPublisher implements Publisher {
     return { promotedCount: swmQuads.length };
   }
 
-  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<void> {
+  async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
+    const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.dropGraph(graphUri);
   }
 }

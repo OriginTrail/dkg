@@ -278,7 +278,7 @@ describe('generateShareTransitionMetadata', () => {
     contextGraphId: PARANET,
     operationId: 'op-share-001',
     agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
-    draftName: 'my-draft',
+    assertionName: 'my-assertion',
     entities: ['urn:test:entity:alice', 'urn:test:entity:bob'],
     timestamp: new Date('2026-04-01T00:00:00Z'),
   };
@@ -306,12 +306,12 @@ describe('generateShareTransitionMetadata', () => {
     expect(preds).toContain(`${DKG}entities`);
   });
 
-  it('source includes draft path with agent and name', () => {
+  it('source includes assertion path with agent and name', () => {
     const quads = generateShareTransitionMetadata(shareMeta);
     const sourceQuad = quads.find(q => q.predicate === `${DKG}source`);
-    expect(sourceQuad!.object).toContain('draft/');
+    expect(sourceQuad!.object).toContain('assertion/');
     expect(sourceQuad!.object).toContain(shareMeta.agentAddress);
-    expect(sourceQuad!.object).toContain(shareMeta.draftName);
+    expect(sourceQuad!.object).toContain(shareMeta.assertionName);
   });
 
   it('generates one entity quad per entity', () => {

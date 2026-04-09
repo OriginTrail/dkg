@@ -7,7 +7,7 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphVerifiedMemoryUri,
   contextGraphVerifiedMemoryMetaUri,
-  contextGraphDraftUri,
+  contextGraphAssertionUri,
   contextGraphSubGraphUri,
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
@@ -51,8 +51,8 @@ export class ContextGraphManager {
     return contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
   }
 
-  draftUri(contextGraphId: string, agentAddress: string, name: string): string {
-    return contextGraphDraftUri(contextGraphId, agentAddress, name);
+  assertionUri(contextGraphId: string, agentAddress: string, name: string): string {
+    return contextGraphAssertionUri(contextGraphId, agentAddress, name);
   }
 
   subGraphUri(contextGraphId: string, subGraphName: string): string {

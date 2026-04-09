@@ -4,7 +4,7 @@ import {
   TransitionType,
   isValidTransition,
   type MemoryTransition,
-  type DraftDescriptor,
+  type AssertionDescriptor,
   type ShareRecord,
   type PublicationRequest,
   type Publication,
@@ -151,15 +151,15 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
     }
   });
 
-  it('draft → share → publish → verify lifecycle with types', () => {
-    // Step 1: Agent creates a draft (WM)
-    const draft: DraftDescriptor = {
+  it('assertion → share → publish → verify lifecycle with types', () => {
+    // Step 1: Agent creates an assertion (WM)
+    const assertion: AssertionDescriptor = {
       contextGraphId: CG_ID,
       agentAddress: AGENT,
       name: 'game-turn-42',
       createdAt: new Date().toISOString(),
     };
-    expect(draft.name).toBeTruthy();
+    expect(assertion.name).toBeTruthy();
 
     // Step 2: Agent shares to SWM
     const share: ShareRecord = {

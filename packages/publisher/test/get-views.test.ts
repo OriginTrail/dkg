@@ -4,7 +4,7 @@ import {
   GET_VIEWS,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri,
-  contextGraphDraftUri,
+  contextGraphAssertionUri,
 } from '@origintrail-official/dkg-core';
 import { resolveViewGraphs, type ViewResolution } from '@origintrail-official/dkg-query';
 
@@ -17,11 +17,11 @@ describe('resolveViewGraphs', () => {
       expect(() => resolveViewGraphs('working-memory', CG)).toThrow('agentAddress is required');
     });
 
-    it('returns a prefix for all agent drafts when no draftName given', () => {
+    it('returns a prefix for all agent assertions when no assertionName given', () => {
       const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT });
       expect(res.graphs).toHaveLength(0);
       expect(res.graphPrefixes).toHaveLength(1);
-      expect(res.graphPrefixes[0]).toBe(`did:dkg:context-graph:${CG}/draft/${AGENT}/`);
+      expect(res.graphPrefixes[0]).toBe(`did:dkg:context-graph:${CG}/assertion/${AGENT}/`);
     });
 
     it('includes the agent address in the graph URI prefix', () => {
@@ -29,9 +29,9 @@ describe('resolveViewGraphs', () => {
       expect(res.graphPrefixes[0]).toContain(AGENT);
     });
 
-    it('returns an exact draft URI when draftName is provided', () => {
-      const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT, draftName: 'exp-lr' });
-      expect(res.graphs).toEqual([contextGraphDraftUri(CG, AGENT, 'exp-lr')]);
+    it('returns an exact assertion URI when assertionName is provided', () => {
+      const res = resolveViewGraphs('working-memory', CG, { agentAddress: AGENT, assertionName: 'exp-lr' });
+      expect(res.graphs).toEqual([contextGraphAssertionUri(CG, AGENT, 'exp-lr')]);
       expect(res.graphPrefixes).toHaveLength(0);
     });
   });

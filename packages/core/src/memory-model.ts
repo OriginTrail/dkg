@@ -5,7 +5,7 @@
  * for the DKG V10 protocol.
  *
  * Memory layers (ordered by trust/permanence):
- *   WM  → Working Memory: local agent drafts, not shared
+ *   WM  → Working Memory: local agent assertions, not shared
  *   SWM → Shared Working Memory: published to peers, not anchored
  *   VM  → Verified Memory: anchored on-chain and M-of-N verified
  */
@@ -41,12 +41,15 @@ export interface MemoryTransition {
   timestamp: string;
 }
 
-export interface DraftDescriptor {
+export interface AssertionDescriptor {
   contextGraphId: string;
   agentAddress: string;
   name: string;
   createdAt: string;
 }
+
+/** @deprecated Use AssertionDescriptor */
+export type DraftDescriptor = AssertionDescriptor;
 
 export interface ShareRecord {
   contextGraphId: string;
@@ -105,7 +108,7 @@ export interface Publication {
 /**
  * V10 GET view selectors — each declares which memory layer(s) a query targets.
  *
- *   working-memory        → WM  (agent's own draft graphs, local-only)
+ *   working-memory        → WM  (agent's own assertion graphs, local-only)
  *   shared-working-memory → SWM (provisional, gossip-replicated)
  *   verified-memory       → VM  (on-chain anchored, M-of-N quorum verified)
  */

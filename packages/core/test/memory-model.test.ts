@@ -13,7 +13,7 @@ import {
   type Publication,
   type PublicationRequest,
   type MemoryTransition,
-  type DraftDescriptor,
+  type AssertionDescriptor,
   type ShareRecord,
 } from '../src/memory-model.js';
 
@@ -223,15 +223,15 @@ describe('MemoryTransition interface', () => {
   });
 });
 
-describe('DraftDescriptor interface', () => {
-  it('describes an agent draft', () => {
-    const d: DraftDescriptor = {
+describe('AssertionDescriptor interface', () => {
+  it('describes an agent assertion', () => {
+    const d: AssertionDescriptor = {
       contextGraphId: 'cg-1',
       agentAddress: '0xAbc',
-      name: 'my-draft',
+      name: 'my-assertion',
       createdAt: '2026-04-02T00:00:00Z',
     };
-    expect(d.name).toBe('my-draft');
+    expect(d.name).toBe('my-assertion');
   });
 });
 

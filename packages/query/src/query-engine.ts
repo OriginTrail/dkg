@@ -20,7 +20,7 @@ export interface QueryOptions {
   includeWorkspace?: boolean;
   /** V10 declared state view — determines which graph(s) the query targets. */
   view?: GetView;
-  /** Agent address — required when view is 'working-memory' to resolve draft graphs. */
+  /** Agent address — required when view is 'working-memory' to resolve assertion graphs. */
   agentAddress?: string;
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;

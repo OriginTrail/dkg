@@ -85,10 +85,13 @@ export function contextGraphVerifiedMemoryMetaUri(contextGraphId: string, verifi
   return `did:dkg:context-graph:${contextGraphId}/_verified_memory/${verifiedMemoryId}/_meta`;
 }
 
-export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
-  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/${agentAddress}/${name}`;
-  return `did:dkg:context-graph:${contextGraphId}/draft/${agentAddress}/${name}`;
+export function contextGraphAssertionUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/${agentAddress}/${name}`;
+  return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
 }
+
+/** @deprecated Use contextGraphAssertionUri */
+export const contextGraphDraftUri = contextGraphAssertionUri;
 
 export function contextGraphRulesUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_rules`;

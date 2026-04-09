@@ -25,7 +25,7 @@ import {
   contextGraphSharedMemoryMetaUri,
   contextGraphVerifiedMemoryUri,
   contextGraphVerifiedMemoryMetaUri,
-  contextGraphDraftUri,
+  contextGraphAssertionUri,
   contextGraphRulesUri,
   contextGraphSubGraphUri,
   // Deprecated aliases
@@ -128,8 +128,8 @@ describe('V10 named graph URIs', () => {
     expect(contextGraphVerifiedMemoryMetaUri(id, '7')).toBe('did:dkg:context-graph:42/_verified_memory/7/_meta');
   });
 
-  it('draft URI', () => {
-    expect(contextGraphDraftUri(id, '0xAbc', 'my-draft')).toBe('did:dkg:context-graph:42/draft/0xAbc/my-draft');
+  it('assertion URI', () => {
+    expect(contextGraphAssertionUri(id, '0xAbc', 'my-assertion')).toBe('did:dkg:context-graph:42/assertion/0xAbc/my-assertion');
   });
 
   it('rules URI', () => {

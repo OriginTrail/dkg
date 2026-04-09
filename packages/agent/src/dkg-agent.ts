@@ -3641,25 +3641,25 @@ export class DKGAgent {
     }
   }
 
-  // ── Working Memory Draft Operations (spec §6) ────────────────────────
+  // ── Working Memory Assertion Operations (spec §6) ───────────────────
 
-  get draft() {
+  get assertion() {
     const agent = this;
     const agentAddress = this.peerId;
     return {
-      async create(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<string> {
-        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress, opts?.subGraphName);
+      async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
+        return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
 
       /**
-       * Write triples to a WM draft. Accepts:
+       * Write triples to a WM assertion. Accepts:
        * - `Quad[]` — standard quad array (same as publish/share)
        * - `JsonLdContent` — JSON-LD document, auto-converted to quads
-       * - `Array<{ subject, predicate, object }>` — legacy triple array (deprecated)
+       * - `Array<{ subject, predicate, object }>` — simple triple array
        */
       async write(
         contextGraphId: string,
-        draftName: string,
+        name: string,
         input: import('@origintrail-official/dkg-storage').Quad[] | JsonLdContent | Array<{ subject: string; predicate: string; object: string }>,
         opts?: { subGraphName?: string },
       ): Promise<void> {
@@ -3673,20 +3673,23 @@ export class DKGAgent {
           quads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
         }
-        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, quads, opts?.subGraphName);
+        return agent.publisher.assertionWrite(contextGraphId, name, agentAddress, quads, opts?.subGraphName);
       },
 
-      async query(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
-        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress, opts?.subGraphName);
+      async query(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.assertionQuery(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
-      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
-        return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
+        return agent.publisher.assertionPromote(contextGraphId, name, agentAddress, opts);
       },
-      async discard(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<void> {
-        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress, opts?.subGraphName);
+      async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
+        return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
     };
   }
+
+  /** @deprecated Use agent.assertion */
+  get draft() { return this.assertion; }
 
 }
 

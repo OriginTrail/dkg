@@ -2,7 +2,7 @@ import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origin
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
-  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
+  contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphAssertionUri,
   contextGraphSubGraphUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   type GetView,
@@ -20,7 +20,7 @@ export interface ViewResolution {
   /**
    * Graph URI prefixes — the engine discovers all named graphs matching
    * each prefix and unions the results. Used for working-memory (multiple
-   * drafts) and verified-memory (multiple quorum graphs).
+   * assertions) and verified-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
 }
@@ -34,7 +34,7 @@ export interface ViewResolution {
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
-  opts?: { agentAddress?: string; verifiedGraph?: string; draftName?: string },
+  opts?: { agentAddress?: string; verifiedGraph?: string; assertionName?: string },
 ): ViewResolution {
   if (REMOVED_VIEWS.includes(view as string)) {
     throw new Error(
@@ -47,15 +47,15 @@ export function resolveViewGraphs(
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
       }
-      if (opts.draftName) {
+      if (opts.assertionName) {
         return {
-          graphs: [contextGraphDraftUri(contextGraphId, opts.agentAddress, opts.draftName)],
+          graphs: [contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName)],
           graphPrefixes: [],
         };
       }
       return {
         graphs: [],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/draft/${opts.agentAddress}/`],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/assertion/${opts.agentAddress}/`],
       };
     }
     case 'shared-working-memory':
