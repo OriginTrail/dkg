@@ -1,7 +1,8 @@
 import {
   decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  isSafeIri,
+  isSafeIri, assertSafeIri, validateSubGraphName,
+  contextGraphSubGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -9,7 +10,7 @@ import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-c
 import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
-  validatePublishRequest, parseSimpleNQuads,
+  validatePublishRequest, parseSimpleNQuads, generateSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -78,7 +79,40 @@ export class GossipPublishHandler {
 
       const graphManager = new GraphManager(this.store);
       await graphManager.ensureParanet(request.paranetId);
-      const dataGraph = graphManager.dataGraphUri(request.paranetId);
+
+      // Sub-graph routing: if the publish specifies a sub-graph, store data there.
+      // Reject (don't reroute) invalid names to prevent polluting the root graph.
+      let subGraphName: string | undefined;
+      if (request.subGraphName) {
+        const sgVal = validateSubGraphName(request.subGraphName);
+        if (!sgVal.valid) {
+          this.log.warn(ctx, `Gossip: rejected publish with invalid subGraphName "${request.subGraphName}": ${sgVal.reason}`);
+          return;
+        }
+        subGraphName = request.subGraphName;
+        await graphManager.ensureSubGraph(request.paranetId, subGraphName);
+
+        // Persist discovery registration so listSubGraphs() works on replicas
+        const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.paranetId)}/_meta`;
+        const alreadyRegistered = await this.store.query(
+          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+        );
+        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+          const regQuads = generateSubGraphRegistration({
+            contextGraphId: request.paranetId,
+            subGraphName,
+            createdBy: request.publisherAddress || 'gossip-discovery',
+            timestamp: new Date(),
+          });
+          await this.store.insert(regQuads);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.paranetId}" from gossip`);
+        }
+      }
+
+      const dataGraph = subGraphName
+        ? contextGraphSubGraphUri(request.paranetId, subGraphName)
+        : graphManager.dataGraphUri(request.paranetId);
       let normalized = quads.map(q => ({ ...q, graph: dataGraph }));
 
       // When receiving ontology-topic broadcasts, skip context graph definition
@@ -156,7 +190,9 @@ export class GossipPublishHandler {
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
 
-        const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities);
+        const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities, {
+          expectedGraph: subGraphName ? dataGraph : undefined,
+        });
         if (!validation.valid) {
           const allRule4 = validation.errors.every(e => e.startsWith('Rule 4'));
           if (!allRule4) {
@@ -205,6 +241,7 @@ export class GossipPublishHandler {
           kaCount: kaMetadata.length,
           publisherPeerId: request.publisherAddress || 'unknown',
           timestamp: new Date(),
+          subGraphName,
         };
 
         // Always store gossip-received data as tentative first —

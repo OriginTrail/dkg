@@ -17,6 +17,7 @@ export type AccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 interface KAMeta {
   rootEntity: string;
   contextGraphId: string;
+  subGraphName?: string;
   privateMerkleRoot?: Uint8Array;
   privateTripleCount?: number;
   accessPolicy?: AccessPolicy;
@@ -72,8 +73,8 @@ export class AccessHandler {
       }
 
       const hasPrivate =
-        this.privateStore.hasPrivateTriples(meta.contextGraphId, meta.rootEntity) ||
-        (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, meta.rootEntity));
+        this.privateStore.hasPrivateTriples(meta.contextGraphId, meta.rootEntity, meta.subGraphName) ||
+        (await this.privateStore.hasPrivateTriplesInStore(meta.contextGraphId, meta.rootEntity, meta.subGraphName));
 
       if (!hasPrivate) {
         return this.deny('No private triples available for this KA');
@@ -133,6 +134,7 @@ export class AccessHandler {
       const privateQuads = await this.privateStore.getPrivateTriples(
         meta.contextGraphId,
         meta.rootEntity,
+        meta.subGraphName,
       );
 
       const nquads = privateQuads
@@ -173,7 +175,7 @@ export class AccessHandler {
   private async lookupKAMeta(kaUal: string): Promise<KAMeta | null> {
     const safeUal = assertSafeIri(kaUal);
     const result = await this.store.query(
-      `SELECT ?rootEntity ?contextGraph ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo WHERE {
+      `SELECT ?rootEntity ?contextGraph ?kc ?privateMerkleRoot ?privateTripleCount ?accessPolicy ?publisherPeerId ?attributedTo ?sgName WHERE {
         GRAPH ?g {
           <${safeUal}> <${DKG_NS}rootEntity> ?rootEntity .
           <${safeUal}> <${DKG_NS}partOf> ?kc .
@@ -183,6 +185,7 @@ export class AccessHandler {
           OPTIONAL { ?kc <${DKG_NS}accessPolicy> ?accessPolicy }
           OPTIONAL { ?kc <${DKG_NS}publisherPeerId> ?publisherPeerId }
           OPTIONAL { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?attributedTo }
+          OPTIONAL { ?kc <${DKG_NS}subGraphName> ?sgName }
           BIND(CONCAT(STR(?contextGraph), '/_meta') AS ?expectedMetaGraph)
           FILTER(STR(?g) = ?expectedMetaGraph)
         }
@@ -227,6 +230,8 @@ export class AccessHandler {
         ? stripLiteral(row['attributedTo'])
         : undefined;
 
+    const subGraphName = row['sgName'] ? stripLiteral(row['sgName']) : undefined;
+
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const allowedPeerRes = await this.store.query(
       `SELECT ?allowedPeer WHERE {
@@ -248,6 +253,7 @@ export class AccessHandler {
     return {
       rootEntity,
       contextGraphId,
+      subGraphName,
       privateMerkleRoot,
       privateTripleCount,
       accessPolicy,

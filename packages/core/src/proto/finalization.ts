@@ -15,7 +15,8 @@ export const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('rootEntities', 10, 'string', 'repeated'))
   .add(new Field('timestampMs', 11, 'uint64'))
   .add(new Field('operationId', 12, 'string'))
-  .add(new Field('contextGraphId', 13, 'string'));
+  .add(new Field('contextGraphId', 13, 'string'))
+  .add(new Field('subGraphName', 14, 'string'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -35,6 +36,8 @@ export interface FinalizationMessageMsg {
   operationId?: string;
   /** When set, the enshrine targeted a context graph instead of the paranet data graph. */
   contextGraphId?: string;
+  /** Sub-graph within the context graph. Receivers promote SWM into sub-graph data graph if set. */
+  subGraphName?: string;
 }
 
 const MAX_UINT64 = (1n << 64n) - 1n;

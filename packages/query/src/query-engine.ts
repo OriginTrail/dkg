@@ -25,6 +25,13 @@ export interface QueryOptions {
   /** Specific verified graph name — used with view='verified-memory' to target a single verified graph. */
   verifiedGraph?: string;
   /**
+   * Scope the query to a specific sub-graph within the context graph.
+   * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`
+   * instead of the root data graph. Only works with legacy routing (no `view`).
+   * Combining `subGraphName` with `view` throws — deferred to V10.x.
+   */
+  subGraphName?: string;
+  /**
    * @internal Reserved for future use — not yet enforced by DKGQueryEngine.
    * Will filter verified-memory triples below this trust threshold once trust
    * metadata is available in verified-memory graphs.

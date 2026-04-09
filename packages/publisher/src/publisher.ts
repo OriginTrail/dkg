@@ -83,6 +83,13 @@ export interface PublishOptions {
   targetGraphUri?: string;
   /** Override the meta graph URI (used for context graph publishing). */
   targetMetaGraphUri?: string;
+  /**
+   * Target sub-graph name within the context graph. When set, data is stored
+   * in `did:dkg:context-graph:{id}/{subGraphName}` and metadata in
+   * `did:dkg:context-graph:{id}/{subGraphName}/_meta`. Sub-graphs are
+   * convention-based partitions — no on-chain enforcement in V10.0.
+   */
+  subGraphName?: string;
   /** @deprecated V9 receiver signatures removed — use v10ACKProvider instead. */
   receiverSignatureProvider?: ReceiverSignatureProvider;
   /**
@@ -121,6 +128,8 @@ export interface PublishResult {
   v10ACKs?: V10CoreNodeACK[];
   /** True when the KC was created via KnowledgeAssetsV10 (V10 storage path). */
   v10Origin?: boolean;
+  /** Sub-graph the data was published into (for gossip propagation). */
+  subGraphName?: string;
 }
 
 export interface Publisher {

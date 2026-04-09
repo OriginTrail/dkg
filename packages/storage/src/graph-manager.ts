@@ -8,6 +8,9 @@ import {
   contextGraphVerifiedMemoryUri,
   contextGraphVerifiedMemoryMetaUri,
   contextGraphDraftUri,
+  contextGraphSubGraphUri,
+  contextGraphSubGraphMetaUri,
+  contextGraphSubGraphPrivateUri,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -32,12 +35,12 @@ export class ContextGraphManager {
     return contextGraphPrivateUri(contextGraphId);
   }
 
-  sharedMemoryUri(contextGraphId: string): string {
-    return contextGraphSharedMemoryUri(contextGraphId);
+  sharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
+    return contextGraphSharedMemoryUri(contextGraphId, subGraphName);
   }
 
-  sharedMemoryMetaUri(contextGraphId: string): string {
-    return contextGraphSharedMemoryMetaUri(contextGraphId);
+  sharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {
+    return contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
   }
 
   verifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string): string {
@@ -50,6 +53,27 @@ export class ContextGraphManager {
 
   draftUri(contextGraphId: string, agentAddress: string, name: string): string {
     return contextGraphDraftUri(contextGraphId, agentAddress, name);
+  }
+
+  subGraphUri(contextGraphId: string, subGraphName: string): string {
+    return contextGraphSubGraphUri(contextGraphId, subGraphName);
+  }
+
+  subGraphMetaUri(contextGraphId: string, subGraphName: string): string {
+    return contextGraphSubGraphMetaUri(contextGraphId, subGraphName);
+  }
+
+  subGraphPrivateUri(contextGraphId: string, subGraphName: string): string {
+    return contextGraphSubGraphPrivateUri(contextGraphId, subGraphName);
+  }
+
+  async ensureSubGraph(contextGraphId: string, subGraphName: string): Promise<void> {
+    await this.ensureContextGraph(contextGraphId);
+    await this.store.createGraph(this.subGraphUri(contextGraphId, subGraphName));
+    await this.store.createGraph(this.subGraphMetaUri(contextGraphId, subGraphName));
+    await this.store.createGraph(this.subGraphPrivateUri(contextGraphId, subGraphName));
+    await this.store.createGraph(contextGraphSharedMemoryUri(contextGraphId, subGraphName));
+    await this.store.createGraph(contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName));
   }
 
   async ensureContextGraph(contextGraphId: string): Promise<void> {
@@ -83,6 +107,26 @@ export class ContextGraphManager {
       }
     }
     return [...contextGraphs];
+  }
+
+  /**
+   * Lists sub-graph names for a given context graph by inspecting named graphs
+   * in the store. Returns names like "code", "decisions" (without the CG prefix).
+   */
+  async listSubGraphs(contextGraphId: string): Promise<string[]> {
+    const prefix = `${CG_PREFIX}${contextGraphId}/`;
+    const allGraphs = await this.store.listGraphs();
+    const subGraphNames = new Set<string>();
+    const reservedPrefixes = ['_', 'draft/', 'context/'];
+    for (const g of allGraphs) {
+      if (!g.startsWith(prefix)) continue;
+      const rest = g.slice(prefix.length);
+      if (reservedPrefixes.some(r => rest.startsWith(r))) continue;
+      const name = rest.endsWith('/_meta') ? rest.slice(0, -6) : rest;
+      if (name.includes('/')) continue;
+      if (name.length > 0) subGraphNames.add(name);
+    }
+    return [...subGraphNames];
   }
 
   async hasContextGraph(contextGraphId: string): Promise<boolean> {

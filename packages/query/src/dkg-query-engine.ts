@@ -3,7 +3,8 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphDraftUri,
-  assertSafeIri, escapeSparqlLiteral,
+  contextGraphSubGraphUri,
+  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -100,10 +101,22 @@ export class DKGQueryEngine implements QueryEngine {
 
     // ── V10 view-based routing ────────────────────────────────────────
     const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+
+    if (options?.subGraphName) {
+      const v = validateSubGraphName(options.subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
+    }
+
     if (options?.view) {
       if (!effectiveContextGraphId) {
         throw new Error(
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
+        );
+      }
+      if (options.subGraphName) {
+        throw new Error(
+          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
+          'Sub-graph scoping within views is deferred to V10.x.',
         );
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
@@ -113,8 +126,10 @@ export class DKGQueryEngine implements QueryEngine {
     let effectiveSparql = sparql;
 
     if (effectiveContextGraphId && !sparql.toLowerCase().includes('from ')) {
-      const dataGraph = contextGraphDataUri(effectiveContextGraphId);
-      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId);
+      const dataGraph = options?.subGraphName
+        ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
+        : contextGraphDataUri(effectiveContextGraphId);
+      const sharedMemoryGraph = contextGraphSharedMemoryUri(effectiveContextGraphId, options?.subGraphName);
       if (options?.includeSharedMemory ?? options?.includeWorkspace) {
         const dataSparql = wrapWithGraph(sparql, dataGraph);
         const sharedMemorySparql = wrapWithGraph(sparql, sharedMemoryGraph);
@@ -202,13 +217,14 @@ export class DKGQueryEngine implements QueryEngine {
     contextGraphId: string;
     quads: Quad[];
   }> {
-    // Look up KA metadata across all meta graphs
+    // Look up KA metadata across all meta graphs, including subGraphName if recorded
     const metaResult = await this.store.query(
-      `SELECT ?rootEntity ?ctxGraph WHERE {
+      `SELECT ?rootEntity ?ctxGraph ?sgName WHERE {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
           <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?ctxGraph .
+          OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }
       }`,
     );
@@ -220,9 +236,14 @@ export class DKGQueryEngine implements QueryEngine {
     const rootEntity = metaResult.bindings[0]['rootEntity'];
     const contextGraphUri = metaResult.bindings[0]['ctxGraph'];
     const contextGraphId = contextGraphUri.replace('did:dkg:context-graph:', '');
-    const dataGraph = contextGraphDataUri(contextGraphId);
+    const sgNameRaw = metaResult.bindings[0]['sgName'];
+    const subGraphName = sgNameRaw ? sgNameRaw.replace(/^"(.*)".*$/, '$1') : undefined;
 
-    // Fetch all triples for this entity
+    const dataGraph = subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : contextGraphDataUri(contextGraphId);
+
+    // Fetch all triples for this entity from the correct data graph
     const dataResult = await this.store.query(
       `SELECT ?s ?p ?o WHERE {
         GRAPH <${assertSafeIri(dataGraph)}> {

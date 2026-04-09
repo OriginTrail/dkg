@@ -67,11 +67,13 @@ export function contextGraphPrivateUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_private`;
 }
 
-export function contextGraphSharedMemoryUri(contextGraphId: string): string {
+export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 }
 
-export function contextGraphSharedMemoryMetaUri(contextGraphId: string): string {
+export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory_meta`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
 }
 
@@ -83,7 +85,8 @@ export function contextGraphVerifiedMemoryMetaUri(contextGraphId: string, verifi
   return `did:dkg:context-graph:${contextGraphId}/_verified_memory/${verifiedMemoryId}/_meta`;
 }
 
-export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string): string {
+export function contextGraphDraftUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/${agentAddress}/${name}`;
   return `did:dkg:context-graph:${contextGraphId}/draft/${agentAddress}/${name}`;
 }
 
@@ -93,6 +96,27 @@ export function contextGraphRulesUri(contextGraphId: string): string {
 
 export function contextGraphSubGraphUri(contextGraphId: string, subGraphName: string): string {
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+}
+
+export function contextGraphSubGraphMetaUri(contextGraphId: string, subGraphName: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_meta`;
+}
+
+export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphName: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
+}
+
+/**
+ * Validates a sub-graph name: must be non-empty, no leading underscore
+ * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.
+ */
+export function validateSubGraphName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Sub-graph name cannot be empty' };
+  if (name.startsWith('_')) return { valid: false, reason: 'Sub-graph names starting with "_" are reserved for protocol graphs' };
+  if (name.includes('/')) return { valid: false, reason: 'Sub-graph names cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Sub-graph name contains characters unsafe for IRIs' };
+  if (name === 'context' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
+  return { valid: true };
 }
 
 // ── Deprecated V9 aliases ──────────────────────────────────────────────

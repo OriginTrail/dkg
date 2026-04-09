@@ -16,7 +16,7 @@ export {
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,

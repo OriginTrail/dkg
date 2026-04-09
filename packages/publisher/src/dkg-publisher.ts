@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphDraftUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -46,6 +46,7 @@ export interface DKGPublisherConfig {
 export interface ShareOptions {
   publisherPeerId: string;
   operationCtx?: OperationContext;
+  subGraphName?: string;
 }
 
 /** @deprecated Use ShareOptions */
@@ -188,6 +189,10 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ShareOptions & { conditions?: CASCondition[] },
   ): Promise<ShareResult> {
+    if (options.subGraphName !== undefined) {
+      const v = validateSubGraphName(options.subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name for share: ${v.reason}`);
+    }
     const ctx = options.operationCtx ?? createOperationContext('share');
     this.log.info(ctx, `Writing ${quads.length} quads to shared memory for context graph ${contextGraphId}`);
 
@@ -211,8 +216,9 @@ export class DKGPublisher implements Publisher {
       privateTripleCount: m.privateTripleCount,
     }));
 
-    const dataOwned = this.ownedEntities.get(contextGraphId) ?? new Set();
-    const swmOwned = this.sharedMemoryOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
+    const ownershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const dataOwned = this.ownedEntities.get(ownershipKey) ?? new Set();
+    const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
     const existing = new Set<string>([...dataOwned, ...swmOwned.keys()]);
 
     const upsertable = new Set<string>();
@@ -234,8 +240,8 @@ export class DKGPublisher implements Publisher {
     }
 
     const shareOperationId = `swm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options.subGraphName);
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options.subGraphName);
 
     // Pre-encode gossip message and enforce size limit BEFORE any
     // destructive SWM mutations to avoid leaving orphaned state.
@@ -268,6 +274,7 @@ export class DKGPublisher implements Publisher {
       timestampMs: Date.now(),
       operationId: ctx.operationId,
       casConditions,
+      subGraphName: options.subGraphName,
     });
 
     const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
@@ -303,11 +310,11 @@ export class DKGPublisher implements Publisher {
     );
     await this.store.insert(metaQuads);
 
-    if (!this.sharedMemoryOwnedEntities.has(contextGraphId)) {
-      this.sharedMemoryOwnedEntities.set(contextGraphId, new Map());
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
     }
     const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
-    const liveOwned = this.sharedMemoryOwnedEntities.get(contextGraphId)!;
+    const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
     for (const r of rootEntities) {
       if (!liveOwned.has(r)) {
         newOwnershipEntries.push({ rootEntity: r, creatorPeerId: options.publisherPeerId });
@@ -418,10 +425,11 @@ export class DKGPublisher implements Publisher {
       publishContextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
     let sparql: string;
     if (selection === 'all') {
@@ -468,7 +476,14 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}`);
+    if (options?.subGraphName && ctxGraphId) {
+      throw new Error(
+        'subGraphName and publishContextGraphId cannot be used together — ' +
+        'the remap flow targets /context/{id} which is incompatible with sub-graph URIs',
+      );
+    }
+
+    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
     const publishResult = await this.publish({
       contextGraphId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
@@ -477,6 +492,7 @@ export class DKGPublisher implements Publisher {
       v10ACKProvider: options?.v10ACKProvider,
       publishContextGraphId: ctxGraphId ?? undefined,
       fromSharedMemory: true,
+      subGraphName: options?.subGraphName,
     });
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
@@ -575,7 +591,8 @@ export class DKGPublisher implements Publisher {
     // Published triples must not linger in SWM — they live in LTM now.
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options?.subGraphName);
+      const swmOwnershipKey = options?.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
       const kaMap = autoPartition(quads);
       let ownerDeletedTotal = 0;
       for (const rootEntity of kaMap.keys()) {
@@ -586,7 +603,7 @@ export class DKGPublisher implements Publisher {
         });
         ownerDeletedTotal += ownerDeleted;
         await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
-        this.sharedMemoryOwnedEntities.get(contextGraphId)?.delete(rootEntity);
+        this.sharedMemoryOwnedEntities.get(swmOwnershipKey)?.delete(rootEntity);
       }
       if (ownerDeletedTotal > 0) {
         this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
@@ -599,7 +616,7 @@ export class DKGPublisher implements Publisher {
         if (remainingCount > 0 || remainingMetaCount > 0) {
           this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
         }
-        this.sharedMemoryOwnedEntities.delete(contextGraphId);
+        this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
       }
     }
 
@@ -681,6 +698,31 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
+    // Sub-graph routing: data triples go to `did:dkg:context-graph:{id}/{subGraph}`.
+    // KC metadata (status, authorship proofs) stays in the root `_meta` graph so that
+    // AccessHandler.lookupKAMeta() and DKGQueryEngine.resolveKA() can still discover
+    // the KC without knowing which sub-graph holds the data triples.
+    if (options.subGraphName && !options.targetGraphUri) {
+      const sgValidation = validateSubGraphName(options.subGraphName);
+      if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
+
+      const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
+      const registered = await this.store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(options.contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> ?p ?o } }`,
+      );
+      if (registered.type === 'boolean' && !registered.value) {
+        throw new Error(
+          `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
+          `Call createSubGraph() first.`,
+        );
+      }
+
+      options = {
+        ...options,
+        targetGraphUri: sgUri,
+      };
+    }
+
     const {
       contextGraphId,
       quads,
@@ -757,7 +799,8 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:validate', 'start');
-    const existing = this.ownedEntities.get(contextGraphId) ?? new Set();
+    const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
     const validation = validatePublishRequest(allSkolemizedQuads, manifestEntries, contextGraphId, existing);
     if (!validation.valid) {
       throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
@@ -788,7 +831,7 @@ export class DKGPublisher implements Publisher {
         (q) => q.subject === rootEntity || q.subject.startsWith(rootEntity + '/.well-known/genid/'),
       );
       if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads);
+        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
       }
     }
 
@@ -976,6 +1019,7 @@ export class DKGPublisher implements Publisher {
             accessPolicy: effectiveAccessPolicy,
             allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
+            subGraphName: options.subGraphName,
           },
           kaMetadata,
           {
@@ -1047,6 +1091,7 @@ export class DKGPublisher implements Publisher {
           accessPolicy: effectiveAccessPolicy,
           allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),
+          subGraphName: options.subGraphName,
         },
         kaMetadata,
       );
@@ -1062,11 +1107,12 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
-      if (!this.ownedEntities.has(contextGraphId)) {
-        this.ownedEntities.set(contextGraphId, new Set());
+      const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+      if (!this.ownedEntities.has(confirmOwnershipKey)) {
+        this.ownedEntities.set(confirmOwnershipKey, new Set());
       }
       for (const e of manifestEntries) {
-        this.ownedEntities.get(contextGraphId)!.add(e.rootEntity);
+        this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
       }
       this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
       onPhase?.('chain:metadata', 'end');
@@ -1084,6 +1130,7 @@ export class DKGPublisher implements Publisher {
       publicQuads: allSkolemizedQuads,
       v10ACKs,
       v10Origin: usedV10Path,
+      subGraphName: options.subGraphName,
     };
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
@@ -1091,6 +1138,12 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kcId: bigint, options: PublishOptions): Promise<PublishResult> {
+    if (options.subGraphName) {
+      throw new Error(
+        'Updating sub-graph KCs is not yet supported. The update path does not resolve sub-graph data/private graphs. ' +
+        'Publish a new KC instead, or remove and recreate the sub-graph.',
+      );
+    }
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
@@ -1197,14 +1250,14 @@ export class DKGPublisher implements Publisher {
     for (const [rootEntity, publicQuads] of kaMap) {
       await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
-      await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity);
+      await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity, options.subGraphName);
 
       const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
       await this.store.insert(normalized);
 
       const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
       if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads);
+        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
       }
     }
 
@@ -1270,69 +1323,32 @@ export class DKGPublisher implements Publisher {
   async reconstructSharedMemoryOwnership(): Promise<number> {
     const DKG = 'http://dkg.io/ontology/';
     const PROV = 'http://www.w3.org/ns/prov#';
+    const SWM_META_SUFFIX = '/_shared_memory_meta';
+    const CG_PREFIX = 'did:dkg:context-graph:';
     try {
       const contextGraphs = await this.graphManager.listContextGraphs();
       let total = 0;
+
+      // Build list of (ownershipKey, swmMetaGraphUri) pairs: root + sub-graph scoped
+      const targets: Array<{ ownershipKey: string; swmMetaGraph: string }> = [];
+      const allGraphs = await this.store.listGraphs();
       for (const cgId of contextGraphs) {
-        const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(cgId);
-        const result = await this.store.query(
-          `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
-        );
-        if (result.type !== 'bindings' || result.bindings.length === 0) continue;
+        targets.push({ ownershipKey: cgId, swmMetaGraph: this.graphManager.sharedMemoryMetaUri(cgId) });
 
-        const opsResult = await this.store.query(
-          `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
-        );
-        const validatedOwners = new Map<string, Set<string>>();
-        if (opsResult.type === 'bindings') {
-          for (const row of opsResult.bindings) {
-            const root = row['root'];
-            const peer = row['peer'];
-            if (!root || !peer) continue;
-            const peerStr = peer.startsWith('"')
-              ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-              : peer;
-            if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
-            validatedOwners.get(root)!.add(peerStr);
-          }
-        }
-
-        if (!this.sharedMemoryOwnedEntities.has(cgId)) {
-          this.sharedMemoryOwnedEntities.set(cgId, new Map());
-        }
-        const ownedMap = this.sharedMemoryOwnedEntities.get(cgId)!;
-        for (const row of result.bindings) {
-          const entity = row['entity'];
-          const creator = row['creator'];
-          if (!entity || !creator) continue;
-          const creatorStr = creator.startsWith('"')
-            ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
-            : creator;
-
-          const validPeers = validatedOwners.get(entity);
-          if (!validPeers || !validPeers.has(creatorStr)) {
-            this.log.warn(
-              createOperationContext('reconstruct'),
-              `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
-            );
-            continue;
-          }
-
-          if (ownedMap.has(entity)) {
-            const existing = ownedMap.get(entity)!;
-            if (existing !== creatorStr) {
-              this.log.warn(
-                createOperationContext('reconstruct'),
-                `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
-              );
-              if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+        // Discover sub-graph SWM meta graphs: did:dkg:context-graph:{cgId}/{sgName}/_shared_memory_meta
+        const sgPrefix = `${CG_PREFIX}${cgId}/`;
+        for (const g of allGraphs) {
+          if (g.startsWith(sgPrefix) && g.endsWith(SWM_META_SUFFIX)) {
+            const middle = g.slice(sgPrefix.length, g.length - SWM_META_SUFFIX.length);
+            if (middle && !middle.includes('/')) {
+              targets.push({ ownershipKey: `${cgId}\0${middle}`, swmMetaGraph: g });
             }
-            continue;
           }
-
-          ownedMap.set(entity, creatorStr);
-          total++;
         }
+      }
+
+      for (const { ownershipKey, swmMetaGraph } of targets) {
+        total += await this.reconstructOwnershipFromGraph(ownershipKey, swmMetaGraph, DKG, PROV);
       }
       return total;
     } catch (err) {
@@ -1342,6 +1358,71 @@ export class DKGPublisher implements Publisher {
       );
       return 0;
     }
+  }
+
+  private async reconstructOwnershipFromGraph(
+    ownershipKey: string, swmMetaGraph: string, DKG: string, PROV: string,
+  ): Promise<number> {
+    const result = await this.store.query(
+      `SELECT ?entity ?creator WHERE { GRAPH <${swmMetaGraph}> { ?entity <${DKG}workspaceOwner> ?creator } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return 0;
+
+    const opsResult = await this.store.query(
+      `SELECT ?op ?peer ?root WHERE { GRAPH <${swmMetaGraph}> { ?op <${PROV}wasAttributedTo> ?peer . ?op <${DKG}rootEntity> ?root } }`,
+    );
+    const validatedOwners = new Map<string, Set<string>>();
+    if (opsResult.type === 'bindings') {
+      for (const row of opsResult.bindings) {
+        const root = row['root'];
+        const peer = row['peer'];
+        if (!root || !peer) continue;
+        const peerStr = peer.startsWith('"')
+          ? peer.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+          : peer;
+        if (!validatedOwners.has(root)) validatedOwners.set(root, new Set());
+        validatedOwners.get(root)!.add(peerStr);
+      }
+    }
+
+    if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+      this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+    }
+    const ownedMap = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+    let count = 0;
+    for (const row of result.bindings) {
+      const entity = row['entity'];
+      const creator = row['creator'];
+      if (!entity || !creator) continue;
+      const creatorStr = creator.startsWith('"')
+        ? creator.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '')
+        : creator;
+
+      const validPeers = validatedOwners.get(entity);
+      if (!validPeers || !validPeers.has(creatorStr)) {
+        this.log.warn(
+          createOperationContext('reconstruct'),
+          `Skipping unvalidated ownership: entity=${entity} creator=${creatorStr}`,
+        );
+        continue;
+      }
+
+      if (ownedMap.has(entity)) {
+        const existing = ownedMap.get(entity)!;
+        if (existing !== creatorStr) {
+          this.log.warn(
+            createOperationContext('reconstruct'),
+            `Conflicting ownership for ${entity}: "${existing}" vs "${creatorStr}"; keeping alphabetically first`,
+          );
+          if (creatorStr < existing) ownedMap.set(entity, creatorStr);
+        }
+        continue;
+      }
+
+      ownedMap.set(entity, creatorStr);
+      count++;
+    }
+    return count;
   }
 
   /** @deprecated Use reconstructSharedMemoryOwnership */
@@ -1376,8 +1457,20 @@ export class DKGPublisher implements Publisher {
 
   // ── Working Memory Draft Operations (spec §6) ────────────────────────
 
-  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string): Promise<string> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+  private static validateOptionalSubGraph(subGraphName: string | undefined): void {
+    if (subGraphName !== undefined) {
+      const v = validateSubGraphName(subGraphName);
+      if (!v.valid) throw new Error(`Invalid sub-graph name: ${v.reason}`);
+    }
+  }
+
+  clearSubGraphOwnership(ownershipKey: string): void {
+    this.sharedMemoryOwnedEntities.delete(ownershipKey);
+  }
+
+  async draftCreate(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<string> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     await this.store.createGraph(graphUri);
     return graphUri;
   }
@@ -1386,10 +1479,17 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
-    triples: Array<{ subject: string; predicate: string; object: string }>,
+    input: Quad[] | Array<{ subject: string; predicate: string; object: string }>,
+    subGraphName?: string,
   ): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const quads = triples.map((t) => ({ ...t, graph: graphUri }));
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
+    const quads = input.map((t) => ({
+      subject: t.subject,
+      predicate: t.predicate,
+      object: t.object,
+      graph: graphUri,
+    }));
     await this.store.insert(quads);
   }
 
@@ -1397,8 +1497,10 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
+    subGraphName?: string,
   ): Promise<Quad[]> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
     );
@@ -1409,10 +1511,11 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     draftName: string,
     agentAddress: string,
-    opts?: { entities?: string[] | 'all' },
+    opts?: { entities?: string[] | 'all'; subGraphName?: string },
   ): Promise<{ promotedCount: number }> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
-    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId);
+    DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, opts?.subGraphName);
+    const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
 
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
@@ -1453,8 +1556,9 @@ export class DKGPublisher implements Publisher {
     return { promotedCount: swmQuads.length };
   }
 
-  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string): Promise<void> {
-    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName);
+  async draftDiscard(contextGraphId: string, draftName: string, agentAddress: string, subGraphName?: string): Promise<void> {
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    const graphUri = contextGraphDraftUri(contextGraphId, agentAddress, draftName, subGraphName);
     await this.store.dropGraph(graphUri);
   }
 }

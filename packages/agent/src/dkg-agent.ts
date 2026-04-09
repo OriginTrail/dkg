@@ -70,6 +70,8 @@ interface PublishOpts {
   operationCtx?: OperationContext;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
+  /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+  subGraphName?: string;
 }
 
 type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
@@ -1273,12 +1275,10 @@ export class DKGAgent {
       return this._publish(contextGraphId, publicQuads, privateQuads, thirdArg as PublishOpts);
     }
     // Quad[]: pass through directly
-    return this._publish(
-      contextGraphId,
-      input as Quad[],
-      Array.isArray(thirdArg) ? thirdArg : undefined,
-      Array.isArray(thirdArg) ? fourthArg : (thirdArg as PublishOpts),
-    );
+    if (Array.isArray(thirdArg)) {
+      return this._publish(contextGraphId, input as Quad[], thirdArg, fourthArg);
+    }
+    return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
   private async _publish(
@@ -1309,6 +1309,7 @@ export class DKGAgent {
       publisherPeerId: this.peerId,
       accessPolicy: opts?.accessPolicy,
       allowedPeers: opts?.allowedPeers,
+      subGraphName: opts?.subGraphName,
       operationCtx: ctx,
       onPhase,
       v10ACKProvider,
@@ -1381,12 +1382,14 @@ export class DKGAgent {
    * When localOnly is false (default), replicates via GossipSub shared memory topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext }): Promise<{ shareOperationId: string }> {
+  async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string }): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${opts?.localOnly ? ' (local-only)' : ''}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
     const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
@@ -1444,6 +1447,8 @@ export class DKGAgent {
       contextGraphId?: string | bigint;
       subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1460,6 +1465,7 @@ export class DKGAgent {
       publishContextGraphId: ctxGraphIdStr,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
+      subGraphName: options?.subGraphName,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -1479,6 +1485,7 @@ export class DKGAgent {
         timestampMs: Date.now(),
         operationId: ctx.operationId,
         contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+        subGraphName: options?.subGraphName,
       };
 
       const topic = paranetFinalizationTopic(contextGraphId);
@@ -1590,6 +1597,7 @@ export class DKGAgent {
       operationCtx?: OperationContext;
       view?: GetView;
       verifiedGraph?: string;
+      subGraphName?: string;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -1599,8 +1607,9 @@ export class DKGAgent {
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
     const ctx = opts.operationCtx ?? createOperationContext('query');
+    const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
-    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+    this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
@@ -1608,6 +1617,7 @@ export class DKGAgent {
       view: opts.view,
       agentAddress: opts.view === 'working-memory' ? this.peerId : undefined,
       verifiedGraph: opts.verifiedGraph,
+      subGraphName: opts.subGraphName,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -1943,6 +1953,137 @@ export class DKGAgent {
         // No peers subscribed — ok for now
       }
     }
+  }
+
+  // ── Sub-Graph Management ───────────────────────────────────────────────
+
+  /**
+   * Create a named sub-graph within a context graph.
+   * Registers it in the CG's `_meta` graph and creates the named graph in storage.
+   * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
+   *
+   * V10.0 limitations:
+   * - Registration triples are stored locally only. Peers discover sub-graphs when
+   *   they receive data via GossipSub or by querying the admin's node.
+   * - GossipSub broadcasts raw triples without sub-graph context; receivers store
+   *   replicated data in the root data graph. The CG admin manages sub-graph
+   *   organization on their own node.
+   */
+  async createSubGraph(contextGraphId: string, subGraphName: string, opts?: {
+    description?: string;
+    authorizedWriters?: string[];
+  }): Promise<{ uri: string }> {
+    const { validateSubGraphName, contextGraphSubGraphUri: sgUri } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) throw new Error(`Context graph "${contextGraphId}" does not exist`);
+
+    const gm = new GraphManager(this.store);
+    const uri = sgUri(contextGraphId, subGraphName);
+
+    // Idempotency: check if already registered before inserting
+    const existing = await this.listSubGraphs(contextGraphId);
+    if (existing.some(sg => sg.name === subGraphName)) {
+      this.log.info(
+        createOperationContext('system'),
+        `Sub-graph "${subGraphName}" already exists in context graph "${contextGraphId}" → ${uri}`,
+      );
+      return { uri };
+    }
+
+    const { generateSubGraphRegistration } = await import('@origintrail-official/dkg-publisher');
+    const registrationQuads = generateSubGraphRegistration({
+      contextGraphId,
+      subGraphName,
+      createdBy: this.peerId,
+      authorizedWriters: opts?.authorizedWriters,
+      description: opts?.description,
+      timestamp: new Date(),
+    });
+
+    await gm.ensureSubGraph(contextGraphId, subGraphName);
+    await this.store.insert(registrationQuads);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Created sub-graph "${subGraphName}" in context graph "${contextGraphId}" → ${uri}`,
+    );
+    return { uri };
+  }
+
+  /**
+   * List registered sub-graphs for a context graph.
+   * Queries the CG's `_meta` graph for `dkg:SubGraph` registrations.
+   */
+  async listSubGraphs(contextGraphId: string): Promise<Array<{
+    uri: string;
+    name: string;
+    createdBy: string;
+    createdAt?: string;
+    description?: string;
+  }>> {
+    const { subGraphDiscoverySparql } = await import('@origintrail-official/dkg-publisher');
+    const sparql = subGraphDiscoverySparql(contextGraphId);
+    const result = await this.store.query(sparql);
+    if (result.type !== 'bindings') return [];
+    return result.bindings.map(row => ({
+      uri: row['subGraph'] ?? '',
+      name: (row['name'] ?? '').replace(/^"|"$/g, ''),
+      createdBy: row['createdBy'] ?? '',
+      createdAt: row['createdAt']?.replace(/^"|".*$/g, '') || undefined,
+      description: row['description']?.replace(/^"|"$/g, '') || undefined,
+    }));
+  }
+
+  /**
+   * Remove a sub-graph registration from `_meta` and drop its named graphs.
+   * Does NOT delete on-chain data — this is a local bookkeeping operation.
+   */
+  async removeSubGraph(contextGraphId: string, subGraphName: string): Promise<void> {
+    const { validateSubGraphName } = await import('@origintrail-official/dkg-core');
+    const validation = validateSubGraphName(subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name "${subGraphName}": ${validation.reason}`);
+
+    const gm = new GraphManager(this.store);
+
+    const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    try {
+      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+    } catch {
+      // SPARQL DELETE WHERE may not be supported — delete quads manually
+      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+      const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
+      await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
+    }
+
+    const dataUri = gm.subGraphUri(contextGraphId, subGraphName);
+    const metaUri = gm.subGraphMetaUri(contextGraphId, subGraphName);
+    const privateUri = gm.subGraphPrivateUri(contextGraphId, subGraphName);
+    const swmUri = gm.sharedMemoryUri(contextGraphId, subGraphName);
+    const swmMetaUri = gm.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    for (const uri of [dataUri, metaUri, privateUri, swmUri, swmMetaUri]) {
+      try { await this.store.dropGraph(uri); } catch { /* graph may not exist */ }
+    }
+
+    // Drop assertion/draft graphs under the sub-graph prefix
+    const sgPrefix = `did:dkg:context-graph:${contextGraphId}/${subGraphName}/draft/`;
+    const allGraphs = await this.store.listGraphs();
+    for (const g of allGraphs) {
+      if (g.startsWith(sgPrefix)) {
+        try { await this.store.dropGraph(g); } catch { /* graph may not exist */ }
+      }
+    }
+
+    // Clear SWM ownership cache for this sub-graph
+    const ownershipKey = `${contextGraphId}\0${subGraphName}`;
+    this.publisher.clearSubGraphOwnership(ownershipKey);
+
+    this.log.info(
+      createOperationContext('system'),
+      `Removed sub-graph "${subGraphName}" from context graph "${contextGraphId}"`,
+    );
   }
 
   /**
@@ -3488,6 +3629,7 @@ export class DKGAgent {
       txHash: onChain?.txHash ?? '',
       blockNumber: onChain?.blockNumber ?? 0,
       operationId: ctx.operationId,
+      subGraphName: result.subGraphName,
     });
 
     const topic = paranetPublishTopic(contextGraphId);
@@ -3505,20 +3647,43 @@ export class DKGAgent {
     const agent = this;
     const agentAddress = this.peerId;
     return {
-      async create(contextGraphId: string, draftName: string): Promise<string> {
-        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress);
+      async create(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<string> {
+        return agent.publisher.draftCreate(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
-      async write(contextGraphId: string, draftName: string, triples: Array<{ subject: string; predicate: string; object: string }>): Promise<void> {
-        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, triples);
+
+      /**
+       * Write triples to a WM draft. Accepts:
+       * - `Quad[]` — standard quad array (same as publish/share)
+       * - `JsonLdContent` — JSON-LD document, auto-converted to quads
+       * - `Array<{ subject, predicate, object }>` — legacy triple array (deprecated)
+       */
+      async write(
+        contextGraphId: string,
+        draftName: string,
+        input: import('@origintrail-official/dkg-storage').Quad[] | JsonLdContent | Array<{ subject: string; predicate: string; object: string }>,
+        opts?: { subGraphName?: string },
+      ): Promise<void> {
+        let quads: import('@origintrail-official/dkg-storage').Quad[];
+        if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
+          quads = input as import('@origintrail-official/dkg-storage').Quad[];
+        } else if (!Array.isArray(input) || (input.length > 0 && !('subject' in input[0]))) {
+          const { publicQuads, privateQuads } = await jsonLdToQuads(input as JsonLdContent);
+          quads = [...publicQuads, ...privateQuads];
+        } else {
+          quads = (input as Array<{ subject: string; predicate: string; object: string }>)
+            .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
+        }
+        return agent.publisher.draftWrite(contextGraphId, draftName, agentAddress, quads, opts?.subGraphName);
       },
-      async query(contextGraphId: string, draftName: string): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
-        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress);
+
+      async query(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<import('@origintrail-official/dkg-storage').Quad[]> {
+        return agent.publisher.draftQuery(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
-      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all' }): Promise<{ promotedCount: number }> {
+      async promote(contextGraphId: string, draftName: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
         return agent.publisher.draftPromote(contextGraphId, draftName, agentAddress, opts);
       },
-      async discard(contextGraphId: string, draftName: string): Promise<void> {
-        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress);
+      async discard(contextGraphId: string, draftName: string, opts?: { subGraphName?: string }): Promise<void> {
+        return agent.publisher.draftDiscard(contextGraphId, draftName, agentAddress, opts?.subGraphName);
       },
     };
   }

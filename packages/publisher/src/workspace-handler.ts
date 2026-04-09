@@ -3,10 +3,10 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm } from '@origintrail-official/dkg-core';
+import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm, validateSubGraphName, contextGraphSubGraphUri } from '@origintrail-official/dkg-core';
 import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
-import { generateShareMetadata, generateOwnershipQuads } from './metadata.js';
+import { generateShareMetadata, generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import type { KAManifestEntry } from './publisher.js';
 
@@ -125,15 +125,44 @@ export class SharedMemoryHandler {
         ctx = createOperationContext('share', request.operationId);
       }
       const contextGraphId = request.paranetId;
-      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions } = request;
-      this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId} op=${shareOperationId}`);
+      const { nquads, manifest, publisherPeerId, workspaceOperationId: shareOperationId, timestampMs, casConditions, subGraphName } = request;
+      const sgLabel = subGraphName ? `/${subGraphName}` : '';
+      this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
 
       if (publisherPeerId !== fromPeerId) {
         this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
         return;
       }
 
+      if (subGraphName) {
+        const v = validateSubGraphName(subGraphName);
+        if (!v.valid) {
+          this.log.warn(ctx, `SWM write rejected: invalid subGraphName "${subGraphName}": ${v.reason}`);
+          return;
+        }
+      }
+
       await this.graphManager.ensureContextGraph(contextGraphId);
+
+      if (subGraphName) {
+        await this.graphManager.ensureSubGraph(contextGraphId, subGraphName);
+
+        const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
+        const alreadyRegistered = await this.store.query(
+          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+        );
+        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+          const regQuads = generateSubGraphRegistration({
+            contextGraphId,
+            subGraphName,
+            createdBy: publisherPeerId || 'swm-discovery',
+            timestamp: new Date(),
+          });
+          await this.store.insert(regQuads);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
+        }
+      }
 
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
@@ -146,16 +175,17 @@ export class SharedMemoryHandler {
         privateTripleCount: m.privateTripleCount ?? 0,
       }));
 
-      const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId);
-      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+      const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+      const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
 
+      const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
       const condSubjects = (casConditions ?? []).map(c => c.subject);
       const subjects = [...new Set([...quads.map(q => q.subject), ...condSubjects])];
-      const lockKeys = subjects.map(s => `${contextGraphId}\0${s}`);
+      const lockKeys = subjects.map(s => `${swmOwnershipKey}\0${s}`);
 
       onPhase?.('store', 'start');
       const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
-        const swmOwned = this.sharedMemoryOwnedEntities.get(contextGraphId) ?? new Map<string, string>();
+        const swmOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey) ?? new Map<string, string>();
         const existing = new Set<string>([...swmOwned.keys()]);
 
         const upsertable = new Set<string>();
@@ -226,10 +256,10 @@ export class SharedMemoryHandler {
 
         await this.store.insert(metaQuads);
 
-        if (!this.sharedMemoryOwnedEntities.has(contextGraphId)) {
-          this.sharedMemoryOwnedEntities.set(contextGraphId, new Map());
+        if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {
+          this.sharedMemoryOwnedEntities.set(swmOwnershipKey, new Map());
         }
-        const liveOwned = this.sharedMemoryOwnedEntities.get(contextGraphId)!;
+        const liveOwned = this.sharedMemoryOwnedEntities.get(swmOwnershipKey)!;
         const newOwnershipEntries: Array<{ rootEntity: string; creatorPeerId: string }> = [];
         for (const r of rootEntities) {
           if (!liveOwned.has(r)) {
