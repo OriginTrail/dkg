@@ -181,12 +181,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 publisherNodeR,
                 publisherNodeVS
             );
-            // Check both the recovered signer and msg.sender — the latter covers
-            // contract authorities (multisigs, PCAs) that can't produce ECDSA signatures.
-            if (
-                !contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet) &&
-                !contextGraphs.isAuthorizedPublisher(contextGraphId, msg.sender)
-            ) {
+            // V10.0: curated CGs require the publishAuthority to be an EOA whose
+            // signature matches publisherWallet. Contract authorities (multisigs, PCAs)
+            // require ERC-1271 verification or a delegation registry — deferred to V10.x.
+            if (!contextGraphs.isAuthorizedPublisher(contextGraphId, publisherWallet)) {
                 revert KnowledgeAssetsLib.UnauthorizedPublisher(contextGraphId, publisherWallet);
             }
         }

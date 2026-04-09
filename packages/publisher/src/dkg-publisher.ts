@@ -862,7 +862,7 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `No v10ACKProvider — self-signing ACK (single-node mode)`);
       const cgIdForACK = (() => {
         const raw = options.publishContextGraphId ?? contextGraphId;
-        try { return BigInt(raw); } catch { return 0n; }
+        try { return BigInt(raw); } catch { return BigInt(ethers.keccak256(ethers.toUtf8Bytes(raw))); }
       })();
       const ackDigest = computeACKDigest(
         cgIdForACK, kcMerkleRoot, kaCount, publicByteSize, publishEpochs, precomputedTokenAmount,
@@ -900,8 +900,8 @@ export class DKGPublisher implements Publisher {
       usedV10Path = true;
 
       // Resolve contextGraphId for V10 on-chain publish.
-      // Only numeric IDs map to real on-chain CGs. Non-numeric string IDs (legacy
-      // paranet names, etc.) are passed as 0 to skip the isAuthorizedPublisher check.
+      // Must match the mapping used by ACKCollector and StorageACKHandler so
+      // the ACK digest is consistent across all parties.
       const ackDomainForSig = isPublishFromSharedMemory
         ? contextGraphId
         : (options.publishContextGraphId ?? contextGraphId);
@@ -909,7 +909,7 @@ export class DKGPublisher implements Publisher {
       try {
         cgIdForSig = BigInt(ackDomainForSig);
       } catch {
-        cgIdForSig = 0n;
+        cgIdForSig = BigInt(ethers.keccak256(ethers.toUtf8Bytes(ackDomainForSig)));
       }
 
       onPhase?.('chain:sign', 'end');
@@ -918,6 +918,9 @@ export class DKGPublisher implements Publisher {
       try {
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
+        }
+        if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') {
+          throw new Error('Chain adapter does not support V10 publish (createKnowledgeAssetsV10 not available)');
         }
         // V10 publisher signature: keccak256(abi.encodePacked(uint256 contextGraphId, uint72 identityId, bytes32 merkleRoot))
         const pubMsgHash = ethers.solidityPackedKeccak256(
@@ -1126,16 +1129,19 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
 
-    // Compute real serialized byte size (same method as publish path)
+    // Compute real serialized byte size — must match the publish path serializer
     const updateNquadsStr = allSkolemizedQuads
       .map(
         (q: { subject: string; predicate: string; object: string; graph?: string }) =>
-          `${q.subject} ${q.predicate} ${q.object} .\n`,
+          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || ''}> .`,
       )
-      .join('');
+      .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
-    const txResult = await this.chain.updateKnowledgeCollectionV10!({
+    if (typeof this.chain.updateKnowledgeCollectionV10 !== 'function') {
+      throw new Error('Chain adapter does not support V10 update (updateKnowledgeCollectionV10 not available)');
+    }
+    const txResult = await this.chain.updateKnowledgeCollectionV10({
       kcId,
       newMerkleRoot: kcMerkleRoot,
       newByteSize: updateByteSize,
