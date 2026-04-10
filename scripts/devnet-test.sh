@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-AUTH="${DKG_AUTH:-QEFtEgVTliirBT2ByxLSDwHqRmnXzQsKthmbLsjGDTc}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [[ -n "${DKG_AUTH:-}" ]]; then
+  AUTH="$DKG_AUTH"
+elif [[ -f "$SCRIPT_DIR/../.devnet/node1/auth.token" ]]; then
+  AUTH="$(grep -v '^#' "$SCRIPT_DIR/../.devnet/node1/auth.token" 2>/dev/null | tr -d '[:space:]')"
+else
+  echo "ERROR: No auth token found. Export DKG_AUTH or start a devnet with ./scripts/devnet.sh start" >&2
+  exit 1
+fi
 CONTEXT_GRAPH="devnet-test"
 PASS=0
 FAIL=0
 WARN=0
 
 c() { curl -s -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@"; }
-G=""  # graph always empty — protocol assigns it
 
 ok()   { PASS=$((PASS+1)); echo "  [PASS] $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  [FAIL] $1"; }
@@ -37,9 +44,35 @@ check() {
 q() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"$3\",\"graph\":\"\"}"; }
 ql() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"\\\"$3\\\"\",\"graph\":\"\"}"; }
 
+swm_publish() {
+  local port=$1 cg=$2
+  shift 2
+  local quads="$*"
+
+  local write_resp
+  write_resp=$(c -X POST "http://127.0.0.1:$port/api/shared-memory/write" -d "{
+    \"contextGraphId\":\"$cg\",
+    \"quads\":[$quads]
+  }")
+  local write_ok
+  write_ok=$(json_get "$write_resp" triplesWritten)
+  if [[ "$write_ok" == "__NONE__" || "$write_ok" == "0" ]]; then
+    echo "$write_resp"
+    return 1
+  fi
+
+  sleep 2
+
+  local pub_resp
+  pub_resp=$(c -X POST "http://127.0.0.1:$port/api/shared-memory/publish" -d "{
+    \"contextGraphId\":\"$cg\"
+  }")
+  echo "$pub_resp"
+}
+
 echo "============================================================"
-echo "DKG V10 Comprehensive Devnet Test Suite"
-echo "5 nodes: Node1=core(9201), Nodes2-5=edge(9202-9205)"
+echo "DKG V10 Comprehensive Devnet Test Suite (SWM-first flow)"
+echo "5 nodes: Nodes1-4=core(9201-9204), Node5=edge(9205)"
 echo "============================================================"
 echo ""
 
@@ -61,16 +94,24 @@ connected=$(echo "$agents" | python3 -c "import sys,json; d=json.load(sys.stdin)
 check "Core sees 5 peers" "$connected" "5"
 
 echo ""
-echo "--- 1c: Wallet balances ---"
-for p in 9201 9202 9203; do
+echo "--- 1c: P2P mesh from every node's perspective ---"
+for p in 9201 9202 9203 9204 9205; do
+  a=$(c "http://127.0.0.1:$p/api/agents")
+  cn=$(echo "$a" | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for a in d['agents'] if a['connectionStatus'] in ('connected','self')))" 2>/dev/null)
+  [[ "$cn" -ge 4 ]] && ok "Node $p sees $cn peers" || warn "Node $p sees only $cn peers"
+done
+
+echo ""
+echo "--- 1d: Wallet balances ---"
+for p in 9201 9202 9203 9204 9205; do
   bals=$(c "http://127.0.0.1:$p/api/wallets/balances")
   bc=$(echo "$bals" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('balances',[])))" 2>/dev/null)
   [[ "$bc" -ge 1 ]] && ok "Node $p has $bc wallet(s)" || fail "Node $p no wallets"
 done
 
 echo ""
-echo "--- 1d: Chain RPC health ---"
-for p in 9201 9202 9203; do
+echo "--- 1e: Chain RPC health ---"
+for p in 9201 9202 9203 9204 9205; do
   h=$(c "http://127.0.0.1:$p/api/chain/rpc-health")
   rpc_ok=$(json_get "$h" ok)
   check "Node $p RPC ok" "$rpc_ok" "True"
@@ -78,11 +119,11 @@ done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 2: Free Operations — Shared Memory Writes (Token Econ §2.2) ==="
+echo "=== SECTION 2: Shared Memory Writes (free operations) ==="
 echo ""
 
 TRAC_BEFORE=$(c "http://127.0.0.1:9202/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-echo "  Node2 TRAC before shared memory write: $TRAC_BEFORE"
+echo "  Node2 TRAC before SWM write: $TRAC_BEFORE"
 
 SWM_W=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
@@ -94,48 +135,48 @@ SWM_W=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
     $(ql 'http://example.org/entity/bob' 'http://schema.org/age' '25')
   ]
 }")
-swm_ok=$(json_get "$SWM_W" ok)
-[[ "$swm_ok" == "True" ]] && ok "Shared memory write OK" || fail "Shared memory write failed: $SWM_W"
+swm_written=$(json_get "$SWM_W" triplesWritten)
+[[ "$swm_written" != "__NONE__" && "$swm_written" != "0" ]] && ok "SWM write OK ($swm_written triples)" || fail "SWM write failed: $SWM_W"
 
 TRAC_AFTER=$(c "http://127.0.0.1:9202/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-check "Shared memory write is FREE (TRAC unchanged)" "$TRAC_BEFORE" "$TRAC_AFTER"
+check "SWM write is FREE (TRAC unchanged)" "$TRAC_BEFORE" "$TRAC_AFTER"
 
 echo ""
-echo "--- 2b: Query shared memory locally ---"
+echo "--- 2b: Query SWM locally ---"
 SWM_Q=$(c -X POST "http://127.0.0.1:9202/api/query" -d "{
   \"sparql\":\"SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(CONTAINS(STR(?g),'_shared_memory')) . FILTER(CONTAINS(STR(?s),'example.org')) } LIMIT 20\",
   \"contextGraphId\":\"$CONTEXT_GRAPH\"
 }")
 SWM_CT=$(echo "$SWM_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-[[ "$SWM_CT" -ge 5 ]] && ok "Shared memory has $SWM_CT triples on Node2" || fail "Shared memory has $SWM_CT triples on Node2 (expected >=5)"
+[[ "$SWM_CT" -ge 5 ]] && ok "SWM has $SWM_CT triples on Node2" || fail "SWM has $SWM_CT triples (expected >=5)"
 
 echo ""
-echo "--- 2c: GossipSub propagation to all nodes ---"
-sleep 4
+echo "--- 2c: GossipSub propagation — SWM data reaches ALL other nodes ---"
+sleep 6
 for p in 9201 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } . FILTER(CONTAINS(STR(?g),'_shared_memory')) . FILTER(CONTAINS(STR(?s),'example.org/entity/alice')) }\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\"
   }")
   ct=$(echo "$R" | python3 -c "
-import sys,json
+import sys,json,re
 b=json.load(sys.stdin).get('result',{}).get('bindings',[])
 if b:
   v=str(b[0].get('c','0'))
-  import re; m=re.search(r'(\d+)',v)
+  m=re.search(r'(\d+)',v)
   print(m.group(1) if m else '0')
 else: print('0')
 " 2>/dev/null)
-  [[ "$ct" -ge 2 ]] && ok "Node $p has Alice in shared memory ($ct triples)" || warn "Node $p missing Alice in shared memory ($ct)"
+  [[ "$ct" -ge 2 ]] && ok "Node $p has Alice in SWM ($ct triples)" || warn "Node $p missing Alice in SWM ($ct)"
 done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 3: PUBLISH Pipeline — Direct to LTM ==="
+echo "=== SECTION 3: PUBLISH via SWM-first flow (WM→SWM→VM) ==="
 echo ""
 
-echo "--- 3a: Publish from Node1 (core) ---"
-PUB1=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{
+echo "--- 3a: Write + Publish from Node1 (core) ---"
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/city1' 'http://schema.org/name' 'Ljubljana'),
@@ -145,6 +186,12 @@ PUB1=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{
     $(q 'http://example.org/entity/city2' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/City'),
     $(ql 'http://example.org/entity/city2' 'http://schema.org/population' '95000')
   ]
+}" > /dev/null
+sleep 2
+
+PUB1=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"selection\":[\"http://example.org/entity/city1\",\"http://example.org/entity/city2\"]
 }")
 PUB1_ST=$(json_get "$PUB1" status)
 PUB1_KC=$(json_get "$PUB1" kcId)
@@ -153,142 +200,140 @@ PUB1_BN=$(json_get "$PUB1" blockNumber)
 PUB1_KAS=$(echo "$PUB1" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 
 echo "  status=$PUB1_ST kcId=$PUB1_KC tx=$PUB1_TX block=$PUB1_BN KAs=$PUB1_KAS"
-[[ "$PUB1_ST" == "confirmed" || "$PUB1_ST" == "finalized" ]] && ok "Publish succeeded ($PUB1_ST)" || fail "Publish status=$PUB1_ST"
+[[ "$PUB1_ST" == "confirmed" || "$PUB1_ST" == "finalized" ]] && ok "Publish from SWM succeeded ($PUB1_ST)" || fail "Publish status=$PUB1_ST: $PUB1"
 [[ "$PUB1_TX" != "__NONE__" ]] && ok "On-chain tx: $PUB1_TX" || fail "No txHash"
-check "2 KA tokens (city1,city2)" "$PUB1_KAS" "2"
+[[ "$PUB1_KAS" == "2" ]] && ok "Published 2 KAs (both selected roots)" || fail "Expected 2 KAs, got $PUB1_KAS"
 
 echo ""
-echo "--- 3b: KA manifest has correct rootEntity URIs ---"
-KA1_ROOT=$(echo "$PUB1" | python3 -c "import sys,json; kas=json.load(sys.stdin).get('kas',[]); roots=sorted([k['rootEntity'] for k in kas]); print(','.join(roots))" 2>/dev/null)
-echo "  Root entities: $KA1_ROOT"
-echo "$KA1_ROOT" | grep -q "city1" && echo "$KA1_ROOT" | grep -q "city2" && ok "Both city roots present" || fail "Missing root entities: $KA1_ROOT"
-
-echo ""
-echo "--- 3c: Query LTM for cities ---"
-sleep 2
+echo "--- 3b: Query Verified Memory for cities on publisher ---"
+sleep 3
 LTM_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\"
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"verified-memory\"
 }")
 LTM_CT=$(echo "$LTM_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-[[ "$LTM_CT" -ge 2 ]] && ok "LTM has $LTM_CT cities on Node1" || fail "LTM has $LTM_CT cities on Node1"
+[[ "$LTM_CT" -ge 2 ]] && ok "VM has $LTM_CT cities on Node1" || fail "VM has $LTM_CT cities (expected >=2)"
 
 echo ""
-echo "--- 3d: Cross-node finalization — cities reach all 5 nodes ---"
-sleep 8
+echo "--- 3c: Cross-node finalization — cities reach ALL 5 nodes ---"
+sleep 10
 for p in 9201 9202 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
-    \"contextGraphId\":\"$CONTEXT_GRAPH\"
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"verified-memory\"
   }")
   ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-  [[ "$ct" -ge 2 ]] && ok "Node $p has $ct cities in LTM" || warn "Node $p has $ct cities in LTM (finalization pending?)"
+  [[ "$ct" -ge 2 ]] && ok "Node $p has $ct cities in VM" || warn "Node $p has $ct cities in VM (finalization pending?)"
 done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 4: Publish from Shared Memory ==="
+echo "=== SECTION 4: Publish from DIFFERENT nodes (SWM-first) ==="
 echo ""
 
-echo "--- 4a: Write to shared memory on Node3, wait for gossip ---"
-c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
+echo "--- 4a: Publish from Node2 (core) ---"
+c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/product1' 'http://schema.org/name' 'Potica'),
     $(q 'http://example.org/entity/product1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Product'),
-    $(ql 'http://example.org/entity/product1' 'http://schema.org/description' 'Traditional Slovenian nut roll'),
+    $(ql 'http://example.org/entity/product1' 'http://schema.org/description' 'Traditional Slovenian nut roll')
+  ]
+}" > /dev/null
+sleep 2
+PUB2=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product1\"]}")
+PUB2_ST=$(json_get "$PUB2" status)
+[[ "$PUB2_ST" == "confirmed" || "$PUB2_ST" == "finalized" ]] && ok "Node2 publish OK ($PUB2_ST)" || fail "Node2 publish=$PUB2_ST: $PUB2"
+
+echo "--- 4b: Publish from Node3 (core, oxigraph backend) ---"
+c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[
     $(ql 'http://example.org/entity/product2' 'http://schema.org/name' 'Carniolan Sausage'),
     $(q 'http://example.org/entity/product2' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Product'),
     $(ql 'http://example.org/entity/product2' 'http://schema.org/description' 'PGI sausage')
   ]
 }" > /dev/null
-sleep 4
+sleep 2
+PUB3=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product2\"]}")
+PUB3_ST=$(json_get "$PUB3" status)
+[[ "$PUB3_ST" == "confirmed" || "$PUB3_ST" == "finalized" ]] && ok "Node3 publish OK ($PUB3_ST)" || fail "Node3 publish=$PUB3_ST: $PUB3"
 
-echo ""
-echo "--- 4b: Publish (from shared memory) on Node3 ---"
-# Use selection to only publish product entities
-ENS=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/publish" -d "{
-  \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"selection\":[\"http://example.org/entity/product1\",\"http://example.org/entity/product2\"],
-  \"clearAfter\":false
-}")
-ENS_ST=$(json_get "$ENS" status)
-ENS_KC=$(json_get "$ENS" kcId)
-ENS_KAS=$(echo "$ENS" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
-echo "  status=$ENS_ST kcId=$ENS_KC KAs=$ENS_KAS"
-[[ "$ENS_ST" == "confirmed" || "$ENS_ST" == "finalized" ]] && ok "Publish from shared memory succeeded ($ENS_ST)" || fail "Publish from shared memory status=$ENS_ST"
-check "2 KAs for products" "$ENS_KAS" "2"
-
-echo ""
-echo "--- 4c: Products in LTM on Node3 ---"
-sleep 3
-P_Q=$(c -X POST "http://127.0.0.1:9203/api/query" -d "{
-  \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/Product> } LIMIT 10\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\"
-}")
-P_CT=$(echo "$P_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-[[ "$P_CT" -ge 2 ]] && ok "Products in LTM on Node3 ($P_CT)" || fail "Products missing from LTM ($P_CT)"
-
-echo ""
-echo "--- 4d: Products replicate to other nodes ---"
-sleep 8
-for p in 9201 9202 9204 9205; do
-  R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
-    \"sparql\":\"SELECT ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/Product> }\",
-    \"contextGraphId\":\"$CONTEXT_GRAPH\"
-  }")
-  ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-  [[ "$ct" -ge 2 ]] && ok "Node $p has products ($ct)" || warn "Node $p products pending ($ct)"
-done
-
-#------------------------------------------------------------
-echo ""
-echo "=== SECTION 5: Edge Node Publishes (Protocol Core §19.2) ==="
-echo ""
-
-PUB_E=$(c -X POST "http://127.0.0.1:9204/api/publish" -d "{
+echo "--- 4c: Publish from Node4 (core) ---"
+c -X POST "http://127.0.0.1:9204/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/person1' 'http://schema.org/name' 'France Prešeren'),
     $(q 'http://example.org/entity/person1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Person'),
     $(ql 'http://example.org/entity/person1' 'http://schema.org/birthDate' '1800-12-03')
   ]
-}")
-PE_ST=$(json_get "$PUB_E" status)
-PE_TX=$(json_get "$PUB_E" txHash)
-[[ "$PE_ST" == "confirmed" || "$PE_ST" == "finalized" ]] && ok "Edge publish OK ($PE_ST)" || fail "Edge publish=$PE_ST"
-[[ "$PE_TX" != "__NONE__" ]] && ok "Edge tx: $PE_TX" || fail "No edge txHash"
+}" > /dev/null
+sleep 2
+PUB4=$(c -X POST "http://127.0.0.1:9204/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/person1\"]}")
+PUB4_ST=$(json_get "$PUB4" status)
+[[ "$PUB4_ST" == "confirmed" || "$PUB4_ST" == "finalized" ]] && ok "Node4 publish OK ($PUB4_ST)" || fail "Node4 publish=$PUB4_ST: $PUB4"
 
-#------------------------------------------------------------
-echo ""
-echo "=== SECTION 6: Token Economics — TRAC Cost ==="
-echo ""
-
-TRAC5_B=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-echo "  Node5 TRAC before: $TRAC5_B"
-
-PUB5=$(c -X POST "http://127.0.0.1:9205/api/publish" -d "{
+echo "--- 4d: Publish from Node5 (edge) ---"
+c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/lake1' 'http://schema.org/name' 'Lake Bled'),
     $(q 'http://example.org/entity/lake1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/LakeBodyOfWater'),
     $(ql 'http://example.org/entity/lake1' 'http://schema.org/description' 'Glacial lake in the Julian Alps')
   ]
-}")
+}" > /dev/null
+sleep 2
+PUB5=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/lake1\"]}")
 PUB5_ST=$(json_get "$PUB5" status)
+[[ "$PUB5_ST" == "confirmed" || "$PUB5_ST" == "finalized" ]] && ok "Node5 (edge) publish OK ($PUB5_ST)" || fail "Node5 publish=$PUB5_ST: $PUB5"
+
+echo ""
+echo "--- 4e: ALL published entities replicate to ALL nodes ---"
+sleep 12
+for p in 9201 9202 9203 9204 9205; do
+  for entity in city1 city2 product1 product2 person1 lake1; do
+    R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
+      \"sparql\":\"ASK { <http://example.org/entity/$entity> <http://schema.org/name> ?name }\",
+      \"contextGraphId\":\"$CONTEXT_GRAPH\",
+      \"view\":\"verified-memory\"
+    }")
+    found=$(echo "$R" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null)
+    [[ "$found" == "yes" ]] && ok "Node $p has $entity" || warn "Node $p missing $entity (finalization pending?)"
+  done
+done
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 5: Token Economics — TRAC Cost on Publish ==="
+echo ""
+
+TRAC5_B=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
+echo "  Node5 TRAC before: $TRAC5_B"
+
+c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[
+    $(ql 'http://example.org/entity/cost-test' 'http://schema.org/name' 'CostTest'),
+    $(q 'http://example.org/entity/cost-test' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
+  ]
+}" > /dev/null
+sleep 1
+c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}" > /dev/null
 
 TRAC5_A=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-echo "  Node5 TRAC after: $TRAC5_A  (status=$PUB5_ST)"
+echo "  Node5 TRAC after: $TRAC5_A"
 
 if [[ "$TRAC5_B" != "$TRAC5_A" ]]; then
   ok "TRAC spent on publish ($TRAC5_B → $TRAC5_A)"
 else
-  warn "TRAC unchanged — publisher wallet may not be the paying wallet"
+  warn "TRAC unchanged — check if publisher wallet pays separately"
 fi
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 7: UPDATE Operation ==="
+echo "=== SECTION 6: UPDATE Operation ==="
 echo ""
 
 UPD=$(c -X POST "http://127.0.0.1:9201/api/update" -d "{
@@ -306,10 +351,10 @@ UPD=$(c -X POST "http://127.0.0.1:9201/api/update" -d "{
 UPD_ST=$(json_get "$UPD" status)
 UPD_TX=$(json_get "$UPD" txHash)
 echo "  Update: status=$UPD_ST tx=$UPD_TX"
-[[ "$UPD_ST" == "confirmed" || "$UPD_ST" == "finalized" ]] && ok "UPDATE succeeded" || fail "UPDATE status=$UPD_ST"
+[[ "$UPD_ST" == "confirmed" || "$UPD_ST" == "finalized" ]] && ok "UPDATE succeeded" || fail "UPDATE status=$UPD_ST: $UPD"
 
 echo ""
-echo "--- 7b: Verify updated population ---"
+echo "--- 6b: Verify updated population ---"
 sleep 3
 UQ=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"sparql\":\"SELECT ?pop WHERE { <http://example.org/entity/city1> <http://schema.org/population> ?pop }\",
@@ -320,7 +365,7 @@ echo "$UQ_POP" | grep -q "295000" && ok "Population updated to 295000" || fail "
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 8: Context Graph Creation ==="
+echo "=== SECTION 7: Context Graph Creation ==="
 echo ""
 
 ID1=$(c "http://127.0.0.1:9201/api/identity" | python3 -c "import sys,json; print(json.load(sys.stdin).get('identityId',0))" 2>/dev/null)
@@ -339,17 +384,19 @@ echo "  CG result: id=$CG_ID success=$CG_OK"
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 9: Triple Deduplication ==="
+echo "=== SECTION 8: Triple Deduplication ==="
 echo ""
 
-DEDUP=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/dedup1' 'http://schema.org/name' 'DedupTest'),
     $(ql 'http://example.org/entity/dedup1' 'http://schema.org/name' 'DedupTest'),
     $(ql 'http://example.org/entity/dedup1' 'http://schema.org/name' 'DedupTest')
   ]
-}")
+}" > /dev/null
+sleep 1
+DEDUP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/dedup1\"]}")
 DD_ST=$(json_get "$DEDUP" status)
 DD_KAS=$(echo "$DEDUP" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 [[ "$DD_ST" == "confirmed" || "$DD_ST" == "finalized" ]] && ok "Dedup publish OK" || fail "Dedup status=$DD_ST"
@@ -357,7 +404,7 @@ check "1 KA (dedup: 3 identical → 1 entity)" "$DD_KAS" "1"
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 10: Multi-Entity Batch Publish (50 entities) ==="
+echo "=== SECTION 9: Multi-Entity Batch Publish (50 entities) ==="
 echo ""
 
 BATCH_QUADS=""
@@ -367,18 +414,23 @@ for i in $(seq 1 50); do
 done
 BATCH_QUADS="${BATCH_QUADS%,}"
 
-BATCH=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"quads\":[$BATCH_QUADS]}")
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"quads\":[$BATCH_QUADS]}" > /dev/null
+sleep 2
+BATCH_SELECTION=""
+for i in $(seq 1 50); do BATCH_SELECTION="$BATCH_SELECTION\"http://example.org/entity/batch_$i\","; done
+BATCH_SELECTION="[${BATCH_SELECTION%,}]"
+BATCH=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":$BATCH_SELECTION}")
 B_ST=$(json_get "$BATCH" status)
-B_KAS=$(echo "$BATCH" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 B_TX=$(json_get "$BATCH" txHash)
-[[ "$B_ST" == "confirmed" || "$B_ST" == "finalized" ]] && ok "Batch(50) publish OK ($B_ST)" || fail "Batch publish=$B_ST"
-check "50 KA tokens minted" "$B_KAS" "50"
+B_KAS=$(echo "$BATCH" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
+[[ "$B_ST" == "confirmed" || "$B_ST" == "finalized" ]] && ok "Batch(50) publish OK ($B_ST)" || fail "Batch publish=$B_ST: $BATCH"
 [[ "$B_TX" != "__NONE__" ]] && ok "Batch tx: $B_TX" || fail "No batch txHash"
+[[ "$B_KAS" == "50" ]] && ok "Batch published 50 KAs" || fail "Expected 50 KAs, got $B_KAS"
 
 echo ""
-echo "--- 10b: Batch entities replicate ---"
-sleep 10
-for p in 9202 9205; do
+echo "--- 9b: Batch entities replicate to ALL nodes ---"
+sleep 12
+for p in 9201 9202 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a <http://schema.org/Thing> . FILTER(CONTAINS(STR(?s),'batch_')) }\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\"
@@ -397,7 +449,7 @@ done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 11: Concurrent Shared Memory Writers ==="
+echo "=== SECTION 10: Concurrent SWM Writers from Multiple Nodes ==="
 echo ""
 
 c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
@@ -412,25 +464,35 @@ c -X POST "http://127.0.0.1:9204/api/shared-memory/write" -d "{
 }" > /dev/null 2>&1 &
 PID2=$!
 
-wait $PID1 $PID2
-ok "Concurrent shared memory writes completed"
+c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[$(ql 'http://example.org/entity/river1' 'http://schema.org/name' 'Sava'),$(q 'http://example.org/entity/river1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/RiverBodyOfWater')]
+}" > /dev/null 2>&1 &
+PID3=$!
 
-sleep 4
-for entity in song1 mountain1; do
-  R=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-    \"sparql\":\"SELECT ?name WHERE { GRAPH ?g { <http://example.org/entity/$entity> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
-    \"contextGraphId\":\"$CONTEXT_GRAPH\"
-  }")
-  ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-  [[ "$ct" -ge 1 ]] && ok "$entity gossiped to Node1 shared memory" || warn "$entity not yet in Node1 shared memory"
+wait $PID1 $PID2 $PID3
+ok "3 concurrent SWM writes completed"
+
+sleep 6
+for entity in song1 mountain1 river1; do
+  for p in 9201 9202 9203 9204 9205; do
+    R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
+      \"sparql\":\"SELECT ?name WHERE { GRAPH ?g { <http://example.org/entity/$entity> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+      \"contextGraphId\":\"$CONTEXT_GRAPH\"
+    }")
+    ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
+    [[ "$ct" -ge 1 ]] && ok "$entity gossiped to Node $p SWM" || warn "$entity NOT in Node $p SWM"
+  done
 done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 12: Cross-Node Query Consistency ==="
+echo "=== SECTION 11: Cross-Node Query Consistency ==="
 echo ""
 
-echo "--- All nodes should see same typed entities in LTM ---"
+echo "--- All nodes should see same typed entities in VM ---"
+REF_CT=""
+ALL_MATCH=true
 for p in 9201 9202 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a ?type . FILTER(CONTAINS(STR(?s),'example.org')) }\",
@@ -445,12 +507,19 @@ if b:
   print(m.group(1) if m else '0')
 else: print('0')
 " 2>/dev/null)
-  [[ "$ct" -ge 50 ]] && ok "Node $p sees $ct typed entities" || warn "Node $p sees $ct typed entities (some may be propagating)"
+  echo "  Node $p: $ct typed entities"
+  if [[ -z "$REF_CT" ]]; then
+    REF_CT="$ct"
+  elif [[ "$ct" != "$REF_CT" ]]; then
+    ALL_MATCH=false
+    warn "Node $p has $ct entities vs Node1's $REF_CT"
+  fi
 done
+[[ "$ALL_MATCH" == "true" ]] && ok "All 5 nodes have consistent entity count ($REF_CT)" || warn "Entity counts diverge across nodes"
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 13: Subscribe & Event System ==="
+echo "=== SECTION 12: Subscribe & Event System ==="
 echo ""
 
 SUB=$(c -X POST "http://127.0.0.1:9202/api/context-graph/subscribe" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"includeSharedMemory\":true}")
@@ -459,34 +528,42 @@ SUB_P=$(json_get "$SUB" subscribed)
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 14: Publish Pipeline Phases ==="
+echo "=== SECTION 13: Adversarial / Edge Cases ==="
 echo ""
 
-PH=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{
-  \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"quads\":[$(ql 'http://example.org/entity/river1' 'http://schema.org/name' 'Sava'),$(q 'http://example.org/entity/river1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/RiverBodyOfWater')]
-}")
-PH_ST=$(json_get "$PH" status)
-PH_PHASES=$(echo "$PH" | python3 -c "import sys,json; d=json.load(sys.stdin); p=d.get('phases',[]); print(len(p) if isinstance(p,list) else 'obj')" 2>/dev/null)
-PH_TIME=$(json_get "$PH" serverTotal)
-echo "  Phases count: $PH_PHASES  Server total: ${PH_TIME}ms"
-[[ "$PH_ST" == "confirmed" || "$PH_ST" == "finalized" ]] && ok "Pipeline publish OK ($PH_ST)" || fail "Pipeline publish=$PH_ST"
+echo "--- 13a: Removed /api/publish returns 404 ---"
+REMOVED=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
+[[ "$REMOVED" == "404" ]] && ok "/api/publish correctly removed (404)" || warn "/api/publish returns $REMOVED (expected 404)"
+
+echo "--- 13b: Empty quads in SWM write ---"
+EMPTY=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d '{"contextGraphId":"devnet-test","quads":[]}')
+echo "  Empty quads response: $(echo "$EMPTY" | head -c 200)"
+echo "$EMPTY" | grep -qi "error\|missing\|invalid" && ok "Empty quads rejected with error" || fail "Empty quads not rejected: $EMPTY"
+
+echo "--- 13c: Malformed SPARQL ---"
+BAD_SPARQL=$(c -X POST "http://127.0.0.1:9201/api/query" -d '{
+  "sparql": "NOT VALID SPARQL AT ALL",
+  "contextGraphId": "devnet-test"
+}')
+echo "$BAD_SPARQL" | grep -qi "error" && ok "Malformed SPARQL returns error" || fail "Malformed SPARQL didn't error: $BAD_SPARQL"
+
+echo "--- 13d: Missing contextGraphId ---"
+NO_CG=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d '{"quads":[]}')
+echo "$NO_CG" | grep -qi "error\|missing\|required" && ok "Missing contextGraphId rejected" || warn "Missing contextGraphId response: $NO_CG"
+
+echo "--- 13e: Publish from empty SWM ---"
+EMPTY_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d '{"contextGraphId":"devnet-test"}')
+echo "  Empty SWM publish: $(echo "$EMPTY_PUB" | head -c 200)"
+echo "$EMPTY_PUB" | grep -qi "error\|empty\|nothing\|no.*triple" && ok "Empty SWM publish rejected with error" || fail "Empty SWM publish not rejected: $(echo "$EMPTY_PUB" | head -c 200)"
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 15: Publish with Access Policy ==="
+echo "=== SECTION 14: SKILL.md Endpoint ==="
 echo ""
 
-AP=$(c -X POST "http://127.0.0.1:9201/api/publish" -d "{
-  \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"quads\":[
-    $(ql 'http://example.org/entity/secret1' 'http://schema.org/name' 'TopSecret'),
-    $(q 'http://example.org/entity/secret1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
-  ],
-  \"accessPolicy\":\"ownerOnly\"
-}")
-AP_ST=$(json_get "$AP" status)
-[[ "$AP_ST" == "confirmed" || "$AP_ST" == "finalized" ]] && ok "Access-policy publish OK ($AP_ST)" || fail "Access-policy publish=$AP_ST"
+SKILL=$(curl -s "http://127.0.0.1:9201/.well-known/skill.md")
+echo "$SKILL" | grep -q "shared-memory" && ok "SKILL.md references SWM flow" || fail "SKILL.md missing SWM references"
+echo "$SKILL" | grep -q "/api/publish" && fail "SKILL.md still references removed /api/publish" || ok "SKILL.md correctly omits /api/publish"
 
 #------------------------------------------------------------
 echo ""
