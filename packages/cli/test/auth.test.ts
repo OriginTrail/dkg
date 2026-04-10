@@ -145,7 +145,7 @@ describe('httpAuthGuard', () => {
   });
 
   it('allows OPTIONS without token (CORS preflight)', async () => {
-    const res = await fetch(`${baseUrl}/api/publish`, { method: 'OPTIONS' });
+    const res = await fetch(`${baseUrl}/api/shared-memory/publish`, { method: 'OPTIONS' });
     expect(res.status).toBe(200);
   });
 
@@ -155,7 +155,7 @@ describe('httpAuthGuard', () => {
   });
 
   it('rejects protected endpoint without token', async () => {
-    const res = await fetch(`${baseUrl}/api/publish`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/api/shared-memory/publish`, { method: 'POST' });
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toContain('Unauthorized');
@@ -178,7 +178,7 @@ describe('httpAuthGuard', () => {
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {
-    const res = await fetch(`${baseUrl}/api/publish`, {
+    const res = await fetch(`${baseUrl}/api/shared-memory/publish`, {
       method: 'POST',
       headers: { Authorization: VALID_TOKEN },
     });
@@ -213,7 +213,7 @@ describe('httpAuthGuard (auth disabled)', () => {
   });
 
   it('allows all requests when auth is disabled', async () => {
-    const res = await fetch(`${baseUrl}/api/publish`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/api/shared-memory/publish`, { method: 'POST' });
     expect(res.status).toBe(200);
   });
 });

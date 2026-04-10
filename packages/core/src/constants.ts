@@ -106,6 +106,13 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
 }
 
+export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
+  if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
+  if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
+  if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
+  return { valid: true };
+}
+
 /**
  * Validates a sub-graph name: must be non-empty, no leading underscore
  * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.
@@ -116,6 +123,18 @@ export function validateSubGraphName(name: string): { valid: boolean; reason?: s
   if (name.includes('/')) return { valid: false, reason: 'Sub-graph names cannot contain "/"' };
   if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Sub-graph name contains characters unsafe for IRIs' };
   if (name === 'context' || name === 'assertion' || name === 'draft') return { valid: false, reason: `"${name}" is a reserved path segment` };
+  return { valid: true };
+}
+
+/**
+ * Validates an assertion name for safe interpolation into graph URIs.
+ * Same character restrictions as sub-graph names.
+ */
+export function validateAssertionName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Assertion name cannot be empty' };
+  if (name.includes('/')) return { valid: false, reason: 'Assertion name cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Assertion name contains characters unsafe for IRIs' };
+  if (name.length > 256) return { valid: false, reason: 'Assertion name exceeds 256 characters' };
   return { valid: true };
 }
 

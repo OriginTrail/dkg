@@ -1411,14 +1411,16 @@ export class DKGAgent {
     contextGraphId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string },
   ): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}${sgLabel}`);
     const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);

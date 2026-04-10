@@ -153,9 +153,9 @@ describe('dkg_publish tool', () => {
   });
 
   it('publishes quads array with literal objects', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
-    );
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 2 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -169,17 +169,17 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaCount).toBe(1);
     expect(parsed.quadsPublished).toBe(2);
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.contextGraphId).toBe('testing');
-    expect(body.quads).toHaveLength(2);
-    expect(body.quads[0].subject).toBe('https://example.org/wine');
-    expect(body.quads[0].object).toBe('"Cabernet Sauvignon"');
+    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(writeBody.paranetId).toBe('testing');
+    expect(writeBody.quads).toHaveLength(2);
+    expect(writeBody.quads[0].subject).toBe('https://example.org/wine');
+    expect(writeBody.quads[0].object).toBe('"Cabernet Sauvignon"');
   });
 
   it('publishes quads array with URI objects (auto-detected)', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }),
-    );
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -187,14 +187,14 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-uri', { context_graph_id: 'testing', quads });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].object).toBe('https://schema.org/Product');
+    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
   });
 
   it('handles mixed URI and literal objects', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }),
-    );
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 3 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -207,10 +207,10 @@ describe('dkg_publish tool', () => {
 
     expect(parsed.quadsPublished).toBe(3);
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].object).toBe('https://schema.org/Product');
-    expect(body.quads[1].object).toBe('"Cabernet"');
-    expect(body.quads[2].object).toBe('urn:winemaker:alice');
+    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
+    expect(writeBody.quads[1].object).toBe('"Cabernet"');
+    expect(writeBody.quads[2].object).toBe('urn:winemaker:alice');
   });
 
   it('returns error for empty quads array', async () => {
@@ -231,9 +231,9 @@ describe('dkg_publish tool', () => {
   });
 
   it('escapes quotes in literal object values', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }),
-    );
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -241,14 +241,14 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-esc', { context_graph_id: 'testing', quads });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].object).toBe('"She said \\"hello\\""');
+    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(writeBody.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
   it('passes optional graph field', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }),
-    );
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -256,8 +256,8 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.quads[0].graph).toBe('urn:my-graph');
+    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    expect(writeBody.quads[0].graph).toBe('urn:my-graph');
   });
 });
 
@@ -567,7 +567,7 @@ describe('dkg_wallet_balances tool', () => {
   });
 });
 
-describe('dkg_publish access_policy', () => {
+describe('dkg_publish SWM-first flow', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
@@ -581,81 +581,35 @@ describe('dkg_publish access_policy', () => {
 
   const VALID_QUADS = [{ subject: 'urn:a', predicate: 'urn:b', object: 'c' }];
 
-  it('defaults to ownerOnly when access_policy not specified', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-1', kas: [] }), { status: 200 }),
-    );
+  it('writes to SWM then publishes from SWM', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-1', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-1', { context_graph_id: 'testing', quads: VALID_QUADS });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.accessPolicy).toBe('ownerOnly');
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.accessPolicy).toBe('ownerOnly');
+    expect(parsed.kcId).toBe('kc-1');
+    expect(parsed.quadsPublished).toBe(1);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const writeUrl = fetchSpy.mock.calls[1][0] as string;
+    expect(writeUrl).toContain('/api/shared-memory/write');
+    const pubUrl = fetchSpy.mock.calls[2][0] as string;
+    expect(pubUrl).toContain('/api/shared-memory/publish');
   });
 
-  it('allows explicit public access_policy', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-2', kas: [] }), { status: 200 }),
-    );
+  it('ignores unknown access_policy parameter gracefully', async () => {
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-2', kas: [] }), { status: 200 }));
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
     const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.accessPolicy).toBe('public');
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.accessPolicy).toBe('public');
-  });
-
-  it('rejects invalid access_policy', async () => {
-    const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-3', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'bogus' });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.error).toContain('Invalid access_policy');
-  });
-
-  it('allows allowList with allowed_peers', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-3', kas: [] }), { status: 200 }),
-    );
-
-    const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-4', {
-      context_graph_id: 'testing',
-      quads: VALID_QUADS,
-      access_policy: 'allowList',
-      allowed_peers: '12D3peer1, 12D3peer2',
-    });
-
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
-    expect(body.accessPolicy).toBe('allowList');
-    expect(body.allowedPeers).toEqual(['12D3peer1', '12D3peer2']);
-  });
-
-  it('rejects allowList without allowed_peers', async () => {
-    const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-5', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'allowList' });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.error).toContain('allowList');
-    expect(parsed.error).toContain('allowed_peers');
-  });
-
-  it('rejects allowed_peers without allowList policy', async () => {
-    const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-6', {
-      context_graph_id: 'testing',
-      quads: VALID_QUADS,
-      access_policy: 'public',
-      allowed_peers: '12D3peer1',
-    });
-    const parsed = JSON.parse(result.content[0].text);
-
-    expect(parsed.error).toContain('allowed_peers');
-    expect(parsed.error).toContain('allowList');
+    expect(parsed.kcId).toBe('kc-2');
   });
 });
 

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -108,7 +108,7 @@ function buildSkillMd(opts: {
     `- **Base URL:** ${opts.baseUrl}`,
     `- **Peer ID:** ${opts.peerId}`,
     `- **Node role:** ${opts.nodeRole}`,
-    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'text/markdown'}`,
+    `- **Available extraction pipelines:** ${opts.extractionPipelines.length > 0 ? opts.extractionPipelines.join(', ') : 'none (install markitdown to enable document conversion)'}`,
     `- **Subscribed Context Graphs:** use \`GET /api/context-graph/list\` (requires auth)`,
   ].join('\n');
 
@@ -188,6 +188,7 @@ interface PublishRequestBody {
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
+  subGraphName?: string;
 }
 
 
@@ -1239,7 +1240,7 @@ async function handleRequest(
     const proto = req.headers['x-forwarded-proto'] ?? 'http';
     const host = req.headers['x-forwarded-host'] ?? req.headers.host ?? `localhost:${config.listenPort ?? 9200}`;
     const baseUrl = `${proto}://${host}`;
-    const pipelines = ['text/markdown', ...extractionRegistry.availableContentTypes()];
+    const pipelines = extractionRegistry.availableContentTypes();
     const content = buildSkillMd({
       version: nodeVersion,
       baseUrl,
@@ -1256,6 +1257,7 @@ async function handleRequest(
       'Content-Type': 'text/markdown; charset=utf-8',
       'ETag': etag,
       'Cache-Control': 'public, max-age=300',
+      'Vary': 'Host, X-Forwarded-Host, X-Forwarded-Proto',
     });
     res.end(content);
     return;
@@ -1859,60 +1861,6 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
-  if (req.method === 'POST' && path === '/api/publish') {
-    const serverT0 = Date.now();
-    const body = await readBody(req);
-    const parsed = parsePublishRequestBody(body);
-    if (!parsed.ok) {
-      return jsonResponse(res, 400, { error: parsed.error });
-    }
-
-    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
-    const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
-    try {
-      const result = await agent.publish(paranetId, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-        operationCtx: ctx,
-        onPhase: tracker.phaseCallback(ctx),
-      });
-      const chain = result.onChainResult;
-      if (chain) {
-        tracker.setCost(ctx, {
-          gasUsed: chain.gasUsed,
-          gasPrice: chain.effectiveGasPrice,
-          gasCost: chain.gasCostWei,
-          tracCost: chain.tokenAmount,
-        });
-        const chainId = (config.chain ?? network?.chain)?.chainId;
-        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
-      }
-      tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, {
-        kcId: String(result.kcId),
-        status: result.status,
-        kas: result.kaManifest.map(ka => ({
-          tokenId: String(ka.tokenId),
-          rootEntity: ka.rootEntity,
-        })),
-        ...(result.onChainResult && {
-          txHash: result.onChainResult.txHash,
-          blockNumber: result.onChainResult.blockNumber,
-          batchId: String(result.onChainResult.batchId),
-          publisherAddress: result.onChainResult.publisherAddress,
-        }),
-        phases: opDetail.phases,
-        serverTotal: Date.now() - serverT0,
-      });
-    } catch (err) {
-      tracker.fail(ctx, err);
-      throw err;
-    }
-  }
-
   // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/update') {
     const body = await readBody(req);
@@ -1961,28 +1909,34 @@ async function handleRequest(
   // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
-    const { quads } = parsed;
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { quads, subGraphName } = parsed;
+    const localOnly = parsed.localOnly === true;
+    if (parsed.localOnly !== undefined && typeof parsed.localOnly !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
+    }
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
     }
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('share');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api', subGraphName } });
     try {
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside share
       });
       const result = await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { operationCtx: ctx }),
+        agent.share(paranetId, quads, { subGraphName, localOnly, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
       return jsonResponse(res, 200, {
-        shareOperationId: result.shareOperationId,
-        workspaceOperationId: result.shareOperationId,
+        shareOperationId: result?.shareOperationId,
+        workspaceOperationId: result?.shareOperationId,
         contextGraphId: paranetId,
         paranetId,
-        graph: contextGraphSharedMemoryUri(paranetId),
+        graph: contextGraphSharedMemoryUri(paranetId, subGraphName),
         triplesWritten: quads.length,
       });
     } catch (err) {
@@ -1994,12 +1948,17 @@ async function handleRequest(
   // POST /api/shared-memory/publish (V10) or /api/workspace/enshrine (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
-    const { selection, clearAfter, publishContextGraphId } = parsed;
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { selection, clearAfter, publishContextGraphId, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (subGraphName && publishContextGraphId) {
+      return jsonResponse(res, 400, { error: '"subGraphName" and "publishContextGraphId" cannot be used together' });
+    }
     const ctx = createOperationContext('publishFromSWM');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId, subGraphName } });
     try {
       const sel: 'all' | { rootEntities: string[] } =
         Array.isArray(selection) ? { rootEntities: selection } : (selection || 'all');
@@ -2007,6 +1966,7 @@ async function handleRequest(
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
+          subGraphName,
           ...(publishContextGraphId != null ? { contextGraphId: String(publishContextGraphId) } : {}),
         }),
       );
@@ -2097,6 +2057,171 @@ async function handleRequest(
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }
 
+  // POST /api/sub-graph/create  { contextGraphId, subGraphName }
+  if (req.method === 'POST' && path === '/api/sub-graph/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!subGraphName) return jsonResponse(res, 400, { error: 'Missing "subGraphName"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof subGraphName !== 'string') return jsonResponse(res, 400, { error: '"subGraphName" must be a string' });
+    const sgVal = validateSubGraphName(subGraphName);
+    if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
+    try {
+      await agent.createSubGraph(contextGraphId, subGraphName);
+      return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
+    } catch (err: any) {
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
+  if (req.method === 'POST' && path === '/api/assertion/create') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, name, subGraphName } = parsed;
+    if (!name) return jsonResponse(res, 400, { error: 'Missing "name"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof name !== 'string') return jsonResponse(res, 400, { error: '"name" must be a string' });
+    const nameVal = validateAssertionName(name);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const assertionUri = await agent.assertion.create(contextGraphId, name, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { assertionUri });
+    } catch (err: any) {
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, quads, subGraphName } = parsed;
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      await agent.assertion.write(contextGraphId, assertionName, quads, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { written: quads.length });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const quads = await agent.assertion.query(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { quads, count: quads.length });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entities, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateEntities(entities, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      const result = await agent.assertion.promote(contextGraphId, assertionName, { entities: entities ?? 'all', subGraphName });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
+  if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length), res);
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    try {
+      await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      return jsonResponse(res, 200, { discarded: true });
+    } catch (err: any) {
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
+  if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { quads, conditions, subGraphName } = parsed;
+    const paranetId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(paranetId, res)) return;
+    if (!validateConditions(conditions, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    const ctx = createOperationContext('share');
+    tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api-cas', subGraphName } });
+    try {
+      const result = await agent.conditionalShare(paranetId, quads, conditions, { subGraphName, operationCtx: ctx });
+      tracker.complete(ctx, { tripleCount: quads.length });
+      return jsonResponse(res, 200, { ok: true, shareOperationId: result?.shareOperationId });
+    } catch (err: any) {
+      tracker.fail(ctx, err);
+      if (err.name === 'StaleWriteError' || err.message?.includes('stale') || err.message?.includes('CAS condition failed')) {
+        return jsonResponse(res, 409, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
   // POST /api/query  { sparql: "...", paranetId?: "...", graphSuffix?: "_shared_memory", includeWorkspace?: bool }
   if (req.method === 'POST' && path === '/api/query') {
     const serverT0 = Date.now();
@@ -2134,7 +2259,7 @@ async function handleRequest(
         msg.startsWith('SPARQL rejected:') || msg.startsWith('Parse error') ||
         /must start with (SELECT|CONSTRUCT|ASK|DESCRIBE)/i.test(msg) ||
         msg.includes('was removed in V10') ||
-        msg.includes('requires agentAddress') || msg.includes('requires contextGraphId') ||
+        msg.includes('agentAddress is required') || msg.includes('requires a contextGraphId') ||
         msg.includes('cannot be combined with')
       ) {
         return jsonResponse(res, 400, { error: msg });
@@ -2647,7 +2772,7 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = payload;
   const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
 
   if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
@@ -2678,6 +2803,16 @@ function parsePublishRequestBody(body: string):
     return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
   }
 
+  if (subGraphName !== undefined) {
+    if (typeof subGraphName !== 'string' || subGraphName.trim().length === 0) {
+      return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+    }
+    const sgValidation = validateSubGraphName(subGraphName);
+    if (!sgValidation.valid) {
+      return { ok: false, error: `Invalid "subGraphName": ${sgValidation.reason}` };
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -2686,6 +2821,7 @@ function parsePublishRequestBody(body: string):
       privateQuads,
       accessPolicy,
       allowedPeers,
+      subGraphName: subGraphName as string | undefined,
     },
   };
 }
@@ -2701,6 +2837,117 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOr
     ...corsHeaders(origin),
   });
   res.end(body);
+}
+
+function safeDecodeURIComponent(encoded: string, res: ServerResponse): string | null {
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    jsonResponse(res, 400, { error: 'Malformed percent-encoding in URL path' });
+    return null;
+  }
+}
+
+function safeParseJson(body: string, res: ServerResponse): Record<string, any> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    jsonResponse(res, 400, { error: 'Request body must be a JSON object' });
+    return null;
+  }
+  return parsed as Record<string, any>;
+}
+
+function validateOptionalSubGraphName(subGraphName: unknown, res: ServerResponse): boolean {
+  if (subGraphName === undefined || subGraphName === null) return true;
+  if (typeof subGraphName === 'string' && subGraphName === '') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a non-empty string (omit the field for root graph)' });
+    return false;
+  }
+  if (typeof subGraphName !== 'string') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a string' });
+    return false;
+  }
+  const v = validateSubGraphName(subGraphName);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "subGraphName": ${v.reason}` });
+    return false;
+  }
+  return true;
+}
+
+function validateRequiredContextGraphId(contextGraphId: unknown, res: ServerResponse): boolean {
+  if (!contextGraphId) {
+    jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    return false;
+  }
+  if (typeof contextGraphId !== 'string') {
+    jsonResponse(res, 400, { error: '"contextGraphId" must be a string' });
+    return false;
+  }
+  const v = validateContextGraphId(contextGraphId);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "contextGraphId": ${v.reason}` });
+    return false;
+  }
+  return true;
+}
+
+function validateEntities(entities: unknown, res: ServerResponse): boolean {
+  if (entities === undefined || entities === null || entities === 'all') return true;
+  if (typeof entities === 'string') {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or an array of entity URIs' });
+    return false;
+  }
+  if (!Array.isArray(entities) || entities.length === 0 || !entities.every((e: unknown) => typeof e === 'string' && e.length > 0)) {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or a non-empty array of non-empty strings' });
+    return false;
+  }
+  return true;
+}
+
+function validateConditions(conditions: unknown, res: ServerResponse): boolean {
+  if (!Array.isArray(conditions) || conditions.length === 0) {
+    jsonResponse(res, 400, { error: '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)' });
+    return false;
+  }
+  for (let i = 0; i < conditions.length; i++) {
+    const c = conditions[i];
+    if (typeof c !== 'object' || c === null || Array.isArray(c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}] must be an object` });
+      return false;
+    }
+    if (typeof c.subject !== 'string' || c.subject.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject must be a non-empty string` });
+      return false;
+    }
+    if (!isSafeIri(c.subject)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject contains characters unsafe for SPARQL IRIs` });
+      return false;
+    }
+    if (typeof c.predicate !== 'string' || c.predicate.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate must be a non-empty string` });
+      return false;
+    }
+    if (!isSafeIri(c.predicate)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate contains characters unsafe for SPARQL IRIs` });
+      return false;
+    }
+    if (!('expectedValue' in c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue is required (use null for "must not exist")` });
+      return false;
+    }
+    if (c.expectedValue !== null && typeof c.expectedValue !== 'string') {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue must be a string or null` });
+      return false;
+    }
+  }
+  return true;
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)
