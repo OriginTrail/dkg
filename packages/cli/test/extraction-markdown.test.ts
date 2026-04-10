@@ -220,14 +220,27 @@ describe('extractFromMarkdown — headings', () => {
     const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION);
     expect(sections).toHaveLength(3);
     expect(sections.map(t => t.object)).toEqual([
-      `${subjectIri}#section-intro`,
-      `${subjectIri}#section-methods`,
-      `${subjectIri}#section-sub-method`,
+      `${subjectIri}#section-1-intro`,
+      `${subjectIri}#section-2-methods`,
+      `${subjectIri}#section-3-sub-method`,
     ]);
     // Each section should have a schema:name
     for (const section of sections) {
       expect(triples.some(t => t.subject === section.object && t.predicate === SCHEMA_NAME)).toBe(true);
     }
+  });
+
+  it('disambiguates repeated headings by prefixing a stable section index', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `# Title\n\n## Overview\n\nText.\n\n## Overview\n\nMore text.\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION).map(t => t.object);
+    expect(sections).toEqual([
+      `${subjectIri}#section-1-overview`,
+      `${subjectIri}#section-2-overview`,
+    ]);
   });
 
   it('H1 promotes to schema:name on the document subject', () => {
@@ -299,7 +312,7 @@ describe('extractFromMarkdown — subject IRI resolution', () => {
     const mentions = triples.filter(t => t.predicate === SCHEMA_MENTIONS).map(t => t.object);
     expect(mentions).toEqual([expect.stringMatching(/^urn:dkg:md:hash-[0-9a-f]{12}$/)]);
     const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION).map(t => t.object);
-    expect(sections).toEqual([expect.stringMatching(new RegExp(`^${subjectIri.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#section-hash-[0-9a-f]{12}$`))]);
+    expect(sections).toEqual([expect.stringMatching(new RegExp(`^${subjectIri.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#section-1-hash-[0-9a-f]{12}$`))]);
   });
 
   it('produces a stable anonymous fallback when there is no title', () => {
@@ -437,8 +450,8 @@ Our method relies on [[SPARQL]] queries.
     // Sections
     const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION).map(t => t.object);
     expect(sections).toEqual([
-      `${subjectIri}#section-background`,
-      `${subjectIri}#section-methods`,
+      `${subjectIri}#section-1-background`,
+      `${subjectIri}#section-2-methods`,
     ]);
 
     // Provenance present

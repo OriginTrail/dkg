@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
-import { DKGPublisher } from '../src/index.js';
+import { DKGPublisher, generateSubGraphRegistration } from '../src/index.js';
 import { ethers } from 'ethers';
 
 const CG_ID = 'test-assertion-cg';
@@ -10,6 +10,7 @@ const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 const ASSERTION_NAME = 'my-assertion';
+const SUB_GRAPH_NAME = 'code';
 
 const TRIPLES = [
   { subject: 'urn:test:entity:alice', predicate: 'http://schema.org/name', object: '"Alice"' },
@@ -20,6 +21,13 @@ const TRIPLES = [
 describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
+
+  const subGraphRegistration = () => generateSubGraphRegistration({
+    contextGraphId: CG_ID,
+    subGraphName: SUB_GRAPH_NAME,
+    createdBy: AGENT,
+    timestamp: new Date('2026-04-10T00:00:00.000Z'),
+  });
 
   beforeEach(async () => {
     store = new OxigraphStore();
@@ -39,6 +47,24 @@ describe('Working Memory Assertion Lifecycle', () => {
   it('create returns the correct assertion graph URI', async () => {
     const uri = await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     expect(uri).toBe(contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME));
+  });
+
+  it('requires registered sub-graphs before creating assertion graphs inside them', async () => {
+    await expect(
+      publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT, SUB_GRAPH_NAME),
+    ).rejects.toThrow(`Sub-graph "${SUB_GRAPH_NAME}" has not been registered in context graph "${CG_ID}". Call createSubGraph() first.`);
+  });
+
+  it('requires registered sub-graphs before writing into sub-graph assertions', async () => {
+    await expect(
+      publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SUB_GRAPH_NAME),
+    ).rejects.toThrow(`Sub-graph "${SUB_GRAPH_NAME}" has not been registered in context graph "${CG_ID}". Call createSubGraph() first.`);
+  });
+
+  it('requires registered sub-graphs before promoting sub-graph assertions', async () => {
+    await expect(
+      publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SUB_GRAPH_NAME }),
+    ).rejects.toThrow(`Sub-graph "${SUB_GRAPH_NAME}" has not been registered in context graph "${CG_ID}". Call createSubGraph() first.`);
   });
 
   it('write inserts triples into the assertion graph', async () => {
@@ -138,6 +164,21 @@ describe('Working Memory Assertion Lifecycle', () => {
     const agentBQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT_B);
     expect(agentBQuads.length).toBe(1);
     expect(agentBQuads[0].subject).toBe('urn:test:bob');
+  });
+
+  it('query and discard still work for orphaned sub-graph assertions after deregistration', async () => {
+    await store.insert(subGraphRegistration());
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT, SUB_GRAPH_NAME);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SUB_GRAPH_NAME);
+
+    await store.delete(subGraphRegistration());
+
+    const quads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT, SUB_GRAPH_NAME);
+    expect(quads).toHaveLength(3);
+
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT, SUB_GRAPH_NAME);
+    const afterDiscard = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT, SUB_GRAPH_NAME);
+    expect(afterDiscard).toHaveLength(0);
   });
 
   it('promote on empty assertion returns 0', async () => {

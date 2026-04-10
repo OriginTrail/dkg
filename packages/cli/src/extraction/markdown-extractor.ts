@@ -318,9 +318,11 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   }
 
   // ── 5. Headings → dkg:hasSection ───────────────────────────────────
+  let sectionIndex = 0;
   for (const heading of extractHeadings(body)) {
     if (heading.level === 1) continue; // H1 is the document title, not a section
-    const sectionIri = `${subject}#section-${slugify(heading.text)}`;
+    sectionIndex += 1;
+    const sectionIri = `${subject}#section-${sectionIndex}-${slugify(heading.text)}`;
     triples.push({ subject, predicate: DKG_HAS_SECTION, object: sectionIri });
     triples.push({ subject: sectionIri, predicate: SCHEMA_NAME, object: JSON.stringify(heading.text) });
   }

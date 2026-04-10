@@ -2303,6 +2303,25 @@ async function handleRequest(
     let mdIntermediate: string | null = null;
     let pipelineUsed: string | null = null;
     let mdIntermediateHash: string | undefined;
+    const recordFailedExtraction = (
+      error: string,
+      tripleCount: number,
+      failedPipelineUsed: string | null = pipelineUsed,
+    ): ExtractionStatusRecord => {
+      const failedRecord: ExtractionStatusRecord = {
+        status: 'failed',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed: failedPipelineUsed,
+        tripleCount,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        error,
+        startedAt,
+        completedAt: new Date().toISOString(),
+      };
+      extractionStatus.set(assertionUri, failedRecord);
+      return failedRecord;
+    };
 
     if (detectedContentType === 'text/markdown') {
       mdIntermediate = filePart.content.toString('utf-8');
@@ -2323,17 +2342,7 @@ async function handleRequest(
           mdIntermediateHash = mdEntry.hash;
         } catch (err: any) {
           // Phase 1 failure: record in status map, return error response
-          const failedRecord: ExtractionStatusRecord = {
-            status: 'failed',
-            fileHash: fileStoreEntry.hash,
-            detectedContentType,
-            pipelineUsed: detectedContentType,
-            tripleCount: 0,
-            error: `Phase 1 converter failed: ${err.message}`,
-            startedAt,
-            completedAt: new Date().toISOString(),
-          };
-          extractionStatus.set(assertionUri, failedRecord);
+          const failedRecord = recordFailedExtraction(`Phase 1 converter failed: ${err.message}`, 0, detectedContentType);
           return jsonResponse(res, 500, {
             assertionUri,
             fileHash: fileStoreEntry.hash,
@@ -2387,18 +2396,7 @@ async function handleRequest(
       triples = result.triples;
       provenance = result.provenance;
     } catch (err: any) {
-      const failedRecord: ExtractionStatusRecord = {
-        status: 'failed',
-        fileHash: fileStoreEntry.hash,
-        detectedContentType,
-        pipelineUsed,
-        tripleCount: 0,
-        mdIntermediateHash,
-        error: `Phase 2 extraction failed: ${err.message}`,
-        startedAt,
-        completedAt: new Date().toISOString(),
-      };
-      extractionStatus.set(assertionUri, failedRecord);
+      const failedRecord = recordFailedExtraction(`Phase 2 extraction failed: ${err.message}`, 0);
       return jsonResponse(res, 500, {
         assertionUri,
         fileHash: fileStoreEntry.hash,
@@ -2430,6 +2428,7 @@ async function handleRequest(
         // create() on an existing graph is idempotent in oxigraph, but if the
         // error is about the sub-graph not being registered, propagate it.
         if (err.message?.includes('has not been registered')) {
+          recordFailedExtraction(err.message, triples.length);
           return jsonResponse(res, 400, { error: err.message });
         }
         // Other errors from create() can be ignored if the graph already exists.
@@ -2444,9 +2443,11 @@ async function handleRequest(
       }
     } catch (err: any) {
       if (err.message?.includes('has not been registered')) {
+        recordFailedExtraction(err.message, triples.length);
         return jsonResponse(res, 400, { error: err.message });
       }
       if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        recordFailedExtraction(err.message, triples.length);
         return jsonResponse(res, 400, { error: err.message });
       }
       throw err;

@@ -79,7 +79,12 @@ interface MockAgent {
   createdAssertions: Array<{ contextGraphId: string; name: string; subGraphName?: string }>;
 }
 
-function makeMockAgent(peerId = '0xMockAgentPeerId'): MockAgent {
+interface MockAgentOptions {
+  createError?: Error;
+  writeError?: Error;
+}
+
+function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions = {}): MockAgent {
   const capturedWrites: CapturedAssertionWrite[] = [];
   const createdAssertions: Array<{ contextGraphId: string; name: string; subGraphName?: string }> = [];
   return {
@@ -88,6 +93,7 @@ function makeMockAgent(peerId = '0xMockAgentPeerId'): MockAgent {
     createdAssertions,
     assertion: {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
+        if (options.createError) throw options.createError;
         createdAssertions.push({ contextGraphId, name, subGraphName: opts?.subGraphName });
         return contextGraphAssertionUri(contextGraphId, peerId, name, opts?.subGraphName);
       },
@@ -97,6 +103,7 @@ function makeMockAgent(peerId = '0xMockAgentPeerId'): MockAgent {
         triples: Array<{ subject: string; predicate: string; object: string }>,
         opts?: { subGraphName?: string },
       ): Promise<void> {
+        if (options.writeError) throw options.writeError;
         capturedWrites.push({ contextGraphId, name, triples, subGraphName: opts?.subGraphName });
       },
     },
@@ -194,22 +201,52 @@ async function runImportFileOrchestration(params: {
   }
 
   // Phase 2
-  const { triples, provenance } = extractFromMarkdown({
-    markdown: mdIntermediate,
-    agentDid: `did:dkg:agent:${agent.peerId}`,
-    ontologyRef,
-    documentIri: assertionUri,
-  });
+  const recordFailed = (error: string, tripleCount: number): void => {
+    extractionStatus.set(assertionUri, {
+      status: 'failed',
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      pipelineUsed,
+      tripleCount,
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+      error,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    });
+  };
+
+  let triples: ReturnType<typeof extractFromMarkdown>['triples'];
+  let provenance: ReturnType<typeof extractFromMarkdown>['provenance'];
+  try {
+    const result = extractFromMarkdown({
+      markdown: mdIntermediate,
+      agentDid: `did:dkg:agent:${agent.peerId}`,
+      ontologyRef,
+      documentIri: assertionUri,
+    });
+    triples = result.triples;
+    provenance = result.provenance;
+  } catch (err: any) {
+    recordFailed(`Phase 2 extraction failed: ${err.message}`, 0);
+    throw err;
+  }
 
   const allTriples = [...triples, ...provenance];
-  await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
-  if (allTriples.length > 0) {
-    await agent.assertion.write(
-      contextGraphId,
-      assertionName,
-      allTriples.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
-      subGraphName ? { subGraphName } : undefined,
-    );
+  try {
+    await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+    if (allTriples.length > 0) {
+      await agent.assertion.write(
+        contextGraphId,
+        assertionName,
+        allTriples.map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
+        subGraphName ? { subGraphName } : undefined,
+      );
+    }
+  } catch (err: any) {
+    if (err.message?.includes('has not been registered') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+      recordFailed(err.message, triples.length);
+    }
+    throw err;
   }
 
   const completedRecord: ExtractionStatusRecord = {
@@ -557,6 +594,53 @@ describe('import-file orchestration — happy paths', () => {
     expect(agent.createdAssertions).toHaveLength(1);
     expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'empty-doc', subGraphName: undefined });
     expect(agent.capturedWrites).toHaveLength(0);
+  });
+
+  it('records failed extraction status when assertion.create rejects an unregistered sub-graph', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      createError: new Error('Sub-graph "decisions" has not been registered in context graph "cg". Call createSubGraph() first.'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'text', name: 'subGraphName', value: 'decisions' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'decision-1',
+    })).rejects.toThrow('has not been registered');
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'decision-1', 'decisions');
+    const record = status.get(assertionUri);
+    expect(record).toBeDefined();
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toContain('has not been registered');
+    expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('records failed extraction status when assertion.write rejects invalid triples', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      writeError: new Error('Invalid triple object'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'invalid-write',
+    })).rejects.toThrow('Invalid triple object');
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'invalid-write');
+    const record = status.get(assertionUri);
+    expect(record).toBeDefined();
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toBe('Invalid triple object');
+    expect(record?.tripleCount).toBeGreaterThan(0);
   });
 });
 
