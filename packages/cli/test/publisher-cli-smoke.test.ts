@@ -103,12 +103,10 @@ describe.sequential('publisher CLI smoke', () => {
     // process to terminate — this gives the store's 50ms debounced flush time
     // to persist shared-memory data before the process exits.
     await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/shutdown`, { method: 'POST' }).catch(() => {});
-    await Promise.race([
-      new Promise((resolve) => daemon?.once('exit', resolve)),
-      new Promise((resolve) => setTimeout(resolve, 5000)).then(() => {
-        daemon?.kill('SIGKILL');
-      }),
-    ]);
+    const daemonExited = new Promise((resolve) => daemon?.once('exit', resolve));
+    const killTimeout = setTimeout(() => { daemon?.kill('SIGKILL'); }, 5000);
+    await daemonExited;
+    clearTimeout(killTimeout);
     daemon = undefined;
 
     const enqueue = await execFileAsync('node', [

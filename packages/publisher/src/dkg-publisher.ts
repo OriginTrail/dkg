@@ -1541,16 +1541,29 @@ export class DKGPublisher implements Publisher {
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Skolemize blank nodes so local SWM and gossip peers store identical data.
-    // If autoPartition finds no root entities (blank-node-only input), fall back
-    // to the original quads to avoid silently dropping data.
     const kaMap = autoPartition(quadsToPromote);
-    const normalizedQuads = kaMap.size > 0 ? [...kaMap.values()].flat() : quadsToPromote;
+    if (kaMap.size === 0) {
+      throw new Error(
+        'Cannot promote assertion: no root entities found. ' +
+        'Assertions must contain at least one named (non-blank-node) subject.',
+      );
+    }
+    const normalizedQuads = [...kaMap.values()].flat();
+    const rootEntities = [...kaMap.keys()];
 
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
     const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
-    const rootEntities = kaMap.size > 0
-      ? [...kaMap.keys()]
-      : [...new Set(normalizedQuads.map((q) => q.subject))];
+    const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
+
+    // Delete-then-insert for already-owned entities (upsert), matching
+    // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
+    for (const root of rootEntities) {
+      if (swmOwned.has(root)) {
+        await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
+        await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
+        await this.deleteMetaForRoot(swmMetaGraph, root);
+      }
+    }
 
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
@@ -1607,7 +1620,7 @@ export class DKGPublisher implements Publisher {
     // message exceeds the pubsub limit we skip gossip rather than failing,
     // since the local promotion has already committed.
     let gossipMessage: Uint8Array | undefined;
-    if (opts?.publisherPeerId && kaMap.size > 0) {
+    if (opts?.publisherPeerId) {
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const nquadsStr = normalizedQuads
         .map(
