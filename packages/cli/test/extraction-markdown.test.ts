@@ -12,6 +12,11 @@ const SCHEMA_KEYWORDS = 'http://schema.org/keywords';
 const DKG_HAS_SECTION = 'http://dkg.io/ontology/hasSection';
 const DKG_EXTRACTION_PROVENANCE = 'http://dkg.io/ontology/ExtractionProvenance';
 const PROV_WAS_GENERATED_BY = 'http://www.w3.org/ns/prov#wasGeneratedBy';
+const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
+const XSD_DATE = 'http://www.w3.org/2001/XMLSchema#date';
+const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 describe('extractFromMarkdown — frontmatter', () => {
   it('extracts rdf:type from frontmatter `type` key (schema.org convention)', () => {
@@ -61,7 +66,7 @@ describe('extractFromMarkdown — frontmatter', () => {
     expect(triples).toContainEqual({
       subject: subjectIri,
       predicate: 'http://schema.org/releaseDate',
-      object: '"2026-04-10T00:00:00.000Z"',
+      object: `"2026-04-10"^^<${XSD_DATE}>`,
     });
     expect(triples).toContainEqual({
       subject: subjectIri,
@@ -80,14 +85,40 @@ describe('extractFromMarkdown — frontmatter', () => {
     expect(authors.map(t => t.object).sort()).toEqual(['"Alice"', '"Bob"']);
   });
 
-  it('handles numeric and boolean scalars', () => {
+  it('emits typed literals for numeric and boolean YAML scalars', () => {
     const { triples } = extractFromMarkdown({
-      markdown: `---\nid: doc\npageCount: 42\npublished: true\n---\n`,
+      markdown: `---\nid: doc\npageCount: 42\nscore: 3.14\npublished: true\n---\n`,
       agentDid: AGENT,
       now: FIXED_NOW,
     });
-    expect(triples).toContainEqual({ subject: 'urn:dkg:md:doc', predicate: 'http://schema.org/pageCount', object: '"42"' });
-    expect(triples).toContainEqual({ subject: 'urn:dkg:md:doc', predicate: 'http://schema.org/published', object: '"true"' });
+    expect(triples).toContainEqual({
+      subject: 'urn:dkg:md:doc',
+      predicate: 'http://schema.org/pageCount',
+      object: `"42"^^<${XSD_INTEGER}>`,
+    });
+    expect(triples).toContainEqual({
+      subject: 'urn:dkg:md:doc',
+      predicate: 'http://schema.org/score',
+      object: `"3.14"^^<${XSD_DECIMAL}>`,
+    });
+    expect(triples).toContainEqual({
+      subject: 'urn:dkg:md:doc',
+      predicate: 'http://schema.org/published',
+      object: `"true"^^<${XSD_BOOLEAN}>`,
+    });
+  });
+
+  it('emits xsd:dateTime for YAML timestamps with a time component', () => {
+    const { triples } = extractFromMarkdown({
+      markdown: `---\nid: doc\nupdatedAt: 2026-04-10T15:45:30Z\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: 'urn:dkg:md:doc',
+      predicate: 'http://schema.org/updatedAt',
+      object: `"2026-04-10T15:45:30.000Z"^^<${XSD_DATE_TIME}>`,
+    });
   });
 
   it('ignores frontmatter with invalid YAML (fallthrough to body)', () => {
@@ -211,21 +242,28 @@ describe('extractFromMarkdown — Dataview inline fields', () => {
 });
 
 describe('extractFromMarkdown — headings', () => {
-  it('emits dkg:hasSection triples for H2+ headings but not H1', () => {
+  it('preserves heading nesting by attaching deeper headings to their nearest parent section', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# Title\n\n## Intro\n\n## Methods\n\n### Sub-method\n`,
       agentDid: AGENT,
       now: FIXED_NOW,
     });
-    const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION);
-    expect(sections).toHaveLength(3);
-    expect(sections.map(t => t.object)).toEqual([
+    const rootSections = triples.filter(t => t.subject === subjectIri && t.predicate === DKG_HAS_SECTION);
+    expect(rootSections).toHaveLength(2);
+    expect(rootSections.map(t => t.object)).toEqual([
       `${subjectIri}#section-1-intro`,
       `${subjectIri}#section-2-methods`,
-      `${subjectIri}#section-3-sub-method`,
     ]);
-    // Each section should have a schema:name
-    for (const section of sections) {
+    expect(triples).toContainEqual({
+      subject: `${subjectIri}#section-2-methods`,
+      predicate: DKG_HAS_SECTION,
+      object: `${subjectIri}#section-3-sub-method`,
+    });
+    for (const section of [...rootSections, {
+      subject: `${subjectIri}#section-2-methods`,
+      predicate: DKG_HAS_SECTION,
+      object: `${subjectIri}#section-3-sub-method`,
+    }]) {
       expect(triples.some(t => t.subject === section.object && t.predicate === SCHEMA_NAME)).toBe(true);
     }
   });

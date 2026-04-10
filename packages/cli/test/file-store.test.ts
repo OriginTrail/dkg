@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -53,6 +53,18 @@ describe('FileStore.put', () => {
     // contentType on the returned entry reflects the caller, not persisted metadata
     expect(first.contentType).toBe('text/plain');
     expect(second.contentType).toBe('application/octet-stream');
+  });
+
+  it('leaves only the final blob after repeated puts of the same content', async () => {
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.from('atomic-write', 'utf-8');
+
+    const first = await store.put(bytes, 'text/plain');
+    const second = await store.put(bytes, 'text/plain');
+
+    expect(second.path).toBe(first.path);
+    const shardEntries = await readdir(join(rootDir, first.hash.slice('sha256:'.length, 'sha256:'.length + 2)));
+    expect(shardEntries).toEqual([first.hash.slice('sha256:'.length + 2)]);
   });
 
   it('handles empty input', async () => {

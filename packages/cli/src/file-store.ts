@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
@@ -38,8 +38,8 @@ export class FileStore {
 
   /**
    * Persist `bytes` to the store and return the resulting entry. Idempotent:
-   * re-putting the same bytes returns the same hash and overwrites the
-   * existing file with identical content. The `contentType` metadata is
+   * re-putting the same bytes returns the same hash without rewriting the
+   * existing blob. The `contentType` metadata is
    * attached to the return value but not persisted to disk — callers that
    * need durable content-type metadata should store it separately (e.g. in
    * an `_meta` triple keyed by hash).
@@ -49,7 +49,23 @@ export class FileStore {
     const hash = `sha256:${hex}`;
     const path = this.resolvePath(hex);
     await mkdir(join(this.rootDir, hex.slice(0, 2)), { recursive: true });
-    await writeFile(path, bytes);
+    if (!existsSync(path)) {
+      const tempPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      try {
+        await writeFile(tempPath, bytes, { flag: 'wx' });
+        try {
+          await rename(tempPath, path);
+        } catch (err: any) {
+          if (!existsSync(path)) {
+            throw err;
+          }
+        }
+      } finally {
+        if (existsSync(tempPath)) {
+          await unlink(tempPath).catch(() => {});
+        }
+      }
+    }
     return { hash, path, size: bytes.length, contentType };
   }
 

@@ -2279,6 +2279,17 @@ async function handleRequest(
 
     const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
 
+    if (subGraphName) {
+      try {
+        const registeredSubGraphs: Array<{ name: string }> = await agent.listSubGraphs(contextGraphId!);
+        if (!registeredSubGraphs.some(subGraph => subGraph.name === subGraphName)) {
+          return jsonResponse(res, 400, { error: unregisteredSubGraphError(contextGraphId!, subGraphName) });
+        }
+      } catch (err: any) {
+        return jsonResponse(res, 500, { error: `Failed to verify sub-graph registration: ${err.message}` });
+      }
+    }
+
     // Persist the original upload to the file store.
     let fileStoreEntry;
     try {
@@ -2303,6 +2314,28 @@ async function handleRequest(
     let mdIntermediate: string | null = null;
     let pipelineUsed: string | null = null;
     let mdIntermediateHash: string | undefined;
+    const respondWithImportFileResponse = (statusCode: number, extraction: ImportFileExtractionPayload) =>
+      jsonResponse(
+        res,
+        statusCode,
+        buildImportFileResponse({
+          assertionUri,
+          fileHash: fileStoreEntry.hash,
+          detectedContentType,
+          extraction,
+        }),
+      );
+    const recordInProgressExtraction = (): void => {
+      setExtractionStatusRecord(extractionStatus, assertionUri, {
+        status: 'in_progress',
+        fileHash: fileStoreEntry.hash,
+        detectedContentType,
+        pipelineUsed,
+        tripleCount: 0,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        startedAt,
+      });
+    };
     const recordFailedExtraction = (
       error: string,
       tripleCount: number,
@@ -2319,13 +2352,31 @@ async function handleRequest(
         startedAt,
         completedAt: new Date().toISOString(),
       };
-      extractionStatus.set(assertionUri, failedRecord);
+      setExtractionStatusRecord(extractionStatus, assertionUri, failedRecord);
       return failedRecord;
     };
+    const respondWithFailedExtraction = (
+      statusCode: number,
+      error: string,
+      tripleCount: number,
+      failedPipelineUsed: string | null = pipelineUsed,
+    ) => {
+      const failedRecord = recordFailedExtraction(error, tripleCount, failedPipelineUsed);
+      return respondWithImportFileResponse(statusCode, {
+        status: 'failed',
+        tripleCount,
+        pipelineUsed: failedRecord.pipelineUsed,
+        ...(failedRecord.mdIntermediateHash ? { mdIntermediateHash: failedRecord.mdIntermediateHash } : {}),
+        error,
+      });
+    };
+
+    recordInProgressExtraction();
 
     if (detectedContentType === 'text/markdown') {
       mdIntermediate = filePart.content.toString('utf-8');
       pipelineUsed = 'text/markdown';
+      recordInProgressExtraction();
     } else {
       const converter = extractionRegistry.get(detectedContentType);
       if (converter) {
@@ -2340,20 +2391,9 @@ async function handleRequest(
           pipelineUsed = detectedContentType;
           const mdEntry = await fileStore.put(Buffer.from(md, 'utf-8'), 'text/markdown');
           mdIntermediateHash = mdEntry.hash;
+          recordInProgressExtraction();
         } catch (err: any) {
-          // Phase 1 failure: record in status map, return error response
-          const failedRecord = recordFailedExtraction(`Phase 1 converter failed: ${err.message}`, 0, detectedContentType);
-          return jsonResponse(res, 500, {
-            assertionUri,
-            fileHash: fileStoreEntry.hash,
-            detectedContentType,
-            extraction: {
-              status: 'failed' as const,
-              tripleCount: 0,
-              pipelineUsed: detectedContentType,
-              error: `Phase 1 converter failed: ${err.message}`,
-            },
-          });
+          return respondWithFailedExtraction(500, `Phase 1 converter failed: ${err.message}`, 0, detectedContentType);
         }
       }
     }
@@ -2370,16 +2410,11 @@ async function handleRequest(
         startedAt,
         completedAt: new Date().toISOString(),
       };
-      extractionStatus.set(assertionUri, skippedRecord);
-      return jsonResponse(res, 200, {
-        assertionUri,
-        fileHash: fileStoreEntry.hash,
-        detectedContentType,
-        extraction: {
-          status: 'skipped' as const,
-          tripleCount: 0,
-          pipelineUsed: null,
-        },
+      setExtractionStatusRecord(extractionStatus, assertionUri, skippedRecord);
+      return respondWithImportFileResponse(200, {
+        status: 'skipped',
+        tripleCount: 0,
+        pipelineUsed: null,
       });
     }
 
@@ -2396,19 +2431,7 @@ async function handleRequest(
       triples = result.triples;
       provenance = result.provenance;
     } catch (err: any) {
-      const failedRecord = recordFailedExtraction(`Phase 2 extraction failed: ${err.message}`, 0);
-      return jsonResponse(res, 500, {
-        assertionUri,
-        fileHash: fileStoreEntry.hash,
-        detectedContentType,
-        extraction: {
-          status: 'failed' as const,
-          tripleCount: 0,
-          pipelineUsed,
-          mdIntermediateHash,
-          error: `Phase 2 extraction failed: ${err.message}`,
-        },
-      });
+      return respondWithFailedExtraction(500, `Phase 2 extraction failed: ${err.message}`, 0);
     }
 
     // ── Write triples + provenance to the assertion graph ──
@@ -2428,8 +2451,7 @@ async function handleRequest(
         // create() on an existing graph is idempotent in oxigraph, but if the
         // error is about the sub-graph not being registered, propagate it.
         if (err.message?.includes('has not been registered')) {
-          recordFailedExtraction(err.message, triples.length);
-          return jsonResponse(res, 400, { error: err.message });
+          return respondWithFailedExtraction(400, err.message, triples.length);
         }
         // Other errors from create() can be ignored if the graph already exists.
       }
@@ -2443,12 +2465,10 @@ async function handleRequest(
       }
     } catch (err: any) {
       if (err.message?.includes('has not been registered')) {
-        recordFailedExtraction(err.message, triples.length);
-        return jsonResponse(res, 400, { error: err.message });
+        return respondWithFailedExtraction(400, err.message, triples.length);
       }
       if (err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
-        recordFailedExtraction(err.message, triples.length);
-        return jsonResponse(res, 400, { error: err.message });
+        return respondWithFailedExtraction(400, err.message, triples.length);
       }
       throw err;
     }
@@ -2463,18 +2483,13 @@ async function handleRequest(
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    extractionStatus.set(assertionUri, completedRecord);
+    setExtractionStatusRecord(extractionStatus, assertionUri, completedRecord);
 
-    return jsonResponse(res, 200, {
-      assertionUri,
-      fileHash: fileStoreEntry.hash,
-      detectedContentType,
-      extraction: {
-        status: 'completed' as const,
-        tripleCount: triples.length,
-        pipelineUsed,
-        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
-      },
+    return respondWithImportFileResponse(200, {
+      status: 'completed',
+      tripleCount: triples.length,
+      pipelineUsed,
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
     });
   }
 
@@ -2500,7 +2515,7 @@ async function handleRequest(
       assertionName,
       subGraphName,
     );
-    const record = extractionStatus.get(assertionUri);
+    const record = getExtractionStatusRecord(extractionStatus, assertionUri);
     if (!record) {
       return jsonResponse(res, 404, {
         error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,
@@ -3280,9 +3295,9 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — for import-file document
 
 /**
  * In-memory extraction job tracking record. Populated at import-file time
- * and queried by the extraction-status endpoint. Keyed by the target
- * assertion URI (which is unique per agent × contextGraph × assertionName
- * × subGraphName).
+ * and queried by the extraction-status endpoint. Records are kept in a
+ * bounded, TTL-pruned map keyed by the target assertion URI (which is
+ * unique per agent × contextGraph × assertionName × subGraphName).
  */
 interface ExtractionStatusRecord {
   status: 'in_progress' | 'completed' | 'skipped' | 'failed';
@@ -3294,6 +3309,92 @@ interface ExtractionStatusRecord {
   error?: string;
   startedAt: string;
   completedAt?: string;
+}
+
+interface ImportFileExtractionPayload {
+  status: 'completed' | 'skipped' | 'failed';
+  tripleCount: number;
+  pipelineUsed: string | null;
+  mdIntermediateHash?: string;
+  error?: string;
+}
+
+const EXTRACTION_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_EXTRACTION_STATUS_RECORDS = 1000;
+
+function buildImportFileResponse(args: {
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType: string;
+  extraction: ImportFileExtractionPayload;
+}) {
+  return {
+    assertionUri: args.assertionUri,
+    fileHash: args.fileHash,
+    detectedContentType: args.detectedContentType,
+    extraction: {
+      status: args.extraction.status,
+      tripleCount: args.extraction.tripleCount,
+      pipelineUsed: args.extraction.pipelineUsed,
+      ...(args.extraction.mdIntermediateHash ? { mdIntermediateHash: args.extraction.mdIntermediateHash } : {}),
+      ...(args.extraction.error ? { error: args.extraction.error } : {}),
+    },
+  };
+}
+
+function extractionStatusSortKey(record: ExtractionStatusRecord): number {
+  const completedAtMs = record.completedAt ? Date.parse(record.completedAt) : Number.NaN;
+  if (Number.isFinite(completedAtMs)) return completedAtMs;
+  const startedAtMs = Date.parse(record.startedAt);
+  return Number.isFinite(startedAtMs) ? startedAtMs : 0;
+}
+
+function pruneExtractionStatusRecords(extractionStatus: Map<string, ExtractionStatusRecord>, nowMs = Date.now()): void {
+  for (const [assertionUri, record] of extractionStatus.entries()) {
+    const ageRefMs = extractionStatusSortKey(record);
+    if (ageRefMs > 0 && nowMs - ageRefMs > EXTRACTION_STATUS_TTL_MS) {
+      extractionStatus.delete(assertionUri);
+    }
+  }
+
+  if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) return;
+
+  const oldestFirst = [...extractionStatus.entries()].sort(
+    ([, left], [, right]) => extractionStatusSortKey(left) - extractionStatusSortKey(right),
+  );
+
+  for (const [assertionUri, record] of oldestFirst) {
+    if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) break;
+    if (record.status !== 'in_progress') {
+      extractionStatus.delete(assertionUri);
+    }
+  }
+
+  for (const [assertionUri] of oldestFirst) {
+    if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) break;
+    extractionStatus.delete(assertionUri);
+  }
+}
+
+function setExtractionStatusRecord(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  assertionUri: string,
+  record: ExtractionStatusRecord,
+): void {
+  pruneExtractionStatusRecords(extractionStatus);
+  extractionStatus.set(assertionUri, record);
+}
+
+function getExtractionStatusRecord(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  assertionUri: string,
+): ExtractionStatusRecord | undefined {
+  pruneExtractionStatusRecords(extractionStatus);
+  return extractionStatus.get(assertionUri);
+}
+
+function unregisteredSubGraphError(contextGraphId: string, subGraphName: string): string {
+  return `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". Call createSubGraph() first.`;
 }
 
 

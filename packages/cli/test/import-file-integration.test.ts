@@ -28,6 +28,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   ExtractionPipelineRegistry,
   type ExtractionPipeline,
@@ -62,6 +63,7 @@ interface CapturedAssertionWrite {
 
 interface MockAgent {
   peerId: string;
+  listSubGraphs: (contextGraphId: string) => Promise<Array<{ name: string }>>;
   assertion: {
     create: (
       contextGraphId: string,
@@ -82,6 +84,7 @@ interface MockAgent {
 interface MockAgentOptions {
   createError?: Error;
   writeError?: Error;
+  registeredSubGraphs?: string[];
 }
 
 function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions = {}): MockAgent {
@@ -91,6 +94,9 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
     peerId,
     capturedWrites,
     createdAssertions,
+    async listSubGraphs(): Promise<Array<{ name: string }>> {
+      return (options.registeredSubGraphs ?? []).map(name => ({ name }));
+    },
     assertion: {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
         if (options.createError) throw options.createError;
@@ -125,6 +131,37 @@ interface ImportFileResult {
   };
 }
 
+class ImportFileRouteError extends Error {
+  readonly statusCode: number;
+  readonly body: ImportFileResult;
+
+  constructor(statusCode: number, body: ImportFileResult) {
+    super(body.extraction.error ?? `Import-file request failed with status ${statusCode}`);
+    this.statusCode = statusCode;
+    this.body = body;
+  }
+}
+
+function buildImportFileResponse(args: {
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType: string;
+  extraction: ImportFileResult['extraction'];
+}): ImportFileResult {
+  return {
+    assertionUri: args.assertionUri,
+    fileHash: args.fileHash,
+    detectedContentType: args.detectedContentType,
+    extraction: {
+      status: args.extraction.status,
+      tripleCount: args.extraction.tripleCount,
+      pipelineUsed: args.extraction.pipelineUsed,
+      ...(args.extraction.mdIntermediateHash ? { mdIntermediateHash: args.extraction.mdIntermediateHash } : {}),
+      ...(args.extraction.error ? { error: args.extraction.error } : {}),
+    },
+  };
+}
+
 function normalizeDetectedContentType(contentType: string | undefined): string {
   const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
@@ -138,8 +175,9 @@ async function runImportFileOrchestration(params: {
   multipartBody: Buffer;
   boundary: string;
   assertionName: string;
+  onInProgress?: (assertionUri: string, record: ExtractionStatusRecord) => void | Promise<void>;
 }): Promise<ImportFileResult> {
-  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName } = params;
+  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName, onInProgress } = params;
 
   const fields = parseMultipart(multipartBody, boundary);
   const filePart = fields.find(f => f.name === 'file' && f.filename !== undefined)!;
@@ -152,6 +190,12 @@ async function runImportFileOrchestration(params: {
   const ontologyRef = textField('ontologyRef');
   const subGraphName = textField('subGraphName');
   const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
+  if (subGraphName) {
+    const registeredSubGraphs = await agent.listSubGraphs(contextGraphId);
+    if (!registeredSubGraphs.some(subGraph => subGraph.name === subGraphName)) {
+      throw new Error(`Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". Call createSubGraph() first.`);
+    }
+  }
 
   const fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
   const assertionUri = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
@@ -160,10 +204,56 @@ async function runImportFileOrchestration(params: {
   let mdIntermediate: string | null = null;
   let pipelineUsed: string | null = null;
   let mdIntermediateHash: string | undefined;
+  const recordInProgress = async (): Promise<void> => {
+    const record: ExtractionStatusRecord = {
+      status: 'in_progress',
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      pipelineUsed,
+      tripleCount: 0,
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+      startedAt,
+    };
+    extractionStatus.set(assertionUri, record);
+    if (onInProgress) {
+      await onInProgress(assertionUri, record);
+    }
+  };
+  const recordFailed = (error: string, tripleCount: number, failedPipelineUsed: string | null = pipelineUsed): void => {
+    extractionStatus.set(assertionUri, {
+      status: 'failed',
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      pipelineUsed: failedPipelineUsed,
+      tripleCount,
+      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+      error,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    });
+  };
+  const fail = (statusCode: number, error: string, tripleCount: number, failedPipelineUsed: string | null = pipelineUsed): never => {
+    recordFailed(error, tripleCount, failedPipelineUsed);
+    throw new ImportFileRouteError(statusCode, buildImportFileResponse({
+      assertionUri,
+      fileHash: fileStoreEntry.hash,
+      detectedContentType,
+      extraction: {
+        status: 'failed',
+        tripleCount,
+        pipelineUsed: failedPipelineUsed,
+        ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        error,
+      },
+    }));
+  };
+
+  await recordInProgress();
 
   if (detectedContentType === 'text/markdown') {
     mdIntermediate = filePart.content.toString('utf-8');
     pipelineUsed = 'text/markdown';
+    await recordInProgress();
   } else {
     const converter = extractionRegistry.get(detectedContentType);
     if (converter) {
@@ -177,6 +267,7 @@ async function runImportFileOrchestration(params: {
       pipelineUsed = detectedContentType;
       const mdEntry = await fileStore.put(Buffer.from(md, 'utf-8'), 'text/markdown');
       mdIntermediateHash = mdEntry.hash;
+      await recordInProgress();
     }
   }
 
@@ -192,29 +283,15 @@ async function runImportFileOrchestration(params: {
       completedAt: new Date().toISOString(),
     };
     extractionStatus.set(assertionUri, skippedRecord);
-    return {
+    return buildImportFileResponse({
       assertionUri,
       fileHash: fileStoreEntry.hash,
       detectedContentType,
       extraction: { status: 'skipped', tripleCount: 0, pipelineUsed: null },
-    };
+    });
   }
 
   // Phase 2
-  const recordFailed = (error: string, tripleCount: number): void => {
-    extractionStatus.set(assertionUri, {
-      status: 'failed',
-      fileHash: fileStoreEntry.hash,
-      detectedContentType,
-      pipelineUsed,
-      tripleCount,
-      ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
-      error,
-      startedAt,
-      completedAt: new Date().toISOString(),
-    });
-  };
-
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let provenance: ReturnType<typeof extractFromMarkdown>['provenance'];
   try {
@@ -227,8 +304,7 @@ async function runImportFileOrchestration(params: {
     triples = result.triples;
     provenance = result.provenance;
   } catch (err: any) {
-    recordFailed(`Phase 2 extraction failed: ${err.message}`, 0);
-    throw err;
+    fail(500, `Phase 2 extraction failed: ${err.message}`, 0);
   }
 
   const allTriples = [...triples, ...provenance];
@@ -244,7 +320,7 @@ async function runImportFileOrchestration(params: {
     }
   } catch (err: any) {
     if (err.message?.includes('has not been registered') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
-      recordFailed(err.message, triples.length);
+      fail(400, err.message, triples.length);
     }
     throw err;
   }
@@ -261,7 +337,7 @@ async function runImportFileOrchestration(params: {
   };
   extractionStatus.set(assertionUri, completedRecord);
 
-  return {
+  return buildImportFileResponse({
     assertionUri,
     fileHash: fileStoreEntry.hash,
     detectedContentType,
@@ -271,7 +347,7 @@ async function runImportFileOrchestration(params: {
       pipelineUsed,
       ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
     },
-  };
+  });
 }
 
 // ── Multipart body builder for tests ──
@@ -563,6 +639,10 @@ describe('import-file orchestration — happy paths', () => {
   });
 
   it('passes subGraphName through to assertion.create and assertion.write', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      registeredSubGraphs: ['decisions'],
+    });
+
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
       { kind: 'text', name: 'subGraphName', value: 'decisions' },
@@ -576,6 +656,29 @@ describe('import-file orchestration — happy paths', () => {
 
     expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'decision-1', subGraphName: 'decisions' });
     expect(agent.capturedWrites[0].subGraphName).toBe('decisions');
+  });
+
+  it('seeds an in-progress extraction status before the terminal record is written', async () => {
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    let observedInProgress = false;
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'in-progress-doc',
+      async onInProgress(assertionUri, record) {
+        observedInProgress = true;
+        expect(assertionUri).toBe(contextGraphAssertionUri('cg', agent.peerId, 'in-progress-doc'));
+        expect(record.status).toBe('in_progress');
+        expect(record.completedAt).toBeUndefined();
+        expect(status.get(assertionUri)?.status).toBe('in_progress');
+      },
+    });
+
+    expect(observedInProgress).toBe(true);
+    expect(status.get(result.assertionUri)?.status).toBe('completed');
   });
 
   it('creates the assertion graph even when Phase 2 extracts zero triples', async () => {
@@ -598,6 +701,7 @@ describe('import-file orchestration — happy paths', () => {
 
   it('records failed extraction status when assertion.create rejects an unregistered sub-graph', async () => {
     agent = makeMockAgent('0xMockAgentPeerId', {
+      registeredSubGraphs: ['decisions'],
       createError: new Error('Sub-graph "decisions" has not been registered in context graph "cg". Call createSubGraph() first.'),
     });
 
@@ -618,6 +722,21 @@ describe('import-file orchestration — happy paths', () => {
     expect(record?.status).toBe('failed');
     expect(record?.error).toContain('has not been registered');
     expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('rejects an unregistered sub-graph before storing the upload blob', async () => {
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'text', name: 'subGraphName', value: 'decisions' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    await expect(runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'unregistered-preflight',
+    })).rejects.toThrow('has not been registered');
+
+    expect(existsSync(fileStore.directory)).toBe(false);
   });
 
   it('records failed extraction status when assertion.write rejects invalid triples', async () => {
@@ -641,6 +760,37 @@ describe('import-file orchestration — happy paths', () => {
     expect(record?.status).toBe('failed');
     expect(record?.error).toBe('Invalid triple object');
     expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('returns the full import-file envelope for write-stage validation failures', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      writeError: new Error('Invalid triple object'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    let caught: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'invalid-write-envelope',
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(ImportFileRouteError);
+    const routeError = caught as ImportFileRouteError;
+    expect(routeError.statusCode).toBe(400);
+    expect(routeError.body.assertionUri).toBe(contextGraphAssertionUri('cg', agent.peerId, 'invalid-write-envelope'));
+    expect(routeError.body.fileHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(routeError.body.detectedContentType).toBe('text/markdown');
+    expect(routeError.body.extraction.status).toBe('failed');
+    expect(routeError.body.extraction.error).toBe('Invalid triple object');
+    expect(routeError.body.extraction.tripleCount).toBeGreaterThan(0);
   });
 });
 

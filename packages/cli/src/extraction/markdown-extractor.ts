@@ -36,7 +36,11 @@ const DKG_EXTRACTED_BY = 'http://dkg.io/ontology/extractedBy';
 const DKG_EXTRACTION_RULE = 'http://dkg.io/ontology/extractionRule';
 const DKG_EXTRACTED_AT = 'http://dkg.io/ontology/extractedAt';
 const PROV_WAS_GENERATED_BY = 'http://www.w3.org/ns/prov#wasGeneratedBy';
+const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
+const XSD_DATE = 'http://www.w3.org/2001/XMLSchema#date';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
+const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 export interface MarkdownExtractInput {
   /** Markdown source text (the Phase 1 mdIntermediate). */
@@ -123,6 +127,10 @@ function shortHash(input: string): string {
   return createHash('sha256').update(input).digest('hex').slice(0, 12);
 }
 
+function typedLiteral(lexicalForm: string, datatypeIri: string): string {
+  return `${JSON.stringify(lexicalForm)}^^<${datatypeIri}>`;
+}
+
 function normalizeSchemaLocalName(raw: string, kind: 'property' | 'class'): string | null {
   const stripped = raw.trim().replace(/\(([^)]*)\)/g, '$1');
   if (stripped.length === 0) return null;
@@ -187,10 +195,23 @@ function resolveFrontmatterValue(value: unknown): string | null {
   }
   if (value instanceof Date) {
     if (Number.isNaN(value.getTime())) return null;
-    return JSON.stringify(value.toISOString());
+    const isUtcDateOnly =
+      value.getUTCHours() === 0
+      && value.getUTCMinutes() === 0
+      && value.getUTCSeconds() === 0
+      && value.getUTCMilliseconds() === 0;
+    return isUtcDateOnly
+      ? typedLiteral(value.toISOString().slice(0, 10), XSD_DATE)
+      : typedLiteral(value.toISOString(), XSD_DATE_TIME);
   }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return JSON.stringify(String(value));
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    return Number.isInteger(value)
+      ? typedLiteral(String(value), XSD_INTEGER)
+      : typedLiteral(String(value), XSD_DECIMAL);
+  }
+  if (typeof value === 'boolean') {
+    return typedLiteral(value ? 'true' : 'false', XSD_BOOLEAN);
   }
   return null;
 }
@@ -319,12 +340,20 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
 
   // ── 5. Headings → dkg:hasSection ───────────────────────────────────
   let sectionIndex = 0;
+  const sectionStack: Array<{ level: number; iri: string }> = [];
   for (const heading of extractHeadings(body)) {
     if (heading.level === 1) continue; // H1 is the document title, not a section
     sectionIndex += 1;
     const sectionIri = `${subject}#section-${sectionIndex}-${slugify(heading.text)}`;
-    triples.push({ subject, predicate: DKG_HAS_SECTION, object: sectionIri });
+    while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1]!.level >= heading.level) {
+      sectionStack.pop();
+    }
+    const parentSection = sectionStack.length > 0
+      ? sectionStack[sectionStack.length - 1]!.iri
+      : subject;
+    triples.push({ subject: parentSection, predicate: DKG_HAS_SECTION, object: sectionIri });
     triples.push({ subject: sectionIri, predicate: SCHEMA_NAME, object: JSON.stringify(heading.text) });
+    sectionStack.push({ level: heading.level, iri: sectionIri });
   }
 
   // ── Provenance ─────────────────────────────────────────────────────
