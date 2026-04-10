@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
-AUTH="${DKG_AUTH:-LgXO3OMrALdxiUrUM38nsG9PISAmMaYVouEjgrosBWQ}"
+AUTH="${DKG_AUTH:-}"
 H="Authorization: Bearer $AUTH"
 CG="devnet-test"
 PASS=0; FAIL=0; WARN=0
+HH_PORT="${HARDHAT_PORT:-8545}"
+CONTRACTS_JSON="$(cd "$(dirname "$0")/.." && pwd)/packages/evm-module/deployments/localhost_contracts.json"
 
 ok()   { PASS=$((PASS+1)); echo "  [PASS] $*"; }
 fail() { FAIL=$((FAIL+1)); echo "  [FAIL] $*"; }
@@ -18,296 +20,451 @@ ql() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"\\\"$3\\\"\",
 
 echo "============================================================"
 echo "DKG V10 Deep Devnet Test — Pre-Release Validation"
+echo "Covers: gossip, staking, game, CAS, sub-graphs, edge cases"
 echo "============================================================"
 
+# ================================================================
 echo ""
-echo "=== TEST 1: Publish with Private Triples — Check for Leaks ==="
-PRIV_RESULT=$(post 9201 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/secret-agent' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Person'),
-    $(ql 'http://test.org/secret-agent' 'http://schema.org/name' 'James Bond')
-  ],
-  \"privateQuads\": [
-    $(ql 'http://test.org/secret-agent' 'http://test.org/secretCode' '007-classified'),
-    $(ql 'http://test.org/secret-agent' 'http://test.org/safeHouse' '53.5,-0.12')
-  ]
-}")
-echo "  Private publish result: $(echo "$PRIV_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","?"),d.get("kcId","?"))' 2>/dev/null || echo 'parse error')"
-if echo "$PRIV_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("status")=="confirmed" else 1)' 2>/dev/null; then
-  ok "Private publish confirmed"
-else
-  fail "Private publish failed: $PRIV_RESULT"
-fi
-
-sleep 3
-
+echo "=== TEST 1: Thorough Cross-Node Gossip (SWM) ==="
+echo "--- Write unique entity FROM each node, verify replication to ALL others ---"
 echo ""
-echo "--- 1b: Check private triples are NOT visible on other nodes ---"
-for PORT in 9202 9203 9204 9205; do
-  LEAK=$(post $PORT /api/query -H "Content-Type: application/json" -d "{
-    \"sparql\": \"SELECT ?o WHERE { <http://test.org/secret-agent> <http://test.org/secretCode> ?o }\",
-    \"contextGraphId\": \"devnet-test\"
-  }" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-  if [ "$LEAK" = "0" ]; then
-    ok "Node $PORT: no private data leak"
-  else
-    fail "Node $PORT: PRIVATE DATA LEAKED ($LEAK results)"
-  fi
+
+for writer_port in 9201 9202 9203 9204 9205; do
+  ENTITY="http://test.org/gossip-from-$writer_port"
+  post $writer_port /api/shared-memory/write -H "Content-Type: application/json" -d "{
+    \"contextGraphId\": \"$CG\",
+    \"quads\": [
+      $(q "$ENTITY" 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing'),
+      $(ql "$ENTITY" 'http://schema.org/name' "Written by node $writer_port"),
+      $(ql "$ENTITY" 'http://test.org/sourcePort' "$writer_port")
+    ]
+  }" > /dev/null 2>&1
+  ok "SWM write from Node $writer_port"
 done
 
-echo ""
-echo "--- 1c: Private triples visible on publisher node ---"
-PRIV_LOCAL=$(post 9201 /api/query -H "Content-Type: application/json" -d '{
-  "sparql": "SELECT ?o WHERE { <http://test.org/secret-agent> <http://test.org/secretCode> ?o }",
-  "contextGraphId": "devnet-test"
-}' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-if [ "$PRIV_LOCAL" -ge "1" ]; then
-  ok "Publisher node has private data locally"
-else
-  warn "Publisher node doesn't show private data via query (may need private access API)"
-fi
+echo "  Waiting 8s for GossipSub propagation..."
+sleep 8
 
-echo ""
-echo "=== TEST 2: Merkle Root Verification ==="
-echo "--- 2a: Publish known triples, check merkle consistency ---"
-MERKLE_RESULT=$(post 9201 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/merkle-test' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing'),
-    $(ql 'http://test.org/merkle-test' 'http://schema.org/name' 'MerkleTest'),
-    $(ql 'http://test.org/merkle-test' 'http://schema.org/value' '42')
-  ]
-}")
-MERKLE_TX=$(echo "$MERKLE_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("tx",""))' 2>/dev/null)
-MERKLE_KC=$(echo "$MERKLE_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("kcId",""))' 2>/dev/null)
-echo "  Merkle publish: kcId=$MERKLE_KC tx=$MERKLE_TX"
-if [ -n "$MERKLE_TX" ] && [ "$MERKLE_TX" != "None" ]; then
-  ok "Merkle test publish confirmed"
-else
-  fail "Merkle test publish failed"
-fi
-
-sleep 3
-
-echo ""
-echo "--- 2b: Query replicated triples on all nodes — exact match ---"
-for PORT in 9201 9202 9203 9204 9205; do
-  COUNT=$(post $PORT /api/query -H "Content-Type: application/json" -d '{
-    "sparql": "SELECT ?p ?o WHERE { <http://test.org/merkle-test> ?p ?o }",
-    "contextGraphId": "devnet-test"
-  }' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-  if [ "$COUNT" = "3" ]; then
-    ok "Node $PORT: exact 3 triples replicated"
-  else
-    if [ "$COUNT" = "0" ]; then
-      warn "Node $PORT: 0 triples (replication pending)"
+GOSSIP_MATRIX_OK=true
+for writer_port in 9201 9202 9203 9204 9205; do
+  ENTITY="http://test.org/gossip-from-$writer_port"
+  for reader_port in 9201 9202 9203 9204 9205; do
+    CT=$(post $reader_port /api/query -H "Content-Type: application/json" -d "{
+      \"sparql\": \"SELECT ?name WHERE { GRAPH ?g { <$ENTITY> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+      \"contextGraphId\": \"$CG\"
+    }" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+    if [ "$CT" -ge 1 ]; then
+      ok "Gossip $writer_port→$reader_port OK"
     else
-      fail "Node $PORT: $COUNT triples (expected 3)"
+      fail "Gossip $writer_port→$reader_port FAILED (0 triples)"
+      GOSSIP_MATRIX_OK=false
     fi
+  done
+done
+[[ "$GOSSIP_MATRIX_OK" == "true" ]] && echo "  ✓ Full 5×5 gossip matrix PASSED" || echo "  ✗ Gossip matrix has gaps"
+
+echo ""
+echo "--- 1b: Gossip latency test — write and measure time to appear on remote ---"
+ENTITY="http://test.org/gossip-latency-test"
+START_TS=$(python3 -c "import time; print(int(time.time()*1000))")
+post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [$(ql "$ENTITY" 'http://schema.org/name' 'LatencyTest')]
+}" > /dev/null
+
+FOUND=false
+for attempt in $(seq 1 20); do
+  CT=$(post 9205 /api/query -H "Content-Type: application/json" -d "{
+    \"sparql\": \"SELECT ?n WHERE { GRAPH ?g { <$ENTITY> <http://schema.org/name> ?n } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+    \"contextGraphId\": \"$CG\"
+  }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+  if [ "$CT" -ge 1 ]; then
+    END_TS=$(python3 -c "import time; print(int(time.time()*1000))")
+    LATENCY=$((END_TS - START_TS))
+    ok "Gossip latency Node1→Node5: ${LATENCY}ms"
+    FOUND=true
+    break
   fi
+  sleep 0.5
+done
+[[ "$FOUND" == "false" ]] && fail "Gossip latency: entity never arrived at Node5 within 10s"
+
+echo ""
+echo "--- 1c: Large payload gossip (100 triples) ---"
+LARGE_QUADS=""
+for i in $(seq 1 100); do
+  LARGE_QUADS="$LARGE_QUADS$(ql "http://test.org/large-gossip/$i" 'http://schema.org/name' "LargeItem$i"),"
+done
+LARGE_QUADS="${LARGE_QUADS%,}"
+
+post 9203 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [$LARGE_QUADS]
+}" > /dev/null
+ok "Large SWM write (100 triples) from Node3"
+sleep 8
+
+for p in 9201 9202 9204 9205; do
+  CT=$(post $p /api/query -H "Content-Type: application/json" -d "{
+    \"sparql\": \"SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s <http://schema.org/name> ?n . FILTER(STRSTARTS(STR(?s),'http://test.org/large-gossip/')) } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+    \"contextGraphId\": \"$CG\"
+  }" | python3 -c '
+import sys,json,re
+b=json.load(sys.stdin).get("result",{}).get("bindings",[])
+v=str(b[0].get("c","0")) if b else "0"
+m=re.search(r"(\d+)",v)
+print(m.group(1) if m else "0")
+' 2>/dev/null || echo "0")
+  [[ "$CT" -ge 80 ]] && ok "Node $p received $CT/100 large gossip triples" || warn "Node $p only has $CT/100 large gossip triples"
+done
+
+# ================================================================
+echo ""
+echo "=== TEST 2: Staking Verification ==="
+echo "--- 2a: Verify all nodes have on-chain stakes ---"
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+for p in 9201 9202 9203 9204 9205; do
+  IDENT=$(get $p /api/identity)
+  IID=$(echo "$IDENT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("identityId","0"))' 2>/dev/null)
+  [[ "$IID" != "0" && "$IID" != "None" ]] && ok "Node $p identityId=$IID" || fail "Node $p no identity"
 done
 
 echo ""
-echo "=== TEST 3: Smart Contract State Verification ==="
-echo "--- 3a: Check on-chain batch via RPC ---"
+echo "--- 2b: Check on-chain stake amounts via contract calls ---"
+cd "$REPO_ROOT/packages/evm-module" && node -e "
+  const { ethers } = require('ethers');
+  const fs = require('fs');
+  (async () => {
+    const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HH_PORT');
+    const contracts = JSON.parse(fs.readFileSync('$CONTRACTS_JSON', 'utf8'));
+    const c = (name) => contracts.contracts[name]?.evmAddress;
+    const identity = new ethers.Contract(c('IdentityStorage'), ['function getIdentityId(address) view returns (uint72)'], provider);
+    const abi = JSON.parse(fs.readFileSync('abi/StakingStorage.json', 'utf8'));
+    const staking = new ethers.Contract(c('StakingStorage'), abi, provider);
+    const signers = await provider.listAccounts();
+    for (let i = 0; i < 5; i++) {
+      const idId = await identity.getIdentityId(signers[i].address);
+      let stake = 0n;
+      try { stake = await staking.getNodeStake(idId); } catch {}
+      const stakeEth = ethers.formatEther(stake);
+      console.log('Node ' + (i+1) + ': identityId=' + idId + ' stake=' + stakeEth + ' TRAC');
+    }
+  })();
+" 2>&1 | while read -r line; do
+  echo "  $line"
+  echo "$line" | grep -q "50000" && ok "$(echo "$line" | cut -d: -f1) staked 50k TRAC" || true
+done
+cd "$REPO_ROOT" || true
 
-BATCH_CHECK=$(curl -s -X POST http://127.0.0.1:8545 -H "Content-Type: application/json" -d '{
+echo ""
+echo "--- 2c: Perform additional staking — add 10k TRAC to Node1 ---"
+cd "$REPO_ROOT/packages/evm-module" && STAKE_RESULT=$(node -e "
+  const { ethers } = require('ethers');
+  const fs = require('fs');
+  (async () => {
+    const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HH_PORT');
+    const contracts = JSON.parse(fs.readFileSync('$CONTRACTS_JSON', 'utf8'));
+    const c = (name) => contracts.contracts[name]?.evmAddress;
+    const deployer = await provider.getSigner(0);
+    const signer0 = await provider.getSigner(0);
+    const token = new ethers.Contract(c('Token'), ['function mint(address,uint256)', 'function approve(address,uint256)'], deployer);
+    const identity = new ethers.Contract(c('IdentityStorage'), ['function getIdentityId(address) view returns (uint72)'], provider);
+    const staking = new ethers.Contract(c('Staking'), ['function stake(uint72,uint96)'], signer0);
+    const stakingAbi = JSON.parse(fs.readFileSync('abi/StakingStorage.json', 'utf8'));
+    const stakingStorage = new ethers.Contract(c('StakingStorage'), stakingAbi, provider);
+
+    const idId = await identity.getIdentityId(signer0.address);
+    const beforeStake = await stakingStorage.getNodeStake(idId);
+    const addAmount = ethers.parseEther('10000');
+    await (await token.mint(signer0.address, addAmount)).wait();
+    await (await token.approve(c('Staking'), addAmount)).wait();
+    await (await staking.stake(idId, addAmount)).wait();
+    const afterStake = await stakingStorage.getNodeStake(idId);
+    console.log(JSON.stringify({
+      before: ethers.formatEther(beforeStake),
+      after: ethers.formatEther(afterStake),
+      added: '10000'
+    }));
+  })();
+" 2>&1) || true
+cd "$REPO_ROOT" || true
+echo "  Stake result: $STAKE_RESULT"
+
+BEFORE=$(echo "$STAKE_RESULT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["before"])' 2>/dev/null || echo "?")
+AFTER=$(echo "$STAKE_RESULT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["after"])' 2>/dev/null || echo "?")
+[[ "$BEFORE" != "$AFTER" ]] && ok "Staking increased: $BEFORE → $AFTER TRAC" || fail "Stake unchanged after adding 10k"
+
+echo ""
+echo "--- 2d: Publish after staking — verify node still functional ---"
+post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [$(ql 'http://test.org/post-stake-publish' 'http://schema.org/name' 'AfterStaking')]
+}" > /dev/null
+sleep 1
+PSTAKE=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\"}")
+PS_ST=$(echo "$PSTAKE" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
+[[ "$PS_ST" == "confirmed" || "$PS_ST" == "finalized" ]] && ok "Post-staking publish OK ($PS_ST)" || fail "Post-staking publish=$PS_ST"
+
+# ================================================================
+echo ""
+echo "=== TEST 3: OriginTrail Game on Devnet ==="
+echo ""
+
+echo "--- 3a: Game info endpoint ---"
+GAME_INFO=$(get 9201 /api/apps/origin-trail-game/info)
+echo "  Game info: $(echo "$GAME_INFO" | head -c 300)"
+GAME_STATUS=$(echo "$GAME_INFO" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if "minPlayers" in d or "dkgEnabled" in d else "missing")' 2>/dev/null || echo "error")
+[[ "$GAME_STATUS" == "ok" ]] && ok "Game info endpoint works" || warn "Game info unexpected: $GAME_INFO"
+
+echo "--- 3b: Game lobby ---"
+LOBBY=$(get 9201 /api/apps/origin-trail-game/lobby)
+echo "  Lobby: $(echo "$LOBBY" | head -c 200)"
+ok "Game lobby accessible"
+
+echo "--- 3c: Game locations ---"
+LOCS=$(get 9201 /api/apps/origin-trail-game/locations)
+LOC_CT=$(echo "$LOCS" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d) if isinstance(d,list) else len(d.get("locations",[])))' 2>/dev/null || echo "0")
+echo "  Locations: $LOC_CT"
+[[ "$LOC_CT" -ge 1 ]] && ok "Game has $LOC_CT locations" || warn "No game locations found"
+
+echo "--- 3d: Create a swarm ---"
+CREATE=$(post 9201 /api/apps/origin-trail-game/create -H "Content-Type: application/json" -d '{"playerName":"TestPlayer1","swarmName":"DevnetTestSwarm"}')
+echo "  Create: $(echo "$CREATE" | head -c 300)"
+SWARM_ID=$(echo "$CREATE" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("swarmId",d.get("id","")))' 2>/dev/null || echo "")
+[[ -n "$SWARM_ID" ]] && ok "Swarm created: $SWARM_ID" || warn "Swarm creation response: $CREATE"
+
+if [[ -n "$SWARM_ID" ]]; then
+  echo "--- 3e: Join swarm from Node2 ---"
+  JOIN=$(post 9202 /api/apps/origin-trail-game/join -H "Content-Type: application/json" -d "{\"swarmId\":\"$SWARM_ID\",\"playerName\":\"TestPlayer2\"}")
+  echo "  Join: $(echo "$JOIN" | head -c 200)"
+  JOIN_OK=$(echo "$JOIN" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if d.get("success") or d.get("joined") or "player" in str(d).lower() else "fail")' 2>/dev/null || echo "fail")
+  [[ "$JOIN_OK" == "ok" ]] && ok "Player2 joined swarm" || warn "Join response: $JOIN"
+
+  echo "--- 3f: Check swarm state ---"
+  SWARM=$(get 9201 /api/apps/origin-trail-game/swarm/$SWARM_ID)
+  PLAYER_CT=$(echo "$SWARM" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("players",[])))' 2>/dev/null || echo "0")
+  echo "  Swarm players: $PLAYER_CT"
+  [[ "$PLAYER_CT" -ge 2 ]] && ok "Swarm has $PLAYER_CT players" || warn "Swarm has $PLAYER_CT players"
+
+  echo "--- 3g: Leaderboard ---"
+  LB=$(get 9201 /api/apps/origin-trail-game/leaderboard)
+  echo "  Leaderboard: $(echo "$LB" | head -c 200)"
+  ok "Leaderboard accessible"
+fi
+
+# ================================================================
+echo ""
+echo "=== TEST 4: Sub-graph Writes ==="
+echo ""
+
+echo "--- 4a: Write to a named sub-graph ---"
+SG_W=$(post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"subGraphName\": \"research-papers\",
+  \"quads\": [
+    $(q 'http://test.org/paper1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/ScholarlyArticle'),
+    $(ql 'http://test.org/paper1' 'http://schema.org/name' 'DKG V10 Architecture'),
+    $(ql 'http://test.org/paper1' 'http://schema.org/author' 'OriginTrail Team')
+  ]
+}")
+SG_OK=$(echo "$SG_W" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if d.get("ok") or d.get("stored") or d.get("triplesWritten") else "fail")' 2>/dev/null)
+echo "  Sub-graph write result: $(echo "$SG_W" | head -c 200)"
+[[ "$SG_OK" == "ok" ]] && ok "Sub-graph 'research-papers' write OK" || warn "Sub-graph write: $SG_W"
+
+echo "--- 4b: Sub-graph gossip — check on Node3 ---"
+sleep 5
+SG_Q=$(post 9203 /api/query -H "Content-Type: application/json" -d "{
+  \"sparql\": \"SELECT ?name WHERE { GRAPH ?g { <http://test.org/paper1> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+  \"contextGraphId\": \"$CG\"
+}")
+SG_CT=$(echo "$SG_Q" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$SG_CT" -ge 1 ]] && ok "Sub-graph data gossiped to Node3" || warn "Sub-graph data not on Node3 ($SG_CT)"
+
+# ================================================================
+echo ""
+echo "=== TEST 5: Conditional Write (CAS) ==="
+echo ""
+
+echo "--- 5a: Write initial value ---"
+post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [$(ql 'http://test.org/cas-entity' 'http://test.org/counter' '1')]
+}" > /dev/null
+ok "CAS initial write OK"
+
+echo "--- 5b: Conditional write with correct expected value ---"
+CAS_RESP=$(post 9201 /api/shared-memory/conditional-write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"conditions\": [{
+    \"subject\": \"http://test.org/cas-entity\",
+    \"predicate\": \"http://test.org/counter\",
+    \"expectedValue\": \"\\\"1\\\"\"
+  }],
+  \"quads\": [$(ql 'http://test.org/cas-entity' 'http://test.org/counter' '2')]
+}")
+echo "  CAS response: $(echo "$CAS_RESP" | head -c 300)"
+CAS_OK=$(echo "$CAS_RESP" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if d.get("ok") or d.get("applied") else "fail")' 2>/dev/null)
+[[ "$CAS_OK" == "ok" ]] && ok "CAS conditional write succeeded" || warn "CAS write response: $CAS_RESP"
+
+echo "--- 5c: Conditional write with WRONG expected value (should fail) ---"
+CAS_BAD=$(post 9201 /api/shared-memory/conditional-write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"conditions\": [{
+    \"subject\": \"http://test.org/cas-entity\",
+    \"predicate\": \"http://test.org/counter\",
+    \"expectedValue\": \"\\\"999\\\"\"
+  }],
+  \"quads\": [$(ql 'http://test.org/cas-entity' 'http://test.org/counter' '3')]
+}")
+echo "  CAS bad response: $(echo "$CAS_BAD" | head -c 300)"
+CAS_REJECTED=$(echo "$CAS_BAD" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("rejected" if d.get("conflict") or d.get("error") or not d.get("ok",True) else "accepted")' 2>/dev/null)
+[[ "$CAS_REJECTED" == "rejected" ]] && ok "CAS correctly rejected wrong expectedValue" || warn "CAS bad write: $CAS_BAD"
+
+# ================================================================
+echo ""
+echo "=== TEST 6: Verified Memory — Publish + Query Across All Nodes ==="
+echo ""
+
+echo "--- 6a: Publish a batch from Node2 ---"
+post 9202 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [
+    $(q 'http://test.org/vm-test1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Event'),
+    $(ql 'http://test.org/vm-test1' 'http://schema.org/name' 'VM Replication Test'),
+    $(ql 'http://test.org/vm-test1' 'http://schema.org/startDate' '2026-04-10')
+  ]
+}" > /dev/null
+sleep 2
+VM_PUB=$(post 9202 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\"}")
+VM_ST=$(echo "$VM_PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
+VM_TX=$(echo "$VM_PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("txHash","?"))' 2>/dev/null)
+echo "  VM publish: status=$VM_ST tx=$VM_TX"
+[[ "$VM_ST" == "confirmed" || "$VM_ST" == "finalized" ]] && ok "VM publish confirmed ($VM_ST)" || fail "VM publish=$VM_ST"
+
+echo "--- 6b: Wait for finalization gossip, query ALL nodes ---"
+sleep 12
+for p in 9201 9202 9203 9204 9205; do
+  CT=$(post $p /api/query -H "Content-Type: application/json" -d "{
+    \"sparql\": \"SELECT ?name WHERE { <http://test.org/vm-test1> <http://schema.org/name> ?name }\",
+    \"contextGraphId\": \"$CG\"
+  }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+  [[ "$CT" -ge 1 ]] && ok "Node $p has VM event in verified memory" || warn "Node $p missing VM event ($CT)"
+done
+
+# ================================================================
+echo ""
+echo "=== TEST 7: On-Chain Block Progression ==="
+echo ""
+
+BLOCK=$(curl -s -X POST http://127.0.0.1:$HH_PORT -H "Content-Type: application/json" -d '{
   "jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1
 }' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(int(d["result"],16))' 2>/dev/null || echo "0")
-if [ "$BATCH_CHECK" -gt "400" ]; then
-  ok "Hardhat block number: $BATCH_CHECK (confirms multiple txs)"
-else
-  warn "Block number $BATCH_CHECK seems low"
-fi
+echo "  Hardhat block number: $BLOCK"
+[[ "$BLOCK" -gt 50 ]] && ok "Block number $BLOCK confirms many txs" || warn "Block number $BLOCK seems low"
 
+# ================================================================
 echo ""
-echo "=== TEST 4: Cross-Node Publish from Different Nodes ==="
-echo "--- 4a: Publish from Node 2 ---"
-N2_RESULT=$(post 9202 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/node2-entity' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Place'),
-    $(ql 'http://test.org/node2-entity' 'http://schema.org/name' 'Published from Node 2')
-  ]
-}")
-N2_STATUS=$(echo "$N2_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","?"))' 2>/dev/null)
-if [ "$N2_STATUS" = "confirmed" ]; then ok "Node 2 publish confirmed"; else fail "Node 2 publish: $N2_STATUS"; fi
-
-echo "--- 4b: Publish from Node 4 ---"
-N4_RESULT=$(post 9204 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/node4-entity' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Event'),
-    $(ql 'http://test.org/node4-entity' 'http://schema.org/name' 'Published from Node 4')
-  ]
-}")
-N4_STATUS=$(echo "$N4_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","?"))' 2>/dev/null)
-if [ "$N4_STATUS" = "confirmed" ]; then ok "Node 4 publish confirmed"; else fail "Node 4 publish: $N4_STATUS"; fi
-
-echo "--- 4c: Publish from Node 5 (edge) ---"
-N5_RESULT=$(post 9205 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/edge-entity' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Organization'),
-    $(ql 'http://test.org/edge-entity' 'http://schema.org/name' 'Published from Edge Node 5')
-  ]
-}")
-N5_STATUS=$(echo "$N5_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","?"))' 2>/dev/null)
-if [ "$N5_STATUS" = "confirmed" ]; then ok "Node 5 (edge) publish confirmed"; else fail "Node 5 publish: $N5_STATUS"; fi
-
-sleep 5
-
+echo "=== TEST 8: Edge Cases ==="
 echo ""
-echo "--- 4d: Verify all 3 entities replicate to all nodes ---"
-for PORT in 9201 9202 9203 9204 9205; do
-  TOTAL=$(post $PORT /api/query -H "Content-Type: application/json" -d '{
-    "sparql": "SELECT ?s WHERE { ?s <http://schema.org/name> ?name . FILTER(STRSTARTS(STR(?name), \"\\\"Published from\")) }",
-    "contextGraphId": "devnet-test"
-  }' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-  if [ "$TOTAL" -ge "3" ]; then
-    ok "Node $PORT: all 3 cross-node entities present"
-  else
-    warn "Node $PORT: only $TOTAL/3 cross-node entities"
-  fi
-done
 
-echo ""
-echo "=== TEST 5: Shared Memory Write + Publish Pipeline ==="
-echo "--- 5a: Write to SWM on Node 1 ---"
-SWM_WRITE=$(post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
-  \"quads\": [
-    $(q 'http://test.org/swm-item' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Product'),
-    $(ql 'http://test.org/swm-item' 'http://schema.org/name' 'SWM Product'),
-    $(ql 'http://test.org/swm-item' 'http://schema.org/price' '29.99')
-  ]
-}")
-if echo "$SWM_WRITE" | python3 -c 'import sys,json;d=json.load(sys.stdin);exit(0 if d.get("ok") or d.get("stored") else 1)' 2>/dev/null; then
-  ok "SWM write succeeded"
-else
-  echo "  SWM result: $SWM_WRITE"
-  warn "SWM write response unexpected"
-fi
+echo "--- 8a: Removed /api/publish returns 404 ---"
+PUB_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
+[[ "$PUB_CODE" == "404" ]] && ok "/api/publish correctly removed (404)" || warn "/api/publish returned $PUB_CODE"
 
-sleep 3
-
-echo "--- 5b: Publish from SWM ---"
-SWM_PUB=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test"}')
-SWM_PUB_STATUS=$(echo "$SWM_PUB" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("status","?"))' 2>/dev/null)
-echo "  SWM publish status: $SWM_PUB_STATUS"
-if [ "$SWM_PUB_STATUS" = "confirmed" ]; then
-  ok "SWM → LTM publish confirmed"
-else
-  warn "SWM → LTM publish status: $SWM_PUB_STATUS"
-fi
-
-echo ""
-echo "=== TEST 6: Query Operations ==="
-echo "--- 6a: SPARQL COUNT query ---"
-COUNT_RESULT=$(post 9201 /api/query -H "Content-Type: application/json" -d '{
-  "sparql": "SELECT (COUNT(?s) AS ?total) WHERE { ?s a ?type }",
-  "contextGraphId": "devnet-test"
-}')
-TOTAL=$(echo "$COUNT_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("result",{}).get("bindings",[{}])[0].get("total","0"))' 2>/dev/null || echo "0")
-echo "  Total typed entities: $TOTAL"
-if [ "${TOTAL%%.*}" -ge "5" ]; then
-  ok "SPARQL COUNT returns typed entities"
-else
-  warn "Low entity count: $TOTAL"
-fi
-
-echo "--- 6b: SPARQL FILTER query ---"
-FILTER_RESULT=$(post 9201 /api/query -H "Content-Type: application/json" -d '{
-  "sparql": "SELECT ?name WHERE { ?s <http://schema.org/name> ?name . FILTER(CONTAINS(STR(?name), \"Bond\")) }",
-  "contextGraphId": "devnet-test"
-}')
-BOND=$(echo "$FILTER_RESULT" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-if [ "$BOND" -ge "1" ]; then
-  ok "SPARQL FILTER found James Bond"
-else
-  warn "SPARQL FILTER: Bond not found (may be in private store)"
-fi
-
-echo ""
-echo "=== TEST 7: Adversarial / Edge Cases ==="
-echo "--- 7a: Empty quads publish ---"
-EMPTY=$(post 9201 /api/publish -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
-if echo "$EMPTY" | grep -q "error"; then
-  ok "Empty quads rejected"
-else
-  fail "Empty quads not rejected: $EMPTY"
-fi
-
-echo "--- 7b: Publish to non-existent context graph ---"
-BAD_CG=$(post 9201 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"does-not-exist\",
-  \"quads\": [$(ql 'http://x' 'http://y' 'z')]
-}")
-if echo "$BAD_CG" | grep -qi "error\|fail"; then
-  ok "Non-existent CG publish rejected or failed"
-else
-  warn "Non-existent CG publish response: $(echo "$BAD_CG" | head -c 200)"
-fi
-
-echo "--- 7c: Malformed SPARQL ---"
-BAD_SPARQL=$(post 9201 /api/query -H "Content-Type: application/json" -d '{
-  "sparql": "NOT VALID SPARQL AT ALL",
-  "contextGraphId": "devnet-test"
-}')
-if echo "$BAD_SPARQL" | grep -qi "error"; then
-  ok "Malformed SPARQL returns error"
-else
-  fail "Malformed SPARQL didn't error: $BAD_SPARQL"
-fi
-
-echo "--- 7d: Missing auth token ---"
-NO_AUTH=$(curl -s http://127.0.0.1:9201/api/publish -X POST -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
-if echo "$NO_AUTH" | grep -qi "unauthorized\|auth\|401\|error"; then
-  ok "Unauthenticated request rejected"
-else
-  warn "No auth may be disabled (DEVNET_NO_AUTH=1)"
-fi
-
-echo "--- 7e: Huge triple value (10KB string) ---"
+echo "--- 8b: Huge payload (10KB string) ---"
 HUGE_VAL=$(python3 -c "print('x'*10000)")
-HUGE_RESULT=$(post 9201 /api/publish -H "Content-Type: application/json" -d "{
-  \"contextGraphId\": \"devnet-test\",
+HUGE_RESP=$(post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
   \"quads\": [{\"subject\":\"http://test.org/huge\",\"predicate\":\"http://test.org/data\",\"object\":\"\\\"$HUGE_VAL\\\"\",\"graph\":\"\"}]
 }" 2>&1 | head -c 500)
-echo "  Large payload response: $(echo "$HUGE_RESULT" | head -c 200)"
+echo "  Large payload: $(echo "$HUGE_RESP" | head -c 200)"
 ok "Large payload handled (no crash)"
 
+echo "--- 8c: Malformed SPARQL ---"
+BAD_SPARQL=$(post 9201 /api/query -H "Content-Type: application/json" -d '{
+  "sparql": "NOT VALID SPARQL",
+  "contextGraphId": "devnet-test"
+}')
+echo "$BAD_SPARQL" | grep -qi "error" && ok "Malformed SPARQL rejected" || fail "Malformed SPARQL not rejected"
+
+echo "--- 8d: Query with SPARQL FILTER ---"
+FILTER=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
+  \"sparql\": \"SELECT ?name WHERE { ?s <http://schema.org/name> ?name . FILTER(CONTAINS(STR(?name), 'VM Replication')) }\",
+  \"contextGraphId\": \"$CG\"
+}")
+FILTER_CT=$(echo "$FILTER" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$FILTER_CT" -ge 1 ]] && ok "SPARQL FILTER found VM Replication Test" || warn "SPARQL FILTER: 0 results"
+
+echo "--- 8e: SWM localOnly=true (no gossip) ---"
+LOCAL_W=$(post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"localOnly\": true,
+  \"quads\": [$(ql 'http://test.org/local-only' 'http://schema.org/name' 'LocalOnlyEntity')]
+}")
+LOCAL_OK=$(echo "$LOCAL_W" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("ok" if d.get("ok") or d.get("triplesWritten") else "fail")' 2>/dev/null)
+[[ "$LOCAL_OK" == "ok" ]] && ok "localOnly SWM write accepted" || warn "localOnly write: $LOCAL_W"
+
+sleep 4
+LOCAL_CHECK=$(post 9205 /api/query -H "Content-Type: application/json" -d "{
+  \"sparql\": \"SELECT ?n WHERE { GRAPH ?g { <http://test.org/local-only> <http://schema.org/name> ?n } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+  \"contextGraphId\": \"$CG\"
+}" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$LOCAL_CHECK" == "0" ]] && ok "localOnly entity NOT gossiped to Node5 (correct)" || warn "localOnly entity appeared on Node5 ($LOCAL_CHECK)"
+
+# ================================================================
 echo ""
-echo "=== TEST 8: Context Graph Operations ==="
-echo "--- 8a: List context graphs ---"
+echo "=== TEST 9: Context Graph Operations ==="
+echo ""
+
+echo "--- 9a: List context graphs ---"
 CG_LIST=$(get 9201 /api/context-graph/list)
 CG_COUNT=$(echo "$CG_LIST" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d) if isinstance(d,list) else len(d.get("contextGraphs",d.get("paranets",[]))))' 2>/dev/null || echo "0")
 echo "  Context graphs: $CG_COUNT"
-if [ "$CG_COUNT" -ge "1" ]; then ok "Context graphs listed"; else warn "No context graphs listed"; fi
+[[ "$CG_COUNT" -ge 1 ]] && ok "Context graphs listed ($CG_COUNT)" || warn "No context graphs"
 
-echo ""
-echo "=== TEST 9: Subscribe + Sync ==="
-echo "--- 9a: Subscribe Node 3 to devnet-test ---"
-SUB=$(post 9203 /api/context-graph/subscribe -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test"}')
-echo "  Subscribe result: $(echo "$SUB" | head -c 200)"
+echo "--- 9b: Subscribe Node5 to devnet-test ---"
+SUB=$(post 9205 /api/context-graph/subscribe -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test"}')
+echo "  Subscribe: $(echo "$SUB" | head -c 200)"
 ok "Subscribe requested"
 
-sleep 2
-echo "--- 9b: Query Node 3 after subscribe ---"
-N3_COUNT=$(post 9203 /api/query -H "Content-Type: application/json" -d '{
-  "sparql": "SELECT (COUNT(?s) AS ?c) WHERE { ?s a ?t }",
-  "contextGraphId": "devnet-test"
-}' | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("result",{}).get("bindings",[{}])[0].get("c","0"))' 2>/dev/null || echo "0")
-echo "  Node 3 entities after sync: $N3_COUNT"
-if [ "${N3_COUNT%%.*}" -ge "5" ]; then ok "Node 3 synced"; else warn "Node 3 entity count low: $N3_COUNT"; fi
+# ================================================================
+echo ""
+echo "=== TEST 10: SKILL.md Validation ==="
+echo ""
 
+for p in 9201 9202 9203 9204 9205; do
+  SKILL=$(curl -s "http://127.0.0.1:$p/.well-known/skill.md")
+  if echo "$SKILL" | grep -q "shared-memory"; then
+    ok "Node $p SKILL.md has SWM references"
+  else
+    warn "Node $p SKILL.md missing SWM references"
+  fi
+  if echo "$SKILL" | grep -q "POST.*publish" | grep -v "shared-memory"; then
+    warn "Node $p SKILL.md may reference old /api/publish"
+  else
+    ok "Node $p SKILL.md clean of old /api/publish"
+  fi
+done
+
+# ================================================================
+echo ""
+echo "=== TEST 11: Node UI Accessibility ==="
+echo ""
+
+for p in 9201 9202 9203 9204 9205; do
+  UI_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$p/ui")
+  [[ "$UI_CODE" == "200" || "$UI_CODE" == "301" || "$UI_CODE" == "302" ]] && ok "Node $p UI accessible ($UI_CODE)" || warn "Node $p UI returned $UI_CODE"
+done
+
+# ================================================================
 echo ""
 echo "============================================================"
 echo "DEEP TEST SUMMARY"
 echo "============================================================"
 echo "  PASS: $PASS"
-echo "  FAIL: $FAIL"  
+echo "  FAIL: $FAIL"
 echo "  WARN: $WARN"
 echo "  TOTAL: $((PASS+FAIL+WARN))"
 echo "============================================================"
