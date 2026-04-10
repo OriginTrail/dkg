@@ -96,6 +96,19 @@ describe.sequential('publisher CLI smoke', () => {
     expect(stagedMatch?.[1]).toBeDefined();
     const shareOperationId = stagedMatch![1];
 
+    // Stop the daemon before publisher file-based commands. The daemon's
+    // in-memory Oxigraph store can flush to the same .nq file and overwrite
+    // data written by the CLI's own store instances, causing flaky "not found".
+    // Use the /api/shutdown endpoint for an orderly exit, then wait for the
+    // process to terminate — this gives the store's 50ms debounced flush time
+    // to persist shared-memory data before the process exits.
+    await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/shutdown`, { method: 'POST' }).catch(() => {});
+    const daemonExited = new Promise((resolve) => daemon?.once('exit', resolve));
+    const killTimeout = setTimeout(() => { daemon?.kill('SIGKILL'); }, 5000);
+    await daemonExited;
+    clearTimeout(killTimeout);
+    daemon = undefined;
+
     const enqueue = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
@@ -135,14 +148,5 @@ describe.sequential('publisher CLI smoke', () => {
     expect(payload.stdout).toContain('"status": "accepted"');
     expect(payload.stdout).toContain('publishOptions');
     expect(payload.stdout).toContain('music-social');
-
-    daemon.kill('SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => daemon?.once('exit', resolve)),
-      new Promise((resolve) => setTimeout(resolve, 3000)).then(() => {
-        daemon?.kill('SIGKILL');
-      }),
-    ]);
-    daemon = undefined;
   }, 45000);
 });
