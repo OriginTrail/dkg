@@ -110,8 +110,9 @@ export class ContextGraphManager {
   }
 
   /**
-   * Lists sub-graph names for a given context graph by inspecting named graphs
-   * in the store. Returns names like "code", "decisions" (without the CG prefix).
+   * @deprecated Prefer DKGAgent.listSubGraphs(), which reads spec-compliant
+   * registration metadata from the context graph `_meta` graph. This shim keeps
+   * the legacy storage-level graph-walk behavior for downstream callers.
    */
   async listSubGraphs(contextGraphId: string): Promise<string[]> {
     const prefix = `${CG_PREFIX}${contextGraphId}/`;
