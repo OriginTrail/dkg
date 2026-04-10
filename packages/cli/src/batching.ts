@@ -77,17 +77,22 @@ function validateSingleBatch(
   quads: PublishQuad[],
   options: Required<Pick<BatchEntityQuadsOptions, 'maxBatchQuads' | 'splitOversizedEntities'>> & Pick<BatchEntityQuadsOptions, 'maxBatchBytes' | 'estimateBatchBytes'>,
 ): void {
-  if (!options.splitOversizedEntities && quads.length > options.maxBatchQuads) {
-    throw new Error(
-      `Single entity batch exceeds maxBatchQuads (${quads.length} > ${options.maxBatchQuads}) for subject ${quads[0]?.subject}`,
-    );
+  if (quads.length > options.maxBatchQuads) {
+    if (!options.splitOversizedEntities) {
+      throw new Error(
+        `Single entity batch exceeds maxBatchQuads (${quads.length} > ${options.maxBatchQuads}) for subject ${quads[0]?.subject}`,
+      );
+    }
+    return;
   }
   if (options.maxBatchBytes && options.estimateBatchBytes) {
     const bytes = options.estimateBatchBytes(quads);
     if (bytes > options.maxBatchBytes) {
-      throw new Error(
-        `Single entity batch exceeds maxBatchBytes (${bytes} > ${options.maxBatchBytes}) for subject ${quads[0]?.subject}`,
-      );
+      if (!options.splitOversizedEntities) {
+        throw new Error(
+          `Single entity batch exceeds maxBatchBytes (${bytes} > ${options.maxBatchBytes}) for subject ${quads[0]?.subject}`,
+        );
+      }
     }
   }
 }
@@ -125,5 +130,19 @@ function splitEntityBatch(
   }
 
   if (batch.length > 0) batches.push(batch);
+
+  for (const b of batches) {
+    if (b.length > options.maxBatchQuads) {
+      throw new Error(
+        `Single quad exceeds maxBatchQuads (1 > ${options.maxBatchQuads}) for subject ${b[0]?.subject}`,
+      );
+    }
+    if (options.maxBatchBytes && options.estimateBatchBytes && options.estimateBatchBytes(b) > options.maxBatchBytes) {
+      throw new Error(
+        `Single quad exceeds maxBatchBytes for subject ${b[0]?.subject}`,
+      );
+    }
+  }
+
   return batches;
 }

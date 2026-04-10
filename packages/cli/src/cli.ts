@@ -1509,6 +1509,7 @@ program
         estimateBatchBytes: useSharedMemory
           ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
           : undefined,
+        splitOversizedEntities: useSharedMemory ? true : undefined,
       });
 
       if (useSharedMemory) {
@@ -1559,6 +1560,7 @@ sharedMemoryCmd
         {
           maxBatchBytes: 240 * 1024,
           estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length,
+          splitOversizedEntities: true,
         },
       );
       const firstResult = results[0];
@@ -1881,8 +1883,7 @@ publisherCmd
       let stats: Record<string, number>;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherStats();
-        stats = result.stats;
+        stats = await client.publisherStats();
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
         const config = await loadConfig();

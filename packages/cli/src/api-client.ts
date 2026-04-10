@@ -191,7 +191,7 @@ export class ApiClient {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
-  async publisherStats(): Promise<{ stats: Record<string, number> }> {
+  async publisherStats(): Promise<Record<string, number>> {
     return this.get('/api/publisher/stats');
   }
 

@@ -380,6 +380,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
     }
 
+    // Revisit failed jobs whose resolution is retry_recovery — re-attempt chain lookup
+    // so that a transient RPC outage past the timeout doesn't strand jobs permanently.
+    if (this.chainRecoveryResolver) {
+      const retryRecoveryJobs = (await this.list({ status: 'failed' }))
+        .filter(isFailedJob)
+        .filter((job) => job.failure.resolution === 'retry_recovery' && 'broadcast' in job && job.broadcast);
+
+      for (const job of retryRecoveryJobs) {
+        const resolved = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
+        if (resolved) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.finalizeRecoveredJob(job as unknown as LiftJobBroadcast, resolved.inclusion, resolved.finalization));
+          recovered += 1;
+        }
+        // If still inconclusive, leave in failed state — next recover() will retry again.
+      }
+    }
+
     return recovered;
   }
 

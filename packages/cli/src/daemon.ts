@@ -2052,25 +2052,16 @@ async function handleRequest(
     return jsonResponse(res, 200, { jobs });
   }
 
-  // GET /api/publisher/job?id=...  (also /api/publisher/jobs/:id for backward compat)
-  if (req.method === 'GET' && (path === '/api/publisher/job' || path.startsWith('/api/publisher/jobs/'))) {
-    const jobId = path.startsWith('/api/publisher/jobs/')
-      ? path.slice('/api/publisher/jobs/'.length).split('/')[0]
-      : url.searchParams.get('id');
+  // GET /api/publisher/job?id=...  (new route, wrapped response)
+  if (req.method === 'GET' && path === '/api/publisher/job') {
+    const jobId = url.searchParams.get('id');
     if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
-    // Old route: /api/publisher/jobs/:id/payload
-    if (path.endsWith('/payload')) {
-      const job = await publisherControl.getStatus(jobId);
-      if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
-      const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, { job, payload });
-    }
     const job = await publisherControl.getStatus(jobId);
     if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
     return jsonResponse(res, 200, { job });
   }
 
-  // GET /api/publisher/job-payload?id=...
+  // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
   if (req.method === 'GET' && path === '/api/publisher/job-payload') {
     const jobId = url.searchParams.get('id');
     if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
@@ -2080,10 +2071,24 @@ async function handleRequest(
     return jsonResponse(res, 200, { job, payload });
   }
 
-  // GET /api/publisher/stats
+  // Legacy: GET /api/publisher/jobs/:id and /api/publisher/jobs/:id/payload (bare response)
+  if (req.method === 'GET' && path.startsWith('/api/publisher/jobs/')) {
+    const segments = path.slice('/api/publisher/jobs/'.length).split('/');
+    const jobId = segments[0];
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    if (segments[1] === 'payload') {
+      const payload = await publisherControl.inspectPreparedPayload(jobId);
+      return jsonResponse(res, 200, { ...job, payload });
+    }
+    return jsonResponse(res, 200, job);
+  }
+
+  // GET /api/publisher/stats — returns the raw status map directly for backward compat
   if (req.method === 'GET' && path === '/api/publisher/stats') {
     const stats = await publisherControl.getStats();
-    return jsonResponse(res, 200, { stats });
+    return jsonResponse(res, 200, stats);
   }
 
   // POST /api/publisher/cancel

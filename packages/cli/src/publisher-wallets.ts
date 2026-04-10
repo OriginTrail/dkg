@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const LOCK_STALE_MS = 5 * 60 * 1000;
@@ -115,6 +115,14 @@ async function acquireLock(lockPath: string) {
 async function reapStaleLock(lockPath: string): Promise<boolean> {
   try {
     const raw = await readFile(lockPath, 'utf-8');
+    if (!raw.trim()) {
+      // Empty file — lock was just created but metadata not yet written.
+      // Check file age via mtime; treat as live if recent.
+      const st = await stat(lockPath).catch(() => null);
+      if (st && Date.now() - st.mtimeMs < 5000) return false;
+      await unlink(lockPath).catch(() => {});
+      return true;
+    }
     const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
     const createdAt = Number(parsed.createdAt);
     const pid = Number(parsed.pid);
@@ -126,6 +134,9 @@ async function reapStaleLock(lockPath: string): Promise<boolean> {
     }
     return false;
   } catch {
+    // Parse failed — possibly partial write. Check file age before reaping.
+    const st = await stat(lockPath).catch(() => null);
+    if (st && Date.now() - st.mtimeMs < 5000) return false;
     await unlink(lockPath).catch(() => {});
     return true;
   }
