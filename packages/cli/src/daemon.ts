@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1951,12 +1951,14 @@ async function handleRequest(
   // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/write' || path === '/api/workspace/write')) {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
     const { quads, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
     }
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('share');
     tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api', subGraphName } });
     try {
@@ -1978,10 +1980,12 @@ async function handleRequest(
   // POST /api/shared-memory/publish (V10) or /api/workspace/enshrine (legacy)
   if (req.method === 'POST' && (path === '/api/shared-memory/publish' || path === '/api/workspace/enshrine')) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
     const { selection, clearAfter, publishContextGraphId, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId")' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('publishFromSWM');
     tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', publishContextGraphId, subGraphName } });
     try {
@@ -2085,7 +2089,9 @@ async function handleRequest(
   // POST /api/sub-graph/create  { contextGraphId, subGraphName }
   if (req.method === 'POST' && path === '/api/sub-graph/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
     if (!contextGraphId || !subGraphName) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "subGraphName"' });
     const sgVal = validateSubGraphName(subGraphName);
     if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
@@ -2100,8 +2106,13 @@ async function handleRequest(
   // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
   if (req.method === 'POST' && path === '/api/assertion/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, name, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, name, subGraphName } = parsed;
     if (!contextGraphId || !name) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
+    const nameVal = validateAssertionName(name);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const assertionUri = await agent.assertion.create(contextGraphId, name, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { assertionUri });
@@ -2113,9 +2124,14 @@ async function handleRequest(
   // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
     const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length));
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req);
-    const { contextGraphId, quads, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, quads, subGraphName } = parsed;
     if (!contextGraphId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.write(contextGraphId, assertionName, quads, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { written: quads.length });
@@ -2127,9 +2143,14 @@ async function handleRequest(
   // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
     const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length));
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const quads = await agent.assertion.query(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { quads, count: quads.length });
@@ -2141,9 +2162,14 @@ async function handleRequest(
   // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
     const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length));
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, entities, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entities, subGraphName } = parsed;
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const result = await agent.assertion.promote(contextGraphId, assertionName, { entities: entities ?? 'all', subGraphName });
       return jsonResponse(res, 200, result);
@@ -2155,9 +2181,14 @@ async function handleRequest(
   // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
     const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length));
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { contextGraphId, subGraphName } = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, subGraphName } = parsed;
     if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { discarded: true });
@@ -2169,11 +2200,15 @@ async function handleRequest(
   // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
   if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
     const body = await readBody(req);
-    const parsed = JSON.parse(body);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
     const { quads, conditions, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
-    if (!Array.isArray(conditions)) return jsonResponse(res, 400, { error: 'Missing "conditions" array' });
+    if (!Array.isArray(conditions) || conditions.length === 0) {
+      return jsonResponse(res, 400, { error: '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)' });
+    }
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('share');
     tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api-cas', subGraphName } });
     try {
@@ -2182,7 +2217,7 @@ async function handleRequest(
       return jsonResponse(res, 200, { ok: true, shareOperationId: result?.shareOperationId });
     } catch (err: any) {
       tracker.fail(ctx, err);
-      if (err.name === 'StaleWriteError' || err.message?.includes('stale') || err.message?.includes('condition')) {
+      if (err.name === 'StaleWriteError' || err.message?.includes('stale') || err.message?.includes('CAS condition failed')) {
         return jsonResponse(res, 409, { error: err.message });
       }
       throw err;
@@ -2804,6 +2839,33 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOr
     ...corsHeaders(origin),
   });
   res.end(body);
+}
+
+function safeParseJson(body: string, res: ServerResponse): Record<string, any> | null {
+  try {
+    return JSON.parse(body);
+  } catch {
+    jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
+    return null;
+  }
+}
+
+function validateOptionalSubGraphName(subGraphName: unknown, res: ServerResponse): boolean {
+  if (subGraphName === undefined || subGraphName === null) return true;
+  if (typeof subGraphName === 'string' && subGraphName === '') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a non-empty string (omit the field for root graph)' });
+    return false;
+  }
+  if (typeof subGraphName !== 'string') {
+    jsonResponse(res, 400, { error: 'subGraphName must be a string' });
+    return false;
+  }
+  const v = validateSubGraphName(subGraphName);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "subGraphName": ${v.reason}` });
+    return false;
+  }
+  return true;
 }
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — default for data-heavy endpoints (publish, update)

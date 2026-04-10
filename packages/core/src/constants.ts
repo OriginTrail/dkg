@@ -119,6 +119,18 @@ export function validateSubGraphName(name: string): { valid: boolean; reason?: s
   return { valid: true };
 }
 
+/**
+ * Validates an assertion name for safe interpolation into graph URIs.
+ * Same character restrictions as sub-graph names.
+ */
+export function validateAssertionName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Assertion name cannot be empty' };
+  if (name.includes('/')) return { valid: false, reason: 'Assertion name cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Assertion name contains characters unsafe for IRIs' };
+  if (name.length > 256) return { valid: false, reason: 'Assertion name exceeds 256 characters' };
+  return { valid: true };
+}
+
 // ── Deprecated V9 aliases ──────────────────────────────────────────────
 // These map V9 function signatures to V10 implementations.
 // The URI patterns now use V10 format (did:dkg:context-graph:).
