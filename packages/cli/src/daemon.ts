@@ -51,6 +51,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
+import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
@@ -334,6 +335,16 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+  });
+
+  let publisherRuntime: PublisherRuntime | null = await startPublisherRuntimeIfEnabled({
+    dataDir: dkgDir(),
+    config,
+    store: agent.store,
+    keypair: agent.wallet.keypair,
+    chainBase,
+    v10ACKProviderFactory: (contextGraphId: string) => (agent as any).createV10ACKProvider?.(contextGraphId),
+    log,
   });
 
   const networkId = await computeNetworkId();
@@ -964,6 +975,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       finally { if (timer) clearTimeout(timer); }
     }));
     metricsCollector.stop();
+    await publisherRuntime?.stop().catch((err: any) => log(`Publisher runtime stop error: ${err?.message ?? String(err)}`));
     server.close();
     appStaticServer?.close();
     await agent.stop();

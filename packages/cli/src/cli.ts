@@ -21,6 +21,7 @@ import {
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveMsOption } from './publisher-runner.js';
+import { batchEntityQuads } from './batching.js';
 import {
   runDaemon,
   performUpdateWithStatus,
@@ -1490,6 +1491,11 @@ program
 
       await publishEntityBatches(result.quads, applyBatch, (sent) => {
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
+      }, {
+        maxBatchBytes: useSharedMemory ? 240 * 1024 : undefined,
+        estimateBatchBytes: useSharedMemory
+          ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
+          : undefined,
       });
 
       if (useSharedMemory) {
@@ -2100,31 +2106,19 @@ async function publishEntityBatches(
   quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
   applyBatch: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => Promise<unknown>,
   onProgress?: (publishedQuadCount: number) => void,
+  options: {
+    maxBatchBytes?: number;
+    estimateBatchBytes?: (batch: Array<{ subject: string; predicate: string; object: string; graph: string }>) => number;
+  } = {},
 ): Promise<void> {
-  // Keep entities intact per batch to avoid partial-entity writes.
-  const byEntity = new Map<string, typeof quads>();
-  for (const q of quads) {
-    const key = q.subject;
-    let arr = byEntity.get(key);
-    if (!arr) { arr = []; byEntity.set(key, arr); }
-    arr.push(q);
-  }
-
-  const MAX_BATCH_QUADS = 500;
-  let batch: typeof quads = [];
   let sent = 0;
+  const batches = batchEntityQuads(quads, {
+    maxBatchQuads: 500,
+    maxBatchBytes: options.maxBatchBytes,
+    estimateBatchBytes: options.estimateBatchBytes,
+  });
 
-  for (const entityQuads of byEntity.values()) {
-    if (batch.length + entityQuads.length > MAX_BATCH_QUADS && batch.length > 0) {
-      await applyBatch(batch);
-      sent += batch.length;
-      onProgress?.(sent);
-      batch = [];
-    }
-    batch.push(...entityQuads);
-  }
-
-  if (batch.length > 0) {
+  for (const batch of batches) {
     await applyBatch(batch);
     sent += batch.length;
     onProgress?.(sent);

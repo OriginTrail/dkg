@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -30,6 +30,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
     chainId?: string;
   };
   log: (message: string) => void;
+  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -43,6 +44,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       chainBase: args.chainBase,
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
+      v10ACKProviderFactory: args.v10ACKProviderFactory,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -69,6 +71,7 @@ interface PublisherRuntimeBaseArgs {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
   closeStoreOnStop: boolean;
 }
 
@@ -127,6 +130,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -135,6 +139,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     chainBase: args.chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    v10ACKProviderFactory: args.v10ACKProviderFactory,
     closeStoreOnStop: false,
   });
 }
@@ -177,7 +182,19 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       if (!publisher) {
         throw new Error(`No publisher configured for wallet ${walletId}`);
       }
-      return await publisher.publish(publishOptions);
+      const v10ACKProvider = publishOptions.v10ACKProvider
+        ?? args.v10ACKProviderFactory?.(publishOptions.contextGraphId);
+      const publishOptionsWithACKs = v10ACKProvider
+        ? { ...publishOptions, v10ACKProvider }
+        : publishOptions;
+      const chain = (publisher as unknown as { chain?: { createKnowledgeAssetsV10?: unknown } }).chain;
+      if (chain && typeof chain.createKnowledgeAssetsV10 === 'function' && !publishOptionsWithACKs.v10ACKProvider) {
+        throw new Error(
+          'Async publisher cannot publish to a V10 ACK-gated chain without a v10ACKProvider. ' +
+          'Use the synchronous agent publish path or add ACK collection support to the async runtime.',
+        );
+      }
+      return await publisher.publish(publishOptionsWithACKs);
     },
   });
 

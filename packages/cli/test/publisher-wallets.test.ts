@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -131,6 +131,65 @@ describe('publisher wallets', () => {
     });
 
     expect(runtime.walletIds).toEqual([wallet.address]);
+    await runtime.stop();
+    await store.close();
+  });
+
+  it('passes v10ACKProvider through the daemon-integrated async runtime when supplied', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new MockChainAdapter('mock:31337', wallet.address),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+    const write = await writer.writeToWorkspace('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      v10ACKProviderFactory: () => (async () => []),
+    });
+
+    const publishSpy = vi.spyOn(DKGPublisher.prototype, 'publish').mockResolvedValue({
+      ual: 'did:dkg:test/async-runtime',
+      merkleRoot: new Uint8Array(32),
+      kcId: 1n,
+      kaManifest: [],
+      status: 'tentative',
+    });
+
+    await runtime.publisher.lift({
+      swmId: 'swm-main',
+      shareOperationId: write.shareOperationId,
+      roots: ['urn:local:/rihana'],
+      contextGraphId: 'music-social',
+      namespace: 'aloha',
+      scope: 'person-profile',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:owner:1' },
+    });
+
+    await runtime.publisher.processNext(wallet.address);
+
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    expect(publishSpy.mock.calls[0]?.[0]?.v10ACKProvider).toEqual(expect.any(Function));
+
+    publishSpy.mockRestore();
     await runtime.stop();
     await store.close();
   });
