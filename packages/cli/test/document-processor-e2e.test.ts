@@ -13,7 +13,7 @@ import {
   ExtractionPipelineRegistry,
   type ExtractionPipeline,
   type ExtractionInput,
-  type ExtractionOutput,
+  type ConverterOutput,
 } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable } from '../src/extraction/index.js';
 
@@ -59,9 +59,9 @@ describe('ExtractionPipelineRegistry E2E', () => {
 
     const customMdPipeline: ExtractionPipeline = {
       contentTypes: ['text/markdown'],
-      async extract(input: ExtractionInput): Promise<ExtractionOutput> {
+      async extract(input: ExtractionInput): Promise<ConverterOutput> {
         const md = await readFile(input.filePath, 'utf-8');
-        return { mdIntermediate: md, triples: [], provenance: [] };
+        return { mdIntermediate: md };
       },
     };
 
@@ -113,8 +113,6 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
     expect(result.mdIntermediate).toBeTruthy();
     expect(result.mdIntermediate).toContain('Research Paper');
     expect(result.mdIntermediate).toContain('decentralized knowledge graphs');
-    expect(result.triples).toEqual([]);
-    expect(result.provenance).toEqual([]);
   });
 
   it('converts a CSV file to Markdown', async () => {
@@ -144,7 +142,6 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
     });
 
     expect(typeof result.mdIntermediate).toBe('string');
-    expect(result.triples).toEqual([]);
   });
 
   it('processes file through registry lookup → extract', async () => {
@@ -207,7 +204,7 @@ describe('Full extraction pipeline simulation', () => {
       contentTypes: ['text/markdown'],
       async extract(input) {
         const md = await readFile(input.filePath, 'utf-8');
-        return { mdIntermediate: md, triples: [], provenance: [] };
+        return { mdIntermediate: md };
       },
     };
 
@@ -277,15 +274,13 @@ describe('Full extraction pipeline simulation', () => {
 
     const registry = new ExtractionPipelineRegistry();
 
-    // Register a mock HTML pipeline
+    // Register a mock HTML pipeline (Phase 1 converter — mdIntermediate only)
     registry.register({
       contentTypes: ['text/html'],
       async extract(input) {
         const content = await readFile(input.filePath, 'utf-8');
         return {
           mdIntermediate: content.replace(/<[^>]+>/g, ''),
-          triples: [{ subject: 'urn:sales:q4', predicate: 'rdf:type', object: 'schema:Report' }],
-          provenance: [],
         };
       },
     });
@@ -299,19 +294,24 @@ describe('Full extraction pipeline simulation', () => {
       agentDid: 'did:dkg:agent:0xSales',
     });
 
+    // Phase 2 (simulated): the route handler would run the Markdown extractor
+    // on `result.mdIntermediate` to produce triples/provenance.
+    const phase2Triples = [{ subject: 'urn:sales:q4', predicate: 'rdf:type', object: 'schema:Report' }];
+
     // Build the import-file response as the daemon would
     const importFileResponse = {
       assertionUri: 'did:dkg:context-graph:sales/assertion/0xSales/q4-report',
       fileHash: 'sha256:abc123',
       detectedContentType: 'text/html',
       extraction: {
-        status: result.triples.length > 0 ? 'completed' as const : 'skipped' as const,
-        tripleCount: result.triples.length,
+        status: phase2Triples.length > 0 ? 'completed' as const : 'skipped' as const,
+        tripleCount: phase2Triples.length,
         mdIntermediateHash: 'sha256:def456',
         pipelineUsed: 'text/html',
       },
     };
 
+    expect(result.mdIntermediate).toContain('Q4 Sales');
     expect(importFileResponse.extraction.status).toBe('completed');
     expect(importFileResponse.extraction.tripleCount).toBe(1);
     expect(importFileResponse.extraction.pipelineUsed).toBe('text/html');

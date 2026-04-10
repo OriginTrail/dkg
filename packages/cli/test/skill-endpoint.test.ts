@@ -54,10 +54,10 @@ describe('SKILL.md file', () => {
   });
 
   it('starts with Agent Skills YAML frontmatter', () => {
-    expect(skillContent).toMatch(/^---\n/);
+    expect(skillContent).toMatch(/^---\r?\n/);
     expect(skillContent).toContain('name: dkg-node');
     expect(skillContent).toContain('description:');
-    expect(skillContent).toMatch(/---\n\n/);
+    expect(skillContent).toMatch(/---\r?\n\r?\n/);
   });
 
   it('contains the required DKG V10 sections', () => {
@@ -96,9 +96,21 @@ describe('SKILL.md file', () => {
   });
 
   it('marks planned endpoints clearly', () => {
-    expect(skillContent).toContain('🚧 Planned');
+    // The Planned/🚧 markers in the skill doc cover context graph sub-resources
+    // and future agent profile endpoints — NOT the assertion API, which ships
+    // as of PR #108 (create/write/query/promote/discard) and this PR (import-file,
+    // extraction-status).
+    expect(skillContent).toContain('*(planned)*');
+  });
+
+  it('documents the now-shipped assertion API surface', () => {
     expect(skillContent).toContain('/api/assertion/create');
+    expect(skillContent).toContain('/api/assertion/{name}/write');
+    expect(skillContent).toContain('/api/assertion/{name}/query');
+    expect(skillContent).toContain('/api/assertion/{name}/promote');
+    expect(skillContent).toContain('/api/assertion/{name}/discard');
     expect(skillContent).toContain('/api/assertion/{name}/import-file');
+    expect(skillContent).toContain('/api/assertion/{name}/extraction-status');
   });
 
   it('documents error status codes', () => {

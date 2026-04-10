@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
-import type { ExtractionPipeline, ExtractionInput, ExtractionOutput } from '@origintrail-official/dkg-core';
+import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@origintrail-official/dkg-core';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -83,16 +83,8 @@ export const MARKITDOWN_CONTENT_TYPES = [
 export class MarkItDownConverter implements ExtractionPipeline {
   readonly contentTypes = [...MARKITDOWN_CONTENT_TYPES];
 
-  async extract(input: ExtractionInput): Promise<ExtractionOutput> {
+  async extract(input: ExtractionInput): Promise<ConverterOutput> {
     const markdown = await runMarkItDown(input.filePath);
-
-    // Phase 2 (markdown → triples) is handled by the Markdown extraction pipeline
-    // which runs separately. This converter only does phase 1: file → Markdown.
-    // Return the intermediate with empty triples; the caller chains the MD pipeline.
-    return {
-      mdIntermediate: markdown,
-      triples: [],
-      provenance: [],
-    };
+    return { mdIntermediate: markdown };
   }
 }

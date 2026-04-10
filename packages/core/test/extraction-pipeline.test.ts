@@ -3,17 +3,15 @@ import {
   ExtractionPipelineRegistry,
   type ExtractionPipeline,
   type ExtractionInput,
-  type ExtractionOutput,
+  type ConverterOutput,
 } from '../src/extraction-pipeline.js';
 
-function makePipeline(contentTypes: string[], output?: Partial<ExtractionOutput>): ExtractionPipeline {
+function makePipeline(contentTypes: string[], output?: Partial<ConverterOutput>): ExtractionPipeline {
   return {
     contentTypes,
-    async extract(_input: ExtractionInput): Promise<ExtractionOutput> {
+    async extract(_input: ExtractionInput): Promise<ConverterOutput> {
       return {
         mdIntermediate: output?.mdIntermediate ?? '# Test',
-        triples: output?.triples ?? [],
-        provenance: output?.provenance ?? [],
       };
     },
   };
@@ -71,14 +69,22 @@ describe('ExtractionPipelineRegistry', () => {
     expect(registry.get('text/markdown')).toBe(mdPipeline);
     expect(registry.get('application/pdf')).toBe(pdfPipeline);
   });
+
+  it('normalizes casing and media-type parameters on registration and lookup', () => {
+    const registry = new ExtractionPipelineRegistry();
+    const pipeline = makePipeline(['Application/PDF']);
+    registry.register(pipeline);
+
+    expect(registry.has('application/pdf')).toBe(true);
+    expect(registry.get('APPLICATION/PDF; charset=utf-8')).toBe(pipeline);
+    expect(registry.availableContentTypes()).toEqual(['application/pdf']);
+  });
 });
 
-describe('ExtractionPipeline interface', () => {
-  it('extract returns mdIntermediate, triples, and provenance', async () => {
+describe('ExtractionPipeline interface (Phase 1 converter)', () => {
+  it('extract returns ConverterOutput with mdIntermediate only', async () => {
     const pipeline = makePipeline(['text/markdown'], {
       mdIntermediate: '# Hello\n\nWorld',
-      triples: [{ subject: 'urn:test:1', predicate: 'rdf:type', object: 'schema:Thing' }],
-      provenance: [{ subject: 'urn:prov:1', predicate: 'dkg:extractedBy', object: 'did:dkg:agent:0x123' }],
     });
 
     const result = await pipeline.extract({
@@ -88,9 +94,9 @@ describe('ExtractionPipeline interface', () => {
     });
 
     expect(result.mdIntermediate).toBe('# Hello\n\nWorld');
-    expect(result.triples).toHaveLength(1);
-    expect(result.triples[0].subject).toBe('urn:test:1');
-    expect(result.provenance).toHaveLength(1);
+    // Converter output must not carry triples/provenance — those come from Phase 2.
+    expect((result as { triples?: unknown }).triples).toBeUndefined();
+    expect((result as { provenance?: unknown }).provenance).toBeUndefined();
   });
 
   it('extract passes through ontologyRef when provided', async () => {
@@ -99,7 +105,7 @@ describe('ExtractionPipeline interface', () => {
       contentTypes: ['application/pdf'],
       async extract(input) {
         capturedInput = input;
-        return { mdIntermediate: '', triples: [], provenance: [] };
+        return { mdIntermediate: '' };
       },
     };
 

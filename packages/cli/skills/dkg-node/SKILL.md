@@ -121,17 +121,29 @@ The token is configured in the node's config file or provided at startup.
   - **Note:** `subGraphName` is supported for legacy routing only and cannot be combined with `view`
 - `POST /api/query-remote` — query a remote peer via P2P
 
-### Working Memory (WM) — Private assertions (🚧 Planned)
+### Working Memory (WM) — Private assertions
 
-> The following WM assertion endpoints are planned for a future release:
+WM assertions are your agent-local drafts — private to you, readable and
+writable only by your peer ID, never gossiped. Use them to stage knowledge
+before sharing it to SWM (team) or promoting it to VM (chain-anchored).
 
 - `POST /api/assertion/create` — create a named private assertion
-- `PUT /api/assertion/{name}` — write triples to an assertion
-- `POST /api/assertion/{name}/import` — import N-Triples/Turtle/JSON-LD
-- `POST /api/assertion/{name}/import-file` — import PDF/DOCX/Markdown (multipart)
-- `GET /api/assertion/{name}` — read assertion contents
-- `DELETE /api/assertion/{name}` — delete assertion
-- `POST /api/assertion/{name}/promote` — promote assertion to SWM
+  Body: `{ "contextGraphId": "...", "name": "...", "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/write` — write triples to an assertion
+  Body: `{ "contextGraphId": "...", "quads": [...], "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/query` — read assertion contents as quads
+  Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/promote` — promote assertion triples to SWM
+  Body: `{ "contextGraphId": "...", "entities"?: [...] | "all", "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/discard` — drop the assertion graph
+  Body: `{ "contextGraphId": "...", "subGraphName"?: "..." }`
+- `POST /api/assertion/{name}/import-file` — import a document (multipart/form-data) — see §7
+- `GET /api/assertion/{name}/extraction-status?contextGraphId=...` — poll the status of an import-file extraction job
+
+> If `subGraphName` is provided but the sub-graph is not registered in the CG's
+> `_meta` graph, all assertion operations throw
+> `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
+> Create the sub-graph before targeting it.
 
 ## 6. Context Graphs
 
@@ -145,21 +157,82 @@ Context Graphs are scoped knowledge domains with configurable access and governa
 - 🚧 `POST /api/context-graph/{id}/ontology` — add ontology *(planned)*
 - 🚧 `GET /api/context-graph/{id}/ontology` — list ontologies *(planned)*
 
-## 7. File Ingestion (🚧 Planned)
+## 7. File Ingestion
 
-> File ingestion via `import-file` depends on the Working Memory assertion API (§5)
-> and will be available when those endpoints ship. The extraction pipeline
-> infrastructure (MarkItDown converter) is already in place on the node.
+Upload a document (PDF, DOCX, HTML, CSV, Markdown, etc.) and let the node
+extract RDF triples into a WM assertion. The node runs a deterministic
+two-phase pipeline:
 
-Supported formats depend on available extraction pipelines (see Node Info §1).
-When available, usage will be:
+1. **Phase 1 (optional converter):** non-Markdown formats go through a
+   registered converter (e.g. MarkItDown for PDF/DOCX/HTML) which produces
+   a Markdown intermediate. `text/markdown` uploads skip Phase 1 — the raw
+   file IS the intermediate.
+2. **Phase 2 (structural extractor):** the Markdown intermediate is parsed
+   for YAML frontmatter, wikilinks (`[[Target]]`), hashtags (`#keyword`),
+   Dataview inline fields (`key:: value`), and heading structure. No LLM —
+   deterministic, node-side, no external calls.
+
+The extracted triples are written to the target assertion graph via the
+same path as `POST /api/assertion/{name}/write`. Agents can then query,
+promote, or publish them like any other assertion content.
+
+**Supported formats:** see Node Info §1 for the list of registered
+extraction pipelines on your specific node. `text/markdown` is always
+supported (no converter needed).
+
+### Request
+
+`POST /api/assertion/{name}/import-file` with `Content-Type: multipart/form-data`:
+
+| Field           | Required | Description                                                                 |
+|-----------------|----------|-----------------------------------------------------------------------------|
+| `file`          | yes      | The document bytes                                                          |
+| `contextGraphId`| yes      | Target context graph                                                        |
+| `contentType`   | no       | Override the file part's Content-Type header                                |
+| `ontologyRef`   | no       | CG `_ontology` URI for guided Phase 2 extraction                            |
+| `subGraphName`  | no       | Target sub-graph inside the CG (must be registered via `createSubGraph`)    |
+
+### Example
 
 ```bash
-curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
+curl -X POST $BASE_URL/api/assertion/climate-report/import-file \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@paper.pdf" \
-  -F "contextGraph=my-context-graph"
+  -F "file=@climate-2026.md;type=text/markdown" \
+  -F "contextGraphId=research"
 ```
+
+### Response
+
+```json
+{
+  "assertionUri": "did:dkg:context-graph:research/assertion/0xAgentAddr/climate-report",
+  "fileHash": "sha256:a1b2c3...",
+  "detectedContentType": "text/markdown",
+  "extraction": {
+    "status": "completed",
+    "tripleCount": 14,
+    "pipelineUsed": "text/markdown",
+    "mdIntermediateHash": "sha256:a1b2c3..."
+  }
+}
+```
+
+### Extraction statuses
+
+- `completed` — Phase 1 (if needed) and Phase 2 both ran; triples were written to the assertion graph
+- `skipped` — no converter is registered for the file's content type; the file is stored in the file store but no triples were written. Agents can still reference the file via its `fileHash`
+- `failed` — one of the phases threw an error; check the `error` field in the response. The file is still stored; no triples written.
+
+For synchronous extractions (the V10.0 default) the response carries the
+final status immediately. To re-query later without holding the original
+response, use:
+
+```bash
+curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=research \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape from the in-memory extraction status tracker, or 404 if no import-file has been run for that assertion.
 
 ## 8. Node Administration
 
