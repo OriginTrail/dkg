@@ -67,12 +67,16 @@ export async function publishKA(
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
   privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
+  if (privateQuads?.length) {
+    throw new Error('privateQuads are not supported in V10 SWM-first publish');
+  }
+  await post<any>(`${nodeBase(nodeId)}/api/shared-memory/write`, { paranetId: contextGraphId, quads });
   return post<{
     kcId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/publish`, { contextGraphId, quads, privateQuads });
+  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, { paranetId: contextGraphId, selection: 'all', clearAfter: true });
 }
 
 export async function queryNode(

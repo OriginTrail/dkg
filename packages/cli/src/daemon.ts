@@ -1899,7 +1899,11 @@ async function handleRequest(
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, subGraphName, localOnly } = parsed;
+    const { quads, subGraphName } = parsed;
+    const localOnly = parsed.localOnly === true;
+    if (parsed.localOnly !== undefined && typeof parsed.localOnly !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
+    }
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId || !quads?.length) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "paranetId") or "quads"' });
@@ -1912,7 +1916,7 @@ async function handleRequest(
         // validation happens inside share
       });
       const shareResult = await tracker.trackPhase(ctx, 'store', () =>
-        agent.share(paranetId, quads, { subGraphName, localOnly: !!localOnly, operationCtx: ctx }),
+        agent.share(paranetId, quads, { subGraphName, localOnly, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
       const opDetail = dashDb.getOperation(ctx.operationId);
@@ -2916,7 +2920,11 @@ function validateConditions(conditions: unknown, res: ServerResponse): boolean {
       jsonResponse(res, 400, { error: `conditions[${i}].predicate contains characters unsafe for SPARQL IRIs` });
       return false;
     }
-    if (c.expectedValue !== null && c.expectedValue !== undefined && typeof c.expectedValue !== 'string') {
+    if (!('expectedValue' in c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue is required (use null for "must not exist")` });
+      return false;
+    }
+    if (c.expectedValue !== null && typeof c.expectedValue !== 'string') {
       jsonResponse(res, 400, { error: `conditions[${i}].expectedValue must be a string or null` });
       return false;
     }

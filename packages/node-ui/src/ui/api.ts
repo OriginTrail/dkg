@@ -175,9 +175,11 @@ export const fetchCatchupStatus = (contextGraphId: string) =>
 export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>
   post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix });
 
-// --- Publish ---
-export const publishTriples = (contextGraphId: string, quads: any[]) =>
-  post<any>('/api/publish', { contextGraphId, quads });
+// --- Publish (SWM-first: write to shared memory, then publish) ---
+export const publishTriples = async (contextGraphId: string, quads: any[]) => {
+  await post<any>('/api/shared-memory/write', { paranetId: contextGraphId, quads });
+  return post<any>('/api/shared-memory/publish', { paranetId: contextGraphId, selection: 'all', clearAfter: true });
+};
 
 // --- Query history ---
 export const fetchQueryHistory = (limit = 50, offset = 0) =>

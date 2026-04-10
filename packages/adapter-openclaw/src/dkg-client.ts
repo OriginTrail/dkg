@@ -188,12 +188,16 @@ export class DkgDaemonClient {
     privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
   ): Promise<any> {
-    return this.post('/api/publish', {
-      contextGraphId,
-      quads,
-      privateQuads,
-      accessPolicy: opts?.accessPolicy,
-      allowedPeers: opts?.allowedPeers,
+    if (privateQuads?.length || opts?.accessPolicy || opts?.allowedPeers?.length) {
+      throw new Error(
+        'privateQuads, accessPolicy, and allowedPeers are not supported in V10 SWM-first publish',
+      );
+    }
+    await this.post('/api/shared-memory/write', { paranetId: contextGraphId, quads });
+    return this.post('/api/shared-memory/publish', {
+      paranetId: contextGraphId,
+      selection: 'all',
+      clearAfter: true,
     });
   }
 
