@@ -66,7 +66,10 @@ curl -X POST $BASE_URL/api/shared-memory/write \
   }'
 ```
 
-**Step 3 — Publish to Verified Memory:**
+**Step 3 — Publish to Verified Memory (from SWM):**
+
+> Data must be in Shared Working Memory before publishing. The on-chain
+> transaction is a finality signal — peers already have the data via gossip.
 
 ```bash
 curl -X POST $BASE_URL/api/shared-memory/publish \
@@ -81,7 +84,7 @@ curl -X POST $BASE_URL/api/shared-memory/publish \
 curl -X POST $BASE_URL/api/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "view": "shared-working-memory"}'
+  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "view": "verified-memory"}'
 ```
 
 ## 4. Authentication
@@ -104,8 +107,11 @@ The token is configured in the node's config file or provided at startup.
 
 ### Verified Memory (VM) — Permanent, on-chain
 
-- `POST /api/publish` — publish triples to VM (costs TRAC)
-- `POST /api/update` — update an existing Knowledge Asset
+> All publishing goes through SWM first. The chain transaction is a finality
+> signal — it seals data that peers already hold.
+
+- `POST /api/shared-memory/publish` — promote SWM data to Verified Memory (costs TRAC)
+- `POST /api/update` — update an existing Knowledge Asset (reads new data from SWM)
 - `POST /api/endorse` — endorse a Knowledge Asset ("I vouch for this")
 - `POST /api/verify` — propose or approve M-of-N consensus verification
 
