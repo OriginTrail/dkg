@@ -1476,8 +1476,8 @@ export class DKGPublisher implements Publisher {
 
   /**
    * Throws if `subGraphName` is provided but not registered in the CG's `_meta` graph.
-   * Mirrors the registration check in `publish()` so that assertion operations cannot
-   * orphan triples under an unregistered sub-graph URI.
+   * Mirrors the registration check in `publish()` for mutation paths that would
+   * otherwise create new orphaned sub-graph state.
    */
   private async ensureSubGraphRegistered(
     contextGraphId: string,
@@ -1531,7 +1531,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     subGraphName?: string,
   ): Promise<Quad[]> {
-    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const result = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
@@ -1589,7 +1589,7 @@ export class DKGPublisher implements Publisher {
   }
 
   async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {
-    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.dropGraph(graphUri);
   }
