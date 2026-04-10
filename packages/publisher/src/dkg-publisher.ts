@@ -89,6 +89,9 @@ export interface ConditionalShareOptions extends ShareOptions {
 }
 
 /** @deprecated Use ConditionalShareOptions */
+export type ShareConditionalOptions = ConditionalShareOptions;
+
+/** @deprecated Use ConditionalShareOptions */
 export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 
 

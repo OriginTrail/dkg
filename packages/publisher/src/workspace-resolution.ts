@@ -148,7 +148,7 @@ function normalizeRoots(roots: readonly string[]): string[] {
 function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
   const normalizedContextGraphId = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
   const normalizedShareOperationId = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  const subject = `urn:dkg:workspace:${normalizedContextGraphId}:${normalizedShareOperationId}`;
+  const subject = `urn:dkg:share:${normalizedContextGraphId}:${normalizedShareOperationId}`;
   assertSafeIri(subject);
   return subject;
 }

@@ -17,7 +17,6 @@ export {
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
 export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration } from './metadata.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,
@@ -27,6 +26,21 @@ export {
   type ShareConditionalOptions,
   type CASCondition,
 } from './dkg-publisher.js';
+export {
+  ACKCollector,
+  type ACKCollectorDeps,
+  type CollectedACK,
+  type ACKCollectionResult,
+} from './ack-collector.js';
+export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
+export {
+  VerifyCollector,
+  type VerifyCollectorDeps,
+  type CollectedApproval,
+  type VerifyCollectionResult,
+} from './verify-collector.js';
+export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
+export { buildVerificationMetadata } from './verification-metadata.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';
 export {
