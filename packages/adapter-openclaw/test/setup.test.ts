@@ -102,7 +102,7 @@ describe('writeDkgConfig', () => {
       expect(config.contextGraphs).toEqual(['testing']);
       expect(config.chain.rpcUrl).toBe('https://rpc.test');
       expect(config.openclawAdapter).toBe(true);
-      expect(config.relay).toBe('/ip4/1.2.3.4/tcp/9090/p2p/12D3test');
+      expect(config.relay).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
     }
