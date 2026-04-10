@@ -2,6 +2,8 @@ import { ethers } from 'ethers';
 import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+const LOCK_STALE_MS = 5 * 60 * 1000;
+
 export interface PublisherWalletsConfig {
   wallets: Array<{
     address: string;
@@ -94,15 +96,50 @@ async function withPublisherWalletLock<T>(dataDir: string, fn: () => Promise<T>)
 async function acquireLock(lockPath: string) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      return await open(lockPath, 'wx', 0o600);
+      const handle = await open(lockPath, 'wx', 0o600);
+      await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+      return handle;
     } catch (error: any) {
       if (error?.code !== 'EEXIST') {
         throw error;
+      }
+      if (await reapStaleLock(lockPath)) {
+        continue;
       }
       await sleep(25);
     }
   }
   throw new Error(`Timed out waiting for publisher wallet lock: ${lockPath}`);
+}
+
+async function reapStaleLock(lockPath: string): Promise<boolean> {
+  try {
+    const raw = await readFile(lockPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number };
+    const createdAt = Number(parsed.createdAt);
+    const pid = Number(parsed.pid);
+    const staleByAge = Number.isFinite(createdAt) ? Date.now() - createdAt > LOCK_STALE_MS : true;
+    const staleByPid = Number.isFinite(pid) ? !isProcessRunning(pid) : true;
+    if (staleByAge || staleByPid) {
+      await unlink(lockPath).catch(() => {});
+      return true;
+    }
+    return false;
+  } catch {
+    await unlink(lockPath).catch(() => {});
+    return true;
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error: any) {
+    if (error?.code === 'EPERM') return true;
+    if (error?.code === 'ESRCH') return false;
+    return true;
+  }
 }
 
 async function sleep(ms: number): Promise<void> {

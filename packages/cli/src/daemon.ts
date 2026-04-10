@@ -51,7 +51,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
-import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
@@ -337,17 +337,10 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
   });
 
-  let publisherRuntime: PublisherRuntime | null = await startPublisherRuntimeIfEnabled({
-    dataDir: dkgDir(),
-    config,
-    store: agent.store,
-    keypair: agent.wallet.keypair,
-    chainBase,
-    v10ACKProviderFactory: (contextGraphId: string) => (agent as any).createV10ACKProvider?.(contextGraphId),
-    log,
-  });
+  let publisherRuntime: PublisherRuntime | null = null;
 
   const networkId = await computeNetworkId();
+  const publisherControl = createPublisherControlFromStore(agent.store);
   log(`Network: ${networkId.slice(0, 16)}...`);
   if (network?.networkId && network.networkId !== networkId) {
     log(`FATAL: genesis mismatch! Expected networkId ${network.networkId.slice(0, 16)}... but computed ${networkId.slice(0, 16)}...`);
@@ -378,6 +371,34 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   await agent.start();
   await agent.publishProfile();
+
+  publisherRuntime = await startPublisherRuntimeIfEnabled({
+    dataDir: dkgDir(),
+    config,
+    store: agent.store,
+    keypair: agent.wallet.keypair,
+    chainBase,
+    ackTransportFactory: () => ({
+      publisherPeerId: agent.peerId,
+      gossipPublish: async (topic: string, data: Uint8Array) => {
+        await agent.gossip.publish(topic, data);
+      },
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+        return agent.router.send(peerId, protocol, data);
+      },
+      getConnectedCorePeers: () => {
+        const allPeers = agent.node.libp2p.getPeers().map((p) => p.toString()).filter((id) => id !== agent.peerId);
+        const knownCorePeerIds = (agent as any).knownCorePeerIds as Set<string> | undefined;
+        if (knownCorePeerIds && knownCorePeerIds.size > 0) {
+          const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
+          if (filtered.length > 0) return filtered;
+        }
+        return allPeers;
+      },
+      log,
+    }),
+    log,
+  });
 
   log(`PeerId: ${agent.peerId}`);
   for (const a of agent.multiaddrs) log(`  ${a}`);
@@ -910,6 +931,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         req,
         res,
         agent,
+        publisherControl,
         config,
         startedAt,
         dashDb,
@@ -1218,6 +1240,7 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   agent: DKGAgent,
+  publisherControl: ReturnType<typeof createPublisherControlFromStore>,
   config: DkgConfig,
   startedAt: number,
   dashDb: DashboardDB,
@@ -2030,6 +2053,94 @@ async function handleRequest(
       tracker.fail(ctx, err);
       throw err;
     }
+  }
+
+  // POST /api/publisher/enqueue
+  if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const { roots, namespace, scope, authorityProofRef, priorVersion } = parsed;
+    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
+    const shareOperationId = parsed.shareOperationId ?? parsed.workspaceOperationId;
+    const swmId = parsed.swmId ?? parsed.workspaceId ?? 'swm-main';
+    const transitionType = parsed.transitionType ?? 'CREATE';
+    const authorityType = parsed.authorityType ?? 'owner';
+    if (!contextGraphId || !shareOperationId || !Array.isArray(roots) || roots.length === 0 || !namespace || !scope || !authorityProofRef) {
+      return jsonResponse(res, 400, { error: 'Missing required enqueue fields' });
+    }
+    const jobId = await publisherControl.lift({
+      swmId,
+      shareOperationId,
+      roots,
+      contextGraphId,
+      namespace,
+      scope,
+      transitionType,
+      authority: { type: authorityType, proofRef: authorityProofRef },
+      ...(priorVersion ? { priorVersion } : {}),
+    } as any);
+    return jsonResponse(res, 200, { jobId, contextGraphId, shareOperationId, rootsCount: roots.length });
+  }
+
+  // GET /api/publisher/jobs?status=...
+  if (req.method === 'GET' && path === '/api/publisher/jobs') {
+    const status = typeof url.searchParams.get('status') === 'string' ? url.searchParams.get('status')! : undefined;
+    const jobs = await publisherControl.list(status ? { status: status as any } : undefined);
+    return jsonResponse(res, 200, { jobs });
+  }
+
+  // GET /api/publisher/job?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    return jsonResponse(res, 200, { job });
+  }
+
+  // GET /api/publisher/job-payload?id=...
+  if (req.method === 'GET' && path === '/api/publisher/job-payload') {
+    const jobId = url.searchParams.get('id');
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+    const job = await publisherControl.getStatus(jobId);
+    if (!job) return jsonResponse(res, 404, { error: `Publisher job not found: ${jobId}` });
+    const payload = await publisherControl.inspectPreparedPayload(jobId);
+    return jsonResponse(res, 200, { job, payload });
+  }
+
+  // GET /api/publisher/stats
+  if (req.method === 'GET' && path === '/api/publisher/stats') {
+    const stats = await publisherControl.getStats();
+    return jsonResponse(res, 200, { stats });
+  }
+
+  // POST /api/publisher/cancel
+  if (req.method === 'POST' && path === '/api/publisher/cancel') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { jobId } = JSON.parse(body);
+    if (!jobId) return jsonResponse(res, 400, { error: 'Missing jobId' });
+    await publisherControl.cancel(jobId);
+    return jsonResponse(res, 200, { cancelled: jobId });
+  }
+
+  // POST /api/publisher/retry
+  if (req.method === 'POST' && path === '/api/publisher/retry') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { status } = JSON.parse(body || '{}');
+    if (status && status !== 'failed') return jsonResponse(res, 400, { error: 'Only status=failed is supported' });
+    const count = await publisherControl.retry({ status: 'failed' });
+    return jsonResponse(res, 200, { retried: count });
+  }
+
+  // POST /api/publisher/clear
+  if (req.method === 'POST' && path === '/api/publisher/clear') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { status } = JSON.parse(body || '{}');
+    if (status !== 'failed' && status !== 'finalized') {
+      return jsonResponse(res, 400, { error: 'status must be failed or finalized' });
+    }
+    const count = await publisherControl.clear(status);
+    return jsonResponse(res, 200, { cleared: count, status });
   }
 
   // POST /api/context-graph/create — on-chain context graph creation (V10)

@@ -959,6 +959,66 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(broadcast?.recovery?.action).toBe('finalized_from_chain');
   });
 
+  it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {
+    const publisher = createPublisher({ recoveryResult: null });
+    const broadcastId = await publisher.lift(request());
+
+    await publisher.claimNext('wallet-1');
+    await publisher.update(broadcastId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(broadcastId, 'broadcast', {
+      broadcast: { txHash: '0xccc', walletId: 'wallet-1' },
+    });
+
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(broadcastId);
+
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('broadcast');
+    expect(job?.recovery).toBeUndefined();
+  });
+
+  it('fails broadcast jobs once inconclusive recovery exceeds the timeout window', async () => {
+    const publisher = createPublisher({
+      recoveryResult: null,
+      config: {
+        recoveryLookupTimeoutMs: 50,
+      },
+    });
+    const broadcastId = await publisher.lift(request());
+
+    await publisher.claimNext('wallet-1');
+    await publisher.update(broadcastId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(broadcastId, 'broadcast', {
+      broadcast: { txHash: '0xccc', walletId: 'wallet-1' },
+    });
+
+    now += 100;
+
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(broadcastId);
+
+    expect(recovered).toBe(1);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.code).toBe('recovery_lookup_timeout');
+    expect(job?.failure?.timeout?.handling).toBe('retry_recovery');
+  });
+
   it('supports pause, resume, cancel, retry, and clear', async () => {
     const publisher = createPublisher();
     const cancelId = await publisher.lift(request());

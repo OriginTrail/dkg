@@ -1092,6 +1092,27 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
+  async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
+    await this.init();
+
+    try {
+      const receipt = await this.provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) return null;
+
+      const v10 = this.contracts.knowledgeCollectionStorage
+        ? await this.parseV10PublishReceipt(receipt)
+        : null;
+      if (v10) return v10;
+
+      const v9 = this.contracts.knowledgeAssetsStorage
+        ? await this.parseV9PublishReceipt(receipt)
+        : null;
+      return v9;
+    } catch {
+      return null;
+    }
+  }
+
   // =====================================================================
   // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
   // =====================================================================
@@ -1200,6 +1221,96 @@ export class EVMChainAdapter implements ChainAdapter {
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
+    };
+  }
+
+  private async parseV10PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Promise<OnChainPublishResult | null> {
+    const kcs = this.contracts.knowledgeCollectionStorage;
+    if (!kcs) return null;
+
+    let kcId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = '';
+    let foundKCCreated = false;
+    let foundKAMinted = false;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'KnowledgeCollectionCreated') {
+          kcId = BigInt(parsed.args.id);
+          foundKCCreated = true;
+        }
+        if (parsed?.name === 'KnowledgeAssetsMinted') {
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId) - 1n;
+          publisherAddress = parsed.args.to;
+          foundKAMinted = true;
+        }
+      } catch {
+        // ignore unrelated logs
+      }
+    }
+
+    if (!foundKCCreated || !foundKAMinted) return null;
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId: kcId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
+    };
+  }
+
+  private async parseV9PublishReceipt(
+    receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
+  ): Promise<OnChainPublishResult | null> {
+    const storage = this.contracts.knowledgeAssetsStorage;
+    if (!storage) return null;
+
+    let batchId = 0n;
+    let startKAId = 0n;
+    let endKAId = 0n;
+    let publisherAddress = '';
+    let foundBatchCreated = false;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (parsed?.name === 'UALRangeReserved') {
+          publisherAddress = parsed.args.publisher;
+          startKAId = BigInt(parsed.args.startId);
+          endKAId = BigInt(parsed.args.endId);
+        }
+        if (parsed?.name === 'KnowledgeBatchCreated') {
+          batchId = BigInt(parsed.args.batchId);
+          foundBatchCreated = true;
+        }
+      } catch {
+        // ignore unrelated logs
+      }
+    }
+
+    if (!foundBatchCreated) return null;
+
+    const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+
+    return {
+      batchId,
+      startKAId,
+      endKAId,
+      txHash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      blockTimestamp,
+      publisherAddress,
     };
   }
 

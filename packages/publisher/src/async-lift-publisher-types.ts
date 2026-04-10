@@ -39,6 +39,7 @@ export type AsyncLiftPublisherRecoveryResolver = (
 export interface AsyncLiftPublisherConfig {
   graphUri?: string;
   maxRetries?: number;
+  recoveryLookupTimeoutMs?: number;
   now?: () => number;
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;

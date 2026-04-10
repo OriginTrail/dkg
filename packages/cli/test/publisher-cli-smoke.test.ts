@@ -131,7 +131,23 @@ describe.sequential('publisher CLI smoke', () => {
     expect(job.stdout).toContain('"status":');
     expect(job.stdout).toContain('jobSlug');
 
-    const payload = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId, '--payload'], { env });
+    let payload: Awaited<ReturnType<typeof execFileAsync>> | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        payload = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId, '--payload'], { env });
+        break;
+      } catch (error: any) {
+        const stderr = String(error?.stderr ?? '');
+        if (!stderr.includes('No shared-memory roots found')) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    expect(payload).toBeDefined();
+    if (!payload) {
+      throw new Error('publisher job --payload did not become available in time');
+    }
     expect(payload.stdout).toContain('"status": "accepted"');
     expect(payload.stdout).toContain('publishOptions');
     expect(payload.stdout).toContain('music-social');

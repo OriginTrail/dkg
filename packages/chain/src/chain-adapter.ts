@@ -256,6 +256,12 @@ export interface ChainAdapter {
   publishKnowledgeAssets(params: PublishParams): Promise<OnChainPublishResult>;
 
   /**
+   * Recover a publish transaction by txHash and reconstruct its on-chain publish result.
+   * Returns null when the tx is absent, pending, failed, or not a recognized publish tx.
+   */
+  resolvePublishByTxHash?(txHash: string): Promise<OnChainPublishResult | null>;
+
+  /**
    * Required TRAC amount for publishing (from stake-weighted ask and byte size).
    * Used so the publisher can approve and send the correct token amount.
    */

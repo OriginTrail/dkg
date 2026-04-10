@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
@@ -75,6 +75,18 @@ describe('publisher wallets', () => {
 
     const stats = await import('node:fs/promises').then((fs) => fs.stat(publisherWalletsPath(dataDir)));
     expect(stats.mode & 0o777).toBe(0o600);
+  });
+
+  it('reaps a stale publisher wallet lock from a dead process', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-wallets-'));
+    const wallet = ethers.Wallet.createRandom();
+    const lockPath = `${publisherWalletsPath(dataDir)}.lock`;
+
+    await writeFile(lockPath, JSON.stringify({ pid: 999999, createdAt: Date.now() - 10 * 60 * 1000 }), 'utf-8');
+
+    const result = await addPublisherWallet(dataDir, wallet.privateKey);
+    expect(result.wallets).toHaveLength(1);
+    expect(result.wallets[0]?.address).toBe(wallet.address);
   });
 
   it('fails runner bootstrap when no publisher wallets are configured', async () => {
@@ -219,6 +231,31 @@ describe('publisher wallets', () => {
     expect(runtime).toBeNull();
     expect(logs.join('\n')).toContain('Publisher startup skipped');
     expect(logs.join('\n')).toContain('dkg publisher wallet add <privateKey>');
+    await store.close();
+  });
+
+  it('fails fast when a publisher wallet has no on-chain identity', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const identitySpy = vi.spyOn(EVMChainAdapter.prototype, 'getIdentityId').mockResolvedValue(0n);
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    await expect(
+      createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: {
+          rpcUrl: 'http://127.0.0.1:8545',
+          hubAddress: '0x1111111111111111111111111111111111111111',
+        },
+      }),
+    ).rejects.toThrow(`Publisher startup blocked: the following publisher wallet is missing an on-chain identity: ${wallet.address}`);
+
+    identitySpy.mockRestore();
     await store.close();
   });
 

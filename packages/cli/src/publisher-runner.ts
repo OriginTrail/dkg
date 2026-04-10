@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -19,6 +19,14 @@ export interface PublisherInspector {
   readonly stop: () => Promise<void>;
 }
 
+interface ACKTransportFactory {
+  publisherPeerId: string;
+  gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
+  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  getConnectedCorePeers: () => string[];
+  log?: (message: string) => void;
+}
+
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
   config: DkgConfig;
@@ -30,7 +38,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
     chainId?: string;
   };
   log: (message: string) => void;
-  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
+  ackTransportFactory?: () => ACKTransportFactory;
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -44,7 +52,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       chainBase: args.chainBase,
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
-      v10ACKProviderFactory: args.v10ACKProviderFactory,
+        ackTransportFactory: args.ackTransportFactory,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -71,7 +79,7 @@ interface PublisherRuntimeBaseArgs {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
-  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
+  ackTransportFactory?: () => ACKTransportFactory;
   closeStoreOnStop: boolean;
 }
 
@@ -119,6 +127,10 @@ export function createPublisherInspectorFromStore(store: TripleStore, closeStore
   };
 }
 
+export function createPublisherControlFromStore(store: TripleStore): AsyncLiftPublisher {
+  return new TripleStoreAsyncLiftPublisher(store);
+}
+
 export async function createPublisherRuntimeFromAgent(args: {
   dataDir: string;
   store: TripleStore;
@@ -130,7 +142,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
-  v10ACKProviderFactory?: (contextGraphId: string) => PublishOptions['v10ACKProvider'] | undefined;
+  ackTransportFactory?: () => ACKTransportFactory;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -139,7 +151,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     chainBase: args.chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
-    v10ACKProviderFactory: args.v10ACKProviderFactory,
+      ackTransportFactory: args.ackTransportFactory,
     closeStoreOnStop: false,
   });
 }
@@ -152,6 +164,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const publishers = new Map<string, DKGPublisher>();
+  const invalidWallets: string[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -163,6 +176,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
+    if (args.chainBase && identityId === 0n) {
+      invalidWallets.push(wallet.address);
+      continue;
+    }
     publishers.set(
       wallet.address,
       new DKGPublisher({
@@ -176,14 +193,23 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     );
   }
 
+  if (invalidWallets.length > 0) {
+    const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
+    throw new Error(
+      `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
+      'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
+    );
+  }
+
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
+    chainRecoveryResolver: createChainRecoveryResolver(publishers),
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
         throw new Error(`No publisher configured for wallet ${walletId}`);
       }
       const v10ACKProvider = publishOptions.v10ACKProvider
-        ?? args.v10ACKProviderFactory?.(publishOptions.contextGraphId);
+        ?? createV10ACKProviderForPublisher(publisher, args.ackTransportFactory?.());
       const publishOptionsWithACKs = v10ACKProvider
         ? { ...publishOptions, v10ACKProvider }
         : publishOptions;
@@ -203,7 +229,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     walletIds: publisherWallets.wallets.map((wallet) => wallet.address),
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
-    hasIncludedRecoveryResolver: false,
+    hasIncludedRecoveryResolver: true,
   });
 
   return {
@@ -216,6 +242,95 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         await args.store.close();
       }
     },
+  };
+}
+
+function createV10ACKProviderForPublisher(
+  publisher: DKGPublisher,
+  transport?: ACKTransportFactory,
+): PublishOptions['v10ACKProvider'] | undefined {
+  if (!transport) return undefined;
+  const chain = (publisher as unknown as {
+    chain?: {
+      createKnowledgeAssetsV10?: unknown;
+      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+      getMinimumRequiredSignatures?: () => Promise<number>;
+    };
+  }).chain;
+  if (!chain || typeof chain.createKnowledgeAssetsV10 !== 'function') return undefined;
+  if (typeof chain.verifyACKIdentity !== 'function') return undefined;
+
+  const collector = new ACKCollector({
+    gossipPublish: transport.gossipPublish,
+    sendP2P: transport.sendP2P,
+    getConnectedCorePeers: transport.getConnectedCorePeers,
+    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
+    log: transport.log,
+  });
+
+  return async (
+    merkleRoot,
+    contextGraphId,
+    kaCount,
+    rootEntities,
+    publicByteSize,
+    stagingQuads,
+    epochs,
+    tokenAmount,
+  ) => {
+    let cgIdBigInt: bigint;
+    try {
+      cgIdBigInt = BigInt(contextGraphId);
+    } catch {
+      cgIdBigInt = 0n;
+    }
+    const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
+      ? await chain.getMinimumRequiredSignatures()
+      : undefined;
+    const result = await collector.collect({
+      merkleRoot,
+      contextGraphId: cgIdBigInt,
+      contextGraphIdStr: contextGraphId,
+      publisherPeerId: transport.publisherPeerId,
+      publicByteSize,
+      isPrivate: false,
+      kaCount,
+      rootEntities,
+      requiredACKs,
+      stagingQuads,
+      epochs,
+      tokenAmount,
+    });
+    return result.acks;
+  };
+}
+
+function createChainRecoveryResolver(
+  publishers: Map<string, DKGPublisher>,
+): (job: LiftJobBroadcast | LiftJobIncluded) => Promise<AsyncLiftPublisherRecoveryResult | null> {
+  return async (job) => {
+    const publisher = publishers.get(job.broadcast.walletId);
+    if (!publisher) return null;
+    const chain = (publisher as unknown as { chain?: { resolvePublishByTxHash?: (txHash: string) => Promise<any> } }).chain;
+    if (!chain?.resolvePublishByTxHash) return null;
+    const result = await chain.resolvePublishByTxHash(job.broadcast.txHash);
+    if (!result) return null;
+
+    return {
+      inclusion: {
+        txHash: result.txHash as `0x${string}`,
+        blockNumber: result.blockNumber,
+        blockTimestamp: result.blockTimestamp,
+      },
+      finalization: {
+        mode: 'published',
+        txHash: result.txHash as `0x${string}`,
+        batchId: result.batchId.toString() as `${bigint}`,
+        startKAId: result.startKAId?.toString() as `${bigint}` | undefined,
+        endKAId: result.endKAId?.toString() as `${bigint}` | undefined,
+        publisherAddress: result.publisherAddress as `0x${string}`,
+      },
+    };
   };
 }
 

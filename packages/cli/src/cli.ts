@@ -1493,7 +1493,6 @@ program
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       }, {
         maxBatchBytes: useSharedMemory ? 240 * 1024 : undefined,
-        splitOversizedEntities: useSharedMemory,
         estimateBatchBytes: useSharedMemory
           ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
           : undefined,
@@ -1546,7 +1545,6 @@ sharedMemoryCmd
         },
         {
           maxBatchBytes: 240 * 1024,
-          splitOversizedEntities: true,
           estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length,
         },
       );
@@ -1716,54 +1714,45 @@ publisherCmd
   .option('--prior-version <value>', 'Prior version reference for MUTATE/REVOKE flows')
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const shareOperationId = opts.shareOperationId ?? opts.workspaceOperationId;
-        if (!shareOperationId) {
-          console.error('Provide --share-operation-id (or legacy --workspace-operation-id).');
-          process.exit(1);
-        }
-        const roots = (opts.root as string[] | undefined)?.map((v) => v.trim()).filter(Boolean) ?? [];
-        if (roots.length === 0) {
-          console.error('Provide at least one --root.');
-          process.exit(1);
-        }
-        const transitionType = String(opts.transitionType ?? 'CREATE').toUpperCase();
-        if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
-          console.error('Invalid --transition-type. Use CREATE, MUTATE, or REVOKE.');
-          process.exit(1);
-        }
-        const authorityType = String(opts.authorityType ?? 'owner');
-        if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
-          console.error('Invalid --authority-type. Use owner, multisig, quorum, or capability.');
-          process.exit(1);
-        }
-
-        const jobId = await inspector.publisher.lift({
-          swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
-          shareOperationId,
-          roots,
-          contextGraphId: contextGraph,
-          namespace: String(opts.namespace),
-          scope: String(opts.scope),
-          transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
-          authority: {
-            type: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
-            proofRef: String(opts.authorityProofRef),
-          },
-          priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
-        });
-
-        console.log('Async publisher job enqueued:');
-        console.log(`  Job ID:     ${jobId}`);
-        console.log(`  Context:    ${contextGraph}`);
-        console.log(`  Share op:   ${shareOperationId}`);
-        console.log(`  Roots:      ${roots.length}`);
-      } finally {
-        await inspector.stop();
+      const shareOperationId = opts.shareOperationId ?? opts.workspaceOperationId;
+      if (!shareOperationId) {
+        console.error('Provide --share-operation-id (or legacy --workspace-operation-id).');
+        process.exit(1);
       }
+      const roots = (opts.root as string[] | undefined)?.map((v) => v.trim()).filter(Boolean) ?? [];
+      if (roots.length === 0) {
+        console.error('Provide at least one --root.');
+        process.exit(1);
+      }
+      const transitionType = String(opts.transitionType ?? 'CREATE').toUpperCase();
+      if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
+        console.error('Invalid --transition-type. Use CREATE, MUTATE, or REVOKE.');
+        process.exit(1);
+      }
+      const authorityType = String(opts.authorityType ?? 'owner');
+      if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
+        console.error('Invalid --authority-type. Use owner, multisig, quorum, or capability.');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.publisherEnqueue({
+        swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
+        shareOperationId,
+        roots,
+        contextGraphId: contextGraph,
+        namespace: String(opts.namespace),
+        scope: String(opts.scope),
+        transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
+        authorityType: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
+        authorityProofRef: String(opts.authorityProofRef),
+        priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
+      });
+
+      console.log('Async publisher job enqueued:');
+      console.log(`  Job ID:     ${result.jobId}`);
+      console.log(`  Context:    ${contextGraph}`);
+      console.log(`  Share op:   ${shareOperationId}`);
+      console.log(`  Roots:      ${roots.length}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1776,20 +1765,14 @@ publisherCmd
   .option('--status <value>', 'Filter by status')
   .action(async (opts: ActionOpts) => {
     try {
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const status = opts.status ? String(opts.status) : undefined;
-        if (status && !['accepted', 'claimed', 'validated', 'broadcast', 'included', 'finalized', 'failed'].includes(status)) {
-          console.error(`Invalid publisher job status: ${status}`);
-          process.exit(1);
-        }
-        const jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
-        console.log(JSON.stringify(jobs, null, 2));
-      } finally {
-        await inspector.stop();
+      const status = opts.status ? String(opts.status) : undefined;
+      if (status && !['accepted', 'claimed', 'validated', 'broadcast', 'included', 'finalized', 'failed'].includes(status)) {
+        console.error(`Invalid publisher job status: ${status}`);
+        process.exit(1);
       }
+      const client = await ApiClient.connect();
+      const { jobs } = await client.publisherJobs(status);
+      console.log(JSON.stringify(jobs.map(formatPublisherJobOutput), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1802,24 +1785,14 @@ publisherCmd
   .option('--payload', 'Include prepared payload details')
   .action(async (jobId: string, opts: ActionOpts) => {
     try {
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const job = await inspector.publisher.getStatus(jobId);
-        if (!job) {
-          console.error(`Publisher job not found: ${jobId}`);
-          process.exit(1);
-        }
-        if (opts.payload) {
-          const payload = await inspector.publisher.inspectPreparedPayload(jobId);
-          console.log(JSON.stringify({ ...job, payload }, null, 2));
-          return;
-        }
-        console.log(JSON.stringify(job, null, 2));
-      } finally {
-        await inspector.stop();
+      const client = await ApiClient.connect();
+      if (opts.payload) {
+        const { job, payload } = await client.publisherJobPayload(jobId);
+        console.log(JSON.stringify(formatPublisherJobOutput({ ...job, payload }), null, 2));
+        return;
       }
+      const { job } = await client.publisherJob(jobId);
+      console.log(JSON.stringify(formatPublisherJobOutput(job), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1831,15 +1804,9 @@ publisherCmd
   .description('Show async publisher job counts by status')
   .action(async () => {
     try {
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const stats = await inspector.publisher.getStats();
-        console.log(JSON.stringify(stats, null, 2));
-      } finally {
-        await inspector.stop();
-      }
+      const client = await ApiClient.connect();
+      const { stats } = await client.publisherStats();
+      console.log(JSON.stringify(stats, null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1851,15 +1818,9 @@ publisherCmd
   .description('Cancel an async publisher job')
   .action(async (jobId: string) => {
     try {
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        await inspector.publisher.cancel(jobId);
-        console.log(`Cancelled publisher job: ${jobId}`);
-      } finally {
-        await inspector.stop();
-      }
+      const client = await ApiClient.connect();
+      await client.publisherCancel(jobId);
+      console.log(`Cancelled publisher job: ${jobId}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1877,15 +1838,9 @@ publisherCmd
         console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
         process.exit(1);
       }
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const count = await inspector.publisher.retry({ status: 'failed' });
-        console.log(`Retried ${count} publisher job(s).`);
-      } finally {
-        await inspector.stop();
-      }
+      const client = await ApiClient.connect();
+      const { retried } = await client.publisherRetry('failed');
+      console.log(`Retried ${retried} publisher job(s).`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1901,15 +1856,9 @@ publisherCmd
         console.error(`Invalid clear status: ${status}. Use "finalized" or "failed".`);
         process.exit(1);
       }
-      const config = await loadConfig();
-      const { createPublisherInspector } = await import('./publisher-runner.js');
-      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-      try {
-        const count = await inspector.publisher.clear(status);
-        console.log(`Cleared ${count} publisher job(s) with status ${status}.`);
-      } finally {
-        await inspector.stop();
-      }
+      const client = await ApiClient.connect();
+      const { cleared } = await client.publisherClear(status);
+      console.log(`Cleared ${cleared} publisher job(s) with status ${status}.`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -2152,6 +2101,27 @@ async function publishEntityBatches(
     sent += batch.length;
     onProgress?.(sent);
   }
+}
+
+function formatPublisherJobOutput<T>(value: T): T {
+  return formatPublisherJobValue(value) as T;
+}
+
+function formatPublisherJobValue(value: unknown, key?: string): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => formatPublisherJobValue(item));
+  }
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      result[entryKey] = formatPublisherJobValue(entryValue, entryKey);
+    }
+    return result;
+  }
+  if (typeof value === 'number' && key && /At$/.test(key)) {
+    return new Date(value).toISOString();
+  }
+  return value;
 }
 
 function stripQuotes(s: string): string {

@@ -58,10 +58,12 @@ import {
 
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
   private readonly maxRetries: number;
+  private readonly recoveryLookupTimeoutMs: number;
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
@@ -79,6 +81,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
     this.maxRetries = config.maxRetries ?? 3;
+    this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
@@ -362,6 +365,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           recovered += 1;
           continue;
         }
+        if (this.hasInconclusiveRecoveryTimedOut(job)) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.failInconclusiveRecovery(job));
+          recovered += 1;
+        }
+        continue;
       }
 
       if (job.status === 'broadcast') {
@@ -809,6 +818,27 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         updatedAt: now,
       },
     } as LiftJob;
+  }
+
+  private hasInconclusiveRecoveryTimedOut(job: LiftJobBroadcast | LiftJobIncluded): boolean {
+    const startedAt = job.timestamps.includedAt ?? job.timestamps.broadcastAt ?? job.timestamps.updatedAt;
+    return this.now() - startedAt >= this.recoveryLookupTimeoutMs;
+  }
+
+  private failInconclusiveRecovery(job: LiftJobBroadcast | LiftJobIncluded): LiftJob {
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: job.status,
+      code: 'recovery_lookup_timeout',
+      message: `Chain recovery remained inconclusive for ${this.recoveryLookupTimeoutMs}ms after ${job.status}`,
+      errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:recovery-timeout`,
+      timeout: {
+        timeoutMs: this.recoveryLookupTimeoutMs,
+        timeoutAt: this.now(),
+        handling: 'retry_recovery',
+      },
+    });
+
+    return this.mergeJob(job, 'failed', { failure: failure as any });
   }
 
   private async finalizeNoopPublish(jobId: string): Promise<LiftJob> {

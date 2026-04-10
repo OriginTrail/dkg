@@ -183,6 +183,24 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async resolvePublishByTxHash(txHash: string): Promise<OnChainPublishResult | null> {
+    const created = this.events.find((event) =>
+      (event.type === 'KCCreated' || event.type === 'KnowledgeBatchCreated') && event.data.txHash === txHash,
+    );
+    if (!created) return null;
+
+    return {
+      batchId: BigInt(String(created.data.kcId ?? created.data.batchId ?? '0')),
+      startKAId: created.data.startKAId != null ? BigInt(String(created.data.startKAId)) : undefined,
+      endKAId: created.data.endKAId != null ? BigInt(String(created.data.endKAId)) : undefined,
+      txHash,
+      blockNumber: created.blockNumber,
+      blockTimestamp: Math.floor(Date.now() / 1000),
+      publisherAddress: String(created.data.publisherAddress ?? this.signerAddress),
+      tokenAmount: created.data.tokenAmount != null ? BigInt(String(created.data.tokenAmount)) : undefined,
+    };
+  }
+
   async getRequiredPublishTokenAmount(_publicByteSize: bigint, _epochs: number): Promise<bigint> {
     return 1n;
   }
