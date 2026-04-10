@@ -3693,8 +3693,13 @@ export class DKGAgent {
           const topic = paranetWorkspaceTopic(contextGraphId);
           try {
             await agent.gossip.publish(topic, gossipMessage);
-          } catch {
-            agent.log.warn(createOperationContext('share'), `No peers subscribed to ${topic} yet`);
+          } catch (err: any) {
+            const msg = String(err?.message ?? err);
+            if (msg.includes('no peer') || msg.includes('PublishError') || msg.includes('NoPeersSubscribed')) {
+              agent.log.warn(createOperationContext('share'), `No peers subscribed to ${topic} yet`);
+            } else {
+              throw err;
+            }
           }
         }
         return { promotedCount };
