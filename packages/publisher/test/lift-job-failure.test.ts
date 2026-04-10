@@ -153,7 +153,7 @@ describe('LiftJob failure classification', () => {
         },
       }),
     ).toThrow(
-      'Invalid LiftJob failure state for code validation_timeout: included. Allowed: validated',
+      'Invalid LiftJob failure state for code validation_timeout: included. Allowed: claimed, validated',
     );
   });
 });

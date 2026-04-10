@@ -230,6 +230,12 @@ workspace, skip gossip, and submit directly to chain. The happy path is
 strictly linear, and every non-terminal state may transition to `failed` if
 its step cannot complete.
 
+The async lift publisher persists this flow as **internal control-plane state**
+in TripleStore graphs that are separate from workspace graphs and separate from
+published KC/KA graphs. These graphs are operational bookkeeping for claiming,
+timeouts, retries, and recovery. They are not shared workspace state and are
+not authoritative published data.
+
 ### LiftJob states
 
 | State | Meaning |
@@ -241,6 +247,75 @@ its step cannot complete.
 | `included` | The transaction is included in a block but is not final yet. |
 | `finalized` | Chain finality is reached and the published canonical state is authoritative. |
 | `failed` | Processing stopped due to an error, and full failure details are persisted. |
+
+### Control-plane graph layout
+
+| Graph | URI | Stores | Notes |
+|---|---|---|---|
+| Jobs graph | `urn:dkg:publisher:control-plane` | `LiftJob` and `LiftRequest` resources plus job-native progress metadata | Internal queue and recovery state only. Not workspace/shared state. |
+| Wallet-lock graph | `urn:dkg:publisher:wallet-locks` | `WalletLock` resources keyed by publisher wallet | Internal lease/claim state only. Not authoritative business data. |
+
+`LiftJob` and `LiftRequest` are persisted as separate resources linked from the
+job record:
+
+- `urn:dkg:publisher:lift-job:{jobId}`
+- `urn:dkg:publisher:lift-request:{jobId}`
+
+The jobs graph keeps the opaque `jobId`, readable `jobSlug`, current `status`,
+immutable request payload, timestamps, retry counters, claim metadata,
+validation metadata, broadcast/inclusion/finalization metadata, failure
+details, timeout markers, and recovery metadata.
+
+The wallet-lock graph keeps only operational active lock state: wallet id,
+locked job reference, claim token, acquired time, lease expiry, heartbeat
+time, and lock status while the lease is live.
+
+### `jobId` vs `jobSlug`
+
+- `jobId` is opaque and is the stable primary key for control-plane records.
+- `jobSlug` is readable and derived from request fields for logs, operators, and
+  dashboards.
+
+Current slug format:
+
+```text
+{paranet}/{scope}/{transition}/{workspaceOperationId}/{root-range}
+```
+
+Derivation rules:
+
+- `paranetId`, `scope`, and `workspaceOperationId` are lowercased and slugged
+- `transitionType` is lowercased (`CREATE` -> `create`)
+- `root-range` is derived from sorted root tails
+  - one root: `rihana`
+  - two roots: `manson-rihana`
+  - many roots: `{first}-{last}-plus-{n}`
+
+Example:
+
+```text
+music-social/person-profile/create/op-9/manson-rihana
+```
+
+### Failure taxonomy persisted on the job
+
+Failures are normalized into four phases:
+
+| Phase | Example codes | Typical persisted action |
+|---|---|---|
+| `validation` | `workspace_unavailable`, `authority_forbidden`, `validation_timeout` | reset to `accepted` or fail terminally |
+| `broadcast` | `wallet_unavailable`, `tx_submit_timeout`, `tx_reverted` | reset, chain-check, or fail |
+| `confirmation` | `inclusion_timeout`, `finality_timeout`, `chain_reorg` | chain-check then finalize-or-reset, or fail |
+| `recovery` | `recovery_lookup_timeout`, `recovery_chain_unavailable`, `recovery_state_inconsistent` | retry recovery or fail |
+
+Each failed job persists job-native metadata such as:
+
+- `failure.code`, `failure.phase`, `failure.mode`
+- `failure.retryable`, `failure.resolution`
+- `failure.message`, payload/reference pointers
+- timeout markers: `timeoutMs`, `timeoutAt`, `timeoutHandling`
+- retry metadata: `retryCount`, `maxRetries`, `lastRetryReason`, retry timestamps
+- recovery metadata: `recovery.action`, `recoveredFromStatus`, optional `txHashChecked`
 
 ### Allowed transitions
 
@@ -331,6 +406,53 @@ Recovery rules from the spec:
 - Mark `finalized` when the transaction already succeeded on-chain
 - Reset non-final interrupted jobs to `accepted` for retry
 - Release stale wallet locks during recovery so workers can resume cleanly
+
+### Wallet locks and claiming
+
+Wallet locks are stored in the dedicated wallet-lock graph because they are
+ephemeral operational state, not part of the shared lift request/job payload.
+
+```mermaid
+sequenceDiagram
+    participant Worker as Lift Worker
+    participant Jobs as Jobs Graph
+    participant Locks as Wallet-Lock Graph
+    participant Recovery as Startup Recovery
+
+    Worker->>Jobs: claimNext()
+    Worker->>Locks: acquire wallet lock for claimed job
+    Locks-->>Worker: lock acquired with leaseExpiry + claimToken
+
+    loop while job.state in claimed/validated/broadcast/included
+        Worker->>Locks: renew lease heartbeat
+        Locks-->>Worker: leaseExpiry extended
+    end
+
+    alt job reaches finalized/failed or resets to accepted
+        Worker->>Locks: delete active lock
+        Locks-->>Worker: lock removed
+    end
+
+    Recovery->>Locks: scan active locks
+    alt lock expired or lock job is terminal/missing
+        Recovery->>Locks: sweep stale/orphaned lock
+        Locks-->>Recovery: lock deleted
+    end
+```
+
+- A lock is acquired when a worker claims a job for a wallet.
+- The lock lease is renewed while the job remains active (`claimed`,
+  `validated`, `broadcast`, `included`).
+- Locks are released on terminal paths (`finalized`, `failed`) and when jobs are
+  reset back to `accepted`.
+- Recovery sweeps expired locks and orphaned locks whose jobs are already
+  terminal or missing.
+- A wallet with an unexpired active lock cannot claim another job.
+
+Operational caveat:
+
+- Lock records prevent duplicate in-process wallet use on the local node, but
+  they do not define authoritative workspace ownership or published graph state.
 
 ## How tentative → committed is reflected in the graph
 
