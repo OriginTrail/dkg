@@ -2658,12 +2658,17 @@ async function handleRequest(
   // ─── Publisher queue API ──────────────────────────────────────────
   // POST /api/publisher/enqueue  { request: LiftRequest }
   if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    let body: any;
     try {
-      const body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
-      const request = body?.request;
-      if (!request || typeof request !== 'object') {
-        return jsonResponse(res, 400, { error: 'Missing request object' });
-      }
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const request = body?.request;
+    if (!request || typeof request !== 'object') {
+      return jsonResponse(res, 400, { error: 'Missing request object' });
+    }
+    try {
       const jobId = await publisherInspector.publisher.lift(request);
       return jsonResponse(res, 200, { jobId });
     } catch (err: any) {
@@ -2710,6 +2715,66 @@ async function handleRequest(
     try {
       const stats = await publisherInspector.publisher.getStats();
       return jsonResponse(res, 200, stats);
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/cancel  { jobId: string }
+  if (req.method === 'POST' && path === '/api/publisher/cancel') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const jobId = body?.jobId;
+    if (!jobId || typeof jobId !== 'string') {
+      return jsonResponse(res, 400, { error: 'Missing jobId string' });
+    }
+    try {
+      await publisherInspector.publisher.cancel(jobId);
+      return jsonResponse(res, 200, { cancelled: jobId });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/retry  { status?: string }
+  if (req.method === 'POST' && path === '/api/publisher/retry') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const status = body?.status ?? 'failed';
+    if (status !== 'failed') {
+      return jsonResponse(res, 400, { error: `Invalid retry status: ${status}. Only "failed" is supported.` });
+    }
+    try {
+      const count = await publisherInspector.publisher.retry({ status: 'failed' });
+      return jsonResponse(res, 200, { retried: count });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/clear  { status: string }
+  if (req.method === 'POST' && path === '/api/publisher/clear') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const status = body?.status;
+    if (status !== 'finalized' && status !== 'failed') {
+      return jsonResponse(res, 400, { error: `Invalid clear status: ${status}. Use "finalized" or "failed".` });
+    }
+    try {
+      const count = await publisherInspector.publisher.clear(status);
+      return jsonResponse(res, 200, { cleared: count });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
     }

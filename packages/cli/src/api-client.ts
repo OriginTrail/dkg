@@ -443,6 +443,18 @@ export class ApiClient {
     return this.get('/api/publisher/stats');
   }
 
+  async publisherCancel(jobId: string): Promise<{ cancelled: string }> {
+    return this.post('/api/publisher/cancel', { jobId });
+  }
+
+  async publisherRetry(status = 'failed'): Promise<{ retried: number }> {
+    return this.post('/api/publisher/retry', { status });
+  }
+
+  async publisherClear(status: string): Promise<{ cleared: number }> {
+    return this.post('/api/publisher/clear', { status });
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});
