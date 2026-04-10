@@ -47,6 +47,7 @@ export {
 export {
   type Quad as ExtractionQuad,
   type ExtractionInput,
+  type ConverterOutput,
   type ExtractionOutput,
   type ExtractionPipeline,
   ExtractionPipelineRegistry,

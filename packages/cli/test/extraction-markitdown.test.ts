@@ -60,7 +60,7 @@ describe('MarkItDownConverter', () => {
     expect(converter.contentTypes.length).toBeGreaterThanOrEqual(6);
   });
 
-  it('extract returns mdIntermediate with empty triples (phase 1 only)', async () => {
+  it('extract returns ConverterOutput with mdIntermediate only (phase 1)', async () => {
     const converter = new MarkItDownConverter();
 
     // If markitdown is not available, the extract call should throw
@@ -89,9 +89,9 @@ describe('MarkItDownConverter', () => {
 
       expect(typeof result.mdIntermediate).toBe('string');
       expect(result.mdIntermediate.length).toBeGreaterThan(0);
-      // Phase 1 only — triples are produced by the Markdown extraction pipeline
-      expect(result.triples).toEqual([]);
-      expect(result.provenance).toEqual([]);
+      // Phase 1 only — converter returns ConverterOutput, no triples/provenance.
+      expect((result as { triples?: unknown }).triples).toBeUndefined();
+      expect((result as { provenance?: unknown }).provenance).toBeUndefined();
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
