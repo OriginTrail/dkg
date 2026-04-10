@@ -3,6 +3,8 @@
   "networkId": "f81f9df2e9604fcaa0aaeb34d07171434199d2bc70d9f35680614453300d9b9d",
   "genesisVersion": 1,
   "relays": [
+    "/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
+    "/ip4/157.180.37.169/tcp/9090/p2p/12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw",
     "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
     "/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ"
   ],

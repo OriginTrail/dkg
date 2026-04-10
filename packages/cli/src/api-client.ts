@@ -97,7 +97,14 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId: contextGraphId, quads, privateQuads, ...options });
+    if (privateQuads?.length || options?.accessPolicy || options?.allowedPeers?.length) {
+      throw new Error(
+        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 SWM-first publish flow. ' +
+        'Use sharedMemoryWrite() + publishFromSharedMemory() directly.',
+      );
+    }
+    await this.sharedMemoryWrite(contextGraphId, quads);
+    return this.publishFromSharedMemory(contextGraphId, 'all', true);
   }
 
   /** Write quads to shared memory (formerly workspace). */

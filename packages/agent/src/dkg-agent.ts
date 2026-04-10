@@ -1411,14 +1411,16 @@ export class DKGAgent {
     contextGraphId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext },
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string },
   ): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
-    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}`);
+    const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
+    this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}${sgLabel}`);
     const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       conditions,
+      subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
       const topic = paranetWorkspaceTopic(contextGraphId);
@@ -1965,12 +1967,16 @@ export class DKGAgent {
    * Registers it in the CG's `_meta` graph and creates the named graph in storage.
    * Sub-graphs use convention-based URI partitioning — no on-chain enforcement in V10.0.
    *
-   * V10.0 limitations:
-   * - Registration triples are stored locally only. Peers discover sub-graphs when
-   *   they receive data via GossipSub or by querying the admin's node.
-   * - GossipSub broadcasts raw triples without sub-graph context; receivers store
-   *   replicated data in the root data graph. The CG admin manages sub-graph
-   *   organization on their own node.
+   * V10.0 replication behavior:
+   * - Registration triples are stored locally by the admin. Peers also auto-register
+   *   sub-graphs on gossip publish, SWM write, and finalization replay paths:
+   *   `gossip-publish-handler.ts`, `workspace-handler.ts`, and
+   *   `finalization-handler.ts` call `ensureSubGraph()` and backfill the full
+   *   `_meta` registration when it is missing.
+   * - Because `subGraphName` is carried on the wire (in the workspace publish request
+   *   and the N-Quads' named-graph field), replicated data is routed into the correct
+   *   sub-graph named graph on receiving nodes — not into the root data graph.
+   * - On-chain contracts are unaware of sub-graphs; enforcement remains convention-based.
    */
   async createSubGraph(contextGraphId: string, subGraphName: string, opts?: {
     description?: string;
@@ -2033,10 +2039,10 @@ export class DKGAgent {
     if (result.type !== 'bindings') return [];
     return result.bindings.map(row => ({
       uri: row['subGraph'] ?? '',
-      name: (row['name'] ?? '').replace(/^"|"$/g, ''),
+      name: stripLiteral(row['name'] ?? ''),
       createdBy: row['createdBy'] ?? '',
-      createdAt: row['createdAt']?.replace(/^"|".*$/g, '') || undefined,
-      description: row['description']?.replace(/^"|"$/g, '') || undefined,
+      createdAt: row['createdAt'] ? stripLiteral(row['createdAt']) : undefined,
+      description: row['description'] ? stripLiteral(row['description']) : undefined,
     }));
   }
 
@@ -3683,7 +3689,19 @@ export class DKGAgent {
         return agent.publisher.assertionQuery(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
-        return agent.publisher.assertionPromote(contextGraphId, name, agentAddress, opts);
+        const { promotedCount, gossipMessage } = await agent.publisher.assertionPromote(
+          contextGraphId, name, agentAddress,
+          { ...opts, publisherPeerId: agent.node.peerId.toString() },
+        );
+        if (gossipMessage) {
+          const topic = paranetWorkspaceTopic(contextGraphId);
+          try {
+            await agent.gossip.publish(topic, gossipMessage);
+          } catch (err: any) {
+            agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
+          }
+        }
+        return { promotedCount };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);

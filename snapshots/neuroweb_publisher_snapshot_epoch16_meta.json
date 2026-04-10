@@ -1,0 +1,12 @@
+{
+  "neuroweb": {
+    "blockchainId": "neuroweb:2043",
+    "blockNumber": 13653653,
+    "blockDate": "2026-04-09T13:01:00.000Z",
+    "currentEpoch": 16,
+    "lastKnowledgeCollectionId": 6320378,
+    "totalKCsWithFutureEpochs": 3076753,
+    "maxFutureEpoch": 73,
+    "epochsCapped": 24
+  }
+}

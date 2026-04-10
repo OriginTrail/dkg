@@ -287,50 +287,47 @@ describe('DkgDaemonClient', () => {
   // Publish
   // ---------------------------------------------------------------------------
 
-  it('publish should POST to /api/publish', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }),
-    );
+  it('publish should write to SWM then publish from SWM', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }));
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"value"' }];
     const result = await client.publish('testing', quads);
     expect(result.kcId).toBe('kc-1');
 
-    const [url, opts] = fetchSpy.mock.calls[0];
-    expect(url).toBe('http://localhost:9200/api/publish');
-    expect(opts?.method).toBe('POST');
-    const body = JSON.parse(opts?.body as string);
-    expect(body.contextGraphId).toBe('testing');
-    expect(body.quads).toHaveLength(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const [writeUrl, writeOpts] = fetchSpy.mock.calls[0];
+    expect(writeUrl).toBe('http://localhost:9200/api/shared-memory/write');
+    expect(writeOpts?.method).toBe('POST');
+    const writeBody = JSON.parse(writeOpts?.body as string);
+    expect(writeBody.paranetId).toBe('testing');
+    expect(writeBody.quads).toHaveLength(1);
+
+    const [pubUrl, pubOpts] = fetchSpy.mock.calls[1];
+    expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
+    expect(pubOpts?.method).toBe('POST');
+    const pubBody = JSON.parse(pubOpts?.body as string);
+    expect(pubBody.paranetId).toBe('testing');
+    expect(pubBody.selection).toBe('all');
   });
 
-  it('publish should pass privateQuads', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-2' }), { status: 200 }),
-    );
-
+  it('publish should reject privateQuads', async () => {
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"public"' }];
     const privateQuads = [{ subject: 'urn:a', predicate: 'urn:c', object: '"secret"' }];
-    await client.publish('testing', quads, privateQuads);
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.privateQuads).toHaveLength(1);
+    await expect(client.publish('testing', quads, privateQuads)).rejects.toThrow(
+      /not supported in V10/,
+    );
   });
 
-  it('publish should pass accessPolicy and allowedPeers', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ kcId: 'kc-3' }), { status: 200 }),
-    );
-
+  it('publish should reject accessPolicy and allowedPeers', async () => {
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"val"' }];
-    await client.publish('testing', quads, undefined, {
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3peer1', '12D3peer2'],
-    });
-
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.accessPolicy).toBe('allowList');
-    expect(body.allowedPeers).toEqual(['12D3peer1', '12D3peer2']);
+    await expect(
+      client.publish('testing', quads, undefined, {
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3peer1', '12D3peer2'],
+      }),
+    ).rejects.toThrow(/not supported in V10/);
   });
 
   // ---------------------------------------------------------------------------

@@ -21,6 +21,16 @@ import {
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveMsOption } from './publisher-runner.js';
+
+function isDaemonUnreachable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('Daemon is not running') || msg.includes('Cannot read API port')) return true;
+  const code = (err as any)?.cause?.code ?? (err as any)?.code;
+  if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
+  if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
+  if (/HTTP (404|405|501)/.test(msg)) return true;
+  return false;
+}
 import { batchEntityQuads } from './batching.js';
 import {
   runDaemon,
@@ -1734,8 +1744,8 @@ publisherCmd
         console.error('Invalid --authority-type. Use owner, multisig, quorum, or capability.');
         process.exit(1);
       }
-      const client = await ApiClient.connect();
-      const result = await client.publisherEnqueue({
+
+      const enqueueFields = {
         swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
         shareOperationId,
         roots,
@@ -1746,10 +1756,30 @@ publisherCmd
         authorityType: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
         authorityProofRef: String(opts.authorityProofRef),
         priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
-      });
+      };
+
+      let jobId: string;
+      try {
+        const client = await ApiClient.connect();
+        const result = await client.publisherEnqueue(enqueueFields);
+        jobId = result.jobId;
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          jobId = await inspector.publisher.lift({
+            ...enqueueFields,
+            authority: { type: enqueueFields.authorityType, proofRef: enqueueFields.authorityProofRef },
+          } as any);
+        } finally {
+          await inspector.stop();
+        }
+      }
 
       console.log('Async publisher job enqueued:');
-      console.log(`  Job ID:     ${result.jobId}`);
+      console.log(`  Job ID:     ${jobId}`);
       console.log(`  Context:    ${contextGraph}`);
       console.log(`  Share op:   ${shareOperationId}`);
       console.log(`  Roots:      ${roots.length}`);
@@ -1770,8 +1800,23 @@ publisherCmd
         console.error(`Invalid publisher job status: ${status}`);
         process.exit(1);
       }
-      const client = await ApiClient.connect();
-      const { jobs } = await client.publisherJobs(status);
+
+      let jobs: any[];
+      try {
+        const client = await ApiClient.connect();
+        const result = await client.publisherJobs(status);
+        jobs = result.jobs;
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
+        } finally {
+          await inspector.stop();
+        }
+      }
       console.log(JSON.stringify(jobs.map(formatPublisherJobOutput), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1785,14 +1830,40 @@ publisherCmd
   .option('--payload', 'Include prepared payload details')
   .action(async (jobId: string, opts: ActionOpts) => {
     try {
-      const client = await ApiClient.connect();
-      if (opts.payload) {
-        const { job, payload } = await client.publisherJobPayload(jobId);
-        console.log(JSON.stringify(formatPublisherJobOutput({ ...job, payload }), null, 2));
-        return;
+      let result: any;
+      try {
+        const client = await ApiClient.connect();
+        if (opts.payload) {
+          result = await client.publisherJobPayload(jobId);
+        } else {
+          result = await client.publisherJob(jobId);
+        }
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          const job = await inspector.publisher.getStatus(jobId);
+          if (!job) {
+            console.error(`Publisher job not found: ${jobId}`);
+            process.exit(1);
+          }
+          if (opts.payload) {
+            const payload = await inspector.publisher.inspectPreparedPayload(jobId);
+            result = { ...job, payload };
+          } else {
+            result = job;
+          }
+        } finally {
+          await inspector.stop();
+        }
       }
-      const { job } = await client.publisherJob(jobId);
-      console.log(JSON.stringify(formatPublisherJobOutput(job), null, 2));
+      if (!result) {
+        console.error(`Publisher job not found: ${jobId}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(formatPublisherJobOutput(result), null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1804,8 +1875,22 @@ publisherCmd
   .description('Show async publisher job counts by status')
   .action(async () => {
     try {
-      const client = await ApiClient.connect();
-      const { stats } = await client.publisherStats();
+      let stats: Record<string, number>;
+      try {
+        const client = await ApiClient.connect();
+        const result = await client.publisherStats();
+        stats = result.stats;
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          stats = await inspector.publisher.getStats();
+        } finally {
+          await inspector.stop();
+        }
+      }
       console.log(JSON.stringify(stats, null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1818,8 +1903,20 @@ publisherCmd
   .description('Cancel an async publisher job')
   .action(async (jobId: string) => {
     try {
-      const client = await ApiClient.connect();
-      await client.publisherCancel(jobId);
+      try {
+        const client = await ApiClient.connect();
+        await client.publisherCancel(jobId);
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          await inspector.publisher.cancel(jobId);
+        } finally {
+          await inspector.stop();
+        }
+      }
       console.log(`Cancelled publisher job: ${jobId}`);
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -1838,9 +1935,23 @@ publisherCmd
         console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
         process.exit(1);
       }
-      const client = await ApiClient.connect();
-      const { retried } = await client.publisherRetry('failed');
-      console.log(`Retried ${retried} publisher job(s).`);
+      let count: number;
+      try {
+        const client = await ApiClient.connect();
+        const result = await client.publisherRetry(status);
+        count = result.retried;
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          count = await inspector.publisher.retry({ status: 'failed' });
+        } finally {
+          await inspector.stop();
+        }
+      }
+      console.log(`Retried ${count} publisher job(s).`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1856,9 +1967,23 @@ publisherCmd
         console.error(`Invalid clear status: ${status}. Use "finalized" or "failed".`);
         process.exit(1);
       }
-      const client = await ApiClient.connect();
-      const { cleared } = await client.publisherClear(status);
-      console.log(`Cleared ${cleared} publisher job(s) with status ${status}.`);
+      let count: number;
+      try {
+        const client = await ApiClient.connect();
+        const result = await client.publisherClear(status);
+        count = result.cleared;
+      } catch (err) {
+        if (!isDaemonUnreachable(err)) throw err;
+        const config = await loadConfig();
+        const { createPublisherInspector } = await import('./publisher-runner.js');
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        try {
+          count = await inspector.publisher.clear(status);
+        } finally {
+          await inspector.stop();
+        }
+      }
+      console.log(`Cleared ${count} publisher job(s) with status ${status}.`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
