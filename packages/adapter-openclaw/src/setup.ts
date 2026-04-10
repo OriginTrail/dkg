@@ -278,10 +278,11 @@ export function writeDkgConfig(
     openclawAdapter: true,
   };
 
-  // Only set relay if not already configured — the daemon reads the full
-  // relay list from network config automatically
-  if (!existing.relay && network.relays?.length) {
-    config.relay = network.relays[0];
+  // Preserve an existing relay override but never pin a new one — the daemon
+  // reads the full relay list from network config (testnet.json) automatically,
+  // which is better than hard-coding a single relay into the user's config.
+  if (existing.relay) {
+    config.relay = existing.relay;
   }
 
   // Preserve auto-update from network defaults if not set

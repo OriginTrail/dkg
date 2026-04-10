@@ -1538,16 +1538,42 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    const swmQuads = quadsToPromote.map((q) => ({ ...q, graph: swmGraphUri }));
+    const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Skolemize blank nodes so local SWM and gossip peers store identical data.
+    const kaMap = autoPartition(quadsToPromote);
+    if (kaMap.size === 0) {
+      throw new Error(
+        'Cannot promote assertion: no root entities found. ' +
+        'Assertions must contain at least one named (non-blank-node) subject.',
+      );
+    }
+    const normalizedQuads = [...kaMap.values()].flat();
+    const rootEntities = [...kaMap.keys()];
+
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
+    const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
+    const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
+
+    // Delete-then-insert for already-owned entities (upsert), matching
+    // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
+    for (const root of rootEntities) {
+      if (swmOwned.has(root)) {
+        await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
+        await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
+        await this.deleteMetaForRoot(swmMetaGraph, root);
+      }
+    }
+
+    const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
 
     // Delete promoted triples from assertion graph
     await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
-    const entities = [...new Set(quadsToPromote.map((q) => q.subject))];
-    const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const shareMetadata = generateShareTransitionMetadata({
+    const entities = [...new Set(normalizedQuads.map((q) => q.subject))];
+    const shareTransition = generateShareTransitionMetadata({
       contextGraphId,
       operationId,
       agentAddress,
@@ -1555,28 +1581,61 @@ export class DKGPublisher implements Publisher {
       entities,
       timestamp: new Date(),
     });
-    await this.store.insert(shareMetadata);
+    await this.store.insert(shareTransition);
 
-    // Build gossip message so the caller (agent) can broadcast to peers.
-    // The gossip nquads use the data graph URI (same as normal share path) —
-    // receivers re-target to SWM on ingest.
+    // Write WorkspaceOperation metadata + ownership quads, mirroring what
+    // _shareImpl and the remote SharedMemoryHandler both produce, so the
+    // promoting node and replicas converge on identical ownership state.
+    if (opts?.publisherPeerId) {
+      const metaQuads = generateShareMetadata(
+        { shareOperationId: operationId, contextGraphId, rootEntities, publisherPeerId: opts.publisherPeerId, timestamp: new Date() },
+        swmMetaGraph,
+      );
+      await this.store.insert(metaQuads);
+
+      if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+        this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+      }
+      const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
+      for (const r of rootEntities) {
+        if (!liveOwned.has(r)) {
+          newOwnershipEntries.push({ rootEntity: r, creatorPeerId: opts.publisherPeerId });
+        }
+      }
+      if (newOwnershipEntries.length > 0) {
+        for (const entry of newOwnershipEntries) {
+          await this.store.deleteByPattern({
+            graph: swmMetaGraph, subject: entry.rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+          });
+        }
+        await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
+        for (const entry of newOwnershipEntries) {
+          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+        }
+      }
+    }
+
+    // Build gossip message for the caller to broadcast. Best-effort: if the
+    // message exceeds the pubsub limit we skip gossip rather than failing,
+    // since the local promotion has already committed.
     let gossipMessage: Uint8Array | undefined;
     if (opts?.publisherPeerId) {
-      const kaMap = autoPartition(quadsToPromote);
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
-      const nquadsLines: string[] = [];
-      for (const q of quadsToPromote) {
-        const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-        nquadsLines.push(`<${q.subject}> <${q.predicate}> ${obj} <${dataGraph}> .`);
-      }
-      const manifestEntries = [...kaMap.keys()].map((rootEntity) => ({
+      const nquadsStr = normalizedQuads
+        .map(
+          (q) =>
+            `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
+        )
+        .join('\n');
+      const manifestEntries = rootEntities.map((rootEntity) => ({
         rootEntity,
         privateMerkleRoot: undefined,
         privateTripleCount: 0,
       }));
-      gossipMessage = encodeWorkspacePublishRequest({
+      const encoded = encodeWorkspacePublishRequest({
         paranetId: contextGraphId,
-        nquads: new TextEncoder().encode(nquadsLines.join('\n')),
+        nquads: new TextEncoder().encode(nquadsStr),
         manifest: manifestEntries,
         publisherPeerId: opts.publisherPeerId,
         workspaceOperationId: operationId,
@@ -1584,6 +1643,11 @@ export class DKGPublisher implements Publisher {
         operationId,
         subGraphName: opts.subGraphName,
       });
+
+      const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024;
+      if (encoded.length <= MAX_GOSSIP_MESSAGE_SIZE) {
+        gossipMessage = encoded;
+      }
     }
 
     return { promotedCount: swmQuads.length, gossipMessage };

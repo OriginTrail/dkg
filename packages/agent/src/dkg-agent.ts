@@ -3693,8 +3693,8 @@ export class DKGAgent {
           const topic = paranetWorkspaceTopic(contextGraphId);
           try {
             await agent.gossip.publish(topic, gossipMessage);
-          } catch {
-            agent.log.warn(createOperationContext('share'), `No peers subscribed to ${topic} yet`);
+          } catch (err: any) {
+            agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }
         }
         return { promotedCount };
