@@ -1541,8 +1541,16 @@ export class DKGPublisher implements Publisher {
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Skolemize blank nodes so local SWM and gossip peers store identical data.
+    // If autoPartition finds no root entities (blank-node-only input), fall back
+    // to the original quads to avoid silently dropping data.
     const kaMap = autoPartition(quadsToPromote);
-    const normalizedQuads = [...kaMap.values()].flat();
+    const normalizedQuads = kaMap.size > 0 ? [...kaMap.values()].flat() : quadsToPromote;
+
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
+    const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
+    const rootEntities = kaMap.size > 0
+      ? [...kaMap.keys()]
+      : [...new Set(normalizedQuads.map((q) => q.subject))];
 
     const swmQuads = normalizedQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
@@ -1552,7 +1560,7 @@ export class DKGPublisher implements Publisher {
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
     const entities = [...new Set(normalizedQuads.map((q) => q.subject))];
-    const shareMetadata = generateShareTransitionMetadata({
+    const shareTransition = generateShareTransitionMetadata({
       contextGraphId,
       operationId,
       agentAddress,
@@ -1560,13 +1568,46 @@ export class DKGPublisher implements Publisher {
       entities,
       timestamp: new Date(),
     });
-    await this.store.insert(shareMetadata);
+    await this.store.insert(shareTransition);
+
+    // Write WorkspaceOperation metadata + ownership quads, mirroring what
+    // _shareImpl and the remote SharedMemoryHandler both produce, so the
+    // promoting node and replicas converge on identical ownership state.
+    if (opts?.publisherPeerId) {
+      const metaQuads = generateShareMetadata(
+        { shareOperationId: operationId, contextGraphId, rootEntities, publisherPeerId: opts.publisherPeerId, timestamp: new Date() },
+        swmMetaGraph,
+      );
+      await this.store.insert(metaQuads);
+
+      if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
+        this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
+      }
+      const liveOwned = this.sharedMemoryOwnedEntities.get(ownershipKey)!;
+      const newOwnershipEntries: { rootEntity: string; creatorPeerId: string }[] = [];
+      for (const r of rootEntities) {
+        if (!liveOwned.has(r)) {
+          newOwnershipEntries.push({ rootEntity: r, creatorPeerId: opts.publisherPeerId });
+        }
+      }
+      if (newOwnershipEntries.length > 0) {
+        for (const entry of newOwnershipEntries) {
+          await this.store.deleteByPattern({
+            graph: swmMetaGraph, subject: entry.rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+          });
+        }
+        await this.store.insert(generateOwnershipQuads(newOwnershipEntries, swmMetaGraph));
+        for (const entry of newOwnershipEntries) {
+          liveOwned.set(entry.rootEntity, entry.creatorPeerId);
+        }
+      }
+    }
 
     // Build gossip message for the caller to broadcast. Best-effort: if the
     // message exceeds the pubsub limit we skip gossip rather than failing,
     // since the local promotion has already committed.
     let gossipMessage: Uint8Array | undefined;
-    if (opts?.publisherPeerId) {
+    if (opts?.publisherPeerId && kaMap.size > 0) {
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const nquadsStr = normalizedQuads
         .map(
@@ -1574,7 +1615,7 @@ export class DKGPublisher implements Publisher {
             `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
         )
         .join('\n');
-      const manifestEntries = [...kaMap.keys()].map((rootEntity) => ({
+      const manifestEntries = rootEntities.map((rootEntity) => ({
         rootEntity,
         privateMerkleRoot: undefined,
         privateTripleCount: 0,
