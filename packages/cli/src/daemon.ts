@@ -55,6 +55,7 @@ import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publish
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
 import { FileStore } from './file-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
@@ -2448,12 +2449,18 @@ async function handleRequest(
           subGraphName ? { subGraphName } : undefined,
         );
       } catch (err: any) {
-        // create() on an existing graph is idempotent in oxigraph, but if the
-        // error is about the sub-graph not being registered, propagate it.
-        if (err.message?.includes('has not been registered')) {
-          return respondWithFailedExtraction(400, err.message, triples.length);
+        const message = err?.message ?? String(err);
+        if (message.includes('already exists') || message.includes('duplicate') || message.includes('conflict')) {
+          // create() is idempotent when the graph already exists.
+        } else if (
+          message.includes('has not been registered')
+          || message.includes('Invalid')
+          || message.includes('Unsafe')
+        ) {
+          return respondWithFailedExtraction(400, message, triples.length);
+        } else {
+          return respondWithFailedExtraction(500, message, triples.length);
         }
-        // Other errors from create() can be ignored if the graph already exists.
       }
       if (allTriples.length > 0) {
         await agent.assertion.write(
@@ -3299,18 +3306,6 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB — for import-file document
  * bounded, TTL-pruned map keyed by the target assertion URI (which is
  * unique per agent × contextGraph × assertionName × subGraphName).
  */
-interface ExtractionStatusRecord {
-  status: 'in_progress' | 'completed' | 'skipped' | 'failed';
-  fileHash: string;
-  detectedContentType: string;
-  pipelineUsed: string | null;
-  tripleCount: number;
-  mdIntermediateHash?: string;
-  error?: string;
-  startedAt: string;
-  completedAt?: string;
-}
-
 interface ImportFileExtractionPayload {
   status: 'completed' | 'skipped' | 'failed';
   tripleCount: number;
@@ -3318,9 +3313,6 @@ interface ImportFileExtractionPayload {
   mdIntermediateHash?: string;
   error?: string;
 }
-
-const EXTRACTION_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_EXTRACTION_STATUS_RECORDS = 1000;
 
 function buildImportFileResponse(args: {
   assertionUri: string;
@@ -3340,57 +3332,6 @@ function buildImportFileResponse(args: {
       ...(args.extraction.error ? { error: args.extraction.error } : {}),
     },
   };
-}
-
-function extractionStatusSortKey(record: ExtractionStatusRecord): number {
-  const completedAtMs = record.completedAt ? Date.parse(record.completedAt) : Number.NaN;
-  if (Number.isFinite(completedAtMs)) return completedAtMs;
-  const startedAtMs = Date.parse(record.startedAt);
-  return Number.isFinite(startedAtMs) ? startedAtMs : 0;
-}
-
-function pruneExtractionStatusRecords(extractionStatus: Map<string, ExtractionStatusRecord>, nowMs = Date.now()): void {
-  for (const [assertionUri, record] of extractionStatus.entries()) {
-    const ageRefMs = extractionStatusSortKey(record);
-    if (ageRefMs > 0 && nowMs - ageRefMs > EXTRACTION_STATUS_TTL_MS) {
-      extractionStatus.delete(assertionUri);
-    }
-  }
-
-  if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) return;
-
-  const oldestFirst = [...extractionStatus.entries()].sort(
-    ([, left], [, right]) => extractionStatusSortKey(left) - extractionStatusSortKey(right),
-  );
-
-  for (const [assertionUri, record] of oldestFirst) {
-    if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) break;
-    if (record.status !== 'in_progress') {
-      extractionStatus.delete(assertionUri);
-    }
-  }
-
-  for (const [assertionUri] of oldestFirst) {
-    if (extractionStatus.size <= MAX_EXTRACTION_STATUS_RECORDS) break;
-    extractionStatus.delete(assertionUri);
-  }
-}
-
-function setExtractionStatusRecord(
-  extractionStatus: Map<string, ExtractionStatusRecord>,
-  assertionUri: string,
-  record: ExtractionStatusRecord,
-): void {
-  pruneExtractionStatusRecords(extractionStatus);
-  extractionStatus.set(assertionUri, record);
-}
-
-function getExtractionStatusRecord(
-  extractionStatus: Map<string, ExtractionStatusRecord>,
-  assertionUri: string,
-): ExtractionStatusRecord | undefined {
-  pruneExtractionStatusRecords(extractionStatus);
-  return extractionStatus.get(assertionUri);
 }
 
 function unregisteredSubGraphError(contextGraphId: string, subGraphName: string): string {

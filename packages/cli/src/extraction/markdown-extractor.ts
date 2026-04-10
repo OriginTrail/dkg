@@ -249,16 +249,18 @@ function extractHashtags(body: string): string[] {
 }
 
 /**
- * Extract Dataview inline fields: `key:: value` at line-start (allowing leading whitespace).
+ * Extract Dataview inline fields: `key:: value` anywhere in a visible line.
  * Returns key-value pairs with raw string values; the caller translates to triples.
  */
 function extractDataviewFields(body: string): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
   const noFences = stripCodeFences(body);
-  const re = /^[\s>*-]*([a-zA-Z][\w-]*)::\s*(.+?)\s*$/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(noFences)) !== null) {
-    out.push({ key: m[1], value: m[2] });
+  for (const line of noFences.split(/\r?\n/)) {
+    const re = /(?:^|[^\w])([a-zA-Z][\w-]*)::\s*(.+?)(?=(?:\s+[a-zA-Z][\w-]*::)|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      out.push({ key: m[1], value: m[2].trim() });
+    }
   }
   return out;
 }
@@ -282,14 +284,14 @@ function stripCodeFences(body: string): string {
   let activeFence: { char: '`' | '~'; length: number } | null = null;
 
   for (const line of lines) {
-    const trimmed = line.trimEnd();
-    const fenceMarker = trimmed.match(/^([`~])\1{2,}/)?.[0] ?? null;
+    const trimmedEnd = line.trimEnd();
+    const fenceMatch = trimmedEnd.match(/^ {0,3}(([`~])\2{2,})(.*)$/);
 
     if (!activeFence) {
-      if (fenceMarker) {
+      if (fenceMatch) {
         activeFence = {
-          char: fenceMarker[0] as '`' | '~',
-          length: fenceMarker.length,
+          char: fenceMatch[2] as '`' | '~',
+          length: fenceMatch[1].length,
         };
         continue;
       }
@@ -298,10 +300,10 @@ function stripCodeFences(body: string): string {
     }
 
     if (
-      fenceMarker
-      && fenceMarker[0] === activeFence.char
-      && fenceMarker.length >= activeFence.length
-      && trimmed.slice(fenceMarker.length).trim().length === 0
+      fenceMatch
+      && fenceMatch[2] === activeFence.char
+      && fenceMatch[1].length >= activeFence.length
+      && fenceMatch[3].trim().length === 0
     ) {
       activeFence = null;
     }

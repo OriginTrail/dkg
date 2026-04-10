@@ -37,22 +37,11 @@ import {
   contextGraphAssertionUri,
 } from '@origintrail-official/dkg-core';
 import { FileStore } from '../src/file-store.js';
+import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { parseBoundary, parseMultipart } from '../src/http/multipart.js';
 import { extractFromMarkdown } from '../src/extraction/markdown-extractor.js';
 
 // ── Test fixture types (mirroring the ExtractionStatusRecord in daemon.ts) ──
-
-interface ExtractionStatusRecord {
-  status: 'in_progress' | 'completed' | 'skipped' | 'failed';
-  fileHash: string;
-  detectedContentType: string;
-  pipelineUsed: string | null;
-  tripleCount: number;
-  mdIntermediateHash?: string;
-  error?: string;
-  startedAt: string;
-  completedAt?: string;
-}
 
 interface CapturedAssertionWrite {
   contextGraphId: string;
@@ -309,7 +298,17 @@ async function runImportFileOrchestration(params: {
 
   const allTriples = [...triples, ...provenance];
   try {
-    await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+    try {
+      await agent.assertion.create(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (!(message.includes('already exists') || message.includes('duplicate') || message.includes('conflict'))) {
+        if (message.includes('has not been registered') || message.includes('Invalid') || message.includes('Unsafe')) {
+          fail(400, message, triples.length);
+        }
+        fail(500, message, triples.length);
+      }
+    }
     if (allTriples.length > 0) {
       await agent.assertion.write(
         contextGraphId,
@@ -722,6 +721,59 @@ describe('import-file orchestration — happy paths', () => {
     expect(record?.status).toBe('failed');
     expect(record?.error).toContain('has not been registered');
     expect(record?.tripleCount).toBeGreaterThan(0);
+  });
+
+  it('surfaces non-idempotent assertion.create failures as failed imports', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      createError: new Error('Storage backend unavailable'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'empty.md', contentType: 'text/markdown', content: Buffer.from('', 'utf-8') },
+    ]);
+
+    let caught: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'create-runtime-failure',
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(ImportFileRouteError);
+    const routeError = caught as ImportFileRouteError;
+    expect(routeError.statusCode).toBe(500);
+    expect(routeError.body.extraction.status).toBe('failed');
+    expect(routeError.body.extraction.error).toBe('Storage backend unavailable');
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'create-runtime-failure');
+    const record = status.get(assertionUri);
+    expect(record?.status).toBe('failed');
+    expect(record?.error).toBe('Storage backend unavailable');
+    expect(record?.tripleCount).toBe(0);
+  });
+
+  it('treats explicit already-exists assertion.create failures as idempotent', async () => {
+    agent = makeMockAgent('0xMockAgentPeerId', {
+      createError: new Error('Assertion graph already exists'),
+    });
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'text/markdown', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'create-idempotent',
+    });
+
+    expect(result.extraction.status).toBe('completed');
+    expect(agent.capturedWrites).toHaveLength(1);
+    expect(status.get(result.assertionUri)?.status).toBe('completed');
   });
 
   it('rejects an unregistered sub-graph before storing the upload blob', async () => {

@@ -198,6 +198,31 @@ describe('extractFromMarkdown — wikilinks', () => {
       object: '"hidden"',
     });
   });
+
+  it('ignores fences indented by up to three spaces', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `  \`\`\`md\n  # Hidden Title\n  [[Hidden Target]]\n  #hidden\n  field:: hidden\n  \`\`\`\n\n# Visible Title\n\n[[Visible Target]] #visible\nfield:: shown\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(subjectIri).toBe('urn:dkg:md:visible-title');
+    expect(triples.filter(t => t.predicate === SCHEMA_MENTIONS).map(t => t.object)).toEqual([
+      'urn:dkg:md:visible-target',
+    ]);
+    expect(triples.filter(t => t.predicate === SCHEMA_KEYWORDS).map(t => t.object)).toEqual([
+      '"visible"',
+    ]);
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/field',
+      object: '"shown"',
+    });
+    expect(triples).not.toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/field',
+      object: '"hidden"',
+    });
+  });
 });
 
 describe('extractFromMarkdown — hashtags', () => {
@@ -243,6 +268,19 @@ describe('extractFromMarkdown — Dataview inline fields', () => {
     });
     expect(triples).toContainEqual({ subject: subjectIri, predicate: 'http://schema.org/author', object: '"Alice"' });
     expect(triples).toContainEqual({ subject: subjectIri, predicate: 'http://schema.org/status', object: '"draft"' });
+  });
+
+  it('extracts inline `key:: value` fields embedded in prose', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `# Doc\n\nSentence with status:: draft\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/status',
+      object: '"draft"',
+    });
   });
 
   it('preserves IRI values as IRIs (not literals)', () => {
