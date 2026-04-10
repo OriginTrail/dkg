@@ -74,6 +74,41 @@ function loadStructuredFile(filePath: string): any {
   return yaml.load(content);
 }
 
+async function loadQuadsFromInput(
+  opts: ActionOpts,
+  defaultGraph: string,
+): Promise<Array<{ subject: string; predicate: string; object: string; graph: string }>> {
+  const rdfParser = await import('./rdf-parser.js');
+
+  if (opts.file) {
+    const { readFile } = await import('node:fs/promises');
+    const raw = await readFile(opts.file, 'utf-8');
+    const format = opts.format ?? rdfParser.detectFormat(opts.file);
+    const quads = await rdfParser.parseRdf(raw, format, defaultGraph);
+    console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
+    return quads;
+  }
+
+  if (opts.triples) {
+    const parsed = JSON.parse(opts.triples);
+    return parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph }));
+  }
+
+  if (opts.subject && opts.predicate && opts.object) {
+    return [{
+      subject: opts.subject,
+      predicate: opts.predicate,
+      object: opts.object.startsWith('"') || opts.object.startsWith('http') || opts.object.startsWith('did:')
+        ? opts.object
+        : `"${opts.object}"`,
+      graph: defaultGraph,
+    }];
+  }
+
+  console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
+  process.exit(1);
+}
+
 function resolveDaemonEntryPoint(): string {
   if (process.env.DKG_NO_BLUE_GREEN) return fileURLToPath(import.meta.url);
   const rDir = releasesDir();
@@ -694,41 +729,18 @@ program
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const rdfParser = await import('./rdf-parser.js');
       const defaultGraph = `did:dkg:context-graph:${contextGraph}`;
-
-      let quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-
-      if (opts.file) {
-        const { readFile } = await import('node:fs/promises');
-        const raw = await readFile(opts.file, 'utf-8');
-        const format = opts.format ?? rdfParser.detectFormat(opts.file);
-        quads = await rdfParser.parseRdf(raw, format, defaultGraph);
-        console.log(`Parsed ${quads.length} quad(s) from ${opts.file} (${format})`);
-      } else if (opts.triples) {
-        const parsed = JSON.parse(opts.triples);
-        quads = parsed.map((q: Record<string, string>) => ({ ...q, graph: q.graph || defaultGraph }));
-      } else if (opts.subject && opts.predicate && opts.object) {
-        quads = [{
-          subject: opts.subject,
-          predicate: opts.predicate,
-          object: opts.object.startsWith('"') || opts.object.startsWith('http') || opts.object.startsWith('did:')
-            ? opts.object
-            : `"${opts.object}"`,
-          graph: defaultGraph,
-        }];
-      } else {
-        console.error(`Provide --file (${rdfParser.supportedExtensions().join(', ')}), --triples, or --subject/--predicate/--object`);
-        process.exit(1);
-      }
+      const quads = await loadQuadsFromInput(opts, defaultGraph);
 
       let privateQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> | undefined;
       if (opts.privateFile) {
+        const rdfParser = await import('./rdf-parser.js');
         const { readFile } = await import('node:fs/promises');
         const raw = await readFile(opts.privateFile, 'utf-8');
         const format = opts.format ?? rdfParser.detectFormat(opts.privateFile);
-        privateQuads = await rdfParser.parseRdf(raw, format, defaultGraph);
-        console.log(`Parsed ${privateQuads.length} private quad(s) from ${opts.privateFile} (${format})`);
+        const parsedPrivateQuads = await rdfParser.parseRdf(raw, format, defaultGraph);
+        privateQuads = parsedPrivateQuads;
+        console.log(`Parsed ${parsedPrivateQuads.length} private quad(s) from ${opts.privateFile} (${format})`);
       }
 
       const accessPolicy = opts.accessPolicy as ('public' | 'ownerOnly' | 'allowList' | undefined);
@@ -1499,6 +1511,36 @@ const sharedMemoryCmd = program
   .description('Shared memory operations (write-first workflow)');
 
 sharedMemoryCmd
+  .command('write [context-graph]')
+  .description('Write triples to shared memory from an RDF file or inline')
+  .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
+  .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
+  .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
+  .option('-s, --subject <uri>', 'Subject URI for simple write')
+  .option('-p, --predicate <uri>', 'Predicate URI for simple write')
+  .option('-o, --object <value>', 'Object value for simple write')
+  .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
+    try {
+      const targetContextGraph = contextGraph ?? 'dev-coordination';
+      const client = await ApiClient.connect();
+      const defaultGraph = `did:dkg:context-graph:${targetContextGraph}`;
+      const quads = await loadQuadsFromInput(opts, defaultGraph);
+      const result = await client.sharedMemoryWrite(targetContextGraph, quads);
+      console.log(`Written to shared memory for "${targetContextGraph}":`);
+      console.log(`  Share operation: ${result.workspaceOperationId}`);
+      console.log(`  Triples written: ${result.triplesWritten}`);
+      console.log(`  Graph:           ${result.graph}`);
+      if (result.skolemizedBlankNodes) {
+        console.log(`  Skolemized BNs:  ${result.skolemizedBlankNodes}`);
+      }
+      console.log(`  Next:            dkg shared-memory publish ${targetContextGraph}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+sharedMemoryCmd
   .command('publish [context-graph]')
   .description('Publish from shared memory to a context graph')
   .option('--keep', 'Keep shared memory triples after publishing')
@@ -1517,6 +1559,228 @@ sharedMemoryCmd
       console.log(`  KAs:    ${result.kas.length}`);
       if (result.txHash) {
         console.log(`  TX:     ${result.txHash}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+// ─── dkg publisher ────────────────────────────────────────────────────
+
+const publisherCmd = program
+  .command('publisher')
+  .description('Async publisher job inspection and control');
+
+publisherCmd
+  .command('enqueue <context-graph>')
+  .description('Enqueue an async lift/publish job from shared memory')
+  .requiredOption('--root <entity...>', 'Root entities to include in the lift request')
+  .requiredOption('--namespace <value>', 'Namespace for the lifted publish')
+  .requiredOption('--scope <value>', 'Scope for the lifted publish')
+  .requiredOption('--authority-proof-ref <value>', 'Authority proof reference')
+  .option('--swm-id <value>', 'Shared memory id', 'swm-main')
+  .option('--workspace-id <value>', 'Legacy alias for --swm-id')
+  .option('--share-operation-id <value>', 'Share operation id')
+  .option('--workspace-operation-id <value>', 'Legacy alias for --share-operation-id')
+  .option('--transition-type <value>', 'Transition type (CREATE|MUTATE|REVOKE)', 'CREATE')
+  .option('--authority-type <value>', 'Authority type (owner|multisig|quorum|capability)', 'owner')
+  .option('--prior-version <value>', 'Prior version reference for MUTATE/REVOKE flows')
+  .action(async (contextGraph: string, opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const shareOperationId = opts.shareOperationId ?? opts.workspaceOperationId;
+        if (!shareOperationId) {
+          console.error('Provide --share-operation-id (or legacy --workspace-operation-id).');
+          process.exit(1);
+        }
+        const roots = (opts.root as string[] | undefined)?.map((v) => v.trim()).filter(Boolean) ?? [];
+        if (roots.length === 0) {
+          console.error('Provide at least one --root.');
+          process.exit(1);
+        }
+        const transitionType = String(opts.transitionType ?? 'CREATE').toUpperCase();
+        if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
+          console.error('Invalid --transition-type. Use CREATE, MUTATE, or REVOKE.');
+          process.exit(1);
+        }
+        const authorityType = String(opts.authorityType ?? 'owner');
+        if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
+          console.error('Invalid --authority-type. Use owner, multisig, quorum, or capability.');
+          process.exit(1);
+        }
+
+        const jobId = await inspector.publisher.lift({
+          swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
+          shareOperationId,
+          roots,
+          contextGraphId: contextGraph,
+          namespace: String(opts.namespace),
+          scope: String(opts.scope),
+          transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
+          authority: {
+            type: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
+            proofRef: String(opts.authorityProofRef),
+          },
+          priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
+        });
+
+        console.log('Async publisher job enqueued:');
+        console.log(`  Job ID:     ${jobId}`);
+        console.log(`  Context:    ${contextGraph}`);
+        console.log(`  Share op:   ${shareOperationId}`);
+        console.log(`  Roots:      ${roots.length}`);
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('jobs')
+  .description('List async publisher jobs')
+  .option('--status <value>', 'Filter by status')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const status = opts.status ? String(opts.status) : undefined;
+        if (status && !['accepted', 'claimed', 'validated', 'broadcast', 'included', 'finalized', 'failed'].includes(status)) {
+          console.error(`Invalid publisher job status: ${status}`);
+          process.exit(1);
+        }
+        const jobs = await inspector.publisher.list(status ? { status: status as any } : undefined);
+        console.log(JSON.stringify(jobs, null, 2));
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('job <job-id>')
+  .description('Show async publisher job details')
+  .option('--payload', 'Include prepared payload details')
+  .action(async (jobId: string, opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const job = await inspector.publisher.getStatus(jobId);
+        if (!job) {
+          console.error(`Publisher job not found: ${jobId}`);
+          process.exit(1);
+        }
+        if (opts.payload) {
+          const payload = await inspector.publisher.inspectPreparedPayload(jobId);
+          console.log(JSON.stringify({ ...job, payload }, null, 2));
+          return;
+        }
+        console.log(JSON.stringify(job, null, 2));
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('stats')
+  .description('Show async publisher job counts by status')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const stats = await inspector.publisher.getStats();
+        console.log(JSON.stringify(stats, null, 2));
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('cancel <job-id>')
+  .description('Cancel an async publisher job')
+  .action(async (jobId: string) => {
+    try {
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        await inspector.publisher.cancel(jobId);
+        console.log(`Cancelled publisher job: ${jobId}`);
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('retry')
+  .description('Retry failed async publisher jobs')
+  .option('--status <value>', 'Retry filter (currently only "failed" is supported)', 'failed')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const status = String(opts.status ?? 'failed');
+      if (status !== 'failed') {
+        console.error(`Invalid retry status: ${status}. Only "failed" is supported.`);
+        process.exit(1);
+      }
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const count = await inspector.publisher.retry({ status: 'failed' });
+        console.log(`Retried ${count} publisher job(s).`);
+      } finally {
+        await inspector.stop();
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
+  .command('clear <status>')
+  .description('Clear terminal async publisher jobs by status')
+  .action(async (status: string) => {
+    try {
+      if (status !== 'finalized' && status !== 'failed') {
+        console.error(`Invalid clear status: ${status}. Use "finalized" or "failed".`);
+        process.exit(1);
+      }
+      const config = await loadConfig();
+      const { createPublisherInspector } = await import('./publisher-runner.js');
+      const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+      try {
+        const count = await inspector.publisher.clear(status);
+        console.log(`Cleared ${count} publisher job(s) with status ${status}.`);
+      } finally {
+        await inspector.stop();
       }
     } catch (err) {
       console.error(toErrorMessage(err));

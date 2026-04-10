@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -1961,12 +1961,18 @@ async function handleRequest(
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside share
       });
-      await tracker.trackPhase(ctx, 'store', () =>
+      const result = await tracker.trackPhase(ctx, 'store', () =>
         agent.share(paranetId, quads, { operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ok: true, phases: opDetail.phases });
+      return jsonResponse(res, 200, {
+        shareOperationId: result.shareOperationId,
+        workspaceOperationId: result.shareOperationId,
+        contextGraphId: paranetId,
+        paranetId,
+        graph: contextGraphSharedMemoryUri(paranetId),
+        triplesWritten: quads.length,
+      });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;
