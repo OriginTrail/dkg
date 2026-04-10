@@ -2093,6 +2093,7 @@ async function handleRequest(
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
     if (!contextGraphId || !subGraphName) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "subGraphName"' });
+    if (typeof subGraphName !== 'string') return jsonResponse(res, 400, { error: '"subGraphName" must be a string' });
     const sgVal = validateSubGraphName(subGraphName);
     if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
     try {
@@ -2110,6 +2111,7 @@ async function handleRequest(
     if (!parsed) return;
     const { contextGraphId, name, subGraphName } = parsed;
     if (!contextGraphId || !name) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
+    if (typeof name !== 'string') return jsonResponse(res, 400, { error: '"name" must be a string' });
     const nameVal = validateAssertionName(name);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -2123,7 +2125,8 @@ async function handleRequest(
 
   // POST /api/assertion/:name/write  { contextGraphId, quads, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/write')) {
-    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length));
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/write'.length), res);
+    if (assertionName === null) return;
     const nameVal = validateAssertionName(assertionName);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req);
@@ -2142,7 +2145,8 @@ async function handleRequest(
 
   // POST /api/assertion/:name/query  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/query')) {
-    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length));
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/query'.length), res);
+    if (assertionName === null) return;
     const nameVal = validateAssertionName(assertionName);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -2161,7 +2165,8 @@ async function handleRequest(
 
   // POST /api/assertion/:name/promote  { contextGraphId, entities?, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/promote')) {
-    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length));
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/promote'.length), res);
+    if (assertionName === null) return;
     const nameVal = validateAssertionName(assertionName);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -2180,7 +2185,8 @@ async function handleRequest(
 
   // POST /api/assertion/:name/discard  { contextGraphId, subGraphName? }
   if (req.method === 'POST' && path.startsWith('/api/assertion/') && path.endsWith('/discard')) {
-    const assertionName = decodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length));
+    const assertionName = safeDecodeURIComponent(path.slice('/api/assertion/'.length, -'/discard'.length), res);
+    if (assertionName === null) return;
     const nameVal = validateAssertionName(assertionName);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid assertion name: ${nameVal.reason}` });
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -2841,13 +2847,28 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown, corsOr
   res.end(body);
 }
 
-function safeParseJson(body: string, res: ServerResponse): Record<string, any> | null {
+function safeDecodeURIComponent(encoded: string, res: ServerResponse): string | null {
   try {
-    return JSON.parse(body);
+    return decodeURIComponent(encoded);
+  } catch {
+    jsonResponse(res, 400, { error: 'Malformed percent-encoding in URL path' });
+    return null;
+  }
+}
+
+function safeParseJson(body: string, res: ServerResponse): Record<string, any> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
   } catch {
     jsonResponse(res, 400, { error: 'Invalid JSON in request body' });
     return null;
   }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    jsonResponse(res, 400, { error: 'Request body must be a JSON object' });
+    return null;
+  }
+  return parsed as Record<string, any>;
 }
 
 function validateOptionalSubGraphName(subGraphName: unknown, res: ServerResponse): boolean {
