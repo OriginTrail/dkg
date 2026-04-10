@@ -1571,6 +1571,8 @@ export class DKGPublisher implements Publisher {
       );
     }
 
+    if (quadsToPromote.length === 0) return { promotedCount: 0 };
+
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Skolemize blank nodes so local SWM and gossip peers store identical data.
@@ -1588,8 +1590,59 @@ export class DKGPublisher implements Publisher {
     const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
     const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
 
-    // Delete-then-insert for already-owned entities (upsert), matching
+    // Pre-encode gossip message and enforce size limit BEFORE any destructive
+    // mutations, so oversized promotions are rejected cleanly while the
+    // assertion is still intact in WM.
+    let gossipMessage: Uint8Array | undefined;
+    if (opts?.publisherPeerId) {
+      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
+      const nquadsStr = normalizedQuads
+        .map(
+          (q) =>
+            `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
+        )
+        .join('\n');
+      const manifestEntries = rootEntities.map((rootEntity) => ({
+        rootEntity,
+        privateMerkleRoot: undefined,
+        privateTripleCount: 0,
+      }));
+      const encoded = encodeWorkspacePublishRequest({
+        paranetId: contextGraphId,
+        nquads: new TextEncoder().encode(nquadsStr),
+        manifest: manifestEntries,
+        publisherPeerId: opts.publisherPeerId,
+        workspaceOperationId: operationId,
+        timestampMs: Date.now(),
+        operationId,
+        subGraphName: opts.subGraphName,
+      });
+
+      const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024;
+      if (encoded.length > MAX_GOSSIP_MESSAGE_SIZE) {
+        throw new Error(
+          `Promoted assertion too large for gossip (${(encoded.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
+          `Promote fewer entities per call.`,
+        );
+      }
+      gossipMessage = encoded;
+    }
+
+    // Rule 4: reject roots owned by a different peer before any mutations.
+    if (opts?.publisherPeerId) {
+      for (const root of rootEntities) {
+        const owner = swmOwned.get(root);
+        if (owner && owner !== opts.publisherPeerId) {
+          throw new Error(
+            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
+          );
+        }
+      }
+    }
+
+    // Delete-then-insert for existing SWM entities (upsert), matching
     // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
+    // Safe after the ownership check above — only self-owned or unowned roots remain.
     for (const root of rootEntities) {
       if (swmOwned.has(root)) {
         await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
@@ -1646,40 +1699,6 @@ export class DKGPublisher implements Publisher {
         for (const entry of newOwnershipEntries) {
           liveOwned.set(entry.rootEntity, entry.creatorPeerId);
         }
-      }
-    }
-
-    // Build gossip message for the caller to broadcast. Best-effort: if the
-    // message exceeds the pubsub limit we skip gossip rather than failing,
-    // since the local promotion has already committed.
-    let gossipMessage: Uint8Array | undefined;
-    if (opts?.publisherPeerId) {
-      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
-      const nquadsStr = normalizedQuads
-        .map(
-          (q) =>
-            `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${dataGraph}> .`,
-        )
-        .join('\n');
-      const manifestEntries = rootEntities.map((rootEntity) => ({
-        rootEntity,
-        privateMerkleRoot: undefined,
-        privateTripleCount: 0,
-      }));
-      const encoded = encodeWorkspacePublishRequest({
-        paranetId: contextGraphId,
-        nquads: new TextEncoder().encode(nquadsStr),
-        manifest: manifestEntries,
-        publisherPeerId: opts.publisherPeerId,
-        workspaceOperationId: operationId,
-        timestampMs: Date.now(),
-        operationId,
-        subGraphName: opts.subGraphName,
-      });
-
-      const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024;
-      if (encoded.length <= MAX_GOSSIP_MESSAGE_SIZE) {
-        gossipMessage = encoded;
       }
     }
 

@@ -102,9 +102,11 @@ describe.sequential('publisher CLI smoke', () => {
     // Use the /api/shutdown endpoint for an orderly exit, then wait for the
     // process to terminate — this gives the store's 50ms debounced flush time
     // to persist shared-memory data before the process exits.
-    await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/shutdown`, { method: 'POST' }).catch(() => {});
-    const daemonExited = new Promise((resolve) => daemon?.once('exit', resolve));
+    const daemonExited = daemon.exitCode !== null
+      ? Promise.resolve()
+      : new Promise((resolve) => daemon?.once('exit', resolve));
     const killTimeout = setTimeout(() => { daemon?.kill('SIGKILL'); }, 5000);
+    await fetch(`http://127.0.0.1:${SMOKE_API_PORT}/api/shutdown`, { method: 'POST' }).catch(() => {});
     await daemonExited;
     clearTimeout(killTimeout);
     daemon = undefined;

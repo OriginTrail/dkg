@@ -422,6 +422,39 @@ export class ApiClient {
     return this.get(`/api/ccl/results?${params.toString()}`);
   }
 
+  async publisherEnqueue(request: Record<string, unknown>): Promise<{ jobId: string }> {
+    return this.post('/api/publisher/enqueue', { request });
+  }
+
+  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.get(`/api/publisher/jobs${qs}`);
+  }
+
+  async publisherJob(jobId: string): Promise<any> {
+    return this.get(`/api/publisher/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async publisherJobPayload(jobId: string): Promise<any> {
+    return this.get(`/api/publisher/jobs/${encodeURIComponent(jobId)}/payload`);
+  }
+
+  async publisherStats(): Promise<Record<string, number>> {
+    return this.get('/api/publisher/stats');
+  }
+
+  async publisherCancel(jobId: string): Promise<{ cancelled: string }> {
+    return this.post('/api/publisher/cancel', { jobId });
+  }
+
+  async publisherRetry(status = 'failed'): Promise<{ retried: number }> {
+    return this.post('/api/publisher/retry', { status });
+  }
+
+  async publisherClear(status: string): Promise<{ cleared: number }> {
+    return this.post('/api/publisher/clear', { status });
+  }
+
   async shutdown(): Promise<void> {
     try {
       await this.post('/api/shutdown', {});

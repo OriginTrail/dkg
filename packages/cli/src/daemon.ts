@@ -51,7 +51,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
-import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
+import { startPublisherRuntimeIfEnabled, createPublisherInspectorFromStore, type PublisherRuntime, type PublisherInspector } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
@@ -355,6 +355,10 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     v10ACKProviderFactory: (contextGraphId: string) => (agent as any).createV10ACKProvider?.(contextGraphId),
     log,
   });
+
+  const publisherInspector: PublisherInspector = publisherRuntime
+    ? { publisher: publisherRuntime.publisher, stop: async () => {} }
+    : createPublisherInspectorFromStore(agent.store);
 
   const networkId = await computeNetworkId();
   log(`Network: ${networkId.slice(0, 16)}...`);
@@ -949,6 +953,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         extractionRegistry,
         fileStore,
         extractionStatus,
+        publisherInspector,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -1259,6 +1264,7 @@ async function handleRequest(
   extractionRegistry: ExtractionPipelineRegistry,
   fileStore: FileStore,
   extractionStatus: Map<string, ExtractionStatusRecord>,
+  publisherInspector: PublisherInspector,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -3017,6 +3023,131 @@ async function handleRequest(
       });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message, identityId: '0', hasIdentity: false });
+    }
+  }
+
+  // ─── Publisher queue API ──────────────────────────────────────────
+  // POST /api/publisher/enqueue  { request: LiftRequest }
+  if (req.method === 'POST' && path === '/api/publisher/enqueue') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const request = body?.request;
+    if (!request || typeof request !== 'object') {
+      return jsonResponse(res, 400, { error: 'Missing request object' });
+    }
+    try {
+      const jobId = await publisherInspector.publisher.lift(request);
+      return jsonResponse(res, 200, { jobId });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // GET /api/publisher/jobs?status=...
+  if (req.method === 'GET' && path === '/api/publisher/jobs') {
+    try {
+      const searchParams = new URL(req.url!, `http://${req.headers.host}`).searchParams;
+      const status = searchParams.get('status') ?? undefined;
+      const jobs = await publisherInspector.publisher.list(status ? { status: status as any } : undefined);
+      return jsonResponse(res, 200, { jobs });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // GET /api/publisher/jobs/:id  or  GET /api/publisher/jobs/:id/payload
+  if (req.method === 'GET' && path.startsWith('/api/publisher/jobs/')) {
+    try {
+      const rest = path.slice('/api/publisher/jobs/'.length);
+      const payloadSuffix = '/payload';
+      const wantPayload = rest.endsWith(payloadSuffix);
+      const jobId = wantPayload ? rest.slice(0, -payloadSuffix.length) : rest;
+      if (!jobId) return jsonResponse(res, 400, { error: 'Missing job id' });
+
+      const job = await publisherInspector.publisher.getStatus(jobId);
+      if (!job) return jsonResponse(res, 404, { error: `Job not found: ${jobId}` });
+
+      if (wantPayload) {
+        const payload = await publisherInspector.publisher.inspectPreparedPayload(jobId);
+        return jsonResponse(res, 200, { ...job, payload });
+      }
+      return jsonResponse(res, 200, job);
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // GET /api/publisher/stats
+  if (req.method === 'GET' && path === '/api/publisher/stats') {
+    try {
+      const stats = await publisherInspector.publisher.getStats();
+      return jsonResponse(res, 200, stats);
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/cancel  { jobId: string }
+  if (req.method === 'POST' && path === '/api/publisher/cancel') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const jobId = body?.jobId;
+    if (!jobId || typeof jobId !== 'string') {
+      return jsonResponse(res, 400, { error: 'Missing jobId string' });
+    }
+    try {
+      await publisherInspector.publisher.cancel(jobId);
+      return jsonResponse(res, 200, { cancelled: jobId });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/retry  { status?: string }
+  if (req.method === 'POST' && path === '/api/publisher/retry') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const status = body?.status ?? 'failed';
+    if (status !== 'failed') {
+      return jsonResponse(res, 400, { error: `Invalid retry status: ${status}. Only "failed" is supported.` });
+    }
+    try {
+      const count = await publisherInspector.publisher.retry({ status: 'failed' });
+      return jsonResponse(res, 200, { retried: count });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
+    }
+  }
+
+  // POST /api/publisher/clear  { status: string }
+  if (req.method === 'POST' && path === '/api/publisher/clear') {
+    let body: any;
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
+    }
+    const status = body?.status;
+    if (status !== 'finalized' && status !== 'failed') {
+      return jsonResponse(res, 400, { error: `Invalid clear status: ${status}. Use "finalized" or "failed".` });
+    }
+    try {
+      const count = await publisherInspector.publisher.clear(status);
+      return jsonResponse(res, 200, { cleared: count });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: err.message });
     }
   }
 
