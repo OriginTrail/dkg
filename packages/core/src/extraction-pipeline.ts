@@ -60,6 +60,10 @@ export interface ExtractionPipeline {
   extract(input: ExtractionInput): Promise<ConverterOutput>;
 }
 
+function normalizeContentType(contentType: string): string {
+  return contentType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+}
+
 /**
  * Registry that maps content types to converter pipelines.
  * Nodes register pipelines at startup; the import-file route handler
@@ -72,16 +76,18 @@ export class ExtractionPipelineRegistry {
 
   register(pipeline: ExtractionPipeline): void {
     for (const ct of pipeline.contentTypes) {
-      this.pipelines.set(ct, pipeline);
+      const normalized = normalizeContentType(ct);
+      if (normalized.length === 0) continue;
+      this.pipelines.set(normalized, pipeline);
     }
   }
 
   get(contentType: string): ExtractionPipeline | undefined {
-    return this.pipelines.get(contentType);
+    return this.pipelines.get(normalizeContentType(contentType));
   }
 
   has(contentType: string): boolean {
-    return this.pipelines.has(contentType);
+    return this.pipelines.has(normalizeContentType(contentType));
   }
 
   availableContentTypes(): string[] {

@@ -47,6 +47,29 @@ describe('extractFromMarkdown — frontmatter', () => {
     expect(triples).toContainEqual({ subject: 'urn:dkg:md:doc-1', predicate: SCHEMA_DESCRIPTION, object: '"A short doc"' });
   });
 
+  it('normalizes unsafe frontmatter keys and bare type values into safe schema IRIs', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `---\nid: doc-1\ntype: Research Report\nrelease date: 2026-04-10\nauthor(s): Alice\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: RDF_TYPE,
+      object: 'http://schema.org/ResearchReport',
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/releaseDate',
+      object: '"2026-04-10T00:00:00.000Z"',
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/authors',
+      object: '"Alice"',
+    });
+  });
+
   it('emits one triple per element for array values in frontmatter', () => {
     const { triples } = extractFromMarkdown({
       markdown: `---\nid: doc\nauthors:\n  - Alice\n  - Bob\n---\n`,
@@ -107,6 +130,17 @@ describe('extractFromMarkdown — wikilinks', () => {
     });
     const mentions = triples.filter(t => t.predicate === SCHEMA_MENTIONS);
     expect(mentions).toHaveLength(1);
+  });
+
+  it('ignores wikilinks inside code fences and derives H1 from visible markdown only', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `\`\`\`md\n# Hidden Title\n[[Hidden Target]]\n\`\`\`\n\n# Visible Title\n\nSee [[Visible Target]].\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(subjectIri).toBe('urn:dkg:md:visible-title');
+    const mentions = triples.filter(t => t.predicate === SCHEMA_MENTIONS).map(t => t.object);
+    expect(mentions).toEqual(['urn:dkg:md:visible-target']);
   });
 });
 
@@ -253,6 +287,19 @@ describe('extractFromMarkdown — subject IRI resolution', () => {
       now: FIXED_NOW,
     });
     expect(subjectIri).toBe('urn:dkg:md:a-title-of-things');
+  });
+
+  it('uses a hash fallback when non-ASCII titles and headings would slugify to empty strings', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `# 東京\n\nSee [[大阪]].\n\n## 感想\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(subjectIri).toMatch(/^urn:dkg:md:hash-[0-9a-f]{12}$/);
+    const mentions = triples.filter(t => t.predicate === SCHEMA_MENTIONS).map(t => t.object);
+    expect(mentions).toEqual([expect.stringMatching(/^urn:dkg:md:hash-[0-9a-f]{12}$/)]);
+    const sections = triples.filter(t => t.predicate === DKG_HAS_SECTION).map(t => t.object);
+    expect(sections).toEqual([expect.stringMatching(new RegExp(`^${subjectIri.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#section-hash-[0-9a-f]{12}$`))]);
   });
 
   it('produces a stable anonymous fallback when there is no title', () => {

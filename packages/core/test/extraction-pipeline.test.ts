@@ -69,6 +69,16 @@ describe('ExtractionPipelineRegistry', () => {
     expect(registry.get('text/markdown')).toBe(mdPipeline);
     expect(registry.get('application/pdf')).toBe(pdfPipeline);
   });
+
+  it('normalizes casing and media-type parameters on registration and lookup', () => {
+    const registry = new ExtractionPipelineRegistry();
+    const pipeline = makePipeline(['Application/PDF']);
+    registry.register(pipeline);
+
+    expect(registry.has('application/pdf')).toBe(true);
+    expect(registry.get('APPLICATION/PDF; charset=utf-8')).toBe(pipeline);
+    expect(registry.availableContentTypes()).toEqual(['application/pdf']);
+  });
 });
 
 describe('ExtractionPipeline interface (Phase 1 converter)', () => {

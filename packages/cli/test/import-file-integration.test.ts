@@ -118,6 +118,11 @@ interface ImportFileResult {
   };
 }
 
+function normalizeDetectedContentType(contentType: string | undefined): string {
+  const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
+}
+
 async function runImportFileOrchestration(params: {
   agent: MockAgent;
   fileStore: FileStore;
@@ -139,7 +144,7 @@ async function runImportFileOrchestration(params: {
   const contentTypeOverride = textField('contentType');
   const ontologyRef = textField('ontologyRef');
   const subGraphName = textField('subGraphName');
-  const detectedContentType = contentTypeOverride ?? filePart.contentType ?? 'application/octet-stream';
+  const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
 
   const fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
   const assertionUri = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
@@ -386,6 +391,22 @@ describe('import-file orchestration — happy paths', () => {
     expect(result.detectedContentType).toBe('text/markdown');
   });
 
+  it('normalizes markdown media types with parameters and casing before Phase 1 routing', async () => {
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      { kind: 'file', name: 'file', filename: 'doc.md', contentType: 'Text/Markdown; charset=utf-8', content: Buffer.from('# Title\n\nBody.\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'doc',
+    });
+
+    expect(result.detectedContentType).toBe('text/markdown');
+    expect(result.extraction.status).toBe('completed');
+    expect(result.extraction.pipelineUsed).toBe('text/markdown');
+  });
+
   it('contentType text field overrides the file part Content-Type header', async () => {
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
@@ -452,6 +473,31 @@ describe('import-file orchestration — happy paths', () => {
     expect(triples.some(t => t.object === 'http://schema.org/Report')).toBe(true);
     expect(triples.some(t => t.object === '"tag1"')).toBe(true);
     expect(triples.some(t => t.object === 'urn:dkg:md:reference')).toBe(true);
+  });
+
+  it('normalizes converter media types before registry lookup', async () => {
+    const stubConverter: ExtractionPipeline = {
+      contentTypes: ['application/pdf'],
+      async extract(_input: ExtractionInput): Promise<ConverterOutput> {
+        return { mdIntermediate: '# Converted\n\nBody.\n' };
+      },
+    };
+    registry.register(stubConverter);
+
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'research' },
+      { kind: 'file', name: 'file', filename: 'paper.pdf', contentType: 'Application/PDF; charset=binary', content: Buffer.from('fake-pdf-bytes', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'paper-normalized',
+    });
+
+    expect(result.detectedContentType).toBe('application/pdf');
+    expect(result.extraction.status).toBe('completed');
+    expect(result.extraction.pipelineUsed).toBe('application/pdf');
+    expect(result.extraction.mdIntermediateHash).toBeDefined();
   });
 
   it('passes ontologyRef through to the converter and Phase 2 extractor', async () => {

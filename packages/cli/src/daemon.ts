@@ -145,6 +145,11 @@ export function parseRequiredSignatures(raw: unknown): { value: number } | { err
   return { value: raw };
 }
 
+function normalizeDetectedContentType(contentType: string | undefined): string {
+  const normalized = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
+}
+
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
 
@@ -2272,7 +2277,7 @@ async function handleRequest(
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
 
-    const detectedContentType = contentTypeOverride ?? filePart.contentType ?? 'application/octet-stream';
+    const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
 
     // Persist the original upload to the file store.
     let fileStoreEntry;

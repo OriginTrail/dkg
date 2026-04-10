@@ -20,6 +20,7 @@
  * Spec: 05_PROTOCOL_EXTENSIONS.md §6.5.2, 19_MARKDOWN_CONTENT_TYPE.md
  */
 
+import { createHash } from 'node:crypto';
 import { load as loadYaml } from 'js-yaml';
 import type { ExtractionQuad as Quad } from '@origintrail-official/dkg-core';
 
@@ -101,7 +102,7 @@ function splitFrontmatter(markdown: string): { frontmatter: Record<string, unkno
 
 /** Extract the text of the first level-1 heading, if any. */
 function findFirstH1(body: string): string | null {
-  const m = body.match(/^#\s+(.+?)\s*$/m);
+  const m = stripCodeFences(body).match(/^#\s+(.+?)\s*$/m);
   return m ? m[1].trim() : null;
 }
 
@@ -109,11 +110,37 @@ function findFirstH1(body: string): string | null {
  * Slugify a string for use in an IRI fragment. Keeps alphanumerics and hyphens.
  */
 function slugify(input: string): string {
-  return input
+  const slug = input
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
+  if (slug.length > 0) return slug;
+  return `hash-${shortHash(input)}`;
+}
+
+function shortHash(input: string): string {
+  return createHash('sha256').update(input).digest('hex').slice(0, 12);
+}
+
+function normalizeSchemaLocalName(raw: string, kind: 'property' | 'class'): string | null {
+  const stripped = raw.trim().replace(/\(([^)]*)\)/g, '$1');
+  if (stripped.length === 0) return null;
+
+  const asciiTokens = stripped.match(/[A-Za-z0-9]+/g);
+  if (asciiTokens && asciiTokens.length > 0) {
+    return asciiTokens
+      .map((token, index) => {
+        if (kind === 'property' && index === 0) {
+          return token[0]!.toLowerCase() + token.slice(1);
+        }
+        return token[0]!.toUpperCase() + token.slice(1);
+      })
+      .join('');
+  }
+
+  const encoded = encodeURIComponent(stripped);
+  return encoded.length > 0 ? encoded : null;
 }
 
 /**
@@ -149,7 +176,8 @@ function resolveTypeIri(typeValue: unknown): string | null {
   if (typeof typeValue !== 'string' || typeValue.length === 0) return null;
   if (/^(https?:|did:|urn:)/.test(typeValue)) return typeValue;
   // Treat bare identifiers as schema.org classes by convention (Report, Person, etc.)
-  return `http://schema.org/${typeValue}`;
+  const localName = normalizeSchemaLocalName(typeValue, 'class');
+  return localName ? `http://schema.org/${localName}` : null;
 }
 
 /** Resolve a frontmatter scalar value to a triple object literal or IRI. */
@@ -158,6 +186,10 @@ function resolveFrontmatterValue(value: unknown): string | null {
   if (typeof value === 'string') {
     if (/^(https?:|did:|urn:)/.test(value)) return value;
     return JSON.stringify(value);
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return JSON.stringify(value.toISOString());
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
     return JSON.stringify(String(value));
@@ -168,9 +200,10 @@ function resolveFrontmatterValue(value: unknown): string | null {
 /** Extract wikilinks `[[Target]]` or `[[Target|Alt]]` → IRIs using the `urn:dkg:md:` namespace. */
 function extractWikilinks(body: string): string[] {
   const out = new Set<string>();
+  const noFences = stripCodeFences(body);
   const re = /\[\[([^\]|#]+?)(?:#[^\]|]*)?(?:\|[^\]]*?)?\]\]/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(body)) !== null) {
+  while ((m = re.exec(noFences)) !== null) {
     const target = m[1].trim();
     if (target.length === 0) continue;
     out.add(`urn:dkg:md:${slugify(target)}`);
@@ -256,6 +289,7 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
         const obj = resolveFrontmatterValue(v);
         if (obj === null) continue;
         const predicate = frontmatterKeyToPredicate(key);
+        if (predicate === null) continue;
         triples.push({ subject, predicate, object: obj });
       }
     }
@@ -280,6 +314,7 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   // ── 4. Dataview inline fields → properties ─────────────────────────
   for (const { key, value } of extractDataviewFields(body)) {
     const predicate = frontmatterKeyToPredicate(key);
+    if (predicate === null) continue;
     const obj = /^(https?:|did:|urn:)/.test(value) ? value : JSON.stringify(value);
     triples.push({ subject, predicate, object: obj });
   }
@@ -303,12 +338,13 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   return { triples, provenance, subjectIri: subject };
 }
 
-function frontmatterKeyToPredicate(key: string): string {
+function frontmatterKeyToPredicate(key: string): string | null {
   if (key === 'name' || key === 'title') return SCHEMA_NAME;
   if (key === 'description' || key === 'summary') return SCHEMA_DESCRIPTION;
   if (key === 'keywords' || key === 'tags') return SCHEMA_KEYWORDS;
   // Unknown keys fall back into the schema.org namespace (same convention as `type`).
-  return `http://schema.org/${key}`;
+  const localName = normalizeSchemaLocalName(key, 'property');
+  return localName ? `http://schema.org/${localName}` : null;
 }
 
 function buildProvenance(args: {
