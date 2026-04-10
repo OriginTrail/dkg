@@ -36,6 +36,7 @@ describe('LiftJob request and record types', () => {
     ]);
     expect(LIFT_JOB_IMMUTABLE_FIELDS).toEqual([
       'jobId',
+      'jobSlug',
       'request',
       'timestamps.acceptedAt',
       'retries.maxRetries',
@@ -78,6 +79,7 @@ describe('LiftJob request and record types', () => {
 
     const accepted: LiftJobAccepted = {
       jobId: 'job-1',
+      jobSlug: 'music-social/person-profile/create/op-1/rihana',
       request,
       status: 'accepted',
       timestamps: { acceptedAt: 1, updatedAt: 1 },
@@ -91,6 +93,7 @@ describe('LiftJob request and record types', () => {
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {
     const job: LiftJobBroadcast = {
       jobId: 'job-2',
+      jobSlug: 'music-social/person-profile/mutate/op-2/rihana',
       request: {
         swmId: 'ws-2',
         shareOperationId: 'op-2',
@@ -109,7 +112,7 @@ describe('LiftJob request and record types', () => {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
         canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
-        workspaceQuadCount: 12,
+        swmQuadCount: 12,
         authorityProofRef: 'proof:quorum:1',
         transitionType: 'MUTATE',
         priorVersion: 'did:dkg:mock:31337/0x123/42',
@@ -124,6 +127,7 @@ describe('LiftJob request and record types', () => {
   it('captures finalization and failure payload references for persistence', () => {
     const finalized: LiftJobFinalized = {
       jobId: 'job-3',
+      jobSlug: 'music-social/person-profile/create/op-3/rihana',
       request: {
         swmId: 'ws-3',
         shareOperationId: 'op-3',
@@ -149,7 +153,7 @@ describe('LiftJob request and record types', () => {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
         canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
-        workspaceQuadCount: 8,
+        swmQuadCount: 8,
         authorityProofRef: 'proof:owner:1',
         transitionType: 'CREATE',
       },
@@ -167,6 +171,7 @@ describe('LiftJob request and record types', () => {
 
     const failed: LiftJobFailedFromBroadcast = {
       jobId: 'job-4',
+      jobSlug: 'music-social/person-profile/create/op-3/rihana',
       request: finalized.request,
       status: 'failed',
       timestamps: { acceptedAt: 1, claimedAt: 2, broadcastAt: 3, failedAt: 4, updatedAt: 4 },
@@ -175,7 +180,7 @@ describe('LiftJob request and record types', () => {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
         canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
-        workspaceQuadCount: 8,
+        swmQuadCount: 8,
         authorityProofRef: 'proof:owner:1',
         transitionType: 'CREATE',
       },
@@ -202,6 +207,7 @@ describe('LiftJob request and record types', () => {
   it('supports chain-driven recovery from included jobs', () => {
     const failed: LiftJobFailedFromIncluded = {
       jobId: 'job-5',
+      jobSlug: 'music-social/person-profile/create/op-5/rihana',
       request: {
         swmId: 'ws-5',
         shareOperationId: 'op-5',
@@ -219,7 +225,7 @@ describe('LiftJob request and record types', () => {
       validation: {
         canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
         canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
-        workspaceQuadCount: 4,
+        swmQuadCount: 4,
         authorityProofRef: 'proof:owner:5',
         transitionType: 'CREATE',
       },
@@ -266,7 +272,7 @@ describe('LiftJob request and record types', () => {
     const baseValidation = {
       canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
       canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
-      workspaceQuadCount: 1,
+      swmQuadCount: 1,
       authorityProofRef: 'proof:owner:x',
       transitionType: 'CREATE' as const,
     };
@@ -274,6 +280,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error failed jobs from broadcast require validation metadata
     const invalidMissingValidation: LiftJobFailed = {
       jobId: 'job-invalid-1',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, failedAt: 3, updatedAt: 3 },
@@ -295,6 +302,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error reset_to_accepted cannot recover from included
     const invalidRecoveryState: LiftJobFailed = {
       jobId: 'job-invalid-2',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },
@@ -323,6 +331,7 @@ describe('LiftJob request and record types', () => {
     // @ts-expect-error finalized_from_chain requires txHashChecked
     const invalidMissingTxHash: LiftJobFailed = {
       jobId: 'job-invalid-3',
+      jobSlug: 'music-social/person-profile/create/op-x/rihana',
       request: baseRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },

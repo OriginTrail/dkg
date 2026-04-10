@@ -25,7 +25,7 @@ describe('LiftJob state machine', () => {
     expect(LIFT_JOB_ALLOWED_TRANSITIONS).toEqual({
       accepted: ['claimed', 'failed'],
       claimed: ['validated', 'failed'],
-      validated: ['broadcast', 'failed'],
+      validated: ['broadcast', 'finalized', 'failed'],
       broadcast: ['included', 'failed'],
       included: ['finalized', 'failed'],
       finalized: [],
@@ -49,6 +49,7 @@ describe('LiftJob state machine', () => {
     expect(canTransitionLiftJob('accepted', 'claimed')).toBe(true);
     expect(canTransitionLiftJob('claimed', 'validated')).toBe(true);
     expect(canTransitionLiftJob('validated', 'broadcast')).toBe(true);
+    expect(canTransitionLiftJob('validated', 'finalized')).toBe(true);
     expect(canTransitionLiftJob('broadcast', 'included')).toBe(true);
     expect(canTransitionLiftJob('included', 'finalized')).toBe(true);
     expect(canTransitionLiftJob('accepted', 'failed')).toBe(true);

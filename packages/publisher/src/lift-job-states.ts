@@ -33,7 +33,7 @@ export type LiftJobChainRecoverableState = Extract<LiftRecoverableJobState, 'bro
 export const LIFT_JOB_ALLOWED_TRANSITIONS: Record<LiftJobState, readonly LiftJobState[]> = {
   accepted: ['claimed', 'failed'],
   claimed: ['validated', 'failed'],
-  validated: ['broadcast', 'failed'],
+  validated: ['broadcast', 'finalized', 'failed'],
   broadcast: ['included', 'failed'],
   included: ['finalized', 'failed'],
   finalized: [],

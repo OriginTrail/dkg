@@ -185,7 +185,7 @@ export class DKGAgent {
   private readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   private readonly writeLocks: Map<string, Promise<void>>;
-  private sharedMemoryHandler?: SharedMemoryHandler;
+  private sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   private gossipPublishHandler?: GossipPublishHandler;
   private finalizationHandler?: FinalizationHandler;
   private readonly log = new Logger('DKGAgent');
@@ -442,7 +442,7 @@ export class DKGAgent {
         store: this.store,
         agentPrivateKey: verifySignerKey,
         agentAddress: verifyWallet.address,
-        getBatchMerkleRoot: async (cgId, batchId) => {
+        getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
           const metaGraph = paranetMetaGraphUri(cgId);
           // Try typed literal first, fallback to untyped for backward compat
           for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
@@ -457,7 +457,7 @@ export class DKGAgent {
           }
           return null;
         },
-        getContextGraphIdOnChain: async (cgId) => {
+        getContextGraphIdOnChain: async (cgId: string) => {
           const sub = this.subscribedContextGraphs.get(cgId);
           return sub?.onChainId ? BigInt(sub.onChainId) : null;
         },
@@ -1786,7 +1786,7 @@ export class DKGAgent {
     return this.gossipPublishHandler;
   }
 
-  private getOrCreateSharedMemoryHandler(): SharedMemoryHandler {
+  private getOrCreateSharedMemoryHandler(): InstanceType<typeof SharedMemoryHandler> {
     if (!this.sharedMemoryHandler) {
       this.sharedMemoryHandler = new SharedMemoryHandler(this.store, this.eventBus, {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
@@ -2335,14 +2335,14 @@ export class DKGAgent {
 
     // 5. Collect M-of-N approvals
     const collector = new VerifyCollector({
-      sendP2P: async (peerId, protocol, data) => this.router.send(peerId, protocol, data),
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => this.router.send(peerId, protocol, data),
       getParticipantPeers: (cgId?: string) => {
         const allPeers = this.node.libp2p.getPeers().map(p => p.toString()).filter(id => id !== this.peerId);
         // TODO: Filter by on-chain participant set once getContextGraphParticipants() is available.
         // Currently relies on signature recovery + identityId resolution to reject non-participants.
         return allPeers;
       },
-      log: (msg) => this.log.info(ctx, msg),
+      log: (msg: string) => this.log.info(ctx, msg),
     });
 
     const entities = await this.getRootEntities(opts.contextGraphId, opts.batchId);
@@ -2406,7 +2406,7 @@ export class DKGAgent {
       opts.batchId,
       txResult.hash,
       txResult.blockNumber,
-      [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
+      [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
     );
 
     this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
@@ -2415,7 +2415,7 @@ export class DKGAgent {
       txHash: txResult.hash,
       blockNumber: txResult.blockNumber,
       verifiedMemoryId: opts.verifiedMemoryId,
-      signers: [proposerAddress, ...result.approvals.map(a => a.approverAddress)],
+      signers: [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
     };
   }
 
@@ -3524,10 +3524,10 @@ export class DKGAgent {
     if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
 
     const collector = new ACKCollector({
-      gossipPublish: async (topic, data) => {
+      gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: async (peerId, protocol, data) => {
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
         return this.router.send(peerId, protocol, data);
       },
       getConnectedCorePeers: () => {
@@ -3553,7 +3553,7 @@ export class DKGAgent {
             }
           }
         : undefined,
-      log: (msg) => {
+      log: (msg: string) => {
         const ctx = createOperationContext('publish');
         this.log.info(ctx, msg);
       },
