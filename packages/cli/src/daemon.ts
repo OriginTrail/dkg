@@ -1936,7 +1936,7 @@ async function handleRequest(
         workspaceOperationId: result?.shareOperationId,
         contextGraphId: paranetId,
         paranetId,
-        graph: contextGraphSharedMemoryUri(paranetId),
+        graph: contextGraphSharedMemoryUri(paranetId, subGraphName),
         triplesWritten: quads.length,
       });
     } catch (err) {
