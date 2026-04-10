@@ -1474,7 +1474,11 @@ export class DKGPublisher implements Publisher {
   private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
     const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
     const registered = await this.store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> {
+        <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
+          <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
+          <http://dkg.io/ontology/createdBy> ?createdBy .
+      } }`,
     );
     return registered.type === 'boolean' && registered.value;
   }
@@ -1493,7 +1497,7 @@ export class DKGPublisher implements Publisher {
     if (!(await this.isSubGraphRegistered(contextGraphId, subGraphName))) {
       throw new Error(
         `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". ` +
-        `Call createSubGraph() first.`,
+        `Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration into the context graph "_meta" graph.`,
       );
     }
   }
