@@ -289,11 +289,11 @@ echo "  Sub-graph write result: $(echo "$SG_W" | head -c 200)"
 echo "--- 4b: Sub-graph gossip — check on Node3 ---"
 sleep 5
 SG_Q=$(post 9203 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { GRAPH ?g { <http://test.org/paper1> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+  \"sparql\": \"SELECT ?name ?g WHERE { GRAPH ?g { <http://test.org/paper1> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'research-papers') && CONTAINS(STR(?g),'_shared_memory')) }\",
   \"contextGraphId\": \"$CG\"
 }")
 SG_CT=$(echo "$SG_Q" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
-[[ "$SG_CT" -ge 1 ]] && ok "Sub-graph data gossiped to Node3" || warn "Sub-graph data not on Node3 ($SG_CT)"
+[[ "$SG_CT" -ge 1 ]] && ok "Sub-graph 'research-papers' data gossiped to Node3" || warn "Sub-graph data not on Node3 ($SG_CT)"
 
 # ================================================================
 echo ""
@@ -361,7 +361,8 @@ sleep 12
 for p in 9201 9202 9203 9204 9205; do
   CT=$(post $p /api/query -H "Content-Type: application/json" -d "{
     \"sparql\": \"SELECT ?name WHERE { <http://test.org/vm-test1> <http://schema.org/name> ?name }\",
-    \"contextGraphId\": \"$CG\"
+    \"contextGraphId\": \"$CG\",
+    \"view\": \"verified-memory\"
   }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
   [[ "$CT" -ge 1 ]] && ok "Node $p has VM event in verified memory" || warn "Node $p missing VM event ($CT)"
 done

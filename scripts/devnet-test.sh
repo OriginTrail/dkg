@@ -209,7 +209,8 @@ echo "--- 3b: Query Verified Memory for cities on publisher ---"
 sleep 3
 LTM_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
   \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\"
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"verified-memory\"
 }")
 LTM_CT=$(echo "$LTM_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
 [[ "$LTM_CT" -ge 2 ]] && ok "VM has $LTM_CT cities on Node1" || fail "VM has $LTM_CT cities (expected >=2)"
@@ -220,7 +221,8 @@ sleep 10
 for p in 9201 9202 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
-    \"contextGraphId\":\"$CONTEXT_GRAPH\"
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"verified-memory\"
   }")
   ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
   [[ "$ct" -ge 2 ]] && ok "Node $p has $ct cities in VM" || warn "Node $p has $ct cities in VM (finalization pending?)"
@@ -291,13 +293,14 @@ echo ""
 echo "--- 4e: ALL published entities replicate to ALL nodes ---"
 sleep 12
 for p in 9201 9202 9203 9204 9205; do
-  for entity_type in City Product Person LakeBodyOfWater; do
+  for entity in city1 city2 product1 product2 person1 lake1; do
     R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
-      \"sparql\":\"SELECT ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/$entity_type> }\",
-      \"contextGraphId\":\"$CONTEXT_GRAPH\"
+      \"sparql\":\"ASK { <http://example.org/entity/$entity> <http://schema.org/name> ?name }\",
+      \"contextGraphId\":\"$CONTEXT_GRAPH\",
+      \"view\":\"verified-memory\"
     }")
-    ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-    [[ "$ct" -ge 1 ]] && ok "Node $p has $entity_type ($ct)" || warn "Node $p missing $entity_type ($ct)"
+    found=$(echo "$R" | python3 -c "import sys,json; print('yes' if json.load(sys.stdin).get('result',{}).get('boolean',False) else 'no')" 2>/dev/null)
+    [[ "$found" == "yes" ]] && ok "Node $p has $entity" || warn "Node $p missing $entity (finalization pending?)"
   done
 done
 
@@ -422,7 +425,7 @@ B_TX=$(json_get "$BATCH" txHash)
 B_KAS=$(echo "$BATCH" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 [[ "$B_ST" == "confirmed" || "$B_ST" == "finalized" ]] && ok "Batch(50) publish OK ($B_ST)" || fail "Batch publish=$B_ST: $BATCH"
 [[ "$B_TX" != "__NONE__" ]] && ok "Batch tx: $B_TX" || fail "No batch txHash"
-[[ "$B_KAS" == "50" ]] && ok "Batch published 50 KAs" || warn "Expected 50 KAs, got $B_KAS"
+[[ "$B_KAS" == "50" ]] && ok "Batch published 50 KAs" || fail "Expected 50 KAs, got $B_KAS"
 
 echo ""
 echo "--- 9b: Batch entities replicate to ALL nodes ---"
