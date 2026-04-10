@@ -109,6 +109,27 @@ export class ContextGraphManager {
     return [...contextGraphs];
   }
 
+  /**
+   * @deprecated Prefer DKGAgent.listSubGraphs(), which reads spec-compliant
+   * registration metadata from the context graph `_meta` graph. This shim keeps
+   * the legacy storage-level graph-walk behavior for downstream callers.
+   */
+  async listSubGraphs(contextGraphId: string): Promise<string[]> {
+    const prefix = `${CG_PREFIX}${contextGraphId}/`;
+    const allGraphs = await this.store.listGraphs();
+    const subGraphNames = new Set<string>();
+    const reservedPrefixes = ['_', 'assertion/', 'draft/', 'context/'];
+    for (const g of allGraphs) {
+      if (!g.startsWith(prefix)) continue;
+      const rest = g.slice(prefix.length);
+      if (reservedPrefixes.some(r => rest.startsWith(r))) continue;
+      const name = rest.endsWith('/_meta') ? rest.slice(0, -6) : rest;
+      if (name.includes('/')) continue;
+      if (name.length > 0) subGraphNames.add(name);
+    }
+    return [...subGraphNames];
+  }
+
   async hasContextGraph(contextGraphId: string): Promise<boolean> {
     return this.store.hasGraph(this.dataGraphUri(contextGraphId));
   }

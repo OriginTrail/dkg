@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair, contextGraphAssertionUri } from '@origintrail-official/dkg-core';
+import {
+  TypedEventBus,
+  generateEd25519Keypair,
+  contextGraphAssertionUri,
+  contextGraphSharedMemoryUri,
+} from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { ethers } from 'ethers';
 
@@ -241,22 +246,23 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     ).rejects.toThrow(/Sub-graph "code" has not been registered/);
   });
 
-  it('assertionQuery throws when sub-graph is not registered', async () => {
-    await expect(
-      publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
-    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
-  });
-
   it('assertionPromote throws when sub-graph is not registered', async () => {
     await expect(
       publisher.assertionPromote(SG_CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SG_NAME }),
     ).rejects.toThrow(/Sub-graph "code" has not been registered/);
   });
 
-  it('assertionDiscard throws when sub-graph is not registered', async () => {
-    await expect(
-      publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME),
-    ).rejects.toThrow(/Sub-graph "code" has not been registered/);
+  it('assertionQuery and assertionDiscard still work for legacy unregistered sub-graph graphs', async () => {
+    const graphUri = contextGraphAssertionUri(SG_CG_ID, AGENT, ASSERTION_NAME, SG_NAME);
+    await store.createGraph(graphUri);
+    await store.insert(TRIPLES.map((triple) => ({ ...triple, graph: graphUri })));
+
+    const quads = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(quads.length).toBe(3);
+
+    await publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    const afterDiscard = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(afterDiscard.length).toBe(0);
   });
 
   it('assertion ops succeed after the sub-graph is registered', async () => {
@@ -272,6 +278,28 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     await publisher.assertionDiscard(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
     const afterDiscard = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
     expect(afterDiscard.length).toBe(0);
+  });
+
+  it('assertionPromote routes promoted triples into the registered sub-graph shared memory', async () => {
+    const swmGraph = contextGraphSharedMemoryUri(SG_CG_ID, SG_NAME);
+
+    await registerSubGraph();
+    await publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    await publisher.assertionWrite(SG_CG_ID, ASSERTION_NAME, AGENT, TRIPLES, SG_NAME);
+
+    const result = await publisher.assertionPromote(SG_CG_ID, ASSERTION_NAME, AGENT, { subGraphName: SG_NAME });
+    expect(result.promotedCount).toBe(3);
+
+    const assertionQuads = await publisher.assertionQuery(SG_CG_ID, ASSERTION_NAME, AGENT, SG_NAME);
+    expect(assertionQuads.length).toBe(0);
+
+    const swmResult = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    expect(swmResult.type).toBe('bindings');
+    if (swmResult.type === 'bindings') {
+      expect(swmResult.bindings.length).toBe(3);
+    }
   });
 
   it('assertion ops without a sub-graph name still work (guard is opt-in)', async () => {
