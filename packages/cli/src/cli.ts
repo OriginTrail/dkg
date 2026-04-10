@@ -28,6 +28,7 @@ function isDaemonUnreachable(err: unknown): boolean {
   const code = (err as any)?.cause?.code ?? (err as any)?.code;
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
+  if (/HTTP (404|405|501)/.test(msg)) return true;
   return false;
 }
 import { batchEntityQuads } from './batching.js';
