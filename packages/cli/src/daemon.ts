@@ -187,6 +187,7 @@ interface PublishRequestBody {
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
+  subGraphName?: string;
 }
 
 
@@ -1847,7 +1848,8 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  { paranetId: "...", quads: [...], privateQuads?: [...], accessPolicy?: "public|ownerOnly|allowList", allowedPeers?: string[] }
+  // POST /api/publish  — SWM-first publish (V10 protocol: chain tx = finality signal, data must be in SWM first)
+  // Accepts quads for backward compatibility but writes them to SWM before publishing.
   if (req.method === 'POST' && path === '/api/publish') {
     const serverT0 = Date.now();
     const body = await readBody(req);
@@ -1856,15 +1858,19 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: parsed.error });
     }
 
-    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers } = parsed.value;
+    const { paranetId, quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = parsed.value;
     const ctx = createOperationContext('publish');
     tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api' } });
     try {
-      const result = await agent.publish(paranetId, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
+      // V10 protocol: write to SWM first so peers have data before chain tx fires
+      await tracker.trackPhase(ctx, 'swm-stage', () =>
+        agent.share(paranetId, quads, { subGraphName, operationCtx: ctx }),
+      );
+
+      const result = await agent.publishFromSharedMemory(paranetId, 'all', {
+        clearSharedMemoryAfter: true,
         operationCtx: ctx,
-        onPhase: tracker.phaseCallback(ctx),
+        subGraphName,
       });
       const chain = result.onChainResult;
       if (chain) {
@@ -2629,7 +2635,7 @@ function parsePublishRequestBody(body: string):
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers } = payload;
+  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } = payload;
   const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
 
   if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
@@ -2660,6 +2666,10 @@ function parsePublishRequestBody(body: string):
     return { ok: false, error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"' };
   }
 
+  if (subGraphName !== undefined && (typeof subGraphName !== 'string' || subGraphName.trim().length === 0)) {
+    return { ok: false, error: 'Invalid "subGraphName" (must be a non-empty string)' };
+  }
+
   return {
     ok: true,
     value: {
@@ -2668,6 +2678,7 @@ function parsePublishRequestBody(body: string):
       privateQuads,
       accessPolicy,
       allowedPeers,
+      subGraphName: subGraphName as string | undefined,
     },
   };
 }
