@@ -12,6 +12,7 @@ import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-c
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   generateConfirmedFullMetadata, getTentativeStatusQuad,
+  generateSubGraphRegistration,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -326,6 +327,24 @@ export class FinalizationHandler {
     await graphManager.ensureParanet(contextGraphId);
     if (subGraphName) {
       await graphManager.ensureSubGraph(contextGraphId, subGraphName);
+      const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+      const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
+      const alreadyRegistered = await this.store.query(
+        `ASK { GRAPH <${metaGraph}> {
+          <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
+            <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
+            <http://dkg.io/ontology/createdBy> ?createdBy .
+        } }`,
+      );
+      if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
+        await this.store.insert(generateSubGraphRegistration({
+          contextGraphId,
+          subGraphName,
+          createdBy: publisherAddress || 'finalization-discovery',
+          timestamp: new Date(),
+        }));
+        this.log.info(ctx, `Finalization: auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}"`);
+      }
     }
     const dataGraph = subGraphName
       ? contextGraphSubGraphUri(contextGraphId, subGraphName)

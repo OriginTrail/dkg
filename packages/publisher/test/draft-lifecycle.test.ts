@@ -231,6 +231,18 @@ describe('Working Memory Assertion sub-graph registration check', () => {
         object: 'http://dkg.io/ontology/SubGraph',
         graph: metaGraph,
       },
+      {
+        subject: sgUri,
+        predicate: 'http://schema.org/name',
+        object: `"${SG_NAME}"`,
+        graph: metaGraph,
+      },
+      {
+        subject: sgUri,
+        predicate: 'http://dkg.io/ontology/createdBy',
+        object: 'did:dkg:agent:test-agent',
+        graph: metaGraph,
+      },
     ]);
   }
 
@@ -252,15 +264,15 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     ).rejects.toThrow(/Sub-graph "code" has not been registered/);
   });
 
-  it('assertion mutation guard ignores stray _meta triples without the SubGraph type marker', async () => {
+  it('assertion mutation guard requires full registration metadata, not just the SubGraph type marker', async () => {
     const metaGraph = `did:dkg:context-graph:${SG_CG_ID}/_meta`;
     const sgUri = `did:dkg:context-graph:${SG_CG_ID}/${SG_NAME}`;
     await store.createGraph(metaGraph);
     await store.insert([
       {
         subject: sgUri,
-        predicate: 'http://schema.org/name',
-        object: '"code"',
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'http://dkg.io/ontology/SubGraph',
         graph: metaGraph,
       },
     ]);
