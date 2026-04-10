@@ -7,6 +7,9 @@ import {
   contextGraphSessionsTopic,
   paranetPublishTopic,
   paranetWorkspaceTopic,
+  validateContextGraphId,
+  validateSubGraphName,
+  validateAssertionName,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
 
@@ -66,5 +69,92 @@ describe('createOperationContext', () => {
     expect(ctx.operationId).toMatch(/^[0-9a-f-]{36}$/);
     expect(ctx.operationId).not.toBe(sourceId);
     expect(ctx.sourceOperationId).toBe(sourceId);
+  });
+});
+
+describe('validateContextGraphId', () => {
+  it('accepts valid context graph IDs', () => {
+    expect(validateContextGraphId('my-context-graph').valid).toBe(true);
+    expect(validateContextGraphId('agent-skills').valid).toBe(true);
+    expect(validateContextGraphId('cg_v2').valid).toBe(true);
+  });
+
+  it('rejects empty IDs', () => {
+    expect(validateContextGraphId('').valid).toBe(false);
+  });
+
+  it('rejects disallowed characters (whitelist: alphanumeric, _, :, /, ., @, -)', () => {
+    expect(validateContextGraphId('foo<bar').valid).toBe(false);
+    expect(validateContextGraphId('foo>bar').valid).toBe(false);
+    expect(validateContextGraphId('foo bar').valid).toBe(false);
+    expect(validateContextGraphId('foo"bar').valid).toBe(false);
+    expect(validateContextGraphId('foo{bar').valid).toBe(false);
+    expect(validateContextGraphId('foo?bar').valid).toBe(false);
+    expect(validateContextGraphId('foo#bar').valid).toBe(false);
+  });
+
+  it('accepts URNs, DIDs, and slug-like identifiers', () => {
+    expect(validateContextGraphId('did:dkg:test').valid).toBe(true);
+    expect(validateContextGraphId('urn:uuid:12345').valid).toBe(true);
+    expect(validateContextGraphId('my-graph_v2').valid).toBe(true);
+    expect(validateContextGraphId('user@domain').valid).toBe(true);
+  });
+
+  it('rejects IDs exceeding 256 chars', () => {
+    expect(validateContextGraphId('a'.repeat(257)).valid).toBe(false);
+    expect(validateContextGraphId('a'.repeat(256)).valid).toBe(true);
+  });
+});
+
+describe('validateAssertionName', () => {
+  it('accepts valid assertion names', () => {
+    expect(validateAssertionName('my-assertion').valid).toBe(true);
+    expect(validateAssertionName('draft-001').valid).toBe(true);
+  });
+
+  it('rejects empty names', () => {
+    expect(validateAssertionName('').valid).toBe(false);
+  });
+
+  it('rejects names with slashes', () => {
+    expect(validateAssertionName('a/b').valid).toBe(false);
+  });
+
+  it('rejects IRI-unsafe characters', () => {
+    expect(validateAssertionName('a<b').valid).toBe(false);
+    expect(validateAssertionName('a b').valid).toBe(false);
+  });
+
+  it('rejects names exceeding 256 chars', () => {
+    expect(validateAssertionName('a'.repeat(257)).valid).toBe(false);
+  });
+});
+
+describe('validateSubGraphName', () => {
+  it('accepts valid sub-graph names', () => {
+    expect(validateSubGraphName('my-sub-graph').valid).toBe(true);
+  });
+
+  it('rejects empty names', () => {
+    expect(validateSubGraphName('').valid).toBe(false);
+  });
+
+  it('rejects underscore-prefixed (reserved)', () => {
+    expect(validateSubGraphName('_internal').valid).toBe(false);
+  });
+
+  it('rejects slashes', () => {
+    expect(validateSubGraphName('a/b').valid).toBe(false);
+  });
+
+  it('rejects reserved path segments', () => {
+    expect(validateSubGraphName('context').valid).toBe(false);
+    expect(validateSubGraphName('assertion').valid).toBe(false);
+    expect(validateSubGraphName('draft').valid).toBe(false);
+  });
+
+  it('rejects IRI-unsafe characters', () => {
+    expect(validateSubGraphName('a<b').valid).toBe(false);
+    expect(validateSubGraphName('a b').valid).toBe(false);
   });
 });

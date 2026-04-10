@@ -372,9 +372,9 @@ export class DkgNodePlugin {
         name: 'dkg_publish',
         description:
           'Publish knowledge to a DKG context graph as an array of quads (subject/predicate/object). ' +
+          'Data is first written to Shared Working Memory, then published to Verified Memory on-chain. ' +
           'Object values that look like URIs (http://, https://, urn:, did:) are treated as URIs; ' +
-          'all other values become string literals automatically. ' +
-          'By default, published data is private (ownerOnly). Set access_policy to "public" to make it readable by anyone.',
+          'all other values become string literals automatically.',
         parameters: {
           type: 'object',
           properties: {
@@ -394,19 +394,6 @@ export class DkgNodePlugin {
               description:
                 'Array of quads to publish. Each quad has subject (URI), predicate (URI), and object (URI or literal string). ' +
                 'URIs are auto-detected by prefix (http://, https://, urn:, did:); everything else becomes a literal.',
-            },
-            access_policy: {
-              type: 'string',
-              enum: ['public', 'ownerOnly', 'allowList'],
-              description:
-                'Access control: "ownerOnly" (only you can read — the default), ' +
-                '"public" (anyone can read), or "allowList" (only listed peers).',
-            },
-            allowed_peers: {
-              type: 'string',
-              description:
-                'Comma-separated peer IDs allowed to read the data. ' +
-                'Required when access_policy is "allowList". Must not be set for other policies.',
             },
           },
           required: ['context_graph_id', 'quads'],
@@ -566,43 +553,8 @@ export class DkgNodePlugin {
         };
       });
 
-      // Access policy: default to ownerOnly (private) when not specified
-      const VALID_POLICIES = new Set(['public', 'ownerOnly', 'allowList']);
-      const accessPolicy = args.access_policy
-        ? String(args.access_policy).trim()
-        : 'ownerOnly';
-
-      if (!VALID_POLICIES.has(accessPolicy)) {
-        return this.error(
-          `Invalid access_policy "${accessPolicy}". Must be one of: ${[...VALID_POLICIES].join(', ')}.`,
-        );
-      }
-
-      // Parse allowed_peers from comma-separated string
-      let allowedPeers: string[] | undefined;
-      if (args.allowed_peers) {
-        allowedPeers = String(args.allowed_peers)
-          .split(',')
-          .map(p => p.trim())
-          .filter(p => p.length > 0);
-      }
-
-      if (accessPolicy === 'allowList' && (!allowedPeers || allowedPeers.length === 0)) {
-        return this.error(
-          '"allowList" access_policy requires non-empty "allowed_peers" (comma-separated peer IDs).',
-        );
-      }
-      if (accessPolicy !== 'allowList' && allowedPeers && allowedPeers.length > 0) {
-        return this.error(
-          '"allowed_peers" is only valid when access_policy is "allowList".',
-        );
-      }
-
-      const result = await this.client.publish(contextGraphId, quads, undefined, {
-        accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList',
-        allowedPeers,
-      });
-      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, quadsPublished: quads.length, accessPolicy });
+      const result = await this.client.publish(contextGraphId, quads);
+      return this.json({ kcId: result.kcId, kaCount: result.kas?.length ?? 0, quadsPublished: quads.length });
     } catch (err: any) {
       return this.daemonError(err);
     }

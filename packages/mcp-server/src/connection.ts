@@ -78,12 +78,13 @@ export class DkgClient {
   async publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>) {
+    await this.post<any>('/api/shared-memory/write', { paranetId: contextGraphId, quads });
     return this.post<{
       kcId: string;
       status: string;
       kas: Array<{ tokenId: string; rootEntity: string }>;
       txHash?: string;
-    }>('/api/publish', { contextGraphId, quads });
+    }>('/api/shared-memory/publish', { paranetId: contextGraphId, selection: 'all', clearAfter: true });
   }
 
   async listContextGraphs() {
