@@ -133,7 +133,7 @@ done
 
 echo ""
 echo "--- 2b: Check on-chain stake amounts via contract calls ---"
-cd "$REPO_ROOT/packages/evm-module" && node -e "
+STAKING_OUTPUT=$(cd "$REPO_ROOT/packages/evm-module" && node -e "
   const { ethers } = require('ethers');
   const fs = require('fs');
   (async () => {
@@ -152,11 +152,16 @@ cd "$REPO_ROOT/packages/evm-module" && node -e "
       console.log('Node ' + (i+1) + ': identityId=' + idId + ' stake=' + stakeEth + ' TRAC');
     }
   })();
-" 2>&1 | while read -r line; do
+" 2>&1) || true
+STAKED_COUNT=0
+while IFS= read -r line; do
   echo "  $line"
-  echo "$line" | grep -q "50000" && ok "$(echo "$line" | cut -d: -f1) staked 50k TRAC" || true
-done
-cd "$REPO_ROOT" || true
+  if echo "$line" | grep -q "50000"; then
+    ok "$(echo "$line" | cut -d: -f1) staked 50k TRAC"
+    STAKED_COUNT=$((STAKED_COUNT+1))
+  fi
+done <<< "$STAKING_OUTPUT"
+[[ "$STAKED_COUNT" -eq 5 ]] || fail "Only $STAKED_COUNT/5 nodes confirmed 50k stake"
 
 echo ""
 echo "--- 2c: Perform additional staking — add 10k TRAC to Node1 ---"
@@ -203,7 +208,7 @@ post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "{
   \"quads\": [$(ql 'http://test.org/post-stake-publish' 'http://schema.org/name' 'AfterStaking')]
 }" > /dev/null
 sleep 1
-PSTAKE=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\"}")
+PSTAKE=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\",\"selection\":[\"http://test.org/post-stake-publish\"]}")
 PS_ST=$(echo "$PSTAKE" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
 [[ "$PS_ST" == "confirmed" || "$PS_ST" == "finalized" ]] && ok "Post-staking publish OK ($PS_ST)" || fail "Post-staking publish=$PS_ST"
 
@@ -320,7 +325,7 @@ CAS_BAD=$(post 9201 /api/shared-memory/conditional-write -H "Content-Type: appli
 }")
 echo "  CAS bad response: $(echo "$CAS_BAD" | head -c 300)"
 CAS_REJECTED=$(echo "$CAS_BAD" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("rejected" if d.get("conflict") or d.get("error") or not d.get("ok",True) else "accepted")' 2>/dev/null)
-[[ "$CAS_REJECTED" == "rejected" ]] && ok "CAS correctly rejected wrong expectedValue" || warn "CAS bad write: $CAS_BAD"
+[[ "$CAS_REJECTED" == "rejected" ]] && ok "CAS correctly rejected wrong expectedValue" || fail "CAS accepted wrong expectedValue (data-integrity regression): $CAS_BAD"
 
 # ================================================================
 echo ""
@@ -337,7 +342,7 @@ post 9202 /api/shared-memory/write -H "Content-Type: application/json" -d "{
   ]
 }" > /dev/null
 sleep 2
-VM_PUB=$(post 9202 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\"}")
+VM_PUB=$(post 9202 /api/shared-memory/publish -H "Content-Type: application/json" -d "{\"contextGraphId\":\"$CG\",\"selection\":[\"http://test.org/vm-test1\"]}")
 VM_ST=$(echo "$VM_PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
 VM_TX=$(echo "$VM_PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("txHash","?"))' 2>/dev/null)
 echo "  VM publish: status=$VM_ST tx=$VM_TX"
@@ -370,7 +375,7 @@ echo "=== TEST 8: Edge Cases ==="
 echo ""
 
 echo "--- 8a: Removed /api/publish returns 404 ---"
-PUB_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
+PUB_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "$H" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
 [[ "$PUB_CODE" == "404" ]] && ok "/api/publish correctly removed (404)" || warn "/api/publish returned $PUB_CODE"
 
 echo "--- 8b: Huge payload (10KB string) ---"
@@ -441,8 +446,9 @@ for p in 9201 9202 9203 9204 9205; do
   else
     warn "Node $p SKILL.md missing SWM references"
   fi
-  if echo "$SKILL" | grep -q "POST.*publish" | grep -v "shared-memory"; then
-    warn "Node $p SKILL.md may reference old /api/publish"
+  OLD_PUB=$(echo "$SKILL" | grep "POST.*publish" | grep -v "shared-memory" || true)
+  if [[ -n "$OLD_PUB" ]]; then
+    fail "Node $p SKILL.md references old /api/publish"
   else
     ok "Node $p SKILL.md clean of old /api/publish"
   fi

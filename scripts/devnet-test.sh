@@ -182,7 +182,8 @@ c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
 sleep 2
 
 PUB1=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
-  \"contextGraphId\":\"$CONTEXT_GRAPH\"
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"selection\":[\"http://example.org/entity/city1\",\"http://example.org/entity/city2\"]
 }")
 PUB1_ST=$(json_get "$PUB1" status)
 PUB1_KC=$(json_get "$PUB1" kcId)
@@ -231,7 +232,7 @@ c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 2
-PUB2=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+PUB2=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product1\"]}")
 PUB2_ST=$(json_get "$PUB2" status)
 [[ "$PUB2_ST" == "confirmed" || "$PUB2_ST" == "finalized" ]] && ok "Node2 publish OK ($PUB2_ST)" || fail "Node2 publish=$PUB2_ST: $PUB2"
 
@@ -245,7 +246,7 @@ c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 2
-PUB3=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+PUB3=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product2\"]}")
 PUB3_ST=$(json_get "$PUB3" status)
 [[ "$PUB3_ST" == "confirmed" || "$PUB3_ST" == "finalized" ]] && ok "Node3 publish OK ($PUB3_ST)" || fail "Node3 publish=$PUB3_ST: $PUB3"
 
@@ -259,7 +260,7 @@ c -X POST "http://127.0.0.1:9204/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 2
-PUB4=$(c -X POST "http://127.0.0.1:9204/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+PUB4=$(c -X POST "http://127.0.0.1:9204/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/person1\"]}")
 PUB4_ST=$(json_get "$PUB4" status)
 [[ "$PUB4_ST" == "confirmed" || "$PUB4_ST" == "finalized" ]] && ok "Node4 publish OK ($PUB4_ST)" || fail "Node4 publish=$PUB4_ST: $PUB4"
 
@@ -273,7 +274,7 @@ c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 2
-PUB5=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+PUB5=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/lake1\"]}")
 PUB5_ST=$(json_get "$PUB5" status)
 [[ "$PUB5_ST" == "confirmed" || "$PUB5_ST" == "finalized" ]] && ok "Node5 (edge) publish OK ($PUB5_ST)" || fail "Node5 publish=$PUB5_ST: $PUB5"
 
@@ -307,7 +308,7 @@ c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 1
-c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" > /dev/null
+c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}" > /dev/null
 
 TRAC5_A=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
 echo "  Node5 TRAC after: $TRAC5_A"
@@ -383,7 +384,7 @@ c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 1
-DEDUP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+DEDUP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/dedup1\"]}")
 DD_ST=$(json_get "$DEDUP" status)
 DD_KAS=$(echo "$DEDUP" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('kas',[])))" 2>/dev/null)
 [[ "$DD_ST" == "confirmed" || "$DD_ST" == "finalized" ]] && ok "Dedup publish OK" || fail "Dedup status=$DD_ST"
@@ -403,7 +404,10 @@ BATCH_QUADS="${BATCH_QUADS%,}"
 
 c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"quads\":[$BATCH_QUADS]}" > /dev/null
 sleep 2
-BATCH=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+BATCH_SELECTION=""
+for i in $(seq 1 50); do BATCH_SELECTION="$BATCH_SELECTION\"http://example.org/entity/batch_$i\","; done
+BATCH_SELECTION="[${BATCH_SELECTION%,}]"
+BATCH=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":$BATCH_SELECTION}")
 B_ST=$(json_get "$BATCH" status)
 B_TX=$(json_get "$BATCH" txHash)
 [[ "$B_ST" == "confirmed" || "$B_ST" == "finalized" ]] && ok "Batch(50) publish OK ($B_ST)" || fail "Batch publish=$B_ST: $BATCH"
@@ -514,13 +518,13 @@ echo "=== SECTION 13: Adversarial / Edge Cases ==="
 echo ""
 
 echo "--- 13a: Removed /api/publish returns 404 ---"
-REMOVED=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
+REMOVED=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:9201/api/publish" -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test","quads":[]}')
 [[ "$REMOVED" == "404" ]] && ok "/api/publish correctly removed (404)" || warn "/api/publish returns $REMOVED (expected 404)"
 
 echo "--- 13b: Empty quads in SWM write ---"
 EMPTY=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d '{"contextGraphId":"devnet-test","quads":[]}')
 echo "  Empty quads response: $(echo "$EMPTY" | head -c 200)"
-ok "Empty quads handled (no crash)"
+echo "$EMPTY" | grep -qi "error\|missing\|invalid" && ok "Empty quads rejected with error" || fail "Empty quads not rejected: $EMPTY"
 
 echo "--- 13c: Malformed SPARQL ---"
 BAD_SPARQL=$(c -X POST "http://127.0.0.1:9201/api/query" -d '{
@@ -536,7 +540,7 @@ echo "$NO_CG" | grep -qi "error\|missing\|required" && ok "Missing contextGraphI
 echo "--- 13e: Publish from empty SWM ---"
 EMPTY_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d '{"contextGraphId":"devnet-test"}')
 echo "  Empty SWM publish: $(echo "$EMPTY_PUB" | head -c 200)"
-ok "Empty SWM publish handled (no crash)"
+echo "$EMPTY_PUB" | grep -qi "error\|empty\|nothing\|no.*triple" && ok "Empty SWM publish rejected with error" || fail "Empty SWM publish not rejected: $(echo "$EMPTY_PUB" | head -c 200)"
 
 #------------------------------------------------------------
 echo ""
