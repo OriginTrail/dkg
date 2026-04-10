@@ -106,6 +106,13 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
 }
 
+export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
+  if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
+  if (/[<>"{}|^`\\\s]/.test(id)) return { valid: false, reason: 'Context graph ID contains characters unsafe for IRIs' };
+  if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
+  return { valid: true };
+}
+
 /**
  * Validates a sub-graph name: must be non-empty, no leading underscore
  * (reserved for protocol graphs), no slashes (flat namespace), and safe for IRIs.

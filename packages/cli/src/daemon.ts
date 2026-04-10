@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -2092,7 +2092,8 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
-    if (!contextGraphId || !subGraphName) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "subGraphName"' });
+    if (!subGraphName) return jsonResponse(res, 400, { error: 'Missing "subGraphName"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (typeof subGraphName !== 'string') return jsonResponse(res, 400, { error: '"subGraphName" must be a string' });
     const sgVal = validateSubGraphName(subGraphName);
     if (!sgVal.valid) return jsonResponse(res, 400, { error: `Invalid "subGraphName": ${sgVal.reason}` });
@@ -2100,7 +2101,10 @@ async function handleRequest(
       await agent.createSubGraph(contextGraphId, subGraphName);
       return jsonResponse(res, 200, { created: subGraphName, contextGraphId });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2110,7 +2114,8 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, name, subGraphName } = parsed;
-    if (!contextGraphId || !name) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
+    if (!name) return jsonResponse(res, 400, { error: 'Missing "name"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (typeof name !== 'string') return jsonResponse(res, 400, { error: '"name" must be a string' });
     const nameVal = validateAssertionName(name);
     if (!nameVal.valid) return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });
@@ -2119,7 +2124,10 @@ async function handleRequest(
       const assertionUri = await agent.assertion.create(contextGraphId, name, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { assertionUri });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('already exists') || err.message?.includes('not found') || err.message?.includes('Invalid')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2133,13 +2141,17 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, quads, subGraphName } = parsed;
-    if (!contextGraphId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.write(contextGraphId, assertionName, quads, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { written: quads.length });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2153,13 +2165,16 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
-    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const quads = await agent.assertion.query(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { quads, count: quads.length });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2173,13 +2188,17 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, entities, subGraphName } = parsed;
-    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateEntities(entities, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       const result = await agent.assertion.promote(contextGraphId, assertionName, { entities: entities ?? 'all', subGraphName });
       return jsonResponse(res, 200, result);
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2193,13 +2212,16 @@ async function handleRequest(
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
     const { contextGraphId, subGraphName } = parsed;
-    if (!contextGraphId) return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err.message });
+      if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
     }
   }
 
@@ -2210,10 +2232,9 @@ async function handleRequest(
     if (!parsed) return;
     const { quads, conditions, subGraphName } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!paranetId || !quads?.length) return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "quads"' });
-    if (!Array.isArray(conditions) || conditions.length === 0) {
-      return jsonResponse(res, 400, { error: '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)' });
-    }
+    if (!quads?.length) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    if (!validateRequiredContextGraphId(paranetId, res)) return;
+    if (!validateConditions(conditions, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     const ctx = createOperationContext('share');
     tracker.start(ctx, { contextGraphId: paranetId, details: { tripleCount: quads.length, source: 'api-cas', subGraphName } });
@@ -2885,6 +2906,63 @@ function validateOptionalSubGraphName(subGraphName: unknown, res: ServerResponse
   if (!v.valid) {
     jsonResponse(res, 400, { error: `Invalid "subGraphName": ${v.reason}` });
     return false;
+  }
+  return true;
+}
+
+function validateRequiredContextGraphId(contextGraphId: unknown, res: ServerResponse): boolean {
+  if (!contextGraphId) {
+    jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    return false;
+  }
+  if (typeof contextGraphId !== 'string') {
+    jsonResponse(res, 400, { error: '"contextGraphId" must be a string' });
+    return false;
+  }
+  const v = validateContextGraphId(contextGraphId);
+  if (!v.valid) {
+    jsonResponse(res, 400, { error: `Invalid "contextGraphId": ${v.reason}` });
+    return false;
+  }
+  return true;
+}
+
+function validateEntities(entities: unknown, res: ServerResponse): boolean {
+  if (entities === undefined || entities === null || entities === 'all') return true;
+  if (typeof entities === 'string') {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or an array of entity URIs' });
+    return false;
+  }
+  if (!Array.isArray(entities) || entities.length === 0 || !entities.every((e: unknown) => typeof e === 'string' && e.length > 0)) {
+    jsonResponse(res, 400, { error: '"entities" must be "all" or a non-empty array of non-empty strings' });
+    return false;
+  }
+  return true;
+}
+
+function validateConditions(conditions: unknown, res: ServerResponse): boolean {
+  if (!Array.isArray(conditions) || conditions.length === 0) {
+    jsonResponse(res, 400, { error: '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)' });
+    return false;
+  }
+  for (let i = 0; i < conditions.length; i++) {
+    const c = conditions[i];
+    if (typeof c !== 'object' || c === null || Array.isArray(c)) {
+      jsonResponse(res, 400, { error: `conditions[${i}] must be an object` });
+      return false;
+    }
+    if (typeof c.subject !== 'string' || c.subject.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].subject must be a non-empty string` });
+      return false;
+    }
+    if (typeof c.predicate !== 'string' || c.predicate.length === 0) {
+      jsonResponse(res, 400, { error: `conditions[${i}].predicate must be a non-empty string` });
+      return false;
+    }
+    if (c.expectedValue !== null && c.expectedValue !== undefined && typeof c.expectedValue !== 'string') {
+      jsonResponse(res, 400, { error: `conditions[${i}].expectedValue must be a string or null` });
+      return false;
+    }
   }
   return true;
 }
