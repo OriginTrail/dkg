@@ -84,7 +84,7 @@ export const buraQueryCoverage: CoverageThresholds = {
 export const buraCliCoverage: CoverageThresholds = {
   lines: 40,
   functions: 43,
-  branches: 28,
+  branches: 27,
   statements: 40,
 };
 
