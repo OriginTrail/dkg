@@ -97,7 +97,8 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    return this.post('/api/publish', { paranetId: contextGraphId, quads, privateQuads, ...options });
+    await this.sharedMemoryWrite(contextGraphId, quads);
+    return this.publishFromSharedMemory(contextGraphId, 'all', true);
   }
 
   /** Write quads to shared memory (formerly workspace). */

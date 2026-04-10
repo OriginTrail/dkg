@@ -1849,120 +1849,22 @@ async function handleRequest(
     return jsonResponse(res, 200, { connected: true });
   }
 
-  // POST /api/publish  — SWM-first publish (V10 protocol: chain tx = finality signal)
-  //
-  // V10 spec interface: { contextGraphId, selection?, sparql?, subGraphName?, clearAfter? }
-  // Legacy compat:      { contextGraphId, quads, ... }  — quads are staged to SWM first
-  if (req.method === 'POST' && path === '/api/publish') {
-    const serverT0 = Date.now();
-    const body = await readBody(req);
-    let payload: Record<string, unknown>;
-    try { payload = JSON.parse(body); } catch {
-      return jsonResponse(res, 400, { error: 'Invalid JSON body' });
-    }
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      return jsonResponse(res, 400, { error: 'Body must be a JSON object' });
-    }
-
-    const paranetId = (payload.contextGraphId ?? payload.paranetId) as string | undefined;
-    if (typeof paranetId !== 'string' || paranetId.trim().length === 0) {
-      return jsonResponse(res, 400, { error: 'Missing or invalid "contextGraphId" (or legacy "paranetId")' });
-    }
-    const subGraphName = payload.subGraphName as string | undefined;
-    if (subGraphName !== undefined && (typeof subGraphName !== 'string' || subGraphName.trim().length === 0)) {
-      return jsonResponse(res, 400, { error: 'Invalid "subGraphName"' });
-    }
-
-    const hasQuads = Array.isArray(payload.quads);
-    const hasSelection = payload.selection !== undefined;
-
-    const ctx = createOperationContext('publish');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { source: 'api', hasQuads, hasSelection, subGraphName } });
-    try {
-      // Legacy path: caller sent quads → stage to SWM first, then publish
-      if (hasQuads) {
-        const parsed = parsePublishRequestBody(body);
-        if (!parsed.ok) return jsonResponse(res, 400, { error: parsed.error });
-        const { quads } = parsed.value;
-
-        await tracker.trackPhase(ctx, 'swm-stage', () =>
-          agent.share(paranetId, quads, { subGraphName, operationCtx: ctx }),
-        );
-      }
-
-      // Resolve selection (V10 spec: selection or sparql; defaults to 'all')
-      const sel: 'all' | { rootEntities: string[] } =
-        Array.isArray(payload.selection) ? { rootEntities: payload.selection as string[] }
-          : (payload.selection === 'all' || !hasSelection ? 'all' : 'all');
-
-      const clearAfter = payload.clearAfter !== undefined ? Boolean(payload.clearAfter) : true;
-
-      const result = await agent.publishFromSharedMemory(paranetId, sel, {
-        clearSharedMemoryAfter: clearAfter,
-        operationCtx: ctx,
-        subGraphName,
-      });
-      const chain = result.onChainResult;
-      if (chain) {
-        tracker.setCost(ctx, {
-          gasUsed: chain.gasUsed,
-          gasPrice: chain.effectiveGasPrice,
-          gasCost: chain.gasCostWei,
-          tracCost: chain.tokenAmount,
-        });
-        const chainId = (config.chain ?? network?.chain)?.chainId;
-        tracker.setTxHash(ctx, chain.txHash, chainId ? Number(chainId) : undefined);
-      }
-      tracker.complete(ctx, { tripleCount: result.kaManifest?.length ?? 0, details: { kcId: String(result.kcId), status: result.status } });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, {
-        kcId: String(result.kcId),
-        status: result.status,
-        kas: result.kaManifest.map(ka => ({
-          tokenId: String(ka.tokenId),
-          rootEntity: ka.rootEntity,
-        })),
-        ...(result.onChainResult && {
-          txHash: result.onChainResult.txHash,
-          blockNumber: result.onChainResult.blockNumber,
-          batchId: String(result.onChainResult.batchId),
-          publisherAddress: result.onChainResult.publisherAddress,
-        }),
-        phases: opDetail.phases,
-        serverTotal: Date.now() - serverT0,
-      });
-    } catch (err) {
-      tracker.fail(ctx, err);
-      throw err;
-    }
-  }
-
-  // POST /api/update  — SWM-first update (V10 protocol: chain tx = finality signal)
-  //
-  // V10 spec interface: { kcId, contextGraphId, selection?, sparql? }
-  // Legacy compat:      { kcId, contextGraphId, quads, ... } — quads staged to SWM first
+  // POST /api/update  { kcId: "...", contextGraphId|paranetId: "...", quads: [...], privateQuads?: [...] }
   if (req.method === 'POST' && path === '/api/update') {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const { kcId, quads, privateQuads } = parsed;
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
-    if (!kcId || !paranetId) {
-      return jsonResponse(res, 400, { error: 'Missing "kcId" or "contextGraphId" (or "paranetId")' });
+    if (!kcId || !paranetId || !quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "kcId", "contextGraphId" (or "paranetId"), or "quads"' });
     }
     let kcIdBigInt: bigint;
     try { kcIdBigInt = BigInt(kcId); } catch {
       return jsonResponse(res, 400, { error: `Invalid "kcId": ${String(kcId).slice(0, 50)}` });
     }
     const ctx = createOperationContext('update');
-    tracker.start(ctx, { contextGraphId: paranetId, details: { kcId: String(kcId), source: 'api' } });
+    tracker.start(ctx, { contextGraphId: paranetId, details: { kcId: String(kcId), tripleCount: quads.length, source: 'api' } });
     try {
-      // Legacy path: caller sent quads → stage to SWM first
-      if (Array.isArray(quads) && quads.length > 0) {
-        await tracker.trackPhase(ctx, 'swm-stage', () =>
-          agent.share(paranetId, quads, { operationCtx: ctx }),
-        );
-      }
-
       const result = await agent.update(kcIdBigInt, paranetId, quads, privateQuads, {
         operationCtx: ctx,
         onPhase: tracker.phaseCallback(ctx),
@@ -1976,7 +1878,7 @@ async function handleRequest(
       if (result.status === 'failed') {
         tracker.fail(ctx, new Error(`Update failed on-chain (kcId=${kcId})`));
       } else {
-        tracker.complete(ctx, { tripleCount: quads?.length ?? 0, details: { kcId: String(result.kcId), status: result.status } });
+        tracker.complete(ctx, { tripleCount: quads.length, details: { kcId: String(result.kcId), status: result.status } });
       }
       const opDetail = dashDb.getOperation(ctx.operationId);
       return jsonResponse(res, 200, {
