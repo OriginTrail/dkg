@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
   MetricsCollector,
@@ -51,6 +51,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
+import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable } from './extraction/index.js';
@@ -335,6 +336,16 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+  });
+
+  let publisherRuntime: PublisherRuntime | null = await startPublisherRuntimeIfEnabled({
+    dataDir: dkgDir(),
+    config,
+    store: agent.store,
+    keypair: agent.wallet.keypair,
+    chainBase,
+    v10ACKProviderFactory: (contextGraphId: string) => (agent as any).createV10ACKProvider?.(contextGraphId),
+    log,
   });
 
   const networkId = await computeNetworkId();
@@ -965,6 +976,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       finally { if (timer) clearTimeout(timer); }
     }));
     metricsCollector.stop();
+    await publisherRuntime?.stop().catch((err: any) => log(`Publisher runtime stop error: ${err?.message ?? String(err)}`));
     server.close();
     appStaticServer?.close();
     await agent.stop();
@@ -1915,12 +1927,18 @@ async function handleRequest(
       await tracker.trackPhase(ctx, 'validate', async () => {
         // validation happens inside share
       });
-      const shareResult = await tracker.trackPhase(ctx, 'store', () =>
+      const result = await tracker.trackPhase(ctx, 'store', () =>
         agent.share(paranetId, quads, { subGraphName, localOnly, operationCtx: ctx }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
-      const opDetail = dashDb.getOperation(ctx.operationId);
-      return jsonResponse(res, 200, { ok: true, shareOperationId: shareResult?.shareOperationId, phases: opDetail.phases });
+      return jsonResponse(res, 200, {
+        shareOperationId: result?.shareOperationId,
+        workspaceOperationId: result?.shareOperationId,
+        contextGraphId: paranetId,
+        paranetId,
+        graph: contextGraphSharedMemoryUri(paranetId),
+        triplesWritten: quads.length,
+      });
     } catch (err) {
       tracker.fail(ctx, err);
       throw err;

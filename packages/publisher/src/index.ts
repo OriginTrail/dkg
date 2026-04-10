@@ -22,13 +22,25 @@ export {
   StaleWriteError,
   type DKGPublisherConfig,
   type ShareOptions,
-  type WriteToWorkspaceOptions,
   type ShareResult,
-  type WriteToWorkspaceResult,
-  type ConditionalShareOptions,
-  type WriteConditionalToWorkspaceOptions,
+  type ShareConditionalOptions,
   type CASCondition,
 } from './dkg-publisher.js';
+export {
+  ACKCollector,
+  type ACKCollectorDeps,
+  type CollectedACK,
+  type ACKCollectionResult,
+} from './ack-collector.js';
+export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
+export {
+  VerifyCollector,
+  type VerifyCollectorDeps,
+  type CollectedApproval,
+  type VerifyCollectionResult,
+} from './verify-collector.js';
+export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
+export { buildVerificationMetadata } from './verification-metadata.js';
 export { PublishHandler, parseSimpleNQuads } from './publish-handler.js';
 export { PublishJournal, type JournalEntry } from './publish-journal.js';
 export {
@@ -107,13 +119,36 @@ export {
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
-export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
+export {
+  TripleStoreAsyncLiftPublisher,
+  type AsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+  type AsyncLiftPublishExecutionInput,
+  type AsyncLiftPublisherRecoveryResult,
+  type AsyncLiftPublisherRecoveryResolver,
+} from './async-lift-publisher.js';
+export {
+  AsyncLiftRunner,
+  type AsyncLiftRunnerConfig,
+} from './async-lift-runner.js';
+export {
+  mapLiftRequestToPublishOptions,
+  type LiftResolvedPublishSlice,
+  type LiftPublishMappingInput,
+} from './async-lift-publish-options.js';
+export {
+  validateLiftPublishPayload,
+  type LiftValidationInput,
+  type ValidatedLiftPublishPayload,
+} from './async-lift-validation.js';
+export {
+  mapPublishResultToLiftJobSuccess,
+  mapPublishExceptionToLiftJobFailure,
+  type AsyncLiftPublishSuccess,
+  type AsyncLiftPublishFailureInput,
+} from './async-lift-publish-result.js';
+export { WorkspaceHandler, WorkspaceHandler as SharedMemoryHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
-export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated, type OnParanetCreated, type OnCollectionUpdated, type OnAllowListUpdated, type OnProfileEvent, type CursorPersistence } from './chain-event-poller.js';
+export { ChainEventPoller, type ChainEventPollerConfig, type OnParanetCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
-export { ACKCollector, type ACKCollectorDeps, type CollectedACK, type ACKCollectionResult } from './ack-collector.js';
-export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
-export { VerifyCollector, type VerifyCollectorDeps, type CollectedApproval, type VerifyCollectionResult } from './verify-collector.js';
-export { VerifyProposalHandler, type VerifyProposalHandlerDeps } from './verify-proposal-handler.js';
-export { buildVerificationMetadata } from './verification-metadata.js';
