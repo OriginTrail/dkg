@@ -1515,8 +1515,8 @@ export class DKGPublisher implements Publisher {
     contextGraphId: string,
     name: string,
     agentAddress: string,
-    opts?: { entities?: string[] | 'all'; subGraphName?: string },
-  ): Promise<{ promotedCount: number }> {
+    opts?: { entities?: string[] | 'all'; subGraphName?: string; publisherPeerId?: string },
+  ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array }> {
     DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
@@ -1557,7 +1557,36 @@ export class DKGPublisher implements Publisher {
     });
     await this.store.insert(shareMetadata);
 
-    return { promotedCount: swmQuads.length };
+    // Build gossip message so the caller (agent) can broadcast to peers.
+    // The gossip nquads use the data graph URI (same as normal share path) —
+    // receivers re-target to SWM on ingest.
+    let gossipMessage: Uint8Array | undefined;
+    if (opts?.publisherPeerId) {
+      const kaMap = autoPartition(quadsToPromote);
+      const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
+      const nquadsLines: string[] = [];
+      for (const q of quadsToPromote) {
+        const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+        nquadsLines.push(`<${q.subject}> <${q.predicate}> ${obj} <${dataGraph}> .`);
+      }
+      const manifestEntries = [...kaMap.keys()].map((rootEntity) => ({
+        rootEntity,
+        privateMerkleRoot: undefined,
+        privateTripleCount: 0,
+      }));
+      gossipMessage = encodeWorkspacePublishRequest({
+        paranetId: contextGraphId,
+        nquads: new TextEncoder().encode(nquadsLines.join('\n')),
+        manifest: manifestEntries,
+        publisherPeerId: opts.publisherPeerId,
+        workspaceOperationId: operationId,
+        timestampMs: Date.now(),
+        operationId,
+        subGraphName: opts.subGraphName,
+      });
+    }
+
+    return { promotedCount: swmQuads.length, gossipMessage };
   }
 
   async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {

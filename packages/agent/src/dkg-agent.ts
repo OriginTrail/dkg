@@ -3685,7 +3685,19 @@ export class DKGAgent {
         return agent.publisher.assertionQuery(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
       async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
-        return agent.publisher.assertionPromote(contextGraphId, name, agentAddress, opts);
+        const { promotedCount, gossipMessage } = await agent.publisher.assertionPromote(
+          contextGraphId, name, agentAddress,
+          { ...opts, publisherPeerId: agent.node.peerId.toString() },
+        );
+        if (gossipMessage) {
+          const topic = paranetWorkspaceTopic(contextGraphId);
+          try {
+            await agent.gossip.publish(topic, gossipMessage);
+          } catch {
+            agent.log.warn(createOperationContext('share'), `No peers subscribed to ${topic} yet`);
+          }
+        }
+        return { promotedCount };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
