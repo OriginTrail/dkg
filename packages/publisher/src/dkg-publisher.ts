@@ -1595,11 +1595,23 @@ export class DKGPublisher implements Publisher {
       gossipMessage = encoded;
     }
 
-    // Delete-then-insert for entities owned by this peer (upsert), matching
+    // Rule 4: reject roots owned by a different peer before any mutations.
+    if (opts?.publisherPeerId) {
+      for (const root of rootEntities) {
+        const owner = swmOwned.get(root);
+        if (owner && owner !== opts.publisherPeerId) {
+          throw new Error(
+            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
+          );
+        }
+      }
+    }
+
+    // Delete-then-insert for existing SWM entities (upsert), matching
     // _shareImpl and SharedMemoryHandler so re-promotes replace stale triples.
-    // Only overwrite entities owned by the same publisherPeerId (Rule 4).
+    // Safe after the ownership check above — only self-owned or unowned roots remain.
     for (const root of rootEntities) {
-      if (swmOwned.has(root) && swmOwned.get(root) === opts?.publisherPeerId) {
+      if (swmOwned.has(root)) {
         await this.store.deleteByPattern({ graph: swmGraphUri, subject: root });
         await this.store.deleteBySubjectPrefix(swmGraphUri, root + '/.well-known/genid/');
         await this.deleteMetaForRoot(swmMetaGraph, root);
