@@ -150,7 +150,11 @@ export class SharedMemoryHandler {
         const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
         const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
         const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> { <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> } }`,
+          `ASK { GRAPH <${metaGraph}> {
+            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
+              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
+              <http://dkg.io/ontology/createdBy> ?createdBy .
+          } }`,
         );
         if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
           const regQuads = generateSubGraphRegistration({

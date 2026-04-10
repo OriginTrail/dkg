@@ -419,6 +419,11 @@ export class DKGPublisher implements Publisher {
   /**
    * Read quads from the context graph's shared memory and publish them with full finality (data graph + chain).
    * Selection: 'all' or { rootEntities: string[] } to publish only those root entities from shared memory.
+   *
+   * @throws Error if `options.subGraphName` is combined with `options.publishContextGraphId`.
+   *   The remap-on-publish flow targets `/context/{id}` URIs, which are incompatible with
+   *   sub-graph URIs of shape `/{contextGraphId}/{subGraphName}`. To publish from a sub-graph,
+   *   omit `publishContextGraphId` (publish remains in the source CG's sub-graph).
    */
   async publishFromSharedMemory(
     contextGraphId: string,
@@ -712,10 +717,7 @@ export class DKGPublisher implements Publisher {
       if (!sgValidation.valid) throw new Error(`Invalid sub-graph name: ${sgValidation.reason}`);
 
       const sgUri = contextGraphSubGraphUri(options.contextGraphId, options.subGraphName);
-      const registered = await this.store.query(
-        `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(options.contextGraphId)}/_meta> { <${assertSafeIri(sgUri)}> ?p ?o } }`,
-      );
-      if (registered.type === 'boolean' && !registered.value) {
+      if (!(await this.isSubGraphRegistered(options.contextGraphId, options.subGraphName))) {
         throw new Error(
           `Sub-graph "${options.subGraphName}" has not been registered in context graph "${options.contextGraphId}". ` +
           `Call createSubGraph() first.`,
@@ -1469,6 +1471,37 @@ export class DKGPublisher implements Publisher {
     }
   }
 
+  private async isSubGraphRegistered(contextGraphId: string, subGraphName: string): Promise<boolean> {
+    const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+    const registered = await this.store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta> {
+        <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
+          <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
+          <http://dkg.io/ontology/createdBy> ?createdBy .
+      } }`,
+    );
+    return registered.type === 'boolean' && registered.value;
+  }
+
+  /**
+   * Throws if `subGraphName` is provided but not registered in the CG's `_meta` graph.
+   * Mirrors the registration check in `publish()` for mutation paths that would
+   * otherwise create new orphaned sub-graph state.
+   */
+  private async ensureSubGraphRegistered(
+    contextGraphId: string,
+    subGraphName: string | undefined,
+  ): Promise<void> {
+    if (subGraphName === undefined) return;
+    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    if (!(await this.isSubGraphRegistered(contextGraphId, subGraphName))) {
+      throw new Error(
+        `Sub-graph "${subGraphName}" has not been registered in context graph "${contextGraphId}". ` +
+        `Register it first via DKGAgent.createSubGraph() or by inserting the sub-graph registration into the context graph "_meta" graph.`,
+      );
+    }
+  }
+
   clearSubGraphOwnership(ownershipKey: string): void {
     this.sharedMemoryOwnedEntities.delete(ownershipKey);
     this.ownedEntities.delete(ownershipKey);
@@ -1476,7 +1509,7 @@ export class DKGPublisher implements Publisher {
   }
 
   async assertionCreate(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<string> {
-    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.createGraph(graphUri);
     return graphUri;
@@ -1489,7 +1522,7 @@ export class DKGPublisher implements Publisher {
     input: Quad[] | Array<{ subject: string; predicate: string; object: string }>,
     subGraphName?: string,
   ): Promise<void> {
-    DKGPublisher.validateOptionalSubGraph(subGraphName);
+    await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const quads = input.map((t) => ({
       subject: t.subject, predicate: t.predicate, object: t.object, graph: graphUri,
@@ -1517,7 +1550,7 @@ export class DKGPublisher implements Publisher {
     agentAddress: string,
     opts?: { entities?: string[] | 'all'; subGraphName?: string; publisherPeerId?: string },
   ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array }> {
-    DKGPublisher.validateOptionalSubGraph(opts?.subGraphName);
+    await this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const swmGraphUri = this.graphManager.sharedMemoryUri(contextGraphId, opts?.subGraphName);
 

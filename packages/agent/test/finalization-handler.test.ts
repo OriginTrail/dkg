@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest } from '@origintrail-official/dkg-core';
+import { encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext } from '@origintrail-official/dkg-core';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
 const PARANET = 'test-paranet';
@@ -141,5 +141,45 @@ describe('FinalizationHandler', () => {
     );
     expect(result.type).toBe('boolean');
     if (result.type === 'boolean') expect(result.value).toBe(false);
+  });
+
+  it('backfills full sub-graph registration metadata during finalization promotion', async () => {
+    const entity = 'urn:test:entity';
+    const subGraphName = 'code';
+    const publisherAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+    const subGraphUri = `did:dkg:context-graph:${PARANET}/${subGraphName}`;
+
+    await (handler as any).promoteSharedMemoryToCanonical(
+      PARANET,
+      [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
+      'did:dkg:evm:31337/0xABC/1',
+      [entity],
+      publisherAddress,
+      '0x' + 'ab'.repeat(32),
+      100,
+      1n,
+      1n,
+      1n,
+      createOperationContext('system'),
+      undefined,
+      subGraphName,
+    );
+
+    const registration = await store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${subGraphUri}> a <http://dkg.io/ontology/SubGraph> ;
+          <http://schema.org/name> "code" ;
+          <http://dkg.io/ontology/createdBy> <did:dkg:agent:${publisherAddress}> .
+      } }`,
+    );
+    expect(registration.type).toBe('boolean');
+    if (registration.type === 'boolean') expect(registration.value).toBe(true);
+
+    const canonical = await store.query(
+      `ASK { GRAPH <${subGraphUri}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(canonical.type).toBe('boolean');
+    if (canonical.type === 'boolean') expect(canonical.value).toBe(true);
   });
 });

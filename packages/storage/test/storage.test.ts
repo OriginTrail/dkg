@@ -285,6 +285,19 @@ describe('GraphManager', () => {
     expect(cgs.sort()).toEqual(['test1', 'test2']);
   });
 
+  it('keeps listSubGraphs as a deprecated compatibility shim', async () => {
+    await store.insert([
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:test1/code' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:test1/decisions/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:context-graph:test1/_meta' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"d"', graph: 'did:dkg:context-graph:test1/assertion/agent/name' },
+      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"e"', graph: 'did:dkg:context-graph:test2/notes' },
+    ]);
+
+    const subGraphs = await gm.listSubGraphs('test1');
+    expect(subGraphs.sort()).toEqual(['code', 'decisions']);
+  });
+
   it('drops context graph', async () => {
     await store.insert([
       { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:x' },
