@@ -69,10 +69,10 @@ curl -X POST $BASE_URL/api/shared-memory/write \
 **Step 3 — Publish to Verified Memory:**
 
 ```bash
-curl -X POST $BASE_URL/api/publish \
+curl -X POST $BASE_URL/api/shared-memory/publish \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"contextGraphId": "my-context-graph", "quads": [...]}'
+  -d '{"contextGraphId": "my-context-graph"}'
 ```
 
 **Step 4 — Query:**
@@ -81,7 +81,7 @@ curl -X POST $BASE_URL/api/publish \
 curl -X POST $BASE_URL/api/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "includeSharedMemory": true}'
+  -d '{"sparql": "SELECT * WHERE { ?s ?p ?o } LIMIT 10", "contextGraphId": "my-context-graph", "view": "shared-memory"}'
 ```
 
 ## 4. Authentication
@@ -186,13 +186,13 @@ curl -X POST $BASE_URL/api/assertion/my-assertion/import-file \
 
 1. Create a context graph (`POST /api/context-graph/create`)
 2. Write triples to shared memory (`POST /api/shared-memory/write`)
-3. Publish to verified memory (`POST /api/publish`)
+3. Publish to verified memory (`POST /api/shared-memory/publish`)
 
 **Query across layers:**
 
-- Shared memory: `{"sparql": "...", "contextGraphId": "...", "includeSharedMemory": true}`
-- Verified memory: `{"sparql": "...", "contextGraphId": "..."}`
-- Working memory (planned): `{"sparql": "...", "view": "working-memory", "agentAddress": "..."}`
+- Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-memory"}`
+- Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory"}`
+- Working memory (planned): `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
 
 ## Appendix: V9 → V10 Migration
 
