@@ -326,10 +326,16 @@ The system uses three memory layers:
 3. Verified Memory (on-chain anchored, immutable)
 DOCEOF
 
+ASSERTION_NAME="test-import-$(date +%s)"
+curl -sf -H "Authorization: Bearer $AUTH" \
+  -H "Content-Type: application/json" \
+  -d "{\"contextGraphId\":\"devnet-test\",\"name\":\"$ASSERTION_NAME\"}" \
+  "$N1/api/assertion/create" >/dev/null 2>&1
+
 IMPORT=$(curl -s -H "Authorization: Bearer $AUTH" \
   -F "file=@${TMPFILE};type=text/markdown" \
   -F "contextGraphId=devnet-test" \
-  "$N1/api/import-file" 2>&1)
+  "$N1/api/assertion/${ASSERTION_NAME}/import-file" 2>&1)
 rm -f "$TMPFILE"
 
 if echo "$IMPORT" | grep -qi "assertion\|extract\|quads\|triples\|import\|written\|operationId"; then

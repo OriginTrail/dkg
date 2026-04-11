@@ -843,6 +843,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       recovery: { action: 'finalized_from_chain', recoveredFromStatus: job.status, txHashChecked: job.broadcast.txHash },
       timestamps: {
         ...job.timestamps,
+        failedAt: undefined,
         includedAt: job.timestamps.includedAt ?? now,
         finalizedAt: now,
         lastRecoveredAt: now,
