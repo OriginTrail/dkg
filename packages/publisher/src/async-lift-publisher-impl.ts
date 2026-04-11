@@ -835,16 +835,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     finalization: LiftJobFinalizationMetadata,
   ): LiftJob {
     const now = this.now();
-    // For retry_recovery jobs the actual status is 'failed'; derive the
-    // original pre-failure state from failure metadata when available.
-    const recoveredFromStatus =
-      (job as any).failure?.failedFromState ?? job.status;
     return {
       ...job,
       status: 'finalized',
       inclusion,
       finalization,
-      recovery: { action: 'finalized_from_chain', recoveredFromStatus, txHashChecked: job.broadcast.txHash },
+      recovery: { action: 'finalized_from_chain', recoveredFromStatus: job.status, txHashChecked: job.broadcast.txHash },
       timestamps: {
         ...job.timestamps,
         failedAt: undefined,

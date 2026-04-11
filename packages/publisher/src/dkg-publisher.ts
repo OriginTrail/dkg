@@ -1640,7 +1640,7 @@ export class DKGPublisher implements Publisher {
           );
         }
       } else {
-        this.log?.warn?.(`Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
+        this.log.warn(createOperationContext('share'), `Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
         skippedRoots.add(root);
       }
     }
@@ -1671,8 +1671,11 @@ export class DKGPublisher implements Publisher {
     const swmQuads = effectiveQuads.map((q) => ({ ...q, graph: swmGraphUri }));
     await this.store.insert(swmQuads);
 
-    // Delete promoted triples from assertion graph
-    await this.store.delete(quadsToPromote.map((q) => ({ ...q, graph: graphUri })));
+    // Delete promoted triples from assertion graph (only the effective, non-skipped roots)
+    const effectivePromoteQuads = skippedRoots.size > 0
+      ? quadsToPromote.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
+      : quadsToPromote;
+    await this.store.delete(effectivePromoteQuads.map((q) => ({ ...q, graph: graphUri })));
 
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
     const entities = [...new Set(effectiveQuads.map((q) => q.subject))];
