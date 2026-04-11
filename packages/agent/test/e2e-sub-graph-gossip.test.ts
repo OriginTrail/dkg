@@ -7,7 +7,7 @@
  * 4. Sub-graph isolation in gossip: data in one sub-graph doesn't appear in another
  * 5. Sub-graph data doesn't leak to root CG queries
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
@@ -38,12 +38,7 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
 
-  afterAll(async () => {
-    try { await nodeA?.stop(); } catch {}
-    try { await nodeB?.stop(); } catch {}
-  });
-
-  it('bootstraps two agents and connects', async () => {
+  beforeAll(async () => {
     nodeA = await DKGAgent.create({
       name: 'SubGossipA',
       listenPort: 0,
@@ -71,6 +66,11 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
     await nodeA.createSubGraph(CG_ID, SG_RESEARCH, { description: 'Papers' });
     await nodeA.createSubGraph(CG_ID, SG_CODE, { description: 'Source code' });
   }, 20_000);
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch {}
+    try { await nodeB?.stop(); } catch {}
+  });
 
   it('SWM write to sub-graph replicates via gossip', async () => {
     await nodeA.share(CG_ID, [

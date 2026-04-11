@@ -227,14 +227,19 @@ describe('Assertion promote gossip (2 nodes)', () => {
     ]);
 
     await nodeA.assertion.promote(CG_ID, 'gossip-draft');
-    await sleep(3000);
 
-    // Node B should have received the data via gossip
-    const result = await nodeB.query(
-      'SELECT ?name WHERE { <urn:gossip:item> <http://schema.org/name> ?name }',
-      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
-    );
-    expect(result.bindings.length).toBe(1);
-    expect(result.bindings[0]?.['name']).toBe('"Gossiped via promote"');
+    const deadline = Date.now() + 15_000;
+    let bindings: any[] = [];
+    while (Date.now() < deadline) {
+      const result = await nodeB.query(
+        'SELECT ?name WHERE { <urn:gossip:item> <http://schema.org/name> ?name }',
+        { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+      );
+      bindings = result.bindings;
+      if (bindings.length > 0) break;
+      await sleep(500);
+    }
+    expect(bindings.length).toBe(1);
+    expect(bindings[0]?.['name']).toBe('"Gossiped via promote"');
   }, 20_000);
 });

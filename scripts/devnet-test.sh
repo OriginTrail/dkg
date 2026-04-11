@@ -568,7 +568,7 @@ ASSERT_CREATE=$(c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{
   \"contextGraphId\":\"$ASSERT_CG\",
   \"name\":\"devnet-draft\"
 }")
-ASSERT_URI=$(json_get "$ASSERT_CREATE" uri)
+ASSERT_URI=$(json_get "$ASSERT_CREATE" assertionUri)
 echo "  Assertion URI: $ASSERT_URI"
 [[ "$ASSERT_URI" != "__NONE__" && "$ASSERT_URI" != "__ERR__" ]] && ok "Assertion created: $ASSERT_URI" || fail "Assertion create failed: $ASSERT_CREATE"
 
@@ -645,9 +645,15 @@ echo "  Jobs: $(echo "$PUB_JOBS" | head -c 300)"
 echo "$PUB_JOBS" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d) if isinstance(d,list) else len(d.get("jobs",[])))' 2>/dev/null && ok "Publisher jobs endpoint works" || warn "Publisher jobs: $PUB_JOBS"
 
 echo "--- 15c: Enqueue a publish job ---"
+ENQUEUE_OP_ID="devnet-enqueue-test-$(date +%s)"
 PUB_ENQUEUE=$(c -X POST "http://127.0.0.1:9201/api/publisher/enqueue" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"selection\":[\"urn:devnet:assert:entity1\"]
+  \"shareOperationId\":\"$ENQUEUE_OP_ID\",
+  \"roots\":[{\"rootEntity\":\"urn:devnet:assert:entity1\",\"privateMerkleRoot\":null,\"privateTripleCount\":0}],
+  \"namespace\":\"did:dkg:context-graph:$CONTEXT_GRAPH\",
+  \"scope\":\"full\",
+  \"authorityType\":\"owner\",
+  \"authorityProofRef\":\"urn:dkg:proof:devnet-test\"
 }")
 echo "  Enqueue: $(echo "$PUB_ENQUEUE" | head -c 300)"
 PUB_JOB_ID=$(json_get "$PUB_ENQUEUE" jobId)
@@ -657,9 +663,9 @@ if [[ "$PUB_JOB_ID" != "__NONE__" && "$PUB_JOB_ID" != "__ERR__" && -n "$PUB_JOB_
   echo "--- 15d: Check job status ---"
   sleep 5
   JOB_STATUS=$(c "http://127.0.0.1:9201/api/publisher/job?id=$PUB_JOB_ID")
-  JOB_ST=$(json_get "$JOB_STATUS" status)
+  JOB_ST=$(echo "$JOB_STATUS" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("job",d).get("status","?") if isinstance(d.get("job",d),dict) else "?")' 2>/dev/null)
   echo "  Job status: $JOB_ST"
-  [[ -n "$JOB_ST" && "$JOB_ST" != "__NONE__" ]] && ok "Job status retrieved: $JOB_ST" || warn "Job status check: $JOB_STATUS"
+  [[ -n "$JOB_ST" && "$JOB_ST" != "?" ]] && ok "Job status retrieved: $JOB_ST" || warn "Job status check: $JOB_STATUS"
 fi
 
 echo "--- 15e: Clear finalized jobs ---"
