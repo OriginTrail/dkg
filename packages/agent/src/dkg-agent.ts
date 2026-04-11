@@ -845,15 +845,20 @@ export class DKGAgent {
         break;
       }
 
-      const requestBytes = await this.buildSyncRequest(contextGraphId, offset, SYNC_PAGE_SIZE, includeSharedMemory, remotePeerId, phase);
       const remainingMs = Math.max(0, deadline - Date.now());
       const timeoutMs = Math.min(
         SYNC_PAGE_TIMEOUT_MS,
         Math.max(2000, Math.floor(remainingMs / SYNC_ROUTER_ATTEMPTS)),
       );
 
+      // Build a fresh request (with unique requestId + signature) per attempt
+      // so that authenticated private-sync retries aren't rejected as replays.
+      const curOffset = offset;
       const responseBytes = await withRetry(
-        () => this.router.send(remotePeerId, PROTOCOL_SYNC, requestBytes, timeoutMs),
+        async () => {
+          const requestBytes = await this.buildSyncRequest(contextGraphId, curOffset, SYNC_PAGE_SIZE, includeSharedMemory, remotePeerId, phase);
+          return this.router.send(remotePeerId, PROTOCOL_SYNC, requestBytes, timeoutMs);
+        },
         {
           maxAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
           baseDelayMs: 1000,
@@ -1642,6 +1647,14 @@ export class DKGAgent {
     let excludeGraphPrefixes: string[] | undefined;
     if (!opts.contextGraphId) {
       excludeGraphPrefixes = await this.getDisallowedGraphPrefixes();
+      // Per spec Axiom 1 every shared query must be resolved within a CG.
+      // Reject explicit GRAPH/FROM clauses that reference private CGs the
+      // caller cannot read — post-filtering alone cannot prevent leaks via
+      // aggregates (ASK, COUNT) or projections that omit graph/subject.
+      if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
+        this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
+        return { bindings: [] };
+      }
     }
 
     const result = await this.queryEngine.query(sparql, {
@@ -1708,6 +1721,13 @@ export class DKGAgent {
       prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
     }
     return prefixes;
+  }
+
+  private sparqlReferencesPrivateGraphs(sparql: string, disallowedPrefixes: string[]): boolean {
+    if (disallowedPrefixes.length === 0) return false;
+    const upper = sparql.toUpperCase();
+    if (!upper.includes('GRAPH') && !upper.includes('FROM')) return false;
+    return disallowedPrefixes.some(prefix => sparql.includes(prefix));
   }
 
   /**
@@ -2032,9 +2052,11 @@ export class DKGAgent {
       // Auto-subscribe to the new context graph's GossipSub topic
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast via the ontology context graph so other nodes learn about it
+      // Broadcast only the ontology-graph quads (not the private meta-graph
+      // participant IDs) so the allow-list doesn't leak to unauthorized peers.
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const nquads = quads.map(q => {
+      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
+      const nquads = broadcastQuads.map(q => {
         const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
         return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
       }).join('\n');
