@@ -206,16 +206,18 @@ curl -X POST $BASE_URL/api/assertion/climate-report/import-file \
 ```json
 {
   "assertionUri": "did:dkg:context-graph:research/assertion/0xAgentAddr/climate-report",
-  "fileHash": "sha256:a1b2c3...",
-  "detectedContentType": "text/markdown",
+  "fileHash": "keccak256:a1b2c3...",
+  "detectedContentType": "application/pdf",
   "extraction": {
     "status": "completed",
     "tripleCount": 14,
-    "pipelineUsed": "text/markdown",
-    "mdIntermediateHash": "sha256:a1b2c3..."
+    "pipelineUsed": "application/pdf",
+    "mdIntermediateHash": "keccak256:d4e5f6..."
   }
 }
 ```
+
+Both `fileHash` and `mdIntermediateHash` are `keccak256:<hex>` per spec §10.2:603. `mdIntermediateHash` is only present when Phase 1 actually ran (converter-backed imports like PDF/DOCX); pure-markdown imports leave it undefined.
 
 ### Extraction statuses
 

@@ -301,12 +301,12 @@ describe('Full extraction pipeline simulation', () => {
     // Build the import-file response as the daemon would
     const importFileResponse = {
       assertionUri: 'did:dkg:context-graph:sales/assertion/0xSales/q4-report',
-      fileHash: 'sha256:abc123',
+      fileHash: 'keccak256:abc123',
       detectedContentType: 'text/html',
       extraction: {
         status: phase2Triples.length > 0 ? 'completed' as const : 'skipped' as const,
         tripleCount: phase2Triples.length,
-        mdIntermediateHash: 'sha256:def456',
+        mdIntermediateHash: 'keccak256:def456',
         pipelineUsed: 'text/html',
       },
     };
@@ -328,7 +328,7 @@ describe('Full extraction pipeline simulation', () => {
     // Node would return extraction.status: "skipped"
     const importFileResponse = {
       assertionUri: 'did:dkg:context-graph:test/assertion/0xAgent/binary-blob',
-      fileHash: 'sha256:xyz789',
+      fileHash: 'keccak256:xyz789',
       detectedContentType: 'application/octet-stream',
       extraction: {
         status: 'skipped' as const,
