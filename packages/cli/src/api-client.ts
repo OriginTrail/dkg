@@ -485,7 +485,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((body as Record<string, unknown>).error as string ?? `HTTP ${res.status}`);
+      throw ApiClient.httpError(res.status, (body as Record<string, unknown>).error as string);
     }
     return res.json() as Promise<T>;
   }
@@ -498,8 +498,16 @@ export class ApiClient {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error((data as Record<string, unknown>).error as string ?? `HTTP ${res.status}`);
+      throw ApiClient.httpError(res.status, (data as Record<string, unknown>).error as string);
     }
     return res.json() as Promise<T>;
+  }
+
+  /** Create an Error with an `httpStatus` property so callers can distinguish
+   *  application-level responses from connection failures. */
+  static httpError(status: number, message?: string): Error & { httpStatus: number } {
+    const err = new Error(message ?? `HTTP ${status}`) as Error & { httpStatus: number };
+    err.httpStatus = status;
+    return err;
   }
 }

@@ -28,7 +28,11 @@ function isDaemonUnreachable(err: unknown): boolean {
   const code = (err as any)?.cause?.code ?? (err as any)?.code;
   if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true;
   if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) return true;
-  // Older daemon without /api/publisher/* — ApiClient throws body text or HTTP status
+  // If ApiClient set httpStatus, the daemon *is* reachable — it responded.
+  // A 404 from a healthy daemon (e.g. "job not found") must NOT trigger fallback.
+  if (typeof (err as any)?.httpStatus === 'number') return false;
+  // Older daemon without /api/publisher/* — ApiClient without httpStatus throws
+  // raw body text. Only match route-level "not found/allowed/implemented".
   const lower = msg.toLowerCase();
   if (lower.includes('not found') || lower.includes('not allowed') || lower.includes('not implemented')
     || /HTTP (404|405|501)/i.test(msg)) return true;

@@ -86,8 +86,8 @@ export class AsyncLiftRunner {
   private async maybeRunRecovery(): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
-    this.lastRecoveryAt = now;
     await this.config.publisher.recover();
+    this.lastRecoveryAt = Date.now();
   }
 
   private async runCycle(): Promise<boolean> {

@@ -391,7 +391,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         const resolved = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
         if (resolved) {
           await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.finalizeRecoveredJob(job as unknown as LiftJobBroadcast, resolved.inclusion, resolved.finalization));
+          // Strip stale failure metadata before finalization and use the
+          // original pre-failure status (broadcast) as recoveredFromStatus.
+          const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
+          const recoverable = { ...jobWithoutFailure, status: 'broadcast' } as unknown as LiftJobBroadcast;
+          await this.writeJob(this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization));
           recovered += 1;
         }
         // If still inconclusive, leave in failed state — next recover() will retry again.
