@@ -320,7 +320,9 @@ c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 1
-c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}" > /dev/null
+COST_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}")
+COST_ST=$(json_get "$COST_PUB" status)
+[[ "$COST_ST" == "confirmed" || "$COST_ST" == "finalized" ]] && ok "Cost-test publish OK ($COST_ST)" || fail "Cost-test publish failed: status=$COST_ST: ${COST_PUB:0:200}"
 
 TRAC5_A=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
 echo "  Node5 TRAC after: $TRAC5_A"
@@ -496,7 +498,8 @@ ALL_MATCH=true
 for p in 9201 9202 9203 9204 9205; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
     \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a ?type . FILTER(CONTAINS(STR(?s),'example.org')) }\",
-    \"contextGraphId\":\"$CONTEXT_GRAPH\"
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"verified-memory\"
   }")
   ct=$(echo "$R" | python3 -c "
 import sys,json,re

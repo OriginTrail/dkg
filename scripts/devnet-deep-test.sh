@@ -39,15 +39,19 @@ echo ""
 
 for writer_port in 9201 9202 9203 9204 9205; do
   ENTITY="http://test.org/gossip-from-$writer_port"
-  post $writer_port /api/shared-memory/write -H "Content-Type: application/json" -d "{
+  SWM_RESP=$(post $writer_port /api/shared-memory/write -H "Content-Type: application/json" -d "{
     \"contextGraphId\": \"$CG\",
     \"quads\": [
       $(q "$ENTITY" 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing'),
       $(ql "$ENTITY" 'http://schema.org/name' "Written by node $writer_port"),
       $(ql "$ENTITY" 'http://test.org/sourcePort' "$writer_port")
     ]
-  }" > /dev/null 2>&1
-  ok "SWM write from Node $writer_port"
+  }" 2>&1)
+  if echo "$SWM_RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);exit(0 if d.get('shareOperationId') or d.get('operationId') else 1)" 2>/dev/null; then
+    ok "SWM write from Node $writer_port"
+  else
+    fail "SWM write from Node $writer_port failed: ${SWM_RESP:0:200}"
+  fi
 done
 
 echo "  Waiting 8s for GossipSub propagation..."
@@ -164,12 +168,13 @@ STAKING_OUTPUT=$(cd "$REPO_ROOT/packages/evm-module" && node -e "
 STAKED_COUNT=0
 while IFS= read -r line; do
   echo "  $line"
-  if echo "$line" | grep -q "50000"; then
-    ok "$(echo "$line" | cut -d: -f1) staked 50k TRAC"
+  STAKE_VAL=$(echo "$line" | sed -n 's/.*stake=\([0-9.]*\).*/\1/p')
+  if [[ -n "$STAKE_VAL" ]] && python3 -c "exit(0 if float('$STAKE_VAL') >= 50000 else 1)" 2>/dev/null; then
+    ok "$(echo "$line" | cut -d: -f1) staked ${STAKE_VAL} TRAC (>= 50k)"
     STAKED_COUNT=$((STAKED_COUNT+1))
   fi
 done <<< "$STAKING_OUTPUT"
-[[ "$STAKED_COUNT" -eq 5 ]] || fail "Only $STAKED_COUNT/5 nodes confirmed 50k stake"
+[[ "$STAKED_COUNT" -eq 5 ]] || fail "Only $STAKED_COUNT/5 nodes confirmed >= 50k stake"
 
 echo ""
 echo "--- 2c: Perform additional staking — add 10k TRAC to Node1 ---"
