@@ -144,7 +144,33 @@ export class DKGQueryEngine implements QueryEngine {
       }
     }
 
-    return this.execAndNormalize(effectiveSparql);
+    const result = await this.execAndNormalize(effectiveSparql);
+
+    // Strip results originating from excluded graphs (e.g. private CGs).
+    if (options?.excludeGraphPrefixes?.length && result.bindings.length > 0) {
+      return this.filterExcludedGraphs(result, options.excludeGraphPrefixes);
+    }
+
+    return result;
+  }
+
+  /**
+   * Remove bindings that contain values matching excluded graph URI prefixes.
+   * This prevents private CG data from leaking into unscoped queries.
+   */
+  private filterExcludedGraphs(result: QueryResult, prefixes: string[]): QueryResult {
+    const filtered = result.bindings.filter((binding) => {
+      for (const value of Object.values(binding)) {
+        if (typeof value !== 'string') continue;
+        // Strip surrounding angle brackets or quotes from URIs
+        const clean = value.replace(/^[<"]|[>"]$/g, '');
+        for (const prefix of prefixes) {
+          if (clean.startsWith(prefix)) return false;
+        }
+      }
+      return true;
+    });
+    return { ...result, bindings: filtered };
   }
 
   /**

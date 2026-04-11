@@ -1637,8 +1637,16 @@ export class DKGAgent {
       return { bindings: [] };
     }
 
+    // When no context graph is specified, exclude private CGs the caller cannot
+    // read to prevent data leakage via unscoped or FROM-less SPARQL.
+    let excludeGraphPrefixes: string[] | undefined;
+    if (!opts.contextGraphId) {
+      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes();
+    }
+
     const result = await this.queryEngine.query(sparql, {
       paranetId: opts.contextGraphId,
+      excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
@@ -1670,6 +1678,36 @@ export class DKGAgent {
     }
 
     return participants.some((id) => id === identityId);
+  }
+
+  /**
+   * Returns graph URI prefixes for private CGs the caller cannot read.
+   * Used to exclude them from unscoped queries.
+   */
+  private async getDisallowedGraphPrefixes(): Promise<string[]> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const result = await this.store.query(
+      `SELECT ?cg WHERE {
+        GRAPH <${ontologyGraph}> {
+          ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
+        }
+      }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return [];
+
+    const prefixes: string[] = [];
+    for (const row of result.bindings) {
+      const cgUri = row['cg'];
+      if (!cgUri) continue;
+      // cgUri is like "did:dkg:context-graph:some-id" — extract the ID
+      const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
+      if (!match) continue;
+      const contextGraphId = match[1];
+      if (await this.canReadContextGraph(contextGraphId)) continue;
+      // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
+      prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
+    }
+    return prefixes;
   }
 
   /**
@@ -1938,12 +1976,15 @@ export class DKGAgent {
     if (creatorIdentityId > 0n) {
       participantIdentityIds.add(creatorIdentityId);
     }
+    // Store participant IDs in the CG's meta graph (not the public ontology)
+    // to prevent leaking the allow-list to unauthorized peers.
+    const cgMetaGraph = paranetMetaGraphUri(opts.id);
     for (const participantIdentityId of participantIdentityIds) {
       quads.push({
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
         object: `"${participantIdentityId.toString()}"`,
-        graph: ontologyGraph,
+        graph: cgMetaGraph,
       });
     }
     if (onChainId) {
@@ -3189,9 +3230,13 @@ export class DKGAgent {
       now < request.issuedAtMs - 5000 ||
       requesterIdentityId === 0n ||
       !request.requesterSignatureR ||
-      !request.requesterSignatureVS ||
-      typeof this.chain.verifyACKIdentity !== 'function'
+      !request.requesterSignatureVS
     ) {
+      return false;
+    }
+    // Require at least one identity verification method
+    const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
+    if (typeof verifyIdentity !== 'function') {
       return false;
     }
 
@@ -3220,7 +3265,7 @@ export class DKGAgent {
       return false;
     }
 
-    const validIdentity = await this.chain.verifyACKIdentity(recoveredAddress, requesterIdentityId);
+    const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
     if (!validIdentity) {
       return false;
     }
@@ -3262,18 +3307,35 @@ export class DKGAgent {
       return localParticipants;
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const contextGraphUri = paranetDataGraphUri(contextGraphId);
-    const result = await this.store.query(
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+
+    // Look in the CG's meta graph first (where createContextGraph now writes them)
+    const metaResult = await this.store.query(
+      `SELECT ?identityId WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
+        }
+      }`,
+    );
+    if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
+      return metaResult.bindings
+        .map((row) => row['identityId'])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
+    }
+
+    // Backward compat: check ontology graph for data created before this change
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontResult = await this.store.query(
       `SELECT ?identityId WHERE {
         GRAPH <${ontologyGraph}> {
           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
         }
       }`,
     );
-
-    if (result.type === 'bindings' && result.bindings.length > 0) {
-      return result.bindings
+    if (ontResult.type === 'bindings' && ontResult.bindings.length > 0) {
+      return ontResult.bindings
         .map((row) => row['identityId'])
         .filter((value): value is string => typeof value === 'string')
         .map((value) => BigInt(value.replace(/^"|"$/g, '')));

@@ -1591,6 +1591,16 @@ export class EVMChainAdapter implements ChainAdapter {
     return true;
   }
 
+  async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    if (!identityStorage) return false;
+
+    const OPERATIONAL_KEY = 2;
+    const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
+    return identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY);
+  }
+
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
     try {
       const sig = ethers.Signature.from(await this.signer.signMessage(digest));

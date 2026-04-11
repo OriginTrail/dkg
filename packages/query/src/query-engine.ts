@@ -34,6 +34,12 @@ export interface QueryOptions {
    */
   subGraphName?: string;
   /**
+   * Graph URI prefixes to exclude from unscoped queries.
+   * Used to prevent private context graph data from leaking into
+   * queries that don't specify a contextGraphId.
+   */
+  excludeGraphPrefixes?: string[];
+  /**
    * @internal Reserved for future use — not yet enforced by DKGQueryEngine.
    * Will filter verified-memory triples below this trust threshold once trust
    * metadata is available in verified-memory graphs.

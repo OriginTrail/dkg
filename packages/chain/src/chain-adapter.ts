@@ -349,6 +349,13 @@ export interface ChainAdapter {
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
 
   /**
+   * Verify that a recovered signer address owns the claimed identity without
+   * requiring the identity to be a staked core node. Used for private CG sync
+   * auth where participants may be non-staked identities.
+   */
+  verifySyncIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+
+  /**
    * Sign an ACK digest for V10 StorageACK (core nodes only).
    * Returns { r, vs } signature components or undefined if not capable.
    * The private key never leaves the adapter implementation.

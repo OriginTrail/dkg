@@ -664,6 +664,10 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
+  async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
+    return this.verifyACKIdentity(recoveredAddress, claimedIdentityId);
+  }
+
   private mockACKSigner?: import('ethers').Wallet;
 
   setMockACKSigner(wallet: import('ethers').Wallet) {

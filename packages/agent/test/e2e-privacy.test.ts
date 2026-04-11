@@ -8,7 +8,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { contextGraphDataUri, SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, SYSTEM_PARANETS, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { generateKCMetadata, computeTripleHashV10, computeFlatKCRootV10, type KAMetadata } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -481,4 +481,141 @@ describe('Context graph access matrix (3 nodes)', () => {
       }
     }
   }, 40000);
+});
+
+describe('Unscoped query privacy (2 nodes)', () => {
+  let nodeA: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+  });
+
+  it('excludes private CG data from unscoped queries', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    nodeA = await DKGAgent.create({ name: 'UnscopedPrivacy', listenPort: 0, chainAdapter: chainA });
+    await nodeA.start();
+    await sleep(500);
+
+    const idA = 1n;
+    (chainA as any).identities.set(walletA.address, idA);
+
+    await nodeA.createContextGraph({ id: 'public-cg', name: 'Public CG' });
+    // Create a private CG — createContextGraph auto-adds the creator (identity 1)
+    // to participants, so we'll remove it and keep only identity 99.
+    await nodeA.createContextGraph({
+      id: 'private-cg',
+      name: 'Private CG',
+      private: true,
+      participantIdentityIds: [99n],
+    });
+    // Override participants to exclude creator (keep only 99) in both store and memory
+    const cgMetaGraph = 'did:dkg:context-graph:private-cg/_meta';
+    const privateCgUri = 'did:dkg:context-graph:private-cg';
+    await (nodeA as any).store.delete([
+      { subject: privateCgUri, predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID, object: `"${idA}"`, graph: cgMetaGraph },
+    ]);
+    const sub = (nodeA as any).subscribedContextGraphs.get('private-cg');
+    if (sub) sub.participantIdentityIds = [99n];
+
+    const publicEntity = 'urn:test:public:entity:1';
+    const privateEntity = 'urn:test:private:entity:1';
+
+    await insertWithMeta((nodeA as any).store, 'public-cg', [
+      { subject: publicEntity, predicate: 'http://schema.org/name', object: '"Public Data"', graph: contextGraphDataUri('public-cg') },
+    ]);
+    await insertWithMeta((nodeA as any).store, 'private-cg', [
+      { subject: privateEntity, predicate: 'http://schema.org/name', object: '"Secret Data"', graph: contextGraphDataUri('private-cg') },
+    ]);
+
+    // Scoped query to public CG works
+    const publicResult = await nodeA.query(
+      `SELECT ?name WHERE { <${publicEntity}> <http://schema.org/name> ?name }`,
+      { contextGraphId: 'public-cg' },
+    );
+    expect(publicResult.bindings.length).toBe(1);
+
+    // Scoped query to private CG is denied (node A identity 1 not in participants [99])
+    const privateResult = await nodeA.query(
+      `SELECT ?name WHERE { <${privateEntity}> <http://schema.org/name> ?name }`,
+      { contextGraphId: 'private-cg' },
+    );
+    expect(privateResult.bindings.length).toBe(0);
+
+    // Unscoped query with GRAPH pattern should NOT return private CG data
+    const unscopedResult = await nodeA.query(
+      `SELECT ?g ?s ?name WHERE { GRAPH ?g { ?s <http://schema.org/name> ?name } }`,
+    );
+    const privateBindings = unscopedResult.bindings.filter(
+      b => b['name'] === '"Secret Data"'
+        || (b['g'] && b['g'].includes('private-cg'))
+        || (b['s'] && b['s'].includes('private')),
+    );
+    expect(privateBindings.length).toBe(0);
+
+    // But unscoped query should still return public data
+    const publicBindings = unscopedResult.bindings.filter(
+      b => b['name'] === '"Public Data"',
+    );
+    expect(publicBindings.length).toBeGreaterThan(0);
+  }, 30000);
+});
+
+describe('Participant IDs stored in meta graph (not ontology)', () => {
+  let nodeA: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+  });
+
+  it('stores participant identity IDs in the CG meta graph', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+
+    nodeA = await DKGAgent.create({ name: 'ParticipantMetaGraph', listenPort: 0, chainAdapter: chainA });
+    await nodeA.start();
+    await sleep(500);
+
+    const idA = await chainA.ensureProfile();
+    (chainA as any).identities.set(walletA.address, idA);
+
+    await nodeA.createContextGraph({
+      id: 'private-meta-test',
+      name: 'Private Meta Test',
+      private: true,
+      participantIdentityIds: [idA, 42n],
+    });
+
+    // Check ontology graph does NOT contain participant IDs
+    const ontologyResult = await (nodeA as any).store.query(
+      `SELECT ?id WHERE {
+        GRAPH <did:dkg:context-graph:dkg-ontology> {
+          ?s <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?id
+        }
+      }`,
+    );
+    const ontologyParticipants = ontologyResult.type === 'bindings' ? ontologyResult.bindings : [];
+    expect(ontologyParticipants.length).toBe(0);
+
+    // Check CG meta graph DOES contain participant IDs
+    const metaResult = await (nodeA as any).store.query(
+      `SELECT ?id WHERE {
+        GRAPH <did:dkg:context-graph:private-meta-test/_meta> {
+          ?s <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?id
+        }
+      }`,
+    );
+    const metaParticipants = metaResult.type === 'bindings' ? metaResult.bindings : [];
+    expect(metaParticipants.length).toBeGreaterThanOrEqual(2);
+
+    // Verify getPrivateContextGraphParticipants still works
+    const participants = await (nodeA as any).getPrivateContextGraphParticipants('private-meta-test');
+    expect(participants).toContain(idA);
+    expect(participants).toContain(42n);
+  }, 30000);
 });
