@@ -1,6 +1,6 @@
 /**
  * Phase 2 of document ingestion: deterministic structural extraction
- * from a Markdown intermediate to RDF triples + provenance.
+ * from a Markdown intermediate to RDF triples + source-file linkage.
  *
  * This is the "Layer 1 structural" extraction defined by
  * `19_MARKDOWN_CONTENT_TYPE.md` — it runs without an LLM and produces
@@ -13,16 +13,34 @@
  *   - Dataview `key:: value` inline fields → properties
  *   - Heading hierarchy → dkg:hasSection
  *
- * Every extracted triple gets a provenance record pointing to a
- * `dkg:ExtractionProvenance` blank identifier so downstream consumers
- * can distinguish structurally-derived triples from user-asserted ones.
+ * When `sourceFileIri` is provided the extractor emits the §10.1 data-
+ * graph linkage triples it owns — specifically row 1
+ * (`<entityUri> dkg:sourceFile <fileUri>`) and row 3
+ * (`<entityUri> dkg:rootEntity <resolvedRootEntity>`). These come back
+ * in the `sourceFileLinkage` return field so the daemon can keep them
+ * distinct from content triples before merging them into the
+ * assertion graph. The field was renamed from `provenance` in Round 13
+ * Bug 39 to remove the semantic clash with its original
+ * extraction-run-metadata meaning.
  *
- * Spec: 05_PROTOCOL_EXTENSIONS.md §6.5.2, 19_MARKDOWN_CONTENT_TYPE.md
+ * Row 2 (`<entityUri> dkg:sourceContentType "<original-mime>"`) is
+ * owned by the daemon (Round 9 Bug 1 / Round 9 Bug 27 rulings), not
+ * this module — only the daemon has access to the original upload
+ * content type that row 2 must describe. The daemon emits row 2
+ * alongside the extractor's rows 1 and 3 in the same atomic insert.
+ *
+ * Rows 4-13 (file descriptor block + ExtractionProvenance resource
+ * described in §3.2/§10.2) are also daemon-owned — the daemon has
+ * natural access to the UAL, the fresh provenance URI, the agent DID,
+ * and the `_meta` writes. This module stays free of `_meta` /
+ * extraction-run concerns.
+ *
+ * Spec: 05_PROTOCOL_EXTENSIONS.md §6.3 / §6.5, 19_MARKDOWN_CONTENT_TYPE.md §10
  */
 
 import { createHash } from 'node:crypto';
 import { load as loadYaml } from 'js-yaml';
-import type { ExtractionQuad as Quad } from '@origintrail-official/dkg-core';
+import { isSafeIri, type ExtractionQuad as Quad } from '@origintrail-official/dkg-core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -30,12 +48,8 @@ const SCHEMA_DESCRIPTION = 'http://schema.org/description';
 const SCHEMA_MENTIONS = 'http://schema.org/mentions';
 const SCHEMA_KEYWORDS = 'http://schema.org/keywords';
 const DKG_HAS_SECTION = 'http://dkg.io/ontology/hasSection';
-const DKG_EXTRACTION_PROVENANCE = 'http://dkg.io/ontology/ExtractionProvenance';
-const DKG_DERIVED_FROM = 'http://dkg.io/ontology/derivedFrom';
-const DKG_EXTRACTED_BY = 'http://dkg.io/ontology/extractedBy';
-const DKG_EXTRACTION_RULE = 'http://dkg.io/ontology/extractionRule';
-const DKG_EXTRACTED_AT = 'http://dkg.io/ontology/extractedAt';
-const PROV_WAS_GENERATED_BY = 'http://www.w3.org/ns/prov#wasGeneratedBy';
+const DKG_SOURCE_FILE = 'http://dkg.io/ontology/sourceFile';
+const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
 const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
 const XSD_DATE = 'http://www.w3.org/2001/XMLSchema#date';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
@@ -54,17 +68,81 @@ export interface MarkdownExtractInput {
    * derives a subject from frontmatter `id` or the first H1 heading.
    */
   documentIri?: string;
-  /** Optional timestamp for provenance (defaults to now). */
+  /**
+   * IRI of the source blob this markdown was extracted from, in the form
+   * `urn:dkg:file:keccak256:<hex>`. When set, the extractor emits the
+   * §10.1 `dkg:sourceFile` linkage quad (row 1) with `<entityUri>` as
+   * subject and this URI as object.
+   *
+   * The file descriptor block (rows 4-8) is subsequently filtered out of
+   * `assertionPromote`'s root-entity partition via a subject-prefix
+   * filter on `urn:dkg:file:` in `packages/publisher/src/dkg-publisher.ts`
+   * — that's how we prevent cross-assertion contention without using
+   * blank-node subjects. See `19_MARKDOWN_CONTENT_TYPE.md §10.2` for the
+   * normative rule and spec-engineer's reconciled ruling on Codex Bug 8
+   * for the history (Round 3 tried blank nodes; Round 4 reverted to URI
+   * subjects + promote-time filter after an `autoPartition` audit showed
+   * the blank-node approach silently drops the ExtractionProvenance
+   * block, which is a correctness smell).
+   */
+  sourceFileIri?: string;
+  /**
+   * Explicit root-entity IRI override. In V10.0 this is usually the
+   * document subject IRI itself (`<entityUri> dkg:rootEntity <entityUri>`).
+   * If the frontmatter carries a `rootEntity` key with a string value it
+   * takes precedence over both the input and the subject default; see
+   * §19.10.1:508. The resolved value is returned on
+   * `MarkdownExtractOutput.resolvedRootEntity` so the daemon can reuse it
+   * for the `_meta` row 14 write without re-resolving.
+   */
+  rootEntityIri?: string;
+  /**
+   * Optional timestamp reserved for future extraction-run metadata
+   * (defaults to now when eventually used). Currently unused — the
+   * extractor no longer emits extraction-run provenance since that
+   * moved to the daemon's route handler in Round 9 Bug 27. Callers
+   * may still pass this for forward compatibility, but it is not
+   * consumed by any code path today.
+   */
   now?: Date;
 }
 
 export interface MarkdownExtractOutput {
-  /** Extracted RDF triples. */
+  /** Extracted RDF triples describing the document content. */
   triples: Quad[];
-  /** dkg:ExtractionProvenance quads for the extraction run. */
-  provenance: Quad[];
+  /**
+   * §10.1 source-file linkage quads on the document subject. Emits rows
+   * 1 and 3 (`dkg:sourceFile` + `dkg:rootEntity`); row 2
+   * (`dkg:sourceContentType`) is owned by the daemon because it has the
+   * original upload content type and the extractor does not. Empty when
+   * `sourceFileIri` is not supplied. The daemon merges these into the
+   * same data graph as `triples` before committing.
+   *
+   * Round 13 Bug 39: renamed from `provenance` to `sourceFileLinkage`.
+   * The original field at module introduction (`ff8afe3`) was
+   * "`dkg:ExtractionProvenance` blank-identifier records for every
+   * extracted triple" — extraction-run metadata (agent, timestamp,
+   * method). The PR #121 chain repurposed the field to hold source-
+   * file linkage triples, creating a semantic clash with the old
+   * meaning. Round 9 Bug 27 moved the extraction-run provenance rows
+   * (9-13 on the `<urn:dkg:extraction:uuid>` subject) to the daemon's
+   * route handler, so the extractor no longer produces ANY
+   * extraction-run metadata — only source-file linkage. Renaming
+   * makes the contract honest: this field contains linkage triples,
+   * full stop.
+   */
+  sourceFileLinkage: Quad[];
   /** The subject IRI used for the document (useful to the caller for indexing). */
   subjectIri: string;
+  /**
+   * The resolved root-entity IRI, following the §19.10.1:508 precedence
+   * rules: frontmatter `rootEntity` key > explicit `rootEntityIri` input >
+   * reflexive fallback to the document subject. The daemon reuses this
+   * value as the object of the `_meta` row 14 quad so the data-graph row 3
+   * and `_meta` row 14 stay in sync without the daemon re-running the
+   * resolution logic.
+   */
+  resolvedRootEntity: string;
 }
 
 /**
@@ -167,7 +245,18 @@ function resolveSubjectIri(
 
   const fmId = frontmatter?.['id'];
   if (typeof fmId === 'string' && fmId.length > 0) {
-    if (/^(https?:|did:|urn:|_:)/.test(fmId)) return fmId;
+    // Round 11 Bug 33 + Round 10 Bug 30 preempt: use `isSafeIri` as the
+    // single source-of-truth "is this an IRI" check. Previous rounds
+    // used a narrow regex allowlist `^(https?:|did:|urn:|_:)` which
+    // (a) accepted `_:foo` blank nodes even though `isSafeIri` rejects
+    // them — contradicting spec §19.10.2:628-629 / §03 §1 non-blank-node
+    // Entity-hood, and (b) silently slugified valid IRIs whose schemes
+    // fell outside the allowlist, e.g. `tag:origintrail.org,2026:paper`
+    // or `doi:10.1000/xyz`. The spec defines the contract as "scheme-
+    // based IRI" without restricting schemes; the only exclusions are
+    // blank nodes (RDF 1.1 §3.4 — not IRIs) and reserved protocol
+    // namespaces (§19.10.2:708-723). `isSafeIri` matches that contract.
+    if (isSafeIri(fmId)) return fmId;
     return `urn:dkg:md:${slugify(fmId)}`;
   }
 
@@ -314,13 +403,12 @@ function stripCodeFences(body: string): string {
 
 /**
  * Run the full Phase 2 structural extraction. Deterministic, no LLM.
- * Returns `{ triples, provenance, subjectIri }`. Empty arrays are valid
+ * Returns `{ triples, sourceFileLinkage, subjectIri, resolvedRootEntity }`. Empty arrays are valid
  * — a Markdown document with no frontmatter, no wikilinks, no tags, no
  * dataview fields, and no headings produces zero triples.
  */
 export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtractOutput {
   const triples: Quad[] = [];
-  const now = input.now ?? new Date();
 
   const { frontmatter, body } = splitFrontmatter(input.markdown);
   const subject = resolveSubjectIri(input, frontmatter, body);
@@ -329,6 +417,7 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   if (frontmatter) {
     for (const [key, value] of Object.entries(frontmatter)) {
       if (key === 'id') continue; // already used as subject identifier
+      if (key === 'rootEntity') continue; // consumed as a linkage override below
       if (key === 'type') {
         const typeIri = resolveTypeIri(value);
         if (typeIri) triples.push({ subject, predicate: RDF_TYPE, object: typeIri });
@@ -388,15 +477,15 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
     sectionStack.push({ level: heading.level, iri: sectionIri });
   }
 
-  // ── Provenance ─────────────────────────────────────────────────────
-  const provenance = buildProvenance({
+  // ── §10.1 source-file linkage (data graph) ─────────────────────────
+  const { quads: sourceFileLinkage, resolvedRootEntity } = buildSourceFileLinkage({
     subject,
-    agentDid: input.agentDid,
-    tripleCount: triples.length,
-    now,
+    frontmatter,
+    sourceFileIri: input.sourceFileIri,
+    rootEntityIri: input.rootEntityIri,
   });
 
-  return { triples, provenance, subjectIri: subject };
+  return { triples, sourceFileLinkage, subjectIri: subject, resolvedRootEntity };
 }
 
 function frontmatterKeyToPredicate(key: string): string | null {
@@ -408,21 +497,155 @@ function frontmatterKeyToPredicate(key: string): string | null {
   return localName ? `http://schema.org/${localName}` : null;
 }
 
-function buildProvenance(args: {
+/**
+ * Build the `19_MARKDOWN_CONTENT_TYPE.md §10.1` source-file linkage quads
+ * on the document subject, plus compute the resolved root-entity IRI.
+ *
+ * The extractor is responsible for rows 1 and 3 of the Phase A table.
+ * Row 2 (`dkg:sourceContentType`) is owned by the daemon: the extractor
+ * only ever processes markdown (even for PDF uploads, where the
+ * markdown intermediate is what it sees), but row 2 must describe the
+ * ORIGINAL blob pointed at by row 1. Only the daemon has that value, so
+ * it emits row 2 itself alongside the file descriptor block.
+ *
+ *   Row 1: `<entityUri> dkg:sourceFile  <urn:dkg:file:keccak256:...>`
+ *   Row 3: `<entityUri> dkg:rootEntity  <resolvedRootEntity>`
+ *
+ * Row 1's object is a content-addressed URI (`urn:dkg:file:keccak256:<hex>`).
+ * Cross-assertion promote contention on that subject is prevented by a
+ * subject-prefix filter in `packages/publisher/src/dkg-publisher.ts`
+ * `assertionPromote` that excludes `urn:dkg:file:` and `urn:dkg:extraction:`
+ * subjects from the partition before `autoPartition` runs. See Codex
+ * Bug 8 Round 4 reconciled ruling for the history — Round 3 tried blank
+ * nodes but an `autoPartition` audit showed they silently drop the
+ * ExtractionProvenance block on promote, which was a correctness smell.
+ *
+ * `resolvedRootEntity` follows the §19.10.1:508 precedence rules:
+ *   1. frontmatter `rootEntity` key (string) — honored regardless of
+ *      whether source-file linkage was requested, since the caller may
+ *      still want the resolved value for other purposes. IRI-shaped
+ *      values are validated via `isSafeIri` to reject malformed inputs
+ *      (Codex Bug 13); non-IRI values fall through to slugification.
+ *   2. explicit `rootEntityIri` input.
+ *   3. reflexive fallback: the document subject itself.
+ */
+function buildSourceFileLinkage(args: {
   subject: string;
-  agentDid: string;
-  tripleCount: number;
-  now: Date;
-}): Quad[] {
-  if (args.tripleCount === 0) return [];
-  const provIri = `urn:dkg:extraction:${slugify(args.subject)}-${args.now.getTime()}`;
-  const xsdDateTime = `"${args.now.toISOString()}"^^<${XSD_DATE_TIME}>`;
-  return [
-    { subject: provIri, predicate: RDF_TYPE, object: DKG_EXTRACTION_PROVENANCE },
-    { subject: provIri, predicate: DKG_EXTRACTED_BY, object: args.agentDid },
-    { subject: provIri, predicate: DKG_EXTRACTION_RULE, object: JSON.stringify('markdown-structural-v1') },
-    { subject: provIri, predicate: DKG_EXTRACTED_AT, object: xsdDateTime },
-    { subject: provIri, predicate: DKG_DERIVED_FROM, object: args.subject },
-    { subject: args.subject, predicate: PROV_WAS_GENERATED_BY, object: provIri },
+  frontmatter: Record<string, unknown> | null;
+  sourceFileIri: string | undefined;
+  rootEntityIri: string | undefined;
+}): { quads: Quad[]; resolvedRootEntity: string } {
+  // Round 7 Bug 20: symmetric validation for the PROGRAMMATIC override
+  // inputs. The frontmatter `rootEntity` path already validates via
+  // `isSafeIri` (Round 4 Bug 13), but `rootEntityIri` and `sourceFileIri`
+  // came through untrusted until now — an internal caller (including
+  // the daemon itself if a hash computation ever drifts) could pass
+  // `''`, `foo`, or `http://x>y` and get malformed linkage quads that
+  // only fail later at store insert with a cryptic RDF parse error.
+  // Reject non-IRIs the same way as the frontmatter path: empty string,
+  // missing IRI scheme prefix, or failed `isSafeIri` check → throw a
+  // clear `Invalid '<field>' IRI` error that the daemon surfaces as 400.
+  //
+  // Round 10 Bug 30 + Round 11 Bug 33: `rootEntity` / `sourceFileIri`
+  // MUST be scheme-based IRIs per `19_MARKDOWN_CONTENT_TYPE.md
+  // §10.2:628-629` (`dkg:rootEntity is an IRI`) AND the reserved-
+  // namespaces rule at §10.2:708-723. The spec defines the contract
+  // as "scheme-based IRI" WITHOUT restricting schemes — the only
+  // exclusions are blank nodes (RDF 1.1 §3.4 — not IRIs, also
+  // excluded from Entity-hood per `03_PROTOCOL_CORE.md §1`) and
+  // reserved protocol namespaces (§10.2:708-723, guarded at the
+  // publisher write-boundary via `rejectReservedSubjectPrefixes`).
+  //
+  // Earlier rounds used a narrow regex allowlist
+  // `^(https?:|did:|urn:)` which silently rejected valid absolute
+  // IRIs with other schemes (e.g. `tag:origintrail.org,2026:paper`,
+  // `doi:10.1000/xyz`, `info:lccn/2005029870`) — users who supplied
+  // such IRIs as `rootEntityIri` got an `Invalid 'rootEntityIri'`
+  // rejection even though `isSafeIri` would have accepted them.
+  // The fix: drop the narrow regex, use `isSafeIri` as the single
+  // source-of-truth "is this an IRI" check. It already rejects
+  // empty strings, malformed values, AND blank nodes per its spec.
+  if (args.rootEntityIri !== undefined) {
+    if (!isSafeIri(args.rootEntityIri)) {
+      throw new Error(
+        `Invalid 'rootEntityIri' input: ${JSON.stringify(args.rootEntityIri)}. ` +
+          `Expected a scheme-based IRI such as urn:note:foo, http://example.com/bar, ` +
+          `or tag:example.org,2026:paper. Any absolute IRI scheme is accepted as long ` +
+          `as the value contains no spaces, angle brackets, quotes, or control ` +
+          `characters. Blank nodes (_:foo) are not accepted — per ` +
+          `19_MARKDOWN_CONTENT_TYPE.md §10.2, rootEntity must be an IRI.`,
+      );
+    }
+  }
+  if (args.sourceFileIri !== undefined) {
+    if (!isSafeIri(args.sourceFileIri)) {
+      throw new Error(
+        `Invalid 'sourceFileIri' input: ${JSON.stringify(args.sourceFileIri)}. ` +
+          `Expected a scheme-based IRI such as urn:dkg:file:keccak256:abc, ` +
+          `http://example.com/file, or tag:example.org,2026:doc. Any absolute IRI ` +
+          `scheme is accepted as long as the value contains no spaces, angle brackets, ` +
+          `quotes, or control characters. Blank nodes (_:foo) are not accepted — per ` +
+          `19_MARKDOWN_CONTENT_TYPE.md §10.2, sourceFile must be an IRI.`,
+      );
+    }
+  }
+
+  // Resolve the root entity regardless of whether linkage quads will be
+  // emitted. Frontmatter wins, then explicit input, then reflexive default.
+  //
+  // Round 11 Bug 33: broaden scheme detection from a narrow allowlist
+  // `^(https?:|did:|urn:)` to the RFC 3986 generic scheme pattern
+  // `^[a-zA-Z][a-zA-Z0-9+.-]*:`. The narrow allowlist silently
+  // slugified valid IRIs with other schemes — Codex's cited example:
+  // `rootEntity: tag:origintrail.org,2026:paper` was rewritten into
+  // `urn:dkg:md:tag-origintrail-org-2026-paper` instead of being
+  // preserved as the caller-intended IRI. Any scheme `isSafeIri`
+  // accepts is now preserved (tag:, doi:, info:, etc.), matching the
+  // programmatic `rootEntityIri` path for contract consistency.
+  //
+  // Round 4 Bug 13 semantics preserved: values that LOOK like IRI
+  // attempts (scheme-prefixed) but fail `isSafeIri` still throw
+  // loudly with a clear `Invalid frontmatter 'rootEntity' IRI`
+  // message — e.g. `urn:x y` (embedded space) or `http://x>y`
+  // (angle bracket). Values that don't look like IRI attempts
+  // (plain text with no scheme prefix) still slugify as before.
+  //
+  // Round 10 Bug 30: blank nodes (`_:foo`) do NOT match the RFC 3986
+  // scheme production (which requires `[a-zA-Z]` first — `_` is not
+  // in that class), so they fall through to slugification rather
+  // than being accepted as pseudo-IRIs. This matches spec §10.2
+  // (rootEntity must be an IRI, not a blank node).
+  let resolvedRootEntity: string = args.rootEntityIri ?? args.subject;
+  const fmRoot = args.frontmatter?.['rootEntity'];
+  if (typeof fmRoot === 'string' && fmRoot.length > 0) {
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(fmRoot)) {
+      // Looks like an IRI attempt — validate strictly.
+      if (!isSafeIri(fmRoot)) {
+        throw new Error(
+          `Invalid frontmatter 'rootEntity' IRI: ${JSON.stringify(fmRoot)}. ` +
+            `Scheme-prefixed values must be safe IRIs ` +
+            `(no spaces, angle brackets, quotes, or control characters). ` +
+            `Any absolute IRI scheme is accepted (http, https, did, urn, ` +
+            `tag, doi, info, etc.). Blank nodes (_:foo) are not accepted — ` +
+            `per 19_MARKDOWN_CONTENT_TYPE.md §10.2, rootEntity must be an IRI.`,
+        );
+      }
+      resolvedRootEntity = fmRoot;
+    } else {
+      resolvedRootEntity = `urn:dkg:md:${slugify(fmRoot)}`;
+    }
+  }
+
+  if (!args.sourceFileIri) {
+    return { quads: [], resolvedRootEntity };
+  }
+
+  const quads: Quad[] = [
+    // Row 1 — points at the content-addressed file URN
+    { subject: args.subject, predicate: DKG_SOURCE_FILE, object: args.sourceFileIri },
+    // Row 3 — resolved root entity (reflexive or frontmatter/explicit override)
+    { subject: args.subject, predicate: DKG_ROOT_ENTITY, object: resolvedRootEntity },
   ];
+
+  return { quads, resolvedRootEntity };
 }

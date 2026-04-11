@@ -3,6 +3,7 @@ import { extractFromMarkdown } from '../src/extraction/markdown-extractor.js';
 
 const AGENT = 'did:dkg:agent:0xAbC123';
 const FIXED_NOW = new Date('2026-04-10T12:00:00Z');
+const FILE_URI = 'urn:dkg:file:keccak256:1111111111111111111111111111111111111111111111111111111111111111';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
@@ -10,8 +11,11 @@ const SCHEMA_DESCRIPTION = 'http://schema.org/description';
 const SCHEMA_MENTIONS = 'http://schema.org/mentions';
 const SCHEMA_KEYWORDS = 'http://schema.org/keywords';
 const DKG_HAS_SECTION = 'http://dkg.io/ontology/hasSection';
+const DKG_SOURCE_FILE = 'http://dkg.io/ontology/sourceFile';
+const DKG_SOURCE_CONTENT_TYPE = 'http://dkg.io/ontology/sourceContentType';
+const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
+const DKG_DERIVED_FROM = 'http://dkg.io/ontology/derivedFrom';
 const DKG_EXTRACTION_PROVENANCE = 'http://dkg.io/ontology/ExtractionProvenance';
-const PROV_WAS_GENERATED_BY = 'http://www.w3.org/ns/prov#wasGeneratedBy';
 const XSD_BOOLEAN = 'http://www.w3.org/2001/XMLSchema#boolean';
 const XSD_DATE = 'http://www.w3.org/2001/XMLSchema#date';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
@@ -442,40 +446,206 @@ describe('extractFromMarkdown — subject IRI resolution', () => {
   });
 });
 
-describe('extractFromMarkdown — provenance', () => {
-  it('emits a single provenance block when triples are produced', () => {
-    const { triples, provenance } = extractFromMarkdown({
+describe('extractFromMarkdown — source-file linkage (§10.1)', () => {
+  it('emits no source-file linkage quads when no sourceFileIri is supplied', () => {
+    const { triples, sourceFileLinkage, resolvedRootEntity, subjectIri } = extractFromMarkdown({
       markdown: `# Doc\n\n#tag1\n`,
       agentDid: AGENT,
       now: FIXED_NOW,
     });
     expect(triples.length).toBeGreaterThan(0);
-    expect(provenance.length).toBeGreaterThan(0);
-    expect(provenance).toContainEqual(expect.objectContaining({
-      predicate: RDF_TYPE,
-      object: DKG_EXTRACTION_PROVENANCE,
-    }));
-    // Back-link from subject to provenance
-    expect(provenance.some(q => q.predicate === PROV_WAS_GENERATED_BY)).toBe(true);
+    expect(sourceFileLinkage).toHaveLength(0);
+    // resolvedRootEntity still falls back to the document subject so the
+    // daemon can write row 14 even when no linkage quads are emitted.
+    expect(resolvedRootEntity).toBe(subjectIri);
   });
 
-  it('emits no provenance when no triples are extracted', () => {
-    const { triples, provenance } = extractFromMarkdown({
+  it('does not emit the legacy dkg:ExtractionProvenance block from the extractor', () => {
+    // The extraction-provenance resource (rows 9-13 of the Phase A table)
+    // is owned by the daemon route handler, not the extractor. Verify the
+    // extractor never emits it even when it would otherwise produce triples.
+    const { triples, sourceFileLinkage } = extractFromMarkdown({
+      markdown: `# Doc\n\n#tag1\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      now: FIXED_NOW,
+    });
+    const all = [...triples, ...sourceFileLinkage];
+    expect(all.some(q => q.object === DKG_EXTRACTION_PROVENANCE)).toBe(false);
+    expect(all.some(q => q.predicate === DKG_DERIVED_FROM)).toBe(false);
+  });
+
+  it('does not emit row 2 (dkg:sourceContentType) — daemon owns that row', () => {
+    // The extractor only ever processes markdown, but row 2 must describe
+    // the ORIGINAL upload blob. Only the daemon has the original content
+    // type, so the extractor MUST NOT emit row 2 at all. Regression guard
+    // for the row-2-ownership split ruled by spec-engineer on Codex Bug 1.
+    const { triples, sourceFileLinkage } = extractFromMarkdown({
+      markdown: `# Doc\n\n#tag\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      now: FIXED_NOW,
+    });
+    const all = [...triples, ...sourceFileLinkage];
+    expect(all.some(q => q.predicate === DKG_SOURCE_CONTENT_TYPE)).toBe(false);
+  });
+
+  it('emits rows 1 and 3 linkage quads when sourceFileIri is supplied', () => {
+    const { sourceFileLinkage, subjectIri, resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: research-note\n---\n\n# Research Note\n\nBody.\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      now: FIXED_NOW,
+    });
+    expect(subjectIri).toBe('urn:dkg:md:research-note');
+    // Row 1 — object is the caller-supplied URN. The earlier Round 3
+    // blank-node approach was reverted in Round 4 (Option B filter in
+    // `assertionPromote` prevents cross-assertion contention).
+    expect(sourceFileLinkage).toContainEqual({
+      subject: subjectIri,
+      predicate: DKG_SOURCE_FILE,
+      object: FILE_URI,
+    });
+    // Row 3: reflexive rootEntity on the document subject by default.
+    expect(sourceFileLinkage).toContainEqual({
+      subject: subjectIri,
+      predicate: DKG_ROOT_ENTITY,
+      object: subjectIri,
+    });
+    // Only rows 1 and 3 — no row 2.
+    expect(sourceFileLinkage).toHaveLength(2);
+    expect(resolvedRootEntity).toBe(subjectIri);
+  });
+
+  it('honors an explicit rootEntityIri over the reflexive default', () => {
+    const ROOT = 'urn:dkg:md:research-project';
+    const { sourceFileLinkage, subjectIri, resolvedRootEntity } = extractFromMarkdown({
+      markdown: `# Doc\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      rootEntityIri: ROOT,
+      now: FIXED_NOW,
+    });
+    const rootQuads = sourceFileLinkage.filter(q => q.predicate === DKG_ROOT_ENTITY);
+    expect(rootQuads).toHaveLength(1);
+    expect(rootQuads[0]!.object).toBe(ROOT);
+    expect(rootQuads[0]!.subject).toBe(subjectIri);
+    // resolvedRootEntity must match the row 3 quad so the daemon's row 14
+    // is consistent with the data-graph row 3.
+    expect(resolvedRootEntity).toBe(ROOT);
+  });
+
+  it('lets a frontmatter `rootEntity` key override both the input and the default', () => {
+    const { sourceFileLinkage, triples, subjectIri, resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: sub-doc\nrootEntity: urn:dkg:md:parent-root\n---\n\n# Sub Doc\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      rootEntityIri: 'urn:dkg:md:ignored-override',
+      now: FIXED_NOW,
+    });
+    expect(subjectIri).toBe('urn:dkg:md:sub-doc');
+    const rootQuads = sourceFileLinkage.filter(q => q.predicate === DKG_ROOT_ENTITY);
+    expect(rootQuads).toHaveLength(1);
+    expect(rootQuads[0]!.object).toBe('urn:dkg:md:parent-root');
+    expect(resolvedRootEntity).toBe('urn:dkg:md:parent-root');
+    // The rootEntity frontmatter key must NOT leak through as a content triple
+    // on the schema.org namespace (it's consumed by the linkage builder).
+    expect(triples.some(t => t.predicate === 'http://schema.org/rootEntity')).toBe(false);
+  });
+
+  it('slugifies a non-IRI frontmatter `rootEntity` value', () => {
+    const { sourceFileLinkage, resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: My Parent\n---\n`,
+      agentDid: AGENT,
+      sourceFileIri: FILE_URI,
+      now: FIXED_NOW,
+    });
+    const rootQuads = sourceFileLinkage.filter(q => q.predicate === DKG_ROOT_ENTITY);
+    expect(rootQuads).toHaveLength(1);
+    expect(rootQuads[0]!.object).toBe('urn:dkg:md:my-parent');
+    expect(resolvedRootEntity).toBe('urn:dkg:md:my-parent');
+  });
+
+  it('frontmatter rootEntity resolves even without a sourceFileIri', () => {
+    // §19.10.1:508 promises the override works regardless — without a
+    // sourceFileIri there are no quads to emit, but the daemon may still
+    // need the resolved value for downstream writes.
+    const { sourceFileLinkage, resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: urn:dkg:md:parent\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(sourceFileLinkage).toHaveLength(0);
+    expect(resolvedRootEntity).toBe('urn:dkg:md:parent');
+  });
+
+  it('emits linkage even when the extractor produces zero content triples', () => {
+    const { triples, sourceFileLinkage } = extractFromMarkdown({
       markdown: ``,
       agentDid: AGENT,
+      sourceFileIri: FILE_URI,
       now: FIXED_NOW,
     });
     expect(triples).toHaveLength(0);
-    expect(provenance).toHaveLength(0);
+    expect(sourceFileLinkage.some(q => q.predicate === DKG_SOURCE_FILE)).toBe(true);
   });
 
-  it('records the extracting agent DID in provenance', () => {
-    const { provenance } = extractFromMarkdown({
-      markdown: `# Doc\n\n#tag\n`,
+  it('Bug 13: frontmatter `rootEntity` with a valid IRI is accepted', () => {
+    const { resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: urn:note:climate-report\n---\n`,
       agentDid: AGENT,
       now: FIXED_NOW,
     });
-    expect(provenance.some(q => q.object === AGENT)).toBe(true);
+    expect(resolvedRootEntity).toBe('urn:note:climate-report');
+  });
+
+  it('Bug 13: frontmatter `rootEntity` with an http://-prefixed IRI is accepted', () => {
+    const { resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: https://example.org/entities/42\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(resolvedRootEntity).toBe('https://example.org/entities/42');
+  });
+
+  it('Bug 13: frontmatter `rootEntity` with an embedded space is REJECTED (not silently passed through)', () => {
+    // Pre-fix: `urn:x y` would pass the prefix check and flow into the
+    // graph, blowing up at the RDF layer with a cryptic error. Post-fix:
+    // `isSafeIri` catches it and the extractor throws with a clear
+    // message that the daemon surfaces as a 400.
+    expect(() => extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: 'urn:x y'\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    })).toThrow(/Invalid frontmatter 'rootEntity' IRI/);
+  });
+
+  it('Bug 13: frontmatter `rootEntity` with an angle bracket is REJECTED', () => {
+    expect(() => extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: 'http://x>y'\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    })).toThrow(/Invalid frontmatter 'rootEntity' IRI/);
+  });
+
+  it('Bug 13: frontmatter `rootEntity` with a double-quote is REJECTED', () => {
+    expect(() => extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: 'urn:x"y'\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    })).toThrow(/Invalid frontmatter 'rootEntity' IRI/);
+  });
+
+  it('Bug 13: non-IRI `rootEntity` values still fall through to slugification (unchanged)', () => {
+    // Values without an http:/https:/did:/urn:/_: prefix take the
+    // slugify path, which is safe by construction (strips everything
+    // that isn't a-z0-9-).
+    const { resolvedRootEntity } = extractFromMarkdown({
+      markdown: `---\nid: child\nrootEntity: My Parent Document\n---\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(resolvedRootEntity).toBe('urn:dkg:md:my-parent-document');
   });
 });
 
@@ -508,9 +678,10 @@ Some background.
 
 Our method relies on [[SPARQL]] queries.
 `;
-    const { triples, provenance, subjectIri } = extractFromMarkdown({
+    const { triples, sourceFileLinkage, subjectIri } = extractFromMarkdown({
       markdown,
       agentDid: AGENT,
+      sourceFileIri: FILE_URI,
       now: FIXED_NOW,
     });
 
@@ -555,8 +726,22 @@ Our method relies on [[SPARQL]] queries.
       `${subjectIri}#section-2-methods`,
     ]);
 
-    // Provenance present
-    expect(provenance.length).toBeGreaterThan(0);
-    expect(provenance.some(q => q.object === AGENT)).toBe(true);
+    // §10.1 linkage present: rows 1 (sourceFile) and 3 (rootEntity).
+    // Row 1's object is the caller-supplied content-addressed URN
+    // (Round 4 Option B after the blank-node approach was reverted).
+    // Row 2 (sourceContentType) is intentionally absent — the daemon
+    // owns that row because only it has the original upload content
+    // type.
+    expect(sourceFileLinkage).toContainEqual({
+      subject: subjectIri,
+      predicate: DKG_SOURCE_FILE,
+      object: FILE_URI,
+    });
+    expect(sourceFileLinkage).toContainEqual({
+      subject: subjectIri,
+      predicate: DKG_ROOT_ENTITY,
+      object: subjectIri,
+    });
+    expect(sourceFileLinkage.some(q => q.predicate === DKG_SOURCE_CONTENT_TYPE)).toBe(false);
   });
 });
