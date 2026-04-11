@@ -434,23 +434,165 @@ LOCAL_CHECK=$(post 9205 /api/query -H "Content-Type: application/json" -d "{
 
 # ================================================================
 echo ""
-echo "=== TEST 9: Context Graph Operations ==="
+echo "=== TEST 9: Assertion Lifecycle ==="
 echo ""
 
-echo "--- 9a: List context graphs ---"
+echo "--- 9a: Create, write, query, promote a working memory assertion ---"
+ASSERT_CREATE=$(post 9201 /api/assertion/create -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"name\": \"deep-draft\"
+}")
+ASSERT_URI=$(echo "$ASSERT_CREATE" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("uri",""))' 2>/dev/null)
+[[ -n "$ASSERT_URI" ]] && ok "Assertion created: $ASSERT_URI" || fail "Assertion create: $ASSERT_CREATE"
+
+post 9201 /api/assertion/deep-draft/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"quads\": [
+    $(ql 'urn:deep:assert:1' 'http://schema.org/name' 'Deep Assertion Entity'),
+    $(ql 'urn:deep:assert:1' 'http://schema.org/version' 'v2'),
+    $(q 'urn:deep:assert:1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
+  ]
+}" > /dev/null
+ok "Assertion write OK"
+
+ASSERT_Q=$(post 9201 /api/assertion/deep-draft/query -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\"
+}")
+AQ_CT=$(echo "$ASSERT_Q" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null || echo "0")
+[[ "$AQ_CT" -ge 2 ]] && ok "Assertion query returned $AQ_CT quads" || fail "Assertion query: $AQ_CT quads (expected >=2)"
+
+echo "--- 9b: Promote assertion to SWM ---"
+ASSERT_P=$(post 9201 /api/assertion/deep-draft/promote -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\"
+}")
+AP_CT=$(echo "$ASSERT_P" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("promotedCount",0))' 2>/dev/null || echo "0")
+[[ "$AP_CT" -ge 1 ]] && ok "Assertion promoted ($AP_CT quads)" || fail "Assertion promote: $ASSERT_P"
+
+echo "--- 9c: Promoted data gossips to all 5 nodes ---"
+sleep 6
+ASSERT_GOSSIP_OK=true
+for p in 9201 9202 9203 9204 9205; do
+  CT=$(post $p /api/query -H "Content-Type: application/json" -d "{
+    \"sparql\": \"SELECT ?name WHERE { GRAPH ?g { <urn:deep:assert:1> <http://schema.org/name> ?name } . FILTER(CONTAINS(STR(?g),'_shared_memory')) }\",
+    \"contextGraphId\": \"$CG\"
+  }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+  if [ "$CT" -ge 1 ]; then
+    ok "Promoted assertion on Node $p"
+  else
+    warn "Promoted assertion NOT on Node $p"
+    ASSERT_GOSSIP_OK=false
+  fi
+done
+
+echo "--- 9d: Publish promoted assertion from SWM ---"
+ASSERT_PUB=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"selection\": [\"urn:deep:assert:1\"]
+}")
+ASSERT_PUB_ST=$(echo "$ASSERT_PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
+[[ "$ASSERT_PUB_ST" == "confirmed" || "$ASSERT_PUB_ST" == "finalized" ]] && ok "Assertion SWM→VM publish ($ASSERT_PUB_ST)" || fail "Assertion SWM publish=$ASSERT_PUB_ST"
+
+echo "--- 9e: Verify WM→SWM→VM data in canonical graph ---"
+sleep 8
+for p in 9201 9202 9203; do
+  VM_CT=$(post $p /api/query -H "Content-Type: application/json" -d "{
+    \"sparql\": \"SELECT ?name WHERE { <urn:deep:assert:1> <http://schema.org/name> ?name }\",
+    \"contextGraphId\": \"$CG\"
+  }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+  [[ "$VM_CT" -ge 1 ]] && ok "VM assertion data on Node $p" || warn "VM assertion data missing on Node $p ($VM_CT)"
+done
+
+echo ""
+echo "--- 9f: Sub-graph assertions ---"
+post 9201 /api/sub-graph/create -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"subGraphName\": \"deep-sg-test\"
+}" > /dev/null
+ok "Sub-graph 'deep-sg-test' created"
+
+post 9201 /api/assertion/create -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"name\": \"sg-assertion\",
+  \"subGraphName\": \"deep-sg-test\"
+}" > /dev/null
+post 9201 /api/assertion/sg-assertion/write -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"subGraphName\": \"deep-sg-test\",
+  \"quads\": [$(ql 'urn:deep:sg:item' 'http://schema.org/name' 'Sub-graph Deep Item')]
+}" > /dev/null
+SG_PROMOTE=$(post 9201 /api/assertion/sg-assertion/promote -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"subGraphName\": \"deep-sg-test\"
+}")
+SG_P_CT=$(echo "$SG_PROMOTE" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("promotedCount",0))' 2>/dev/null || echo "0")
+[[ "$SG_P_CT" -ge 1 ]] && ok "Sub-graph assertion promoted ($SG_P_CT)" || fail "Sub-graph assertion promote: $SG_PROMOTE"
+
+sleep 4
+SG_GOS=$(post 9203 /api/query -H "Content-Type: application/json" -d "{
+  \"sparql\": \"SELECT ?name WHERE { <urn:deep:sg:item> <http://schema.org/name> ?name }\",
+  \"contextGraphId\": \"$CG\",
+  \"subGraphName\": \"deep-sg-test\",
+  \"graphSuffix\": \"_shared_memory\"
+}")
+SG_GOS_CT=$(echo "$SG_GOS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$SG_GOS_CT" -ge 1 ]] && ok "Sub-graph assertion gossiped to Node3" || warn "Sub-graph not on Node3 ($SG_GOS_CT)"
+
+# ================================================================
+echo ""
+echo "=== TEST 10: Publisher Queue ==="
+echo ""
+
+echo "--- 10a: Publisher stats ---"
+PUB_STATS=$(get 9201 /api/publisher/stats)
+echo "  Stats: $(echo "$PUB_STATS" | head -c 300)"
+echo "$PUB_STATS" | python3 -c 'import sys,json;d=json.load(sys.stdin);assert isinstance(d,dict)' 2>/dev/null && ok "Publisher stats valid" || warn "Publisher stats: $PUB_STATS"
+
+echo "--- 10b: Publisher jobs list ---"
+PUB_JOBS=$(get 9201 /api/publisher/jobs)
+echo "$PUB_JOBS" | python3 -c 'import sys,json;json.load(sys.stdin)' 2>/dev/null && ok "Publisher jobs valid JSON" || warn "Publisher jobs: $PUB_JOBS"
+
+echo "--- 10c: Enqueue via API ---"
+PUB_ENQ=$(post 9201 /api/publisher/enqueue -H "Content-Type: application/json" -d "{
+  \"contextGraphId\": \"$CG\",
+  \"selection\": [\"urn:deep:assert:1\"]
+}")
+echo "  Enqueue: $(echo "$PUB_ENQ" | head -c 300)"
+JOB_ID=$(echo "$PUB_ENQ" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("jobId",""))' 2>/dev/null)
+[[ -n "$JOB_ID" ]] && ok "Publisher job enqueued: $JOB_ID" || warn "Enqueue: $PUB_ENQ"
+
+if [[ -n "$JOB_ID" ]]; then
+  echo "--- 10d: Check job status ---"
+  sleep 8
+  JOB_CHECK=$(get 9201 "/api/publisher/job?id=$JOB_ID")
+  JOB_ST=$(echo "$JOB_CHECK" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status","?"))' 2>/dev/null)
+  echo "  Job $JOB_ID status: $JOB_ST"
+  ok "Job status: $JOB_ST"
+fi
+
+echo "--- 10e: Clear finalized ---"
+CLR=$(post 9201 /api/publisher/clear -H "Content-Type: application/json" -d '{"status":"finalized"}')
+echo "  Clear: $(echo "$CLR" | head -c 200)"
+ok "Publisher clear executed"
+
+# ================================================================
+echo ""
+echo "=== TEST 11: Context Graph Operations ==="
+echo ""
+
+echo "--- 11a: List context graphs ---"
 CG_LIST=$(get 9201 /api/context-graph/list)
 CG_COUNT=$(echo "$CG_LIST" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d) if isinstance(d,list) else len(d.get("contextGraphs",d.get("paranets",[]))))' 2>/dev/null || echo "0")
 echo "  Context graphs: $CG_COUNT"
 [[ "$CG_COUNT" -ge 1 ]] && ok "Context graphs listed ($CG_COUNT)" || warn "No context graphs"
 
-echo "--- 9b: Subscribe Node5 to devnet-test ---"
+echo "--- 11b: Subscribe Node5 to devnet-test ---"
 SUB=$(post 9205 /api/context-graph/subscribe -H "Content-Type: application/json" -d '{"contextGraphId":"devnet-test"}')
 echo "  Subscribe: $(echo "$SUB" | head -c 200)"
 ok "Subscribe requested"
 
 # ================================================================
 echo ""
-echo "=== TEST 10: SKILL.md Validation ==="
+echo "=== TEST 12: SKILL.md Validation ==="
 echo ""
 
 for p in 9201 9202 9203 9204 9205; do
@@ -470,7 +612,7 @@ done
 
 # ================================================================
 echo ""
-echo "=== TEST 11: Node UI Accessibility ==="
+echo "=== TEST 13: Node UI Accessibility ==="
 echo ""
 
 for p in 9201 9202 9203 9204 9205; do

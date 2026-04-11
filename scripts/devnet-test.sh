@@ -561,12 +561,176 @@ echo "$EMPTY_PUB" | grep -qi "error\|empty\|nothing\|no.*triple" && ok "Empty SW
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 14: SKILL.md Endpoint ==="
+echo "=== SECTION 14: Assertion Lifecycle (Working Memory) ==="
+echo ""
+
+ASSERT_CG="devnet-test"
+
+echo "--- 14a: Create an assertion ---"
+ASSERT_CREATE=$(c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{
+  \"contextGraphId\":\"$ASSERT_CG\",
+  \"name\":\"devnet-draft\"
+}")
+ASSERT_URI=$(json_get "$ASSERT_CREATE" assertionUri)
+echo "  Assertion URI: $ASSERT_URI"
+[[ "$ASSERT_URI" != "__NONE__" && "$ASSERT_URI" != "__ERR__" ]] && ok "Assertion created: $ASSERT_URI" || fail "Assertion create failed: $ASSERT_CREATE"
+
+echo "--- 14b: Write triples to the assertion ---"
+ASSERT_WRITE=$(c -X POST "http://127.0.0.1:9201/api/assertion/devnet-draft/write" -d "{
+  \"contextGraphId\":\"$ASSERT_CG\",
+  \"quads\":[
+    $(ql 'urn:devnet:assert:entity1' 'http://schema.org/name' 'Assertion Entity'),
+    $(ql 'urn:devnet:assert:entity1' 'http://schema.org/version' '1')
+  ]
+}")
+echo "  Write response: $(echo "$ASSERT_WRITE" | head -c 200)"
+echo "$ASSERT_WRITE" | grep -qi "error" && fail "Assertion write failed: $ASSERT_WRITE" || ok "Assertion write OK"
+
+echo "--- 14c: Query the assertion ---"
+ASSERT_QUERY=$(c -X POST "http://127.0.0.1:9201/api/assertion/devnet-draft/query" -d "{
+  \"contextGraphId\":\"$ASSERT_CG\"
+}")
+ASSERT_Q_CT=$(echo "$ASSERT_QUERY" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null || echo "0")
+echo "  Assertion has $ASSERT_Q_CT quads"
+[[ "$ASSERT_Q_CT" -ge 1 ]] && ok "Assertion query returned $ASSERT_Q_CT quads" || fail "Assertion query returned 0 quads"
+
+echo "--- 14d: Promote the assertion to SWM ---"
+ASSERT_PROMOTE=$(c -X POST "http://127.0.0.1:9201/api/assertion/devnet-draft/promote" -d "{
+  \"contextGraphId\":\"$ASSERT_CG\"
+}")
+PROMOTED_CT=$(json_get "$ASSERT_PROMOTE" promotedCount)
+echo "  Promoted count: $PROMOTED_CT"
+[[ "$PROMOTED_CT" != "__NONE__" && "$PROMOTED_CT" != "0" ]] && ok "Assertion promoted ($PROMOTED_CT quads)" || fail "Assertion promote failed: $ASSERT_PROMOTE"
+
+echo "--- 14e: Verify promoted data in SWM ---"
+sleep 1
+SWM_CHECK=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:devnet:assert:entity1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$ASSERT_CG\",
+  \"graphSuffix\":\"_shared_memory\"
+}")
+SWM_CT=$(echo "$SWM_CHECK" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$SWM_CT" -ge 1 ]] && ok "Promoted data visible in SWM" || fail "Promoted data not in SWM ($SWM_CT)"
+
+echo "--- 14f: Create and immediately discard another assertion ---"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$ASSERT_CG\",\"name\":\"discard-me\"}" > /dev/null
+c -X POST "http://127.0.0.1:9201/api/assertion/discard-me/write" -d "{
+  \"contextGraphId\":\"$ASSERT_CG\",
+  \"quads\":[$(ql 'urn:devnet:assert:discard' 'http://schema.org/name' 'Discard Me')]
+}" > /dev/null
+DISCARD_RESP=$(c -X POST "http://127.0.0.1:9201/api/assertion/discard-me/discard" -d "{\"contextGraphId\":\"$ASSERT_CG\"}")
+echo "$DISCARD_RESP" | grep -qi "error" && fail "Discard failed: $DISCARD_RESP" || ok "Assertion discard OK"
+
+echo "--- 14g: Promoted assertion gossips to other nodes ---"
+sleep 4
+for p in 9202 9203 9204; do
+  GOS_CT=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
+    \"sparql\":\"SELECT ?name WHERE { <urn:devnet:assert:entity1> <http://schema.org/name> ?name }\",
+    \"contextGraphId\":\"$ASSERT_CG\",
+    \"graphSuffix\":\"_shared_memory\"
+  }" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+  [[ "$GOS_CT" -ge 1 ]] && ok "Promoted data gossiped to Node $p" || warn "Promoted data not on Node $p ($GOS_CT)"
+done
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 15: Publisher Queue (async lift) ==="
+echo ""
+
+echo "--- 15a: Publisher stats ---"
+PUB_STATS=$(c "http://127.0.0.1:9201/api/publisher/stats")
+echo "  Stats: $(echo "$PUB_STATS" | head -c 300)"
+echo "$PUB_STATS" | python3 -c 'import sys,json;json.load(sys.stdin)' 2>/dev/null && ok "Publisher stats returned valid JSON" || warn "Publisher stats: $PUB_STATS"
+
+echo "--- 15b: Publisher jobs list ---"
+PUB_JOBS=$(c "http://127.0.0.1:9201/api/publisher/jobs")
+echo "  Jobs: $(echo "$PUB_JOBS" | head -c 300)"
+echo "$PUB_JOBS" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d) if isinstance(d,list) else len(d.get("jobs",[])))' 2>/dev/null && ok "Publisher jobs endpoint works" || warn "Publisher jobs: $PUB_JOBS"
+
+echo "--- 15c: Enqueue a publish job ---"
+ENQUEUE_OP_ID="devnet-enqueue-test-$(date +%s)"
+PUB_ENQUEUE=$(c -X POST "http://127.0.0.1:9201/api/publisher/enqueue" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"shareOperationId\":\"$ENQUEUE_OP_ID\",
+  \"roots\":[{\"rootEntity\":\"urn:devnet:assert:entity1\",\"privateMerkleRoot\":null,\"privateTripleCount\":0}],
+  \"namespace\":\"did:dkg:context-graph:$CONTEXT_GRAPH\",
+  \"scope\":\"full\",
+  \"authorityType\":\"owner\",
+  \"authorityProofRef\":\"urn:dkg:proof:devnet-test\"
+}")
+echo "  Enqueue: $(echo "$PUB_ENQUEUE" | head -c 300)"
+PUB_JOB_ID=$(json_get "$PUB_ENQUEUE" jobId)
+[[ "$PUB_JOB_ID" != "__NONE__" && "$PUB_JOB_ID" != "__ERR__" ]] && ok "Publisher job enqueued: $PUB_JOB_ID" || warn "Enqueue response: $PUB_ENQUEUE"
+
+if [[ "$PUB_JOB_ID" != "__NONE__" && "$PUB_JOB_ID" != "__ERR__" && -n "$PUB_JOB_ID" ]]; then
+  echo "--- 15d: Check job status ---"
+  sleep 5
+  JOB_STATUS=$(c "http://127.0.0.1:9201/api/publisher/job?id=$PUB_JOB_ID")
+  JOB_ST=$(echo "$JOB_STATUS" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("job",d).get("status","?") if isinstance(d.get("job",d),dict) else "?")' 2>/dev/null)
+  echo "  Job status: $JOB_ST"
+  [[ -n "$JOB_ST" && "$JOB_ST" != "?" ]] && ok "Job status retrieved: $JOB_ST" || warn "Job status check: $JOB_STATUS"
+fi
+
+echo "--- 15e: Clear finalized jobs ---"
+PUB_CLEAR=$(c -X POST "http://127.0.0.1:9201/api/publisher/clear" -d '{"status":"finalized"}')
+echo "  Clear: $(echo "$PUB_CLEAR" | head -c 200)"
+echo "$PUB_CLEAR" | python3 -c 'import sys,json;json.load(sys.stdin)' 2>/dev/null && ok "Publisher clear returned valid JSON" || warn "Publisher clear: $PUB_CLEAR"
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 16: Sub-graph Assertions ==="
+echo ""
+
+echo "--- 16a: Create a sub-graph ---"
+SG_CREATE=$(c -X POST "http://127.0.0.1:9201/api/sub-graph/create" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"test-assertions\"
+}")
+echo "  Sub-graph create: $(echo "$SG_CREATE" | head -c 200)"
+echo "$SG_CREATE" | grep -qi "error" && warn "Sub-graph create: $SG_CREATE" || ok "Sub-graph 'test-assertions' created"
+
+echo "--- 16b: Write assertion to sub-graph ---"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"name\":\"sg-draft\",
+  \"subGraphName\":\"test-assertions\"
+}" > /dev/null
+SG_AW=$(c -X POST "http://127.0.0.1:9201/api/assertion/sg-draft/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"test-assertions\",
+  \"quads\":[$(ql 'urn:sg:assert:item1' 'http://schema.org/name' 'Sub-graph Assertion')]
+}")
+echo "$SG_AW" | grep -qi "error" && fail "Sub-graph assertion write failed: $SG_AW" || ok "Sub-graph assertion write OK"
+
+echo "--- 16c: Promote sub-graph assertion ---"
+SG_PROMOTE=$(c -X POST "http://127.0.0.1:9201/api/assertion/sg-draft/promote" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"test-assertions\"
+}")
+SG_PROMOTED=$(json_get "$SG_PROMOTE" promotedCount)
+[[ "$SG_PROMOTED" != "__NONE__" && "$SG_PROMOTED" != "0" ]] && ok "Sub-graph assertion promoted ($SG_PROMOTED quads)" || fail "Sub-graph promote: $SG_PROMOTE"
+
+echo "--- 16d: Sub-graph SWM gossip to Node3 ---"
+sleep 5
+SG_GOS=$(c -X POST "http://127.0.0.1:9203/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:sg:assert:item1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"test-assertions\",
+  \"graphSuffix\":\"_shared_memory\"
+}")
+SG_GOS_CT=$(echo "$SG_GOS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("result",{}).get("bindings",[])))' 2>/dev/null || echo "0")
+[[ "$SG_GOS_CT" -ge 1 ]] && ok "Sub-graph assertion gossiped to Node3" || warn "Sub-graph assertion not on Node3 ($SG_GOS_CT)"
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 17: SKILL.md Endpoint ==="
 echo ""
 
 SKILL=$(curl -s "http://127.0.0.1:9201/.well-known/skill.md")
 echo "$SKILL" | grep -q "shared-memory" && ok "SKILL.md references SWM flow" || fail "SKILL.md missing SWM references"
 echo "$SKILL" | grep -q "/api/publish" && fail "SKILL.md still references removed /api/publish" || ok "SKILL.md correctly omits /api/publish"
+echo "$SKILL" | grep -q "assertion" && ok "SKILL.md references assertion API" || warn "SKILL.md doesn't mention assertion API"
+echo "$SKILL" | grep -q "sub-graph\|subGraph" && ok "SKILL.md references sub-graphs" || warn "SKILL.md doesn't mention sub-graphs"
 
 #------------------------------------------------------------
 echo ""
