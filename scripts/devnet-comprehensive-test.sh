@@ -12,12 +12,22 @@ N5="http://127.0.0.1:9205"
 PASS=0; FAIL=0; WARN=0
 BUGS=""
 
+RUN_ID="$(date +%s)"
 ok()   { PASS=$((PASS+1)); echo "  ✅ $*"; }
 fail() { FAIL=$((FAIL+1)); echo "  ❌ $*"; BUGS="${BUGS}\n  - $*"; }
 warn() { WARN=$((WARN+1)); echo "  ⚠️  $*"; }
 hdr()  { echo ""; echo "═══════════════════════════════════════"; echo "  $*"; echo "═══════════════════════════════════════"; }
 api()  { curl -sf -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@"; }
-api_raw()  { curl -s -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@"; }
+api_raw()  {
+  local _body _code
+  _body=$(curl -s -w '\n%{http_code}' -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@")
+  _code=$(echo "$_body" | tail -1)
+  _body=$(echo "$_body" | sed '$d')
+  echo "$_body"
+  if [[ "$_code" -ge 400 ]] 2>/dev/null; then
+    return 1
+  fi
+}
 
 ###########################################################################
 # 1. BASIC CONNECTIVITY
@@ -40,16 +50,16 @@ done
 ###########################################################################
 hdr "2. Shared Memory Write → Gossip Replication"
 
-SWM_RESULT=$(api_raw "$N1/api/shared-memory/write" -X POST -d '{
-  "contextGraphId":"devnet-test",
-  "quads":[
-    {"subject":"urn:test:alice","predicate":"http://schema.org/name","object":"\"Alice\"","graph":"did:dkg:context-graph:devnet-test"},
-    {"subject":"urn:test:alice","predicate":"http://schema.org/age","object":"\"30\"^^<http://www.w3.org/2001/XMLSchema#integer>","graph":"did:dkg:context-graph:devnet-test"},
-    {"subject":"urn:test:alice","predicate":"http://schema.org/knows","object":"urn:test:bob","graph":"did:dkg:context-graph:devnet-test"},
-    {"subject":"urn:test:bob","predicate":"http://schema.org/name","object":"\"Bob\"","graph":"did:dkg:context-graph:devnet-test"},
-    {"subject":"urn:test:bob","predicate":"http://schema.org/age","object":"\"25\"^^<http://www.w3.org/2001/XMLSchema#integer>","graph":"did:dkg:context-graph:devnet-test"}
+SWM_RESULT=$(api_raw "$N1/api/shared-memory/write" -X POST -d "{
+  \"contextGraphId\":\"devnet-test\",
+  \"quads\":[
+    {\"subject\":\"urn:test:alice-${RUN_ID}\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Alice\\\"\",\"graph\":\"did:dkg:context-graph:devnet-test\"},
+    {\"subject\":\"urn:test:alice-${RUN_ID}\",\"predicate\":\"http://schema.org/age\",\"object\":\"\\\"30\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"did:dkg:context-graph:devnet-test\"},
+    {\"subject\":\"urn:test:alice-${RUN_ID}\",\"predicate\":\"http://schema.org/knows\",\"object\":\"urn:test:bob-${RUN_ID}\",\"graph\":\"did:dkg:context-graph:devnet-test\"},
+    {\"subject\":\"urn:test:bob-${RUN_ID}\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Bob\\\"\",\"graph\":\"did:dkg:context-graph:devnet-test\"},
+    {\"subject\":\"urn:test:bob-${RUN_ID}\",\"predicate\":\"http://schema.org/age\",\"object\":\"\\\"25\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"did:dkg:context-graph:devnet-test\"}
   ]
-}')
+}")
 if echo "$SWM_RESULT" | grep -q '"workspaceOperationId"'; then
   ok "SWM write succeeded"
 else
@@ -59,7 +69,7 @@ fi
 sleep 8
 
 for port in 9202 9203 9204 9205; do
-  Q=$(api "http://127.0.0.1:$port/api/query" -X POST -d '{"sparql":"SELECT ?name WHERE { <urn:test:alice> <http://schema.org/name> ?name }","contextGraphId":"devnet-test"}' 2>&1)
+  Q=$(api "http://127.0.0.1:$port/api/query" -X POST -d "{\"sparql\":\"SELECT ?name WHERE { <urn:test:alice-${RUN_ID}> <http://schema.org/name> ?name }\",\"contextGraphId\":\"devnet-test\"}" 2>&1)
   if echo "$Q" | grep -q "Alice"; then
     ok "Gossip to :$port — Alice found"
   else
@@ -85,7 +95,7 @@ fi
 sleep 10
 
 # Check gossip-publish handler propagated data to node 2
-Q_N2=$(api "$N2/api/query" -X POST -d '{"sparql":"SELECT ?name WHERE { <urn:test:alice> <http://schema.org/name> ?name }","contextGraphId":"devnet-test"}' 2>&1)
+Q_N2=$(api "$N2/api/query" -X POST -d "{\"sparql\":\"SELECT ?name WHERE { <urn:test:alice-${RUN_ID}> <http://schema.org/name> ?name }\",\"contextGraphId\":\"devnet-test\"}" 2>&1)
 if echo "$Q_N2" | grep -q "Alice"; then
   ok "Published data visible on node 2 (via gossip-publish)"
 else
@@ -200,27 +210,28 @@ fi
 ###########################################################################
 hdr "6. Assertion Lifecycle — create, write, query, promote, discard"
 
-CREATE=$(api_raw "$N1/api/assertion/create" -X POST -d '{"contextGraphId":"devnet-test","name":"test-draft"}')
+DRAFT_NAME="test-draft-${RUN_ID}"
+CREATE=$(api_raw "$N1/api/assertion/create" -X POST -d "{\"contextGraphId\":\"devnet-test\",\"name\":\"${DRAFT_NAME}\"}")
 if echo "$CREATE" | grep -q '"assertionUri"'; then
-  ok "Assertion test-draft created"
+  ok "Assertion ${DRAFT_NAME} created"
 else
   fail "Assertion create: $CREATE"
 fi
 
-WRITE=$(api_raw "$N1/api/assertion/test-draft/write" -X POST -d '{
-  "contextGraphId":"devnet-test",
-  "quads":[
-    {"subject":"urn:draft:idea1","predicate":"http://schema.org/name","object":"\"My Draft Idea\"","graph":"did:dkg:context-graph:devnet-test"},
-    {"subject":"urn:draft:idea1","predicate":"http://schema.org/status","object":"\"pending\"","graph":"did:dkg:context-graph:devnet-test"}
+WRITE=$(api_raw "$N1/api/assertion/${DRAFT_NAME}/write" -X POST -d "{
+  \"contextGraphId\":\"devnet-test\",
+  \"quads\":[
+    {\"subject\":\"urn:draft:idea1-${RUN_ID}\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"My Draft Idea\\\"\",\"graph\":\"did:dkg:context-graph:devnet-test\"},
+    {\"subject\":\"urn:draft:idea1-${RUN_ID}\",\"predicate\":\"http://schema.org/status\",\"object\":\"\\\"pending\\\"\",\"graph\":\"did:dkg:context-graph:devnet-test\"}
   ]
-}')
+}")
 if echo "$WRITE" | grep -q '"written"'; then
   ok "Assertion write: $(echo "$WRITE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('written',0))")"
 else
   fail "Assertion write: $WRITE"
 fi
 
-QUERY=$(api_raw "$N1/api/assertion/test-draft/query" -X POST -d '{"contextGraphId":"devnet-test"}')
+QUERY=$(api_raw "$N1/api/assertion/${DRAFT_NAME}/query" -X POST -d '{"contextGraphId":"devnet-test"}')
 if echo "$QUERY" | grep -q "My Draft Idea"; then
   ok "Assertion query: draft data accessible in working memory"
 else
@@ -228,7 +239,7 @@ else
 fi
 
 # Assertion should NOT be visible on node 2 (working memory is local)
-Q_WM_N2=$(api "$N2/api/query" -X POST -d '{"sparql":"SELECT ?n WHERE { <urn:draft:idea1> <http://schema.org/name> ?n }","contextGraphId":"devnet-test"}' 2>&1)
+Q_WM_N2=$(api "$N2/api/query" -X POST -d "{\"sparql\":\"SELECT ?n WHERE { <urn:draft:idea1-${RUN_ID}> <http://schema.org/name> ?n }\",\"contextGraphId\":\"devnet-test\"}" 2>&1)
 WM_COUNT=$(echo "$Q_WM_N2" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null || echo "0")
 if [ "$WM_COUNT" -eq 0 ]; then
   ok "Working memory isolation: draft NOT visible on node 2"
@@ -237,7 +248,7 @@ else
 fi
 
 # Promote assertion to SWM
-PROMOTE=$(api_raw "$N1/api/assertion/test-draft/promote" -X POST -d '{"contextGraphId":"devnet-test"}')
+PROMOTE=$(api_raw "$N1/api/assertion/${DRAFT_NAME}/promote" -X POST -d '{"contextGraphId":"devnet-test"}')
 if echo "$PROMOTE" | grep -q '"promotedCount"'; then
   PCOUNT=$(echo "$PROMOTE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('promotedCount',0))")
   ok "Assertion promoted: $PCOUNT entities"
@@ -248,29 +259,38 @@ fi
 sleep 5
 
 # Check promoted data on node 2 (should be in SWM now via gossip)
-PROMOTED_N2=$(api "$N2/api/query" -X POST -d '{"sparql":"SELECT ?n WHERE { <urn:draft:idea1> <http://schema.org/name> ?n }","contextGraphId":"devnet-test"}' 2>&1)
+PROMOTED_N2=$(api "$N2/api/query" -X POST -d "{\"sparql\":\"SELECT ?n WHERE { <urn:draft:idea1-${RUN_ID}> <http://schema.org/name> ?n }\",\"contextGraphId\":\"devnet-test\"}" 2>&1)
 if echo "$PROMOTED_N2" | grep -q "My Draft Idea"; then
   ok "Promoted assertion gossiped to node 2"
 else
   warn "Promoted assertion NOT on node 2 (may need more time): $PROMOTED_N2"
 fi
 
-# Create and discard
-DISCARD_CREATE=$(api_raw "$N1/api/assertion/create" -X POST -d '{"contextGraphId":"devnet-test","name":"throw-away"}')
-api_raw "$N1/api/assertion/throw-away/write" -X POST -d '{"contextGraphId":"devnet-test","quads":[{"subject":"urn:draft:trash","predicate":"http://schema.org/name","object":"\"Trash\"","graph":"did:dkg:context-graph:devnet-test"}]}' > /dev/null 2>&1
-DISCARD=$(api_raw "$N1/api/assertion/throw-away/discard" -X POST -d '{"contextGraphId":"devnet-test"}')
-if echo "$DISCARD" | grep -q '"discarded":true'; then
-  ok "Assertion discarded"
+# Create and discard — validate each step before proceeding
+DISCARD_NAME="throw-away-${RUN_ID}"
+DISCARD_CREATE=$(api_raw "$N1/api/assertion/create" -X POST -d "{\"contextGraphId\":\"devnet-test\",\"name\":\"${DISCARD_NAME}\"}")
+if ! echo "$DISCARD_CREATE" | grep -q '"assertionUri"'; then
+  fail "Discard setup: create failed: $DISCARD_CREATE"
 else
-  fail "Assertion discard: $DISCARD"
-fi
+  DISCARD_WRITE=$(api_raw "$N1/api/assertion/${DISCARD_NAME}/write" -X POST -d "{\"contextGraphId\":\"devnet-test\",\"quads\":[{\"subject\":\"urn:draft:trash-${RUN_ID}\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Trash\\\"\",\"graph\":\"did:dkg:context-graph:devnet-test\"}]}")
+  if ! echo "$DISCARD_WRITE" | grep -q '"written"'; then
+    fail "Discard setup: write failed: $DISCARD_WRITE"
+  else
+    DISCARD=$(api_raw "$N1/api/assertion/${DISCARD_NAME}/discard" -X POST -d '{"contextGraphId":"devnet-test"}')
+    if echo "$DISCARD" | grep -q '"discarded":true'; then
+      ok "Assertion discarded"
+    else
+      fail "Assertion discard: $DISCARD"
+    fi
 
-# Verify discarded data is gone
-DISC_Q=$(api_raw "$N1/api/assertion/throw-away/query" -X POST -d '{"contextGraphId":"devnet-test"}')
-if echo "$DISC_Q" | grep -qE '"count":0|not found|error'; then
-  ok "Discarded assertion data cleaned up"
-else
-  warn "Discarded assertion might still have data: $DISC_Q"
+    # Verify discarded data is gone
+    DISC_Q=$(api_raw "$N1/api/assertion/${DISCARD_NAME}/query" -X POST -d '{"contextGraphId":"devnet-test"}')
+    if echo "$DISC_Q" | grep -qE '"count":0|not found|error'; then
+      ok "Discarded assertion data cleaned up"
+    else
+      warn "Discarded assertion might still have data: $DISC_Q"
+    fi
+  fi
 fi
 
 ###########################################################################
