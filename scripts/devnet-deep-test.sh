@@ -169,7 +169,7 @@ STAKED_COUNT=0
 while IFS= read -r line; do
   echo "  $line"
   STAKE_VAL=$(echo "$line" | sed -n 's/.*stake=\([0-9.]*\).*/\1/p')
-  if [[ -n "$STAKE_VAL" ]] && python3 -c "exit(0 if float('$STAKE_VAL') >= 50000 else 1)" 2>/dev/null; then
+  if [[ -n "$STAKE_VAL" ]] && python3 -c "from decimal import Decimal; exit(0 if Decimal('$STAKE_VAL') >= 50000 else 1)" 2>/dev/null; then
     ok "$(echo "$line" | cut -d: -f1) staked ${STAKE_VAL} TRAC (>= 50k)"
     STAKED_COUNT=$((STAKED_COUNT+1))
   fi
