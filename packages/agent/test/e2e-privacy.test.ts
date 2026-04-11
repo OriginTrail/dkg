@@ -438,8 +438,8 @@ describe('Context graph access matrix (3 nodes)', () => {
 
     expect(privateDataB).toBeGreaterThan(0);
     expect(privateSwmB).toBeGreaterThan(0);
-    expect(privateDataC).toBeGreaterThanOrEqual(0);
-    expect(privateSwmC).toBeGreaterThanOrEqual(0);
+    expect(privateDataC).toBe(0);
+    expect(privateSwmC).toBe(0);
 
     const queryMatrix = [
       { node: nodeB, contextGraphId: MATRIX_PUBLIC_PARANET, entity: MATRIX_PUBLIC_DATA_ENTITY, expected: '"Public Data"' },

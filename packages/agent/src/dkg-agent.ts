@@ -543,11 +543,14 @@ export class DKGAgent {
     // with the first data page.
     this.router.register(PROTOCOL_SYNC, async (data, peerId) => {
       const request = this.parseSyncRequest(data);
-      const offset = request.offset;
-      const limit = request.limit;
+      const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
+      const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : SYNC_PAGE_SIZE, SYNC_PAGE_SIZE));
       const phase = request.phase ?? 'data';
       const isWorkspace = request.includeSharedMemory;
       const contextGraphId = request.contextGraphId;
+      if (!contextGraphId || typeof contextGraphId !== 'string') {
+        return new TextEncoder().encode('');
+      }
       const nquads: string[] = [];
 
       if (!(await this.authorizeSyncRequest(request, peerId.toString()))) {
@@ -3242,7 +3245,8 @@ export class DKGAgent {
       }
     }
 
-    const requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n;
+    let requesterIdentityId = 0n;
+    try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch { /* malformed — treated as unauthenticated */ }
     if (
       request.targetPeerId !== this.peerId ||
       request.requesterPeerId !== remotePeerId ||
