@@ -21,6 +21,7 @@ export class AsyncLiftRunner {
   private stopped = false;
   private running?: Promise<void>;
   private lastRecoveryAt = 0;
+  private lastRecoveryAttemptAt = 0;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
@@ -86,10 +87,12 @@ export class AsyncLiftRunner {
   private async maybeRunRecovery(): Promise<void> {
     const now = Date.now();
     if (now - this.lastRecoveryAt < this.recoveryIntervalMs) return;
-    // Record attempt time *before* calling recover() so that failures are
-    // also throttled by recoveryIntervalMs — prevents hammering during outages.
-    this.lastRecoveryAt = now;
+    // Throttle attempts at errorBackoffMs to avoid hammering during outages,
+    // but allow the full interval between *successful* recoveries.
+    if (now - this.lastRecoveryAttemptAt < this.errorBackoffMs) return;
+    this.lastRecoveryAttemptAt = now;
     await this.config.publisher.recover();
+    this.lastRecoveryAt = now;
   }
 
   private async runCycle(): Promise<boolean> {

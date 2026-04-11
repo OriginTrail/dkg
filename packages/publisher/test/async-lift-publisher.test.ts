@@ -1019,6 +1019,99 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.failure?.timeout?.handling).toBe('retry_recovery');
   });
 
+  it('finalizes retry_recovery jobs from broadcast with correct recoveredFromStatus', async () => {
+    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++now,
+      idGenerator: () => `job-${++ids}`,
+      chainRecoveryResolver: async () => resolverResult,
+      recoveryLookupTimeoutMs: 50,
+    });
+
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3, authorityProofRef: 'proof:owner:1', transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xbcast', walletId: 'wallet-1' },
+    });
+
+    now += 100;
+    await publisher.recover();
+    let job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.failedFromState).toBe('broadcast');
+    expect(job?.failure?.timeout?.handling).toBe('retry_recovery');
+    expect(job?.timestamps?.failedAt).toBeDefined();
+
+    resolverResult = {
+      inclusion: { txHash: '0xbcast', blockNumber: 8 },
+      finalization: {
+        txHash: '0xfin', blockNumber: 10, blockTimestamp: now,
+        batchId: 'batch-1', batchRoot: '0xroot', batchSize: 1,
+      },
+    };
+    await publisher.recover();
+    job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('finalized');
+    expect(job?.recovery?.action).toBe('finalized_from_chain');
+    expect(job?.recovery?.recoveredFromStatus).toBe('broadcast');
+    expect(job?.timestamps?.failedAt).toBeUndefined();
+  });
+
+  it('finalizes retry_recovery jobs from included with correct recoveredFromStatus', async () => {
+    let resolverResult: AsyncLiftPublisherRecoveryResult | null = null;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++now,
+      idGenerator: () => `job-${++ids}`,
+      chainRecoveryResolver: async () => resolverResult,
+      recoveryLookupTimeoutMs: 50,
+    });
+
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3, authorityProofRef: 'proof:owner:1', transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xincl', walletId: 'wallet-1' },
+    });
+    await publisher.update(jobId, 'included', {
+      inclusion: { txHash: '0xincl', blockNumber: 9 },
+    });
+
+    now += 100;
+    await publisher.recover();
+    let job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.failedFromState).toBe('included');
+    expect(job?.failure?.timeout?.handling).toBe('retry_recovery');
+    expect(job?.timestamps?.failedAt).toBeDefined();
+
+    resolverResult = {
+      inclusion: { txHash: '0xincl', blockNumber: 9 },
+      finalization: {
+        txHash: '0xfin2', blockNumber: 12, blockTimestamp: now,
+        batchId: 'batch-2', batchRoot: '0xroot2', batchSize: 1,
+      },
+    };
+    await publisher.recover();
+    job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('finalized');
+    expect(job?.recovery?.action).toBe('finalized_from_chain');
+    expect(job?.recovery?.recoveredFromStatus).toBe('included');
+    expect(job?.timestamps?.failedAt).toBeUndefined();
+  });
+
   it('supports pause, resume, cancel, retry, and clear', async () => {
     const publisher = createPublisher();
     const cancelId = await publisher.lift(request());
