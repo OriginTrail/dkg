@@ -209,6 +209,14 @@ function typedLiteral(lexicalForm: string, datatypeIri: string): string {
   return `${JSON.stringify(lexicalForm)}^^<${datatypeIri}>`;
 }
 
+function buildSectionIri(subject: string, sectionIndex: number, headingText: string): string {
+  const sectionSuffix = `section-${sectionIndex}-${slugify(headingText)}`;
+  if (!subject.includes('#')) {
+    return `${subject}#${sectionSuffix}`;
+  }
+  return `${subject}${subject.endsWith('#') ? '' : '/'}${sectionSuffix}`;
+}
+
 function normalizeSchemaLocalName(raw: string, kind: 'property' | 'class'): string | null {
   const stripped = raw.trim().replace(/\(([^)]*)\)/g, '$1');
   if (stripped.length === 0) return null;
@@ -465,7 +473,7 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   for (const heading of extractHeadings(body)) {
     if (heading.level === 1) continue; // H1 is the document title, not a section
     sectionIndex += 1;
-    const sectionIri = `${subject}#section-${sectionIndex}-${slugify(heading.text)}`;
+    const sectionIri = buildSectionIri(subject, sectionIndex, heading.text);
     while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1]!.level >= heading.level) {
       sectionStack.pop();
     }

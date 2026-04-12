@@ -348,6 +348,26 @@ describe('extractFromMarkdown — headings', () => {
     ]);
   });
 
+  it('uses fragment-safe section IRIs when the document subject already contains a fragment', () => {
+    const subjectIri = 'https://example.org/doc#root';
+    const { triples } = extractFromMarkdown({
+      markdown: `# Title\n\n## Intro\n\n### Details\n`,
+      agentDid: AGENT,
+      documentIri: subjectIri,
+      now: FIXED_NOW,
+    });
+    const rootSections = triples.filter(t => t.subject === subjectIri && t.predicate === DKG_HAS_SECTION);
+    expect(rootSections.map(t => t.object)).toEqual([
+      `${subjectIri}/section-1-intro`,
+    ]);
+    expect(triples).toContainEqual({
+      subject: `${subjectIri}/section-1-intro`,
+      predicate: DKG_HAS_SECTION,
+      object: `${subjectIri}/section-2-details`,
+    });
+    expect(triples.some(t => t.subject.includes('#root#section') || t.object.includes('#root#section'))).toBe(false);
+  });
+
   it('H1 promotes to schema:name on the document subject', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `# My Document\n\nBody.\n`,

@@ -2137,6 +2137,39 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(row14?.object).toBe(ROOT_OVERRIDE);
   });
 
+  it('Issue 122: fragment-bearing frontmatter `rootEntity` keeps section IRIs fragment-safe after retargeting', async () => {
+    const ROOT_OVERRIDE = 'https://example.org/doc#root';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'fragment-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: fragment-doc\nrootEntity: ${ROOT_OVERRIDE}\n---\n\n# Fragment Title\n\n## Intro\n\n### Details\n`, 'utf-8'),
+      },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+      multipartBody: body, boundary: BOUNDARY, assertionName: 'fragment-root',
+    });
+
+    expect(result.rootEntity).toBe(ROOT_OVERRIDE);
+    const dataQuads = getDataGraphQuads(agent, 'cg', 'fragment-root');
+    expect(dataQuads).toContainEqual({
+      subject: ROOT_OVERRIDE,
+      predicate: `${DKG}hasSection`,
+      object: `${ROOT_OVERRIDE}/section-1-intro`,
+    });
+    expect(dataQuads).toContainEqual({
+      subject: `${ROOT_OVERRIDE}/section-1-intro`,
+      predicate: `${DKG}hasSection`,
+      object: `${ROOT_OVERRIDE}/section-2-details`,
+    });
+    expect(dataQuads.some(q => q.subject.includes('#root#section') || q.object.includes('#root#section'))).toBe(false);
+  });
+
   it('Issue 122: reserved frontmatter `rootEntity` prefixes are rejected before retargeting content subjects', async () => {
     const RESERVED_ROOT = 'urn:dkg:file:keccak256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     const body = buildMultipart([
