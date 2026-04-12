@@ -171,16 +171,33 @@ DKG_SHARE_SCHEMA = {
 DKG_PUBLISH_SCHEMA = {
     "name": "dkg_publish",
     "description": (
-        "Publish Shared Working Memory to Verified Memory — chain-anchored, "
-        "permanent, costs TRAC. Only use when knowledge is ready for "
-        "permanent record."
+        "Publish knowledge to Verified Memory — chain-anchored, permanent, costs TRAC. "
+        "Two modes:\n"
+        "1. With quads: publish structured RDF triples directly (precise graph construction)\n"
+        "2. Without quads: publish everything in Shared Working Memory\n\n"
+        "Object values starting with http://, https://, urn:, or did: are treated as "
+        "URIs. Everything else becomes a string literal automatically.\n"
+        "Always call dkg_wallet_balances first to verify sufficient TRAC."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "context_graph": {
                 "type": "string",
-                "description": "Context Graph to publish from (default: current project).",
+                "description": "Context Graph to publish to (default: current project).",
+            },
+            "quads": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string", "description": "Subject URI (e.g. 'https://example.org/finding/001')"},
+                        "predicate": {"type": "string", "description": "Predicate URI (e.g. 'https://schema.org/name')"},
+                        "object": {"type": "string", "description": "Object — URI or literal (e.g. 'Warfarin interaction' or 'https://schema.org/MedicalEntity')"},
+                    },
+                    "required": ["subject", "predicate", "object"],
+                },
+                "description": "Array of RDF triples to publish. If omitted, publishes entire SWM.",
             },
         },
         "required": [],
@@ -733,8 +750,38 @@ class DKGMemoryProvider(MemoryProvider):
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot publish to chain.")
         cg = args.get("context_graph", self._context_graph)
-        result = self._client.publish(cg)
-        return json.dumps(result)
+        raw_quads = args.get("quads")
+
+        if raw_quads and isinstance(raw_quads, list) and len(raw_quads) > 0:
+            # Structured quad publishing — build daemon-format quads with URI auto-detect
+            quads = []
+            for q in raw_quads:
+                obj_val = str(q.get("object", ""))
+                # URIs pass through; everything else becomes a quoted literal
+                if _is_uri(obj_val):
+                    obj_out = obj_val
+                else:
+                    obj_out = '"' + obj_val.replace("\\", "\\\\").replace('"', '\\"') + '"'
+                quads.append({
+                    "subject": str(q.get("subject", "")),
+                    "predicate": str(q.get("predicate", "")),
+                    "object": obj_out,
+                    "graph": str(q.get("graph", "")),
+                })
+            # Write to SWM first, then publish
+            share_result = self._client._post("/api/shared-memory/write", {
+                "contextGraphId": cg,
+                "quads": quads,
+            })
+            if share_result.get("success") is False:
+                return json.dumps(share_result)
+            result = self._client.publish(cg)
+            result["quadsPublished"] = len(quads)
+            return json.dumps(result)
+        else:
+            # Publish entire SWM
+            result = self._client.publish(cg)
+            return json.dumps(result)
 
     def _handle_status(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -945,6 +992,11 @@ class DKGMemoryProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _is_uri(value: str) -> bool:
+    """Check if a value looks like a URI."""
+    return bool(value) and any(value.startswith(p) for p in ("http://", "https://", "urn:", "did:"))
+
 
 def _escape_sparql(text: str) -> str:
     """Escape text for use in SPARQL string literal."""
