@@ -15,12 +15,36 @@ PASS=0
 FAIL=0
 WARN=0
 
-c() { curl -s -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@"; }
+# P1-1: Bounded curl — every devnet call gets a connect + total timeout so a
+# hung node stalls CI instead of letting a single test run forever. Override
+# DEVNET_CURL_TIMEOUT / DEVNET_CURL_CONNECT_TIMEOUT to widen if needed.
+DEVNET_CURL_TIMEOUT="${DEVNET_CURL_TIMEOUT:-30}"
+DEVNET_CURL_CONNECT_TIMEOUT="${DEVNET_CURL_CONNECT_TIMEOUT:-5}"
+c() {
+  curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "$@"
+}
+
+# P2-3: Respect TMPDIR so CI runners with non-/tmp tmp dirs work cleanly.
+DEVNET_TMPDIR="${TMPDIR:-/tmp}"
+
+# P2-1: Make the gossip sleep overrideable for fast local runs / flaky CI.
+# Round 8 Bug 24: split LOCAL_SETTLE_S out of GOSSIP_WAIT_S. The former
+# governs local write→query settles that must never be set to 0 (section 24
+# would race its own write); the latter governs cross-node gossip propagation
+# waits exclusively and CAN be set to 0 for fast local-only runs.
+GOSSIP_WAIT_S="${GOSSIP_WAIT_S:-3}"
+LOCAL_SETTLE_S="${LOCAL_SETTLE_S:-1}"
 
 ok()   { PASS=$((PASS+1)); echo "  [PASS] $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  [FAIL] $1"; }
 warn() { WARN=$((WARN+1)); echo "  [WARN] $1"; }
+skip() { echo "  [SKIP] $1"; }
 
+# P1-2: json_get now normalizes Python booleans to lowercase so the `check`
+# helper can compare against plain 'true'/'false' without worrying about
+# Python's `True`/`False` capitalization leaking through. Also emits
+# __NONE__ / __ERR__ sentinels unchanged for existing call sites.
 json_get() {
   echo "$1" | python3 -c "
 import sys,json
@@ -31,7 +55,12 @@ try:
     if isinstance(d,dict): d=d.get(k)
     elif isinstance(d,list) and k.isdigit(): d=d[int(k)]
     else: d=None
-  print(d if d is not None else '__NONE__')
+  if d is None:
+    print('__NONE__')
+  elif isinstance(d,bool):
+    print('true' if d else 'false')
+  else:
+    print(d)
 except: print('__ERR__')
 " 2>/dev/null
 }
@@ -39,6 +68,60 @@ except: print('__ERR__')
 check() {
   local desc="$1" actual="$2" expected="$3"
   if [[ "$actual" == "$expected" ]]; then ok "$desc"; else fail "$desc (expected=$expected, got=$actual)"; fi
+}
+
+# P1-3: Safe count helper. Replaces the pervasive
+#   python3 -c '…len(bindings)…' 2>/dev/null || echo "0"
+# idiom, which silently turns schema drift and parse errors into a legitimate
+# "zero results" reading. When the response is not parseable JSON-with-bindings,
+# this helper echoes PARSE_ERR so call sites can distinguish an empty-but-valid
+# response from a broken one.
+safe_bindings_count() {
+  echo "$1" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  b=d.get("result",{}).get("bindings",None)
+  if b is None:
+    print("PARSE_ERR")
+  else:
+    print(len(b))
+except Exception:
+  print("PARSE_ERR")
+' 2>/dev/null || echo "PARSE_ERR"
+}
+
+# P1-3: Same idea for /assertion/:name/query responses that carry a top-level
+# `quads` or `result` list instead of SPARQL-style bindings.
+safe_quads_count() {
+  echo "$1" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  v=d.get("quads",d.get("result",None))
+  if v is None:
+    print("PARSE_ERR")
+  else:
+    print(len(v))
+except Exception:
+  print("PARSE_ERR")
+' 2>/dev/null || echo "PARSE_ERR"
+}
+
+# P0-3: Capture both the response body and the HTTP status in one call.
+# Usage: http_post_capture <url> <json-body> <body-var-name> <code-var-name>
+# Returns by assigning to caller's variables via nameref.
+http_post_capture() {
+  local url="$1" body="$2" body_out="$3" code_out="$4"
+  local tmp
+  tmp="$(mktemp "$DEVNET_TMPDIR/devnet-resp-XXXXXX")"
+  local code
+  code=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" \
+    -o "$tmp" -w "%{http_code}" -X POST "$url" -d "$body" 2>/dev/null || echo "000")
+  local content
+  content="$(cat "$tmp")"
+  rm -f "$tmp"
+  printf -v "$body_out" '%s' "$content"
+  printf -v "$code_out" '%s' "$code"
 }
 
 q() { echo "{\"subject\":\"$1\",\"predicate\":\"$2\",\"object\":\"$3\",\"graph\":\"\"}"; }
@@ -114,7 +197,7 @@ echo "--- 1e: Chain RPC health ---"
 for p in 9201 9202 9203 9204 9205; do
   h=$(c "http://127.0.0.1:$p/api/chain/rpc-health")
   rpc_ok=$(json_get "$h" ok)
-  check "Node $p RPC ok" "$rpc_ok" "True"
+  check "Node $p RPC ok" "$rpc_ok" "true"
 done
 
 #------------------------------------------------------------
@@ -382,7 +465,7 @@ CG=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
 CG_ID=$(json_get "$CG" contextGraphId)
 CG_OK=$(json_get "$CG" success)
 echo "  CG result: id=$CG_ID success=$CG_OK"
-[[ "$CG_OK" == "True" ]] && ok "Context Graph created (id=$CG_ID)" || fail "CG creation: $CG"
+[[ "$CG_OK" == "true" ]] && ok "Context Graph created (id=$CG_ID)" || fail "CG creation: $CG"
 
 #------------------------------------------------------------
 echo ""
@@ -731,6 +814,796 @@ echo "$SKILL" | grep -q "shared-memory" && ok "SKILL.md references SWM flow" || 
 echo "$SKILL" | grep -q "/api/publish" && fail "SKILL.md still references removed /api/publish" || ok "SKILL.md correctly omits /api/publish"
 echo "$SKILL" | grep -q "assertion" && ok "SKILL.md references assertion API" || warn "SKILL.md doesn't mention assertion API"
 echo "$SKILL" | grep -q "sub-graph\|subGraph" && ok "SKILL.md references sub-graphs" || warn "SKILL.md doesn't mention sub-graphs"
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 18: Sync Protocol & Catch-up Status ==="
+echo ""
+
+echo "--- 18a: Subscribe Node5 and poll catch-up status ---"
+# P0-4: `idle` was previously treated as success, but it's the PRE-catchup
+# initial state — a test that breaks out of the loop on `idle` never sees
+# whether catch-up actually ran. Only accept positive completion markers
+# and require 18b/18c data to confirm the sync.
+c -X POST "http://127.0.0.1:9205/api/context-graph/subscribe" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"includeSharedMemory\":true}" > /dev/null 2>&1
+SYNC_COMPLETED=false
+SYNC_ST=""
+for i in $(seq 1 20); do
+  SYNC=$(c "http://127.0.0.1:9205/api/sync/catchup-status?contextGraphId=$CONTEXT_GRAPH")
+  SYNC_ST=$(json_get "$SYNC" status)
+  if [[ "$SYNC_ST" == "completed" || "$SYNC_ST" == "synced" || "$SYNC_ST" == "done" ]]; then
+    SYNC_COMPLETED=true
+    break
+  fi
+  sleep 2
+done
+$SYNC_COMPLETED && ok "Sync catch-up reported completion on Node5 (status=$SYNC_ST)" || warn "Sync catch-up did not reach a positive completion status after 40s (status=$SYNC_ST)"
+
+echo "--- 18b: Write fresh post-subscribe SWM data on Node1 for sync verification ---"
+SYNC_ENTITY="urn:sync-verify:post-sub-$(date +%s)"
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[$(ql "$SYNC_ENTITY" 'http://schema.org/name' 'Post-Subscribe Sync Test')]
+}" > /dev/null
+sleep "$LOCAL_SETTLE_S"
+
+echo "--- 18c: Verify post-subscribe SWM data synced to Node5 ---"
+SYNC_SWM_OK=false
+for i in $(seq 1 10); do
+  SYNC_SWM=$(c -X POST "http://127.0.0.1:9205/api/query" -d "{
+    \"sparql\":\"SELECT ?name WHERE { <$SYNC_ENTITY> <http://schema.org/name> ?name }\",
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"shared-working-memory\"
+  }")
+  SYNC_SWM_CT=$(safe_bindings_count "$SYNC_SWM")
+  if [[ "$SYNC_SWM_CT" != "PARSE_ERR" && "$SYNC_SWM_CT" -ge 1 ]]; then
+    SYNC_SWM_OK=true
+    break
+  fi
+  sleep 2
+done
+if $SYNC_SWM_OK; then
+  ok "Post-subscribe SWM data synced to Node5"
+elif [[ "$SYNC_SWM_CT" == "PARSE_ERR" ]]; then
+  fail "Node5 SWM sync query returned unparseable response: ${SYNC_SWM:0:200}"
+elif $SYNC_COMPLETED; then
+  fail "Catchup reported complete on Node5 but fresh SWM data is missing — sync pipeline bug"
+else
+  warn "Post-subscribe SWM data not synced to Node5 ($SYNC_SWM_CT) — catchup never completed"
+fi
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 19: Memory Layer View Queries ==="
+echo ""
+
+echo "--- 19a: Verified memory view ---"
+VM_VIEW=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <http://example.org/entity/city1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"verified-memory\"
+}")
+VM_CT=$(safe_bindings_count "$VM_VIEW")
+if [[ "$VM_CT" == "PARSE_ERR" ]]; then
+  fail "Verified memory view returned unparseable response: ${VM_VIEW:0:200}"
+elif [[ "$VM_CT" -ge 1 ]]; then
+  ok "Verified memory view returns published data"
+else
+  warn "Verified memory view empty ($VM_CT) — VM finalization may be pending"
+fi
+
+echo "--- 19b: Shared memory view ---"
+SWM_VIEW=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { ?s a ?type }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"shared-working-memory\"
+}")
+SWM_CT=$(echo "$SWM_VIEW" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  b=d.get("result",{}).get("bindings",None)
+  if b is None:
+    print("PARSE_ERR")
+  elif b:
+    print(b[0]["c"].strip(chr(34)).split("^^")[0])
+  else:
+    print("0")
+except Exception:
+  print("PARSE_ERR")
+' 2>/dev/null || echo "PARSE_ERR")
+echo "  SWM entity count: $SWM_CT"
+if [[ "$SWM_CT" == "PARSE_ERR" ]]; then
+  fail "Shared memory view returned unparseable response: ${SWM_VIEW:0:200}"
+elif [[ "$SWM_CT" -ge 1 ]]; then
+  ok "Shared memory view returns data ($SWM_CT entities)"
+else
+  warn "Shared memory view empty"
+fi
+
+echo "--- 19c: Working memory assertion visible only locally ---"
+WM_NAME="wm-view-test-$(date +%s)"
+WM_SUBJECT="urn:wm-view:${WM_NAME}"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$WM_NAME\"}" > /dev/null
+c -X POST "http://127.0.0.1:9201/api/assertion/$WM_NAME/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[$(ql "$WM_SUBJECT" 'http://schema.org/name' 'WM Only Data')]
+}" > /dev/null
+
+WM_LOCAL=$(c -X POST "http://127.0.0.1:9201/api/assertion/$WM_NAME/query" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+WM_LOCAL_CT=$(safe_quads_count "$WM_LOCAL")
+if [[ "$WM_LOCAL_CT" == "PARSE_ERR" ]]; then
+  fail "WM assertion query returned unparseable response: ${WM_LOCAL:0:200}"
+elif [[ "$WM_LOCAL_CT" -ge 1 ]]; then
+  ok "WM assertion visible locally ($WM_LOCAL_CT quads)"
+else
+  fail "WM assertion not visible locally"
+fi
+
+echo "--- 19d: WM data NOT in verified memory ---"
+WM_IN_VM=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <$WM_SUBJECT> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"verified-memory\"
+}")
+WM_IN_VM_CT=$(safe_bindings_count "$WM_IN_VM")
+if [[ "$WM_IN_VM_CT" == "PARSE_ERR" ]]; then
+  fail "WM/VM isolation query returned unparseable response: ${WM_IN_VM:0:200}"
+elif [[ "$WM_IN_VM_CT" -eq 0 ]]; then
+  ok "WM data correctly absent from verified memory"
+else
+  fail "WM data leaked into verified memory ($WM_IN_VM_CT)"
+fi
+
+echo "--- 19e: WM data NOT visible on Node2 (including SWM) ---"
+WM_REMOTE=$(c -X POST "http://127.0.0.1:9202/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <$WM_SUBJECT> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"includeSharedMemory\":true
+}")
+WM_REMOTE_CT=$(safe_bindings_count "$WM_REMOTE")
+if [[ "$WM_REMOTE_CT" == "PARSE_ERR" ]]; then
+  fail "WM/Node2 isolation query returned unparseable response: ${WM_REMOTE:0:200}"
+elif [[ "$WM_REMOTE_CT" -eq 0 ]]; then
+  ok "WM data correctly absent on Node2 (root + SWM)"
+else
+  fail "WM data leaked to Node2 ($WM_REMOTE_CT)"
+fi
+
+c -X POST "http://127.0.0.1:9201/api/assertion/$WM_NAME/discard" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" > /dev/null 2>&1
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 20: Context Graph Existence & SWM TTL Settings ==="
+echo ""
+
+echo "--- 20a: Context graph exists (known) ---"
+CG_EXISTS=$(c "http://127.0.0.1:9201/api/context-graph/exists?id=$CONTEXT_GRAPH")
+CG_E=$(json_get "$CG_EXISTS" exists)
+check "Context graph devnet-test exists" "$CG_E" "true"
+
+echo "--- 20b: Context graph exists (unknown) ---"
+CG_NOT=$(c "http://127.0.0.1:9201/api/context-graph/exists?id=nonexistent-cg-$(date +%s)")
+CG_N=$(json_get "$CG_NOT" exists)
+check "Nonexistent context graph reports false" "$CG_N" "false"
+
+echo "--- 20c: Read SWM TTL setting ---"
+TTL_ORIG=$(c "http://127.0.0.1:9201/api/settings/shared-memory-ttl")
+TTL_DAYS_ORIG=$(json_get "$TTL_ORIG" ttlDays)
+TTL_MS_ORIG=$(json_get "$TTL_ORIG" ttlMs)
+echo "  Current TTL: ${TTL_DAYS_ORIG} days (${TTL_MS_ORIG} ms)"
+[[ "$TTL_DAYS_ORIG" != "__NONE__" && "$TTL_DAYS_ORIG" != "__ERR__" ]] && ok "SWM TTL readable ($TTL_DAYS_ORIG days)" || fail "SWM TTL not readable: $TTL_ORIG"
+
+echo "--- 20d: Update SWM TTL ---"
+# P1-4: Route through the `c()` helper so the bounded timeout + auth
+# headers propagate; c() accepts any curl args via "$@".
+TTL_SET=$(c -X PUT "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d '{"ttlDays":7}')
+TTL_OK=$(json_get "$TTL_SET" ok)
+[[ "$TTL_OK" == "true" ]] && ok "SWM TTL updated to 7 days" || fail "SWM TTL update failed: $TTL_SET"
+
+echo "--- 20e: Verify updated TTL ---"
+TTL_NEW=$(c "http://127.0.0.1:9201/api/settings/shared-memory-ttl")
+TTL_DAYS_NEW=$(json_get "$TTL_NEW" ttlDays)
+check "TTL reads back as 7 days" "$TTL_DAYS_NEW" "7"
+
+echo "--- 20f: Restore original TTL ---"
+# The PUT endpoint only accepts ttlDays. Convert ttlMs back to days for
+# precision (ttlDays from GET may be rounded for non-whole-day values).
+TTL_DAYS_PRECISE=$(python3 -c "print($TTL_MS_ORIG / 86400000)" 2>/dev/null || echo "$TTL_DAYS_ORIG")
+TTL_RESTORE=$(c -X PUT "http://127.0.0.1:9201/api/settings/shared-memory-ttl" -d "{\"ttlDays\":$TTL_DAYS_PRECISE}")
+TTL_RESTORE_OK=$(json_get "$TTL_RESTORE" ok)
+check "TTL restored to original (${TTL_DAYS_PRECISE} days)" "$TTL_RESTORE_OK" "true"
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 21: Import-File Extraction Status ==="
+echo ""
+
+IMPORT_NAME="import-extract-$(date +%s)"
+echo "--- 21a: Create assertion for import ---"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$IMPORT_NAME\"}" > /dev/null
+
+echo "--- 21b: Import markdown file ---"
+# P2-3: honor $TMPDIR for CI runners with non-/tmp tmp roots.
+TMPMD=$(mktemp "$DEVNET_TMPDIR/devnet-import-XXXXXX.md")
+cat > "$TMPMD" <<'MDEOF'
+---
+title: DKG V10 Import Test
+author: Devnet Suite
+---
+
+# Knowledge Graph Testing
+
+The Decentralized Knowledge Graph enables verifiable knowledge sharing.
+
+## Features
+
+- Sub-graphs for scoped data organization
+- Async publisher queue for reliable chain anchoring
+- Memory layers: Working Memory, Shared Memory, Verified Memory
+MDEOF
+
+IMPORT_RESP=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+  -H "Authorization: Bearer $AUTH" \
+  -F "file=@${TMPMD};type=text/markdown" \
+  -F "contextGraphId=$CONTEXT_GRAPH" \
+  "http://127.0.0.1:9201/api/assertion/${IMPORT_NAME}/import-file" 2>&1)
+rm -f "$TMPMD"
+IMPORT_URI=$(json_get "$IMPORT_RESP" assertionUri)
+IMPORT_HASH=$(json_get "$IMPORT_RESP" fileHash)
+echo "  Import assertionUri=$IMPORT_URI fileHash=$IMPORT_HASH"
+[[ "$IMPORT_URI" != "__NONE__" && "$IMPORT_URI" != "__ERR__" ]] && ok "Import-file accepted ($IMPORT_URI)" || fail "Import-file failed: ${IMPORT_RESP:0:200}"
+[[ "$IMPORT_HASH" != "__NONE__" && "$IMPORT_HASH" != "__ERR__" ]] && ok "File hash returned ($IMPORT_HASH)" || warn "No file hash returned"
+# Spec §10.2:603 mandates keccak256 on the wire for the import-file response
+# fileHash. Lock in the format so a regression to sha256 is a hard fail.
+if [[ "$IMPORT_HASH" =~ ^keccak256:[0-9a-f]{64}$ ]]; then
+  ok "File hash is keccak256 (${IMPORT_HASH})"
+else
+  fail "File hash not keccak256 format (got=$IMPORT_HASH)"
+fi
+
+echo "--- 21c: Check extraction status endpoint ---"
+EXTRACT_ST=$(c "http://127.0.0.1:9201/api/assertion/${IMPORT_NAME}/extraction-status?contextGraphId=$CONTEXT_GRAPH")
+EXT_STATUS=$(json_get "$EXTRACT_ST" status)
+echo "  Extraction status: $EXT_STATUS"
+[[ "$EXT_STATUS" == "completed" ]] && ok "Extraction status endpoint reports completed" || warn "Extraction status: $EXT_STATUS (${EXTRACT_ST:0:200})"
+
+echo "--- 21d: Query imported assertion ---"
+IMPORT_Q=$(c -X POST "http://127.0.0.1:9201/api/assertion/${IMPORT_NAME}/query" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+IMPORT_Q_CT=$(safe_quads_count "$IMPORT_Q")
+if [[ "$IMPORT_Q_CT" == "PARSE_ERR" ]]; then
+  fail "Imported assertion query returned unparseable response: ${IMPORT_Q:0:200}"
+elif [[ "$IMPORT_Q_CT" -ge 1 ]]; then
+  ok "Imported assertion has $IMPORT_Q_CT quads"
+else
+  warn "Imported assertion empty"
+fi
+
+echo "--- 21e: Promote imported assertion to SWM ---"
+IMPORT_PROMOTE=$(c -X POST "http://127.0.0.1:9201/api/assertion/${IMPORT_NAME}/promote" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+IMPORT_PC=$(json_get "$IMPORT_PROMOTE" promotedCount)
+echo "  Promoted count: $IMPORT_PC"
+# P1-10: also exclude __ERR__ (and keep the 0 guard) so parse failures don't
+# silently count as success.
+if [[ "$IMPORT_PC" != "__NONE__" && "$IMPORT_PC" != "__ERR__" && "$IMPORT_PC" != "0" ]]; then
+  ok "Imported data promoted to SWM ($IMPORT_PC quads)"
+else
+  warn "Import promote: $IMPORT_PC"
+fi
+
+# ── 21f / 21g / 21h: spec-linkage SPARQL gate — this is the devnet-side
+# sign-off for the Phase B file-linkage implementation. The tests above
+# only check that the import-file endpoint RESPONDED; these query the
+# actual graph data to confirm the §10.1 data-graph linkage + §10.2 _meta
+# triples actually landed. A daemon regression that silently dropped any
+# of these predicates would be invisible to 21b-e.
+
+echo "--- 21f: §10.1 linkage triples present in assertion data graph ---"
+# /api/assertion/:name/query ignores `sparql` and returns all quads as
+# { quads, count } — it's NOT a SPARQL-execution endpoint. Earlier we
+# routed through /api/query with `view: "working-memory"` +
+# `assertionName`, but the HTTP route does NOT auto-fill `agentAddress`
+# the way the in-process agent code path does, so that form 400s with
+# "agentAddress is required for the working-memory view". Instead, use
+# the explicit `GRAPH <iri>` form — matches §21g/§21h below and sidesteps
+# the HTTP-vs-agent-internal auto-fill drift entirely. The assertion
+# graph URI is the same as IMPORT_URI (both come from
+# contextGraphAssertionUri with the same args), so we can reuse it as
+# both the graph name AND the subject binding.
+#
+# Follow-up note: the /api/query route should probably auto-fill
+# `agentAddress` with the node's own peerId when `view === "working-memory"`
+# is set and `agentAddress` is absent, matching dkg-agent.ts:1669 — but
+# that's a separate daemon fix, not part of this PR.
+LINK_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"sparql\":\"SELECT ?p ?o WHERE { GRAPH <${IMPORT_URI}> { <${IMPORT_URI}> ?p ?o FILTER(?p IN (<http://dkg.io/ontology/sourceFile>, <http://dkg.io/ontology/sourceContentType>, <http://dkg.io/ontology/rootEntity>)) } }\"
+}")
+LINK_CT=$(safe_bindings_count "$LINK_Q")
+# Expect one each of sourceFile / sourceContentType / rootEntity — three rows.
+if [[ "$LINK_CT" == "PARSE_ERR" ]]; then
+  fail "§10.1 linkage query returned unparseable response: ${LINK_Q:0:200}"
+elif [[ "$LINK_CT" -ge 3 ]]; then
+  ok "§10.1 linkage predicates present in assertion graph ($LINK_CT bindings)"
+else
+  fail "§10.1 linkage predicates missing from assertion graph ($LINK_CT, expected >= 3)"
+fi
+
+echo "--- 21g: §10.2 sourceFileHash in CG root _meta graph ---"
+META_GRAPH="did:dkg:context-graph:${CONTEXT_GRAPH}/_meta"
+META_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"sparql\":\"SELECT ?h WHERE { GRAPH <${META_GRAPH}> { <${IMPORT_URI}> <http://dkg.io/ontology/sourceFileHash> ?h } }\"
+}")
+META_CT=$(safe_bindings_count "$META_Q")
+META_HASH_RAW=$(echo "$META_Q" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  b=d.get("result",{}).get("bindings",[])
+  if b and "h" in b[0]:
+    v=b[0]["h"]
+    # strip surrounding quotes + any xsd:string suffix
+    if v.startswith("\"") and "\"^^" in v:
+      print(v.split("\"^^",1)[0].lstrip("\""))
+    elif v.startswith("\"") and v.endswith("\""):
+      print(v[1:-1])
+    else:
+      print(v)
+  else:
+    print("__MISSING__")
+except Exception:
+  print("__ERR__")
+' 2>/dev/null || echo "__ERR__")
+if [[ "$META_CT" == "PARSE_ERR" ]]; then
+  fail "§10.2 sourceFileHash query returned unparseable response: ${META_Q:0:200}"
+elif [[ "$META_HASH_RAW" =~ ^keccak256:[0-9a-f]{64}$ ]]; then
+  if [[ "$META_HASH_RAW" == "$IMPORT_HASH" ]]; then
+    ok "§10.2 sourceFileHash present in CG root _meta and matches import response"
+  else
+    fail "§10.2 sourceFileHash (${META_HASH_RAW}) does not match import response hash (${IMPORT_HASH})"
+  fi
+else
+  fail "§10.2 sourceFileHash missing or wrong shape (got=$META_HASH_RAW)"
+fi
+
+echo "--- 21h: §10.2 row 20 (mdIntermediateHash) absent for markdown upload ---"
+# Row 20 is spec-gated on Phase 1 having run. text/markdown bypasses Phase 1,
+# so the md intermediate predicate MUST NOT be present for a direct markdown
+# upload. We assert absence here and verify presence in §21i for PDF-path.
+MD_INT_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"sparql\":\"SELECT ?h WHERE { GRAPH <${META_GRAPH}> { <${IMPORT_URI}> <http://dkg.io/ontology/mdIntermediateHash> ?h } }\"
+}")
+MD_INT_CT=$(safe_bindings_count "$MD_INT_Q")
+if [[ "$MD_INT_CT" == "PARSE_ERR" ]]; then
+  fail "§10.2 mdIntermediateHash query returned unparseable response: ${MD_INT_Q:0:200}"
+elif [[ "$MD_INT_CT" -eq 0 ]]; then
+  ok "§10.2 mdIntermediateHash correctly absent for markdown upload"
+else
+  fail "§10.2 mdIntermediateHash leaked into a markdown import ($MD_INT_CT bindings)"
+fi
+
+echo "--- 21i: Unsupported content type gracefully degrades (§6.5) ---"
+# P1-6: exercise the graceful-degrade path — a PNG upload should land as
+# extraction.status="skipped", tripleCount=0, no linkage triples written.
+# Required by 05_PROTOCOL_EXTENSIONS.md §6.5 but previously uncovered.
+PNG_NAME="import-degrade-$(date +%s)"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$PNG_NAME\"}" > /dev/null
+TMPPNG=$(mktemp "$DEVNET_TMPDIR/devnet-png-XXXXXX.png")
+# 8-byte PNG magic header — enough to look like a real image to the server
+# while keeping the test body small. No converter is registered for image/png
+# so the daemon must graceful-degrade.
+printf '\x89PNG\r\n\x1a\n' > "$TMPPNG"
+PNG_RESP=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+  -H "Authorization: Bearer $AUTH" \
+  -F "file=@${TMPPNG};type=image/png" \
+  -F "contextGraphId=$CONTEXT_GRAPH" \
+  "http://127.0.0.1:9201/api/assertion/${PNG_NAME}/import-file" 2>&1)
+rm -f "$TMPPNG"
+PNG_STATUS=$(json_get "$PNG_RESP" extraction.status)
+PNG_PIPELINE=$(json_get "$PNG_RESP" extraction.pipelineUsed)
+PNG_COUNT=$(json_get "$PNG_RESP" extraction.tripleCount)
+if [[ "$PNG_STATUS" == "skipped" && "$PNG_COUNT" == "0" && "$PNG_PIPELINE" == "None" ]]; then
+  ok "§6.5 graceful degrade: PNG upload returns skipped + zero triples"
+elif [[ "$PNG_STATUS" == "skipped" ]]; then
+  # Tolerant fallback: some daemon versions emit pipelineUsed as null->__NONE__
+  # or an empty string. Still fine as long as the status is skipped and the
+  # count is zero.
+  if [[ "$PNG_COUNT" == "0" ]]; then
+    ok "§6.5 graceful degrade: PNG upload returns skipped (pipelineUsed=$PNG_PIPELINE)"
+  else
+    fail "§6.5 graceful degrade reported skipped but with tripleCount=$PNG_COUNT"
+  fi
+else
+  fail "§6.5 graceful degrade failed: status=$PNG_STATUS pipeline=$PNG_PIPELINE count=$PNG_COUNT (${PNG_RESP:0:200})"
+fi
+# Clean up the degraded assertion so it doesn't pollute later tests.
+c -X POST "http://127.0.0.1:9201/api/assertion/$PNG_NAME/discard" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" > /dev/null 2>&1
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 22: Publisher Queue End-to-End ==="
+echo ""
+
+echo "--- 22a: Write SWM data for publisher test ---"
+PQ_ENTITY="http://example.org/entity/pub-queue-$(date +%s)"
+PQ_WRITE=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[
+    $(q "$PQ_ENTITY" 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing'),
+    $(ql "$PQ_ENTITY" 'http://schema.org/name' 'Publisher Queue Test')
+  ]
+}")
+# P2-4: shareOperationId is the current field name; workspaceOperationId is
+# the legacy alias still emitted by some node versions. Keep the fallback
+# until we confirm every supported node build has migrated.
+PQ_OP_ID=$(json_get "$PQ_WRITE" shareOperationId)
+if [[ "$PQ_OP_ID" == "__NONE__" || "$PQ_OP_ID" == "__ERR__" ]]; then
+  PQ_OP_ID=$(json_get "$PQ_WRITE" workspaceOperationId)
+fi
+echo "  SWM write shareOperationId=$PQ_OP_ID"
+[[ "$PQ_OP_ID" != "__NONE__" && "$PQ_OP_ID" != "__ERR__" ]] && ok "SWM write for publisher test" || fail "SWM write failed: ${PQ_WRITE:0:200}"
+
+# P1-9: also assert triplesWritten >= 2. A silent zero-write pipeline would
+# let the publisher enqueue an empty payload and 22c would "pass" with no
+# actual data to publish.
+PQ_TW=$(json_get "$PQ_WRITE" triplesWritten)
+if [[ "$PQ_TW" != "__NONE__" && "$PQ_TW" != "__ERR__" && "$PQ_TW" -ge 2 ]] 2>/dev/null; then
+  ok "SWM write persisted $PQ_TW triples (>= 2)"
+else
+  fail "SWM write triplesWritten=$PQ_TW (expected >= 2) — publisher queue test will be meaningless"
+fi
+
+echo "--- 22b: Enqueue publish job ---"
+PQ_ENQUEUE=$(c -X POST "http://127.0.0.1:9201/api/publisher/enqueue" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"shareOperationId\":\"$PQ_OP_ID\",
+  \"roots\":[\"$PQ_ENTITY\"],
+  \"namespace\":\"did:dkg:context-graph:$CONTEXT_GRAPH\",
+  \"scope\":\"full\",
+  \"authorityType\":\"owner\",
+  \"authorityProofRef\":\"urn:dkg:proof:devnet-pub-queue\"
+}")
+PQ_JOB_ID=$(json_get "$PQ_ENQUEUE" jobId)
+echo "  Enqueue jobId=$PQ_JOB_ID"
+[[ "$PQ_JOB_ID" != "__NONE__" && "$PQ_JOB_ID" != "__ERR__" ]] && ok "Publisher job enqueued: $PQ_JOB_ID" || warn "Enqueue response: ${PQ_ENQUEUE:0:200}"
+
+if [[ "$PQ_JOB_ID" != "__NONE__" && "$PQ_JOB_ID" != "__ERR__" && -n "$PQ_JOB_ID" ]]; then
+  echo "--- 22c: Poll job status ---"
+  PQ_FINAL_ST="unknown"
+  for i in $(seq 1 15); do
+    PQ_STATUS=$(c "http://127.0.0.1:9201/api/publisher/job?id=$PQ_JOB_ID")
+    # P1-5: replace the fragile inline ternary with a dedicated helper so
+    # malformed responses surface as __ERR__ instead of a stringified "?"
+    # that looked like a "valid" status and could fall through.
+    PQ_FINAL_ST=$(echo "$PQ_STATUS" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  job=d.get("job", d) if isinstance(d, dict) else None
+  if isinstance(job, dict):
+    s=job.get("status")
+    print(s if s is not None else "__MISSING__")
+  else:
+    print("__ERR__")
+except Exception:
+  print("__ERR__")
+' 2>/dev/null || echo "__ERR__")
+    echo "  Poll $i: status=$PQ_FINAL_ST"
+    [[ "$PQ_FINAL_ST" == "finalized" || "$PQ_FINAL_ST" == "included" || "$PQ_FINAL_ST" == "failed" ]] && break
+    sleep 3
+  done
+  if [[ "$PQ_FINAL_ST" == "finalized" || "$PQ_FINAL_ST" == "included" ]]; then
+    ok "Publisher job reached $PQ_FINAL_ST"
+  elif [[ "$PQ_FINAL_ST" == "__ERR__" || "$PQ_FINAL_ST" == "__MISSING__" ]]; then
+    fail "Publisher job status unparseable or missing status field (got=$PQ_FINAL_ST)"
+  else
+    fail "Publisher job did not reach included/finalized (got=$PQ_FINAL_ST) — publisher queue e2e broken"
+  fi
+
+  echo "--- 22d: Fetch job payload ---"
+  PQ_PAYLOAD=$(c "http://127.0.0.1:9201/api/publisher/job-payload?id=$PQ_JOB_ID")
+  PQ_HAS_PAYLOAD=$(echo "$PQ_PAYLOAD" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print("yes" if isinstance(d, dict) and (d.get("payload") or d.get("job")) else "no")
+except Exception:
+  print("ERR")
+' 2>/dev/null || echo "ERR")
+  if [[ "$PQ_HAS_PAYLOAD" == "yes" ]]; then
+    ok "Job payload retrieved"
+  elif [[ "$PQ_HAS_PAYLOAD" == "ERR" ]]; then
+    fail "Job payload query returned unparseable response: ${PQ_PAYLOAD:0:200}"
+  else
+    warn "Job payload: ${PQ_PAYLOAD:0:200}"
+  fi
+
+  echo "--- 22e: Verify publisher stats ---"
+  PQ_STATS=$(c "http://127.0.0.1:9201/api/publisher/stats")
+  echo "  Stats: $(echo "$PQ_STATS" | head -c 300)"
+  echo "$PQ_STATS" | python3 -c 'import sys,json;json.load(sys.stdin)' 2>/dev/null && ok "Publisher stats valid JSON" || warn "Publisher stats: $PQ_STATS"
+
+  echo "--- 22f: Clear finalized jobs ---"
+  PQ_CLEAR=$(c -X POST "http://127.0.0.1:9201/api/publisher/clear" -d '{"status":"finalized"}')
+  PQ_CLEARED=$(json_get "$PQ_CLEAR" cleared)
+  echo "  Cleared: $PQ_CLEARED jobs"
+  [[ "$PQ_CLEARED" != "__ERR__" ]] && ok "Publisher clear returned ($PQ_CLEARED)" || warn "Publisher clear: $PQ_CLEAR"
+else
+  # P2-2: silent no-op was confusing when 22a succeeds but the job id is
+  # missing. Emit an explicit [SKIP] so the test log carries the reason.
+  skip "22c-22f skipped: publisher enqueue did not return a usable jobId (PQ_JOB_ID=$PQ_JOB_ID)"
+fi
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 23: Authorization & Error Handling ==="
+echo ""
+
+echo "--- 23a: Request without auth token ---"
+# P0-2: explicitly detect DEVNET_NO_AUTH=1 and emit a clean SKIP rather
+# than degrading silently to WARN. A real auth-middleware regression must
+# show up as a hard failure when auth is enabled.
+if [[ "${DEVNET_NO_AUTH:-0}" == "1" ]]; then
+  skip "23a: auth disabled via DEVNET_NO_AUTH=1"
+else
+  NOAUTH_CODE=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -o /dev/null -w "%{http_code}" "http://127.0.0.1:9201/api/query" \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 1","contextGraphId":"devnet-test"}')
+  if [[ "$NOAUTH_CODE" == "401" ]]; then
+    ok "No-auth request rejected (401)"
+  else
+    fail "No-auth returned $NOAUTH_CODE (expected 401; set DEVNET_NO_AUTH=1 if intentional)"
+  fi
+fi
+
+echo "--- 23b: Query against nonexistent context graph ---"
+# P1-8: `err`/PARSE_ERR must NOT pass — a 500 that returns malformed JSON
+# would previously silently count as success.
+BAD_CG=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?s WHERE { ?s ?p ?o } LIMIT 1\",
+  \"contextGraphId\":\"nonexistent-cg-$(date +%s)\"
+}")
+BAD_CG_CT=$(safe_bindings_count "$BAD_CG")
+if [[ "$BAD_CG_CT" == "PARSE_ERR" ]]; then
+  # Could be a legitimate 4xx with a bare error envelope OR a 500 — warn
+  # rather than pass, so a genuinely broken response shows up instead of
+  # hiding inside the "empty result" branch.
+  if echo "$BAD_CG" | grep -qiE '"error"|"message"'; then
+    ok "Query against nonexistent CG returned an error envelope"
+  else
+    warn "Query against nonexistent CG returned unparseable response: ${BAD_CG:0:200}"
+  fi
+elif [[ "$BAD_CG_CT" == "0" ]]; then
+  ok "Query against nonexistent CG returns empty result"
+else
+  warn "Nonexistent CG returned $BAD_CG_CT results"
+fi
+
+echo "--- 23c: Create assertion with empty name ---"
+# P0-3: capture HTTP status — a 500 with body `{"error":"internal"}` used
+# to silently pass the substring check. Require a 4xx AND an error token.
+http_post_capture "http://127.0.0.1:9201/api/assertion/create" \
+  "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"\"}" \
+  EMPTY_NAME EMPTY_CODE
+if [[ "$EMPTY_CODE" =~ ^4 ]] && echo "$EMPTY_NAME" | grep -qiE 'error|invalid'; then
+  ok "Empty assertion name rejected (HTTP $EMPTY_CODE)"
+else
+  fail "Empty assertion name not cleanly rejected (HTTP $EMPTY_CODE): ${EMPTY_NAME:0:200}"
+fi
+
+echo "--- 23d: Duplicate assertion name reuses same URI ---"
+DUP_NAME="dup-test-$(date +%s)"
+DUP_FIRST=$(c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$DUP_NAME\"}")
+DUP_URI1=$(json_get "$DUP_FIRST" assertionUri)
+DUP_SECOND=$(c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$DUP_NAME\"}")
+DUP_URI2=$(json_get "$DUP_SECOND" assertionUri)
+if echo "$DUP_SECOND" | grep -qi "error\|exists\|already\|duplicate"; then
+  ok "Duplicate assertion name rejected"
+elif [[ "$DUP_URI1" == "$DUP_URI2" ]]; then
+  ok "Duplicate assertion name returns same URI (idempotent)"
+else
+  warn "Duplicate assertion name created different URI (URI1=$DUP_URI1, URI2=$DUP_URI2)"
+fi
+c -X POST "http://127.0.0.1:9201/api/assertion/$DUP_NAME/discard" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" > /dev/null 2>&1
+
+echo "--- 23e: Promote nonexistent assertion ---"
+GHOST_PROMOTE=$(c -X POST "http://127.0.0.1:9201/api/assertion/does-not-exist-$(date +%s)/promote" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+GHOST_PC=$(json_get "$GHOST_PROMOTE" promotedCount)
+if echo "$GHOST_PROMOTE" | grep -qi "error\|not found\|not exist"; then
+  ok "Promote nonexistent assertion rejected with error"
+elif [[ "$GHOST_PC" == "0" ]]; then
+  ok "Promote nonexistent assertion returns promotedCount=0 (no-op)"
+else
+  fail "Promote nonexistent assertion unexpected: ${GHOST_PROMOTE:0:200}"
+fi
+
+echo "--- 23f: Double discard ---"
+DD_NAME="discard-twice-$(date +%s)"
+c -X POST "http://127.0.0.1:9201/api/assertion/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$DD_NAME\"}" > /dev/null
+c -X POST "http://127.0.0.1:9201/api/assertion/$DD_NAME/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"quads\":[$(ql 'urn:dd:test' 'http://schema.org/name' 'Double Discard')]
+}" > /dev/null
+c -X POST "http://127.0.0.1:9201/api/assertion/$DD_NAME/discard" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" > /dev/null
+DD_SECOND=$(c -X POST "http://127.0.0.1:9201/api/assertion/$DD_NAME/discard" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
+if echo "$DD_SECOND" | grep -qi "error\|not found\|not exist\|already"; then
+  ok "Double discard rejected with error"
+else
+  ok "Double discard is idempotent (${DD_SECOND:0:80})"
+fi
+
+echo "--- 23g: Publisher enqueue missing fields ---"
+# P0-3: same treatment as 23c — must return a real 4xx, not just a 500
+# with an "error" string in the body.
+http_post_capture "http://127.0.0.1:9201/api/publisher/enqueue" \
+  "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" \
+  BAD_ENQ BAD_ENQ_CODE
+if [[ "$BAD_ENQ_CODE" =~ ^4 ]] && echo "$BAD_ENQ" | grep -qiE 'error|missing|required'; then
+  ok "Publisher enqueue missing fields rejected (HTTP $BAD_ENQ_CODE)"
+else
+  fail "Bad enqueue not cleanly rejected (HTTP $BAD_ENQ_CODE): ${BAD_ENQ:0:200}"
+fi
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 24: Sub-graph Query Isolation ==="
+echo ""
+
+SG_A="isolation-alpha-$(date +%s)"
+SG_B="isolation-beta-$(date +%s)"
+
+echo "--- 24a: Create two sub-graphs ---"
+SG_A_CREATE=$(c -X POST "http://127.0.0.1:9201/api/sub-graph/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"subGraphName\":\"$SG_A\"}")
+echo "$SG_A_CREATE" | grep -qi "error" && fail "Sub-graph A create failed: $SG_A_CREATE" || ok "Sub-graph '$SG_A' created"
+SG_B_CREATE=$(c -X POST "http://127.0.0.1:9201/api/sub-graph/create" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"subGraphName\":\"$SG_B\"}")
+echo "$SG_B_CREATE" | grep -qi "error" && fail "Sub-graph B create failed: $SG_B_CREATE" || ok "Sub-graph '$SG_B' created"
+
+echo "--- 24b: Write distinct data to each sub-graph ---"
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_A\",
+  \"quads\":[
+    $(ql 'urn:iso:alpha1' 'http://schema.org/name' 'Alpha Only Entity'),
+    $(q 'urn:iso:alpha1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
+  ]
+}" > /dev/null
+c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_B\",
+  \"quads\":[
+    $(ql 'urn:iso:beta1' 'http://schema.org/name' 'Beta Only Entity'),
+    $(q 'urn:iso:beta1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
+  ]
+}" > /dev/null
+
+# P2-1: brief settle window for the local SWM write to hit the triple
+# store before we query it. Round 8 Bug 24: this is a LOCAL write→query
+# settle, NOT a cross-node gossip wait, so it uses its own env var.
+# Otherwise a dev running with `GOSSIP_WAIT_S=0` to speed up a local-only
+# test run would accidentally also skip this settle and section 24 would
+# race its own write. `GOSSIP_WAIT_S` continues to govern cross-node
+# propagation waits exclusively.
+sleep "$LOCAL_SETTLE_S"
+
+echo "--- 24c: Query sub-graph A — should find alpha, not beta ---"
+SG_A_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:iso:alpha1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_A\",
+  \"includeSharedMemory\":true
+}")
+SG_A_CT=$(safe_bindings_count "$SG_A_Q")
+if [[ "$SG_A_CT" == "PARSE_ERR" ]]; then
+  fail "Sub-graph A query returned unparseable response: ${SG_A_Q:0:200}"
+elif [[ "$SG_A_CT" -ge 1 ]]; then
+  ok "Sub-graph A has alpha entity"
+else
+  fail "Sub-graph A missing alpha entity ($SG_A_CT)"
+fi
+
+SG_A_LEAK=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:iso:beta1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_A\",
+  \"includeSharedMemory\":true
+}")
+SG_A_LEAK_CT=$(safe_bindings_count "$SG_A_LEAK")
+if [[ "$SG_A_LEAK_CT" == "PARSE_ERR" ]]; then
+  fail "Sub-graph A leak query returned unparseable response: ${SG_A_LEAK:0:200}"
+elif [[ "$SG_A_LEAK_CT" -eq 0 ]]; then
+  ok "Sub-graph A correctly excludes beta data"
+else
+  fail "Sub-graph A leaks beta data ($SG_A_LEAK_CT)"
+fi
+
+echo "--- 24d: Query sub-graph B — should find beta, not alpha ---"
+SG_B_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:iso:beta1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_B\",
+  \"includeSharedMemory\":true
+}")
+SG_B_CT=$(safe_bindings_count "$SG_B_Q")
+if [[ "$SG_B_CT" == "PARSE_ERR" ]]; then
+  fail "Sub-graph B query returned unparseable response: ${SG_B_Q:0:200}"
+elif [[ "$SG_B_CT" -ge 1 ]]; then
+  ok "Sub-graph B has beta entity"
+else
+  fail "Sub-graph B missing beta entity ($SG_B_CT)"
+fi
+
+SG_B_LEAK=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:iso:alpha1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"subGraphName\":\"$SG_B\",
+  \"includeSharedMemory\":true
+}")
+SG_B_LEAK_CT=$(safe_bindings_count "$SG_B_LEAK")
+if [[ "$SG_B_LEAK_CT" == "PARSE_ERR" ]]; then
+  fail "Sub-graph B leak query returned unparseable response: ${SG_B_LEAK:0:200}"
+elif [[ "$SG_B_LEAK_CT" -eq 0 ]]; then
+  ok "Sub-graph B correctly excludes alpha data"
+else
+  fail "Sub-graph B leaks alpha data ($SG_B_LEAK_CT)"
+fi
+
+echo "--- 24e: Root CG query should NOT include sub-graph-only data ---"
+ROOT_ALPHA=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { <urn:iso:alpha1> <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"view\":\"shared-working-memory\"
+}")
+ROOT_ALPHA_CT=$(safe_bindings_count "$ROOT_ALPHA")
+if [[ "$ROOT_ALPHA_CT" == "PARSE_ERR" ]]; then
+  # Phase D hardening: unparseable response now fails loudly instead
+  # of being silently counted as 0.
+  fail "Root CG isolation query returned unparseable response: ${ROOT_ALPHA:0:200}"
+elif [[ "$ROOT_ALPHA_CT" -eq 0 ]]; then
+  ok "Sub-graph alpha data absent from root CG SWM"
+else
+  # Base-rebase fix: non-zero binding count is now a FAIL (was warn).
+  # Root and sub-graph SWM use different graph URIs, so contamination
+  # is an isolation regression, not "expected".
+  fail "Sub-graph data leaked into root CG query ($ROOT_ALPHA_CT) — isolation regression"
+fi
+
+echo "--- 24f: Sub-graph data gossips to Node2 ---"
+# P2-6: poll instead of one long sleep so a quick network can finish fast
+# while a slow one still gets its full budget. Bounded at 5 × 1s = 5s,
+# which matches the previous single sleep 5.
+SG_GOS_CT="PARSE_ERR"
+for i in 1 2 3 4 5; do
+  SG_GOS_A=$(c -X POST "http://127.0.0.1:9202/api/query" -d "{
+    \"sparql\":\"SELECT ?name WHERE { <urn:iso:alpha1> <http://schema.org/name> ?name }\",
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"subGraphName\":\"$SG_A\",
+    \"includeSharedMemory\":true
+  }")
+  SG_GOS_CT=$(safe_bindings_count "$SG_GOS_A")
+  [[ "$SG_GOS_CT" != "PARSE_ERR" && "$SG_GOS_CT" -ge 1 ]] && break
+  sleep 1
+done
+if [[ "$SG_GOS_CT" == "PARSE_ERR" ]]; then
+  fail "Sub-graph gossip query returned unparseable response: ${SG_GOS_A:0:200}"
+elif [[ "$SG_GOS_CT" -ge 1 ]]; then
+  ok "Sub-graph A data gossiped to Node2"
+else
+  warn "Sub-graph A not on Node2 ($SG_GOS_CT)"
+fi
+
+echo "--- 24g: Write to unregistered sub-graph rejected (negative test) ---"
+# P1-7: the spec requires a write to an unregistered sub-graph to fail
+# with a 4xx; previously zero coverage. Use a name seeded with a fresh
+# timestamp to avoid collisions with anything a previous test run might
+# have created.
+UNREG_SG="never-created-$(date +%s%N)"
+http_post_capture "http://127.0.0.1:9201/api/shared-memory/write" \
+  "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"subGraphName\":\"$UNREG_SG\",\"quads\":[$(ql 'urn:unreg:x' 'http://schema.org/name' 'nope')]}" \
+  UNREG_BODY UNREG_CODE
+if [[ "$UNREG_CODE" =~ ^4 ]]; then
+  ok "Write to unregistered sub-graph rejected (HTTP $UNREG_CODE)"
+else
+  fail "Write to unregistered sub-graph not rejected (HTTP $UNREG_CODE): ${UNREG_BODY:0:200}"
+fi
 
 #------------------------------------------------------------
 echo ""

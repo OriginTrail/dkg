@@ -138,18 +138,86 @@ describe('FileStore.has', () => {
 });
 
 describe('FileStore.hashToPath', () => {
-  it('resolves a hash to an absolute sharded path without touching disk', () => {
+  it('resolves a sha256 hash to the absolute sharded blob path', async () => {
     const store = new FileStore(rootDir);
     const hex = '1234567890abcdef'.repeat(4);
     expect(hex.length).toBe(64);
 
-    const path = store.hashToPath(`sha256:${hex}`);
+    const path = await store.hashToPath(`sha256:${hex}`);
     expect(path).toBe(join(rootDir, hex.slice(0, 2), hex.slice(2)));
+  });
+
+  it('returns null for malformed hashes', async () => {
+    const store = new FileStore(rootDir);
+    expect(await store.hashToPath('not-a-hash')).toBeNull();
+    expect(await store.hashToPath('sha256:short')).toBeNull();
+  });
+
+  it('Bug 9: resolves a keccak256 hash to the CONTENT path (not the pointer file)', async () => {
+    // Regression guard: before the Bug 9 fix, hashToPath returned the
+    // pointer file for keccak256 inputs. A caller using it to read the
+    // file bytes would get the sha256 hex text from the pointer file
+    // instead of the actual content. The fix makes hashToPath always
+    // return the underlying blob path, dereferencing the pointer as
+    // needed.
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.from('keccak round-trip payload', 'utf-8');
+    const entry = await store.put(bytes, 'text/plain');
+
+    // hashToPath with the keccak256 form returns the content path ...
+    const pathViaKeccak = await store.hashToPath(entry.keccak256);
+    expect(pathViaKeccak).not.toBeNull();
+    // ... which is byte-equal to the sha256-form path and points at
+    // the actual blob, not the pointer indirection file.
+    const pathViaSha = await store.hashToPath(entry.hash);
+    expect(pathViaKeccak).toBe(pathViaSha);
+    const onDisk = await readFile(pathViaKeccak!);
+    expect(onDisk.equals(bytes)).toBe(true);
+  });
+
+  it('Bug 9: hashToPath returns null for keccak256 hashes whose pointer file is missing', async () => {
+    const store = new FileStore(rootDir);
+    // A well-formed but never-stored keccak256 hash has no pointer
+    // file on disk, so the method must return null rather than a
+    // would-be-invalid content path.
+    const bogusKeccak = 'keccak256:' + '0'.repeat(64);
+    expect(await store.hashToPath(bogusKeccak)).toBeNull();
+  });
+});
+
+describe('FileStore.hashToPointerPath', () => {
+  it('returns the synchronous pointer-file path for a valid keccak256 hash', () => {
+    const store = new FileStore(rootDir);
+    const hex = 'abcdef0123456789'.repeat(4);
+    expect(hex.length).toBe(64);
+
+    const path = store.hashToPointerPath(`keccak256:${hex}`);
+    expect(path).toBe(join(rootDir, 'keccak256', hex.slice(0, 2), hex.slice(2)));
+  });
+
+  it('returns null for sha256 inputs (use hashToPath for content resolution)', () => {
+    const store = new FileStore(rootDir);
+    const hex = '1234567890abcdef'.repeat(4);
+    expect(store.hashToPointerPath(`sha256:${hex}`)).toBeNull();
   });
 
   it('returns null for malformed hashes', () => {
     const store = new FileStore(rootDir);
-    expect(store.hashToPath('not-a-hash')).toBeNull();
-    expect(store.hashToPath('sha256:short')).toBeNull();
+    expect(store.hashToPointerPath('not-a-hash')).toBeNull();
+    expect(store.hashToPointerPath('keccak256:short')).toBeNull();
+  });
+
+  it('the pointer file returned actually contains the sha256 hex after a put()', async () => {
+    // Tightens the contract: the pointer file isn't just a location
+    // on disk — it's a file whose contents are the sha256 hex that
+    // `hashToPath` uses to resolve the blob.
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.from('pointer contents check', 'utf-8');
+    const entry = await store.put(bytes, 'text/plain');
+
+    const pointerPath = store.hashToPointerPath(entry.keccak256);
+    expect(pointerPath).not.toBeNull();
+    const pointerContents = (await readFile(pointerPath!, 'utf-8')).trim();
+    expect(pointerContents).toBe(entry.hash.slice('sha256:'.length));
   });
 });

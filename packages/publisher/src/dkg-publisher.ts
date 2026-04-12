@@ -5,6 +5,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
+import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import { computeTripleHashV10 as computeTripleHash, computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
@@ -20,6 +21,8 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+
+export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
 export interface DKGPublisherConfig {
   store: TripleStore;
@@ -94,6 +97,99 @@ export type ShareConditionalOptions = ConditionalShareOptions;
 /** @deprecated Use ConditionalShareOptions */
 export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 
+// Round 9 Bug 25: protocol-reserved URN namespaces that MUST NOT appear
+// as subjects in user-authored quads. These prefixes are owned by the
+// daemon's import-file handler for file descriptors and extraction
+// provenance per `19_MARKDOWN_CONTENT_TYPE.md §10.2`. Allowing user
+// writes here would (a) collide with daemon bookkeeping across assertions
+// and (b) get silently stripped by `assertionPromote`'s safety filter,
+// which would be data loss from the user's perspective. Reject at the
+// write boundary with a clear error that names the reserved prefix.
+//
+// The daemon's own import-file handler bypasses `assertion.write` via a
+// direct `store.insert` (documented in `daemon.ts`), so the guard here
+// only fires on user-facing entry points and never on the daemon's
+// internal bookkeeping writes.
+//
+// Prefix form matches the `assertionPromote` defense-in-depth filter:
+// bare `urn:dkg:file:` (not `urn:dkg:file:keccak256:`) so any future
+// hash-algorithm variant (e.g., `urn:dkg:file:blake3:...`) is also
+// covered without a guard update.
+export class ReservedNamespaceError extends Error {
+  readonly subject: string;
+  readonly prefix: string;
+  constructor(subject: string, prefix: string) {
+    super(
+      `Subject '${subject}' is in the reserved namespace '${prefix}*', which is protocol-reserved ` +
+        `for daemon-generated file descriptors and extraction provenance per ` +
+        `19_MARKDOWN_CONTENT_TYPE.md §10.2. Use a different URN for user-authored quads.`,
+    );
+    this.name = 'ReservedNamespaceError';
+    this.subject = subject;
+    this.prefix = prefix;
+  }
+}
+
+// Round 12 Bug 34: module-private token proving an internal caller
+// (specifically `publishFromSharedMemory`) is the origin of a
+// `publish()` call so the reserved-namespace guard can be bypassed
+// for legitimate internal promote→publish flows WITHOUT exposing a
+// public flag that external callers could set to bypass the guard.
+//
+// Round 9 Bug 25 used `options.fromSharedMemory` as the discriminator,
+// but `fromSharedMemory` is a public `PublishOptions` field with its
+// own user-facing semantic (signals to the V10 ACK path that data is
+// already in peers' SWM). Any external caller could set it `true` and
+// trivially bypass the guard, making `urn:dkg:file:*` writes possible
+// via the public API — the exact class of bypass Round 9 was supposed
+// to prevent. Codex Bug 34 caught this.
+//
+// The token is a module-scoped `Symbol` with no external references.
+// Only code in this file can mint it. Public callers cannot forge it.
+// Bypassing the guard therefore requires either being in this file
+// (and thus code-reviewed for correctness) or not calling the guarded
+// public entry points at all (the daemon's direct `store.insert`
+// bypass, which is the other legitimate non-guard path).
+const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
+
+type InternalPublishOptions = PublishOptions & {
+  [INTERNAL_ORIGIN_TOKEN]?: true;
+};
+
+function isInternalOrigin(options: PublishOptions): boolean {
+  return (options as InternalPublishOptions)[INTERNAL_ORIGIN_TOKEN] === true;
+}
+
+// Round 14 Bug 41: case-insensitive check against `RESERVED_SUBJECT_PREFIXES`.
+// Per RFC 8141 §3.1, the URN scheme (`urn:`) and NID (`dkg`) are
+// case-insensitive for equivalence purposes — `URN:dkg:file:abc`,
+// `urn:DKG:file:abc`, and `urn:dkg:file:abc` are all the same resource.
+// The NSS portion is case-sensitive by default but our reserved
+// prefixes (`urn:dkg:file:`, `urn:dkg:extraction:`) are entirely
+// within the scheme+NID range, so lowercase-then-startsWith on the
+// full subject string is the correct comparison: it accepts all
+// case variants of the scheme/NID without over-matching into
+// NSS-level content.
+//
+// Earlier rounds used a byte-level `subject.startsWith(prefix)` check
+// at both the Bucket A write-boundary guard (Round 9 Bug 25) AND the
+// Round 4 promote-time filter (Round 12 Bug 35 SSOT). Both were
+// case-sensitive, so a malicious or accidentally-mixed-case subject
+// like `URN:dkg:file:keccak256:<hex>` bypassed both defenses. Codex
+// Bug 41 flagged this. The fix replaces both byte-level comparisons
+// with the shared case-insensitive helper from `reserved-subjects.ts`,
+// preserving the SSOT property established in Round 12.
+function rejectReservedSubjectPrefixes(quads: Quad[]): void {
+  for (const q of quads) {
+    if (isReservedSubject(q.subject)) {
+      // Find the specific prefix that matched (for the error message)
+      // — re-scan with the lowercased subject since the constants are
+      // lowercase. Byte-level comparison here is fine because by this
+      // point we've already confirmed a match exists.
+      throw new ReservedNamespaceError(q.subject, findReservedSubjectPrefix(q.subject)!);
+    }
+  }
+}
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
@@ -173,6 +269,13 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ShareOptions,
   ): Promise<ShareResult> {
+    // Round 9 Bug 25: reject user-authored quads with reserved URN
+    // prefixes at the TOP of the Bucket A entry point, before any
+    // other processing (lock acquisition, partitioning, etc.) per
+    // spec `19_MARKDOWN_CONTENT_TYPE.md §10.2`. Short-circuit so a
+    // reserved-namespace violation cannot be masked by a lock timeout
+    // or subject-level validation error downstream.
+    rejectReservedSubjectPrefixes(quads);
     const subjects = [...new Set(quads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
@@ -197,6 +300,10 @@ export class DKGPublisher implements Publisher {
       const v = validateSubGraphName(options.subGraphName);
       if (!v.valid) throw new Error(`Invalid sub-graph name for share: ${v.reason}`);
     }
+    // Round 9 Bug 25: reserved-namespace guard lives at the public
+    // entry points (`share`, `conditionalShare`), not here — this
+    // method is Bucket B (internal plumbing) and its callers have
+    // already validated the quad set.
     const ctx = options.operationCtx ?? createOperationContext('share');
     this.log.info(ctx, `Writing ${quads.length} quads to shared memory for context graph ${contextGraphId}`);
 
@@ -355,6 +462,12 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ConditionalShareOptions,
   ): Promise<ShareResult> {
+    // Round 9 Bug 25: reject user-authored quads with reserved URN
+    // prefixes at the TOP of the Bucket A entry point, before the
+    // CAS condition check (which could otherwise mask the namespace
+    // violation with a StaleWriteError). Short-circuit per
+    // `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
+    rejectReservedSubjectPrefixes(quads);
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
       assertSafeIri(cond.predicate);
@@ -494,7 +607,15 @@ export class DKGPublisher implements Publisher {
     }
 
     this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
-    const publishResult = await this.publish({
+    // Round 12 Bug 34: mint the internal-origin token so the guard
+    // in `publish()` recognizes this as a legitimate internal
+    // promote→publish path and bypasses the reserved-namespace check.
+    // SWM quads are already filtered by `assertionPromote`'s Round 4
+    // safety net, so re-checking here would reject legitimate internal
+    // bookkeeping. The public `fromSharedMemory: true` is still set
+    // for its V10 ACK-path semantic (core nodes verify against their
+    // local SWM copy, no inline staging quads).
+    const internalPublishOptions: InternalPublishOptions = {
       contextGraphId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
@@ -503,7 +624,9 @@ export class DKGPublisher implements Publisher {
       publishContextGraphId: ctxGraphId ?? undefined,
       fromSharedMemory: true,
       subGraphName: options?.subGraphName,
-    });
+      [INTERNAL_ORIGIN_TOKEN]: true,
+    };
+    const publishResult = await this.publish(internalPublishOptions);
 
     if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
       let participantSigs = options?.contextGraphSignatures ?? [];
@@ -741,6 +864,19 @@ export class DKGPublisher implements Publisher {
       entityProofs = false,
       onPhase,
     } = options;
+    // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
+    // namespace subjects. The bypass is keyed on a module-private
+    // `INTERNAL_ORIGIN_TOKEN` Symbol (see its declaration near the top
+    // of the file) — NOT on the public `fromSharedMemory` flag. That
+    // means external callers cannot bypass this guard by setting a
+    // public option; only in-file code paths (specifically
+    // `publishFromSharedMemory`) can mint the token. Public
+    // `fromSharedMemory` retains its V10 ACK-path semantic
+    // independently.
+    if (!isInternalOrigin(options)) {
+      rejectReservedSubjectPrefixes(quads);
+      if (privateQuads.length > 0) rejectReservedSubjectPrefixes(privateQuads);
+    }
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
@@ -1152,6 +1288,18 @@ export class DKGPublisher implements Publisher {
       );
     }
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
+    // Round 12 Bug 34: `update()` is a Bucket A public write entry
+    // point (accepts user-authored quads) that Round 9 missed. Apply
+    // the same reserved-namespace guard as `publish()` / `assertionWrite`
+    // / `share` / `conditionalShare`, gated on the same internal-origin
+    // token so legitimate internal update flows can bypass. Currently
+    // there are no internal callers of `update()`, so the token check
+    // is a forward-looking safety net — the common path is always
+    // guarded.
+    if (!isInternalOrigin(options)) {
+      rejectReservedSubjectPrefixes(quads);
+      if (privateQuads.length > 0) rejectReservedSubjectPrefixes(privateQuads);
+    }
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
@@ -1527,6 +1675,9 @@ export class DKGPublisher implements Publisher {
     const quads = input.map((t) => ({
       subject: t.subject, predicate: t.predicate, object: t.object, graph: graphUri,
     }));
+    // Round 9 Bug 25: reject user-authored quads whose subject is in a
+    // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
+    rejectReservedSubjectPrefixes(quads);
     await this.store.insert(quads);
   }
 
@@ -1560,6 +1711,66 @@ export class DKGPublisher implements Publisher {
     if (result.type !== 'quads' || result.quads.length === 0) return { promotedCount: 0 };
 
     let quadsToPromote = result.quads;
+
+    // ── Bug 8 (Codex Round 4) + Round 9 Bug 25 — import-bookkeeping filter ──
+    // Defense-in-depth: reserved-prefix subjects SHOULD already have
+    // been rejected at the write boundary by `rejectReservedSubjectPrefixes`
+    // (Round 9 Bug 25 per `19_MARKDOWN_CONTENT_TYPE.md §10.2`). User-
+    // authored writes with `urn:dkg:file:*` or `urn:dkg:extraction:*`
+    // subjects are short-circuited at `assertionWrite`, `share`,
+    // `conditionalShare`, and non-`fromSharedMemory` `publish` entry
+    // points. This promote-time filter is kept as a belt-and-suspenders
+    // safety net for quads that legitimately enter the store through
+    // a path that bypasses the write guard — namely the daemon's
+    // import-file handler, which writes file descriptors and
+    // ExtractionProvenance blocks via a direct `store.insert` call
+    // (documented at `daemon.ts:2663-2668`) precisely because those
+    // URN subjects are protocol-reserved and belong in WM/`_meta`,
+    // not promoted SWM.
+    //
+    // The `<urn:dkg:file:...>` file descriptor block (rows 4-8 of the
+    // §10.2 linkage table) and the `<urn:dkg:extraction:<uuid>>`
+    // ExtractionProvenance block (rows 9-13) are subordinate metadata
+    // about the extraction RUN, not semantic knowledge about an Entity.
+    // Without this filter, `autoPartition` below would treat
+    // `<urn:dkg:file:keccak256:abc>` as a root entity and cross-assertion
+    // ownership would contend when two different assertions reference
+    // the same file content (same keccak256 → same URN → same
+    // ownership slot). Filtering the subject-prefix before partitioning
+    // means:
+    //   - Row 1 (`<entityUri> dkg:sourceFile <urn:dkg:file:...>`)
+    //     SURVIVES because its subject is the doc entity, not the file
+    //     URN — only OBJECTs are `urn:dkg:file:...`, not subjects. So
+    //     SWM consumers still see "this entity came from this file".
+    //   - Rows 4-5, 8 on `<fileUri>` are stripped — file descriptor
+    //     absent from SWM. Content-addressed blob lookup remains
+    //     available via the literal `dkg:sourceFileHash` in `_meta`.
+    //   - Rows 9-13 on `<provUri>` are stripped — prov block absent
+    //     from SWM.
+    //
+    // Because Bug 25's write-time guard means no user-authored data
+    // in those namespaces can exist in the store, filtering by prefix
+    // on promote cannot drop legitimate user data.
+    //
+    // See `19_MARKDOWN_CONTENT_TYPE.md §10.2` for the normative rule
+    // and Codex Bug 8 Round 4 reconciled ruling for the history (Round
+    // 3 tried blank-node subjects but an `autoPartition` audit showed
+    // they silently drop rows 9-13 on promote, which was worse).
+    // Round 12 Bug 35: source the prefix list from `RESERVED_SUBJECT_PREFIXES`
+    // instead of hardcoding the two literals inline. If the reserved
+    // namespace list ever gains a new prefix at the top of the file
+    // (e.g., a future `urn:dkg:prov:` or `urn:dkg:ack:`), the promote
+    // filter picks it up automatically without a separate code change —
+    // single source of truth. The Round 9 write-time guard uses the
+    // same constant, so both defenses always stay in sync.
+    //
+    // Round 14 Bug 41: use the case-insensitive `isReservedSubject`
+    // helper instead of byte-level `startsWith`. Per RFC 8141 the URN
+    // scheme and NID are case-insensitive, so `URN:dkg:file:...` is
+    // semantically equivalent to `urn:dkg:file:...` and must be
+    // filtered identically. See the helper's docstring for the full
+    // argument.
+    quadsToPromote = quadsToPromote.filter((q) => !isReservedSubject(q.subject));
 
     if (opts?.entities && opts.entities !== 'all') {
       const entitySet = new Set(opts.entities);
@@ -1728,6 +1939,34 @@ export class DKGPublisher implements Publisher {
   async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+    // Drop the assertion data graph AND clean up any `_meta` rows keyed
+    // by this assertion's UAL in the CG root `_meta` graph. Without this
+    // second step, `<assertionUal> dkg:sourceFileHash ?h` and friends
+    // would still resolve after a discard, pointing at a source blob
+    // for an assertion graph that no longer exists. See spec §10.2.
+    //
+    // Pairs with the import-file route's stale-`_meta` cleanup: a
+    // discarded assertion MUST leave zero rows in `_meta` keyed by its
+    // UAL, so a subsequent re-create/re-import starts from a clean slate.
+    //
+    // Ordering (Codex Bug 12 fix): `_meta` cleanup FIRST, then data
+    // graph drop. Previously the order was reversed, which meant a
+    // transient failure on `deleteByPattern` would leave the assertion
+    // body gone but `_meta` pointing at a hash for a vanished graph —
+    // actively misleading to consumers ("why does `_meta` reference
+    // this hash but `GET /assertion/name` 404s?"). With `_meta` first:
+    //   - If `deleteByPattern` fails, the data graph is still intact
+    //     and retry converges. No visible corruption.
+    //   - If `dropGraph` fails after `_meta` succeeded, the data graph
+    //     is orphaned (no `_meta` trail) — debuggable ("why does this
+    //     graph exist with no `_meta`?") but not actively misleading.
+    //
+    // The non-atomicity is bounded by retries; neither partial state is
+    // catastrophic. An atomic combined DELETE+DROP via a single SPARQL
+    // UPDATE is tracked as a follow-up on the storage layer (needs a
+    // new method on the `TripleStore` public interface).
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
     await this.store.dropGraph(graphUri);
   }
 

@@ -9,9 +9,10 @@ const BASE_MS = Date.UTC(2026, 3, 10, 12, 0, 0);
 
 function makeRecord(status: ExtractionStatusRecord['status'], index: number): ExtractionStatusRecord {
   const startedAt = new Date(BASE_MS + (index * 1000)).toISOString();
+  const hex = index.toString(16).padStart(64, '0');
   return {
     status,
-    fileHash: `sha256:${index.toString(16).padStart(64, '0')}`,
+    fileHash: `keccak256:${hex}`,
     detectedContentType: 'text/markdown',
     pipelineUsed: status === 'skipped' ? null : 'text/markdown',
     tripleCount: 0,

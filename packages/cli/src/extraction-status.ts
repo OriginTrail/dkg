@@ -1,9 +1,13 @@
 export interface ExtractionStatusRecord {
   status: 'in_progress' | 'completed' | 'skipped' | 'failed';
+  // `keccak256:<hex>` — canonical per spec §10.2:603 / 03 §2.1:658.
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   pipelineUsed: string | null;
   tripleCount: number;
+  // `keccak256:<hex>` — present only when Phase 1 actually ran (PDF/
+  // DOCX via MarkItDown). Undefined for pure-markdown imports.
   mdIntermediateHash?: string;
   error?: string;
   startedAt: string;

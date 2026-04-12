@@ -89,9 +89,13 @@ describe('MarkItDownConverter', () => {
 
       expect(typeof result.mdIntermediate).toBe('string');
       expect(result.mdIntermediate.length).toBeGreaterThan(0);
-      // Phase 1 only — converter returns ConverterOutput, no triples/provenance.
+      // Phase 1 only — converter returns ConverterOutput, no triples
+      // or source-file linkage (those are Phase 2 extractor output).
+      // Round 13 Bug 39 renamed the linkage field from `provenance`
+      // to `sourceFileLinkage` on `MarkdownExtractOutput`; this
+      // converter's output has neither.
       expect((result as { triples?: unknown }).triples).toBeUndefined();
-      expect((result as { provenance?: unknown }).provenance).toBeUndefined();
+      expect((result as { sourceFileLinkage?: unknown }).sourceFileLinkage).toBeUndefined();
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
