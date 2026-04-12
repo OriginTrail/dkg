@@ -96,15 +96,6 @@ export interface MarkdownExtractInput {
    * for the `_meta` row 14 write without re-resolving.
    */
   rootEntityIri?: string;
-  /**
-   * Optional timestamp reserved for future extraction-run metadata
-   * (defaults to now when eventually used). Currently unused — the
-   * extractor no longer emits extraction-run provenance since that
-   * moved to the daemon's route handler in Round 9 Bug 27. Callers
-   * may still pass this for forward compatibility, but it is not
-   * consumed by any code path today.
-   */
-  now?: Date;
 }
 
 export interface MarkdownExtractOutput {
