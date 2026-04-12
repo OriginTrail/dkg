@@ -24,6 +24,10 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
 fi
 command -v pnpm >/dev/null 2>&1 || { red "Error: pnpm is not installed. Install with: npm install -g pnpm"; exit 1; }
 command -v git >/dev/null 2>&1 || { red "Error: git is not installed."; exit 1; }
+command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 || {
+  red "Error: python3 or python is required to build the bundled MarkItDown binary for source installs."
+  exit 1
+}
 
 green "Prerequisites OK (node v$(node -v | tr -d v), pnpm $(pnpm -v), git $(git --version | awk '{print $3}'))"
 echo ""
@@ -40,10 +44,23 @@ slot_ready() {
   [ -d "$slot_path/.git" ] && [ -f "$entry_path" ]
 }
 
+stage_markitdown() {
+  slot_path="$1"
+  slot_name="$2"
+  cli_dir="$slot_path/packages/cli"
+  if [ ! -d "$cli_dir" ]; then
+    return
+  fi
+  info "Staging MarkItDown binary in slot $slot_name ..."
+  (cd "$cli_dir" && node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform)
+}
+
 mkdir -p "$RELEASES_DIR"
 
 if [ -L "$RELEASES_DIR/current" ] && slot_ready "$SLOT_A" "$SLOT_A_ENTRY" && slot_ready "$SLOT_B" "$SLOT_B_ENTRY"; then
   green "Blue-green slots already exist. Skipping clone."
+  stage_markitdown "$SLOT_A" "a"
+  stage_markitdown "$SLOT_B" "b"
 else
   if [ -L "$RELEASES_DIR/current" ]; then
     info "Detected incomplete slots. Rebuilding missing/broken slots..."
@@ -61,6 +78,7 @@ else
     info "Building slot a ..."
     (cd "$SLOT_A" && pnpm build)
   fi
+  stage_markitdown "$SLOT_A" "a"
 
   if slot_ready "$SLOT_B" "$SLOT_B_ENTRY"; then
     info "Slot b already exists and is ready."
@@ -73,6 +91,7 @@ else
     info "Building slot b ..."
     (cd "$SLOT_B" && pnpm build)
   fi
+  stage_markitdown "$SLOT_B" "b"
 
   # Ensure current points to a known-good active slot.
   ln -sfn a "$RELEASES_DIR/current"

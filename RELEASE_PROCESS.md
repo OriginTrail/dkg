@@ -66,7 +66,14 @@ git push origin v9.0.0-beta.2
 ## 5) Publishing to npm
 
 After pushing a tag, the GitHub Actions release workflow builds, tests, and creates a
-GitHub Release automatically. npm publishing is done manually to keep full control.
+GitHub Release automatically. It also builds and uploads the standalone MarkItDown
+binaries for the currently supported node platforms:
+
+- `markitdown-linux-x64`
+- `markitdown-darwin-arm64`
+- `markitdown-win32-x64.exe`
+
+npm publishing is done manually to keep full control.
 
 From a clean `main` checkout at the tagged commit:
 
@@ -80,6 +87,11 @@ pnpm -r publish --no-git-checks --tag latest
 npm will prompt for your OTP code. All publishable packages in the monorepo are
 published in one command. Private packages (`@origintrail-official/dkg-evm-module`,
 `@origintrail-official/dkg-network-sim`) are skipped automatically.
+
+The published `@origintrail-official/dkg` package now runs a best-effort postinstall
+step that downloads the current-platform MarkItDown binary from the matching GitHub
+Release into `packages/cli/bin`. Make sure the GitHub Release for the same version
+already exists before publishing to npm.
 
 Verify after publishing:
 
@@ -154,3 +166,4 @@ Promote only after successful:
 - automated tests
 - isolated local update run
 - canary network runtime validation
+- release-asset verification (`markitdown-*` binaries present on the GitHub Release)

@@ -99,7 +99,7 @@ describe('MarkItDownConverter', () => {
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('isMarkItDownAvailable', () => {

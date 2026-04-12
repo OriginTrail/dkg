@@ -78,6 +78,10 @@ const AU: AutoUpdateConfig = {
   checkIntervalMinutes: 30,
 };
 
+function normalizePathString(value: unknown): string {
+  return String(value).replace(/\\/g, '/');
+}
+
 function makeFetchOk(sha: string) {
   fetchMock.mockResolvedValueOnce({
     ok: true,
@@ -88,7 +92,7 @@ function makeFetchOk(sha: string) {
 function getExecCalls() {
   return mockedExec.mock.calls.map(c => ({
     cmd: String(c[0]),
-    cwd: (c[1] as any)?.cwd,
+    cwd: normalizePathString((c[1] as any)?.cwd),
   }));
 }
 
@@ -96,7 +100,7 @@ function getExecFileCalls() {
   return mockedExecFile.mock.calls.map(c => ({
     file: String(c[0]),
     args: (c[1] as string[]) ?? [],
-    cwd: (c[2] as any)?.cwd,
+    cwd: normalizePathString((c[2] as any)?.cwd),
     env: (c[2] as any)?.env,
   }));
 }
@@ -128,7 +132,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('reinitializes missing target slot git metadata before fetch', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.endsWith('/releases/a')) return true; // active slot path
       if (path.endsWith('/releases/b/.git')) return false; // target slot missing git metadata
       if (path.includes('cli.js')) return true;
@@ -214,6 +218,7 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build') && c.cwd === targetDir)).toBe(false);
 
     const activeDir = '/tmp/dkg-test/releases/a';
@@ -229,10 +234,10 @@ describe('blue-green checkForUpdate', () => {
     await performUpdate(AU, vi.fn());
 
     expect(mockedSwapSlot).toHaveBeenCalledWith('b');
-    expect(mockedWriteFile).toHaveBeenCalledWith(
-      '/tmp/dkg-test/.current-commit',
-      latest,
-    );
+    expect(
+      mockedWriteFile.mock.calls.some((call) =>
+        normalizePathString(call[0]).endsWith('/tmp/dkg-test/.current-commit') && call[1] === latest)
+    ).toBe(true);
   });
 
   it('returns true after swap via checkForUpdate', async () => {
@@ -348,7 +353,7 @@ describe('blue-green checkForUpdate', () => {
 
     // existsSync returns true for dirs but false for cli.js entry file
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.includes('cli.js')) return false;
       return true;
     });
@@ -360,9 +365,26 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
   });
 
+  it('aborts swap when the bundled MarkItDown binary is missing after build', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('newcommit');
+
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bundled MarkItDown binary missing'));
+  });
+
   it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
-      const path = String(p);
+      const path = normalizePathString(p);
       if (path.endsWith('/releases/a')) return true;
       if (path.endsWith('/releases/b/.git')) return false;
       if (path.includes('cli.js')) return true;
@@ -545,7 +567,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('blocks pre-release versions unless allowPrerelease is true', async () => {
     mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
+      const p = normalizePathString(path);
       if (p.endsWith('.current-commit')) return 'aaa111' as any;
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
       if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
@@ -562,7 +584,7 @@ describe('blue-green checkForUpdate', () => {
 
   it('allows pre-release versions when allowPrerelease=true', async () => {
     mockedReadFile.mockImplementation(async (path: any) => {
-      const p = String(path);
+      const p = normalizePathString(path);
       if (p.endsWith('.current-commit')) return 'aaa111' as any;
       if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
       if (p.endsWith('/packages/cli/package.json')) return JSON.stringify({ version: '9.0.5-rc.1' }) as any;
@@ -706,6 +728,19 @@ describe('performNpmUpdate', () => {
     const result = await performNpmUpdate('9.0.0-beta.5', log);
     expect(result).toBe('failed');
     expect(mockedSwapSlot).not.toHaveBeenCalled();
+  });
+
+  it('returns failed when the bundled MarkItDown binary is missing after install', async () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = String(p);
+      if (path.includes('markitdown-')) return false;
+      return true;
+    });
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('failed');
+    expect(mockedSwapSlot).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bundled MarkItDown binary missing'));
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {

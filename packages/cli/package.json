@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('network',{recursive:true});fs.copyFileSync('../../network/testnet.json','network/testnet.json')\"",
+    "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
+    "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
@@ -38,6 +40,7 @@
   "files": [
     "dist",
     "network",
+    "scripts",
     "skills",
     "README.md",
     "LICENSE"

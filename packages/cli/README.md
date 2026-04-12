@@ -8,10 +8,16 @@ Command-line interface and daemon for DKG V9. This is the main entry point for r
 npm install -g @origintrail-official/dkg
 ```
 
+On supported platforms, the package performs a best-effort postinstall fetch of
+the standalone MarkItDown converter into the package `bin/` directory so PDF,
+DOCX, PPTX, XLSX, CSV, HTML, EPUB, and XML imports work without a separate
+system-level install.
+
 **From source** (monorepo development):
 
 ```bash
 pnpm build
+cd packages/cli && node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform
 pnpm link --global --filter @origintrail-official/dkg
 
 # Binary is now available as `dkg`

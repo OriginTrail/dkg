@@ -12,10 +12,52 @@ permissions:
   contents: write
 
 jobs:
+  markitdown-assets:
+    name: Build MarkItDown binary (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset_name: markitdown-linux-x64
+          - runner: macos-14
+            asset_name: markitdown-darwin-arm64
+          - runner: windows-latest
+            asset_name: markitdown-win32-x64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node setup
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build current-platform MarkItDown binary
+        run: node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --force
+
+      - name: Upload MarkItDown binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: markitdown-${{ matrix.asset_name }}
+          path: |
+            packages/cli/bin/${{ matrix.asset_name }}
+            packages/cli/bin/${{ matrix.asset_name }}.sha256
+          if-no-files-found: error
+
   release:
     name: Build, test, and create release
+    needs: markitdown-assets
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -63,6 +105,13 @@ jobs:
       - name: Run tests
         run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
 
+      - name: Download MarkItDown release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: markitdown-*
+          merge-multiple: true
+          path: release-assets
+
       - name: Extract release notes
         id: notes
         run: |
@@ -84,5 +133,7 @@ jobs:
           draft: false
           prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
           generate_release_notes: true
+          files: |
+            release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

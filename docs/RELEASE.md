@@ -26,6 +26,14 @@ This document describes how to cut a new release of the DKG V9 node so that user
    pnpm dkg start
    ```
 
+   On supported platforms, source installs can also stage the standalone MarkItDown
+   converter into `packages/cli/bin` with:
+
+   ```bash
+   cd packages/cli
+   node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform
+   ```
+
 3. **Check version**  
    ```bash
    pnpm dkg --version
@@ -57,10 +65,17 @@ This document describes how to cut a new release of the DKG V9 node so that user
 
 - Pushing the tag triggers the **Release** workflow (`.github/workflows/release.yml`):
   - Checkout, install, build, run tests.
+  - Build and upload the standalone MarkItDown binaries for Linux x64, macOS arm64,
+    and Windows x64.
   - Create a GitHub Release with:
     - Name: `v9.0.1`
     - Body: section from CHANGELOG for that version (plus auto-generated release notes from commits).
-    - No artifacts are uploaded; the tag itself provides the source (download zip/tar from the release page).
+    - Release assets for the MarkItDown binaries plus the default source zip/tar downloads.
+
+- After the release exists, publish npm packages from the tagged commit. The
+  `@origintrail-official/dkg` package runs a best-effort postinstall hook that
+  downloads the matching current-platform MarkItDown binary from the GitHub Release
+  into the installed package `bin/` directory.
 
 ### 3. Verify
 

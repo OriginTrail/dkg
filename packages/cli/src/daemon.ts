@@ -152,6 +152,15 @@ function normalizeDetectedContentType(contentType: string | undefined): string {
   return normalized && normalized.length > 0 ? normalized : 'application/octet-stream';
 }
 
+function currentBundledMarkItDownAssetName(): string | null {
+  const supported =
+    (process.platform === 'linux' && process.arch === 'x64')
+    || (process.platform === 'darwin' && process.arch === 'arm64')
+    || (process.platform === 'win32' && process.arch === 'x64');
+  if (!supported) return null;
+  return `markitdown-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
+}
+
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
 let isUpdating = false;
 
@@ -4462,6 +4471,14 @@ async function _performNpmUpdateInner(
     log(`Auto-update (npm): entry point missing after install. Aborting swap.`);
     return 'failed';
   }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
+    if (!existsSync(bundledMarkItDownPath)) {
+      log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Aborting swap.`);
+      return 'failed';
+    }
+  }
 
   let resolvedVersion = targetVersion;
   try {
@@ -4844,6 +4861,13 @@ async function _performUpdateInner(
         log('Auto-update: no contract folder changes detected; skipping @origintrail-official/dkg-evm-module build.');
       }
     }
+
+    log('Auto-update: staging MarkItDown binary for the inactive slot...');
+    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform', {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 900_000,
+    });
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';
@@ -4853,6 +4877,14 @@ async function _performUpdateInner(
   if (!existsSync(entryFile)) {
     log(`Auto-update: build output missing (${entryFile}). Aborting swap.`);
     return 'failed';
+  }
+  const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
+  if (bundledMarkItDownAsset) {
+    const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
+    if (!existsSync(bundledMarkItDownPath)) {
+      log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Aborting swap.`);
+      return 'failed';
+    }
   }
 
   let nextVersion = '';

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
+import process from 'node:process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -23,7 +24,9 @@ describe('install.sh validation', () => {
   it('install script exists and is executable', async () => {
     expect(existsSync(INSTALL_SCRIPT)).toBe(true);
     const s = await stat(INSTALL_SCRIPT);
-    expect(s.mode & 0o111).toBeGreaterThan(0);
+    if (process.platform !== 'win32') {
+      expect(s.mode & 0o111).toBeGreaterThan(0);
+    }
   });
 
   it('script contains required prerequisite checks', async () => {
@@ -31,6 +34,7 @@ describe('install.sh validation', () => {
     expect(content).toContain('command -v node');
     expect(content).toContain('command -v pnpm');
     expect(content).toContain('command -v git');
+    expect(content).toContain('command -v python3');
   });
 
   it('script creates correct directory structure markers', async () => {
@@ -79,5 +83,11 @@ describe('install.sh validation', () => {
     expect(content).toContain('slot_ready');
     expect(content).toContain('packages/cli/dist/cli.js');
     expect(content).toContain('Detected incomplete slots');
+  });
+
+  it('stages the current-platform MarkItDown binary into each slot', async () => {
+    const content = await readFile(INSTALL_SCRIPT, 'utf-8');
+    expect(content).toContain('bundle-markitdown-binaries.mjs');
+    expect(content).toContain('--build-current-platform');
   });
 });
