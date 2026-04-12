@@ -212,11 +212,13 @@ export async function downloadBinaryAsset({
 }
 
 function resolvePythonCommand() {
-  if (process.env.PYTHON) return process.env.PYTHON;
-  const candidates = process.platform === 'win32' ? ['python'] : ['python3', 'python'];
+  if (process.env.PYTHON) return { command: process.env.PYTHON, args: [] };
+  const candidates = process.platform === 'win32'
+    ? [{ command: 'python', args: [] }, { command: 'py', args: ['-3'] }]
+    : [{ command: 'python3', args: [] }, { command: 'python', args: [] }];
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ['--version'], { stdio: 'pipe' });
+      execFileSync(candidate.command, [...candidate.args, '--version'], { stdio: 'pipe' });
       return candidate;
     } catch {
       // Try the next candidate.
@@ -256,7 +258,7 @@ export async function buildCurrentPlatformBinary({
   const python = resolvePythonCommand();
 
   try {
-    await execFile(python, ['-m', 'venv', venvDir], { cwd: tmpRoot, timeout: 120_000 });
+    await execFile(python.command, [...python.args, '-m', 'venv', venvDir], { cwd: tmpRoot, timeout: 120_000 });
     const venvPython = venvPythonPath(venvDir);
 
     await execFile(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'], {

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -159,6 +159,29 @@ function currentBundledMarkItDownAssetName(): string | null {
     || (process.platform === 'win32' && process.arch === 'x64');
   if (!supported) return null;
   return `markitdown-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
+}
+
+async function carryForwardBundledMarkItDownBinary(opts: {
+  sourceCandidates: string[];
+  targetBinaryPath: string;
+  log: (msg: string) => void;
+  context: string;
+}): Promise<boolean> {
+  for (const sourceBinaryPath of opts.sourceCandidates) {
+    if (!existsSync(sourceBinaryPath)) continue;
+    await mkdir(dirname(opts.targetBinaryPath), { recursive: true });
+    await copyFile(sourceBinaryPath, opts.targetBinaryPath);
+
+    const sourceChecksumPath = `${sourceBinaryPath}.sha256`;
+    const targetChecksumPath = `${opts.targetBinaryPath}.sha256`;
+    if (existsSync(sourceChecksumPath)) {
+      await copyFile(sourceChecksumPath, targetChecksumPath);
+    }
+
+    opts.log(`${opts.context}: reused bundled MarkItDown binary from the active slot (${sourceBinaryPath}).`);
+    return true;
+  }
+  return false;
 }
 
 const lastUpdateCheck = { upToDate: true, checkedAt: 0, latestCommit: '', latestVersion: '' };
@@ -4433,6 +4456,7 @@ async function _performNpmUpdateInner(
   }
 
   const active = await activeSlot();
+  const activeDir = join(rDir, active);
   const target = active === 'a' ? 'b' : (active === 'b' ? 'a' : 'a');
   const targetDir = join(rDir, target);
 
@@ -4475,7 +4499,18 @@ async function _performNpmUpdateInner(
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
     if (!existsSync(bundledMarkItDownPath)) {
-      log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
+          join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: 'Auto-update (npm)',
+      });
+      if (!reused) {
+        log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      }
     }
   }
 
@@ -4881,7 +4916,18 @@ async function _performUpdateInner(
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
     if (!existsSync(bundledMarkItDownPath)) {
-      log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      const reused = await carryForwardBundledMarkItDownBinary({
+        sourceCandidates: [
+          join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),
+          join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
+        ],
+        targetBinaryPath: bundledMarkItDownPath,
+        log,
+        context: 'Auto-update',
+      });
+      if (!reused) {
+        log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
+      }
     }
   }
 

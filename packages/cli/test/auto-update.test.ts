@@ -11,6 +11,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    copyFile: vi.fn(),
     readFile: vi.fn(),
     writeFile: vi.fn(),
     mkdir: vi.fn(),
@@ -51,12 +52,13 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { copyFile, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
+const mockedCopyFile = vi.mocked(copyFile);
 const mockedReadFile = vi.mocked(readFile);
 const mockedWriteFile = vi.mocked(writeFile);
 const mockedMkdir = vi.mocked(mkdir);
@@ -110,6 +112,7 @@ describe('blue-green checkForUpdate', () => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    mockedCopyFile.mockResolvedValue(undefined as any);
     mockedMkdir.mockResolvedValue(undefined as any);
     mockedRm.mockResolvedValue(undefined as any);
     mockedOpenSync.mockReturnValue(99 as any);
@@ -381,6 +384,24 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(true);
     expect(mockedSwapSlot).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('reuses the active-slot MarkItDown binary when staging misses it during git update', async () => {
+    mockedReadFile.mockResolvedValueOnce('aaa111' as any);
+    makeFetchOk('newcommit');
+
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/packages/cli/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/packages/cli/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
   it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
@@ -742,6 +763,21 @@ describe('performNpmUpdate', () => {
     expect(result).toBe('updated');
     expect(mockedSwapSlot).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
+  it('reuses the active-slot MarkItDown binary when npm install leaves it missing', async () => {
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {
