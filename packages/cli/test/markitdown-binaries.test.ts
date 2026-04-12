@@ -10,6 +10,7 @@ import {
   ensureCurrentPlatformBinary,
   getSupportedTarget,
   parseSha256File,
+  pyInstallerNameForTarget,
   readCliVersion,
   releaseAssetUrl,
   releaseBaseUrl,
@@ -42,6 +43,8 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(releaseAssetUrl('https://example.invalid/release', 'markitdown-linux-x64')).toBe(
       'https://example.invalid/release/markitdown-linux-x64',
     );
+    expect(pyInstallerNameForTarget({ assetName: 'markitdown-win32-x64.exe' })).toBe('markitdown-win32-x64');
+    expect(pyInstallerNameForTarget({ assetName: 'markitdown-linux-x64' })).toBe('markitdown-linux-x64');
   });
 
   it('downloads an asset and writes its checksum sidecar', async () => {

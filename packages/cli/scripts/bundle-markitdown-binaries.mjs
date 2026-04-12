@@ -110,6 +110,10 @@ export function targetBinaryPath(target, packageDir = DEFAULT_PACKAGE_DIR, outpu
   return join(resolveBinDir(packageDir, outputDir), target.assetName);
 }
 
+export function pyInstallerNameForTarget(target) {
+  return target.assetName.replace(/\.exe$/i, '');
+}
+
 export function checksumPathFor(binaryPath) {
   return `${binaryPath}.sha256`;
 }
@@ -283,7 +287,7 @@ export async function buildCurrentPlatformBinary({
       '--clean',
       '--onefile',
       '--name',
-      target.assetName,
+      pyInstallerNameForTarget(target),
       '--collect-data',
       'magika',
       '--distpath',

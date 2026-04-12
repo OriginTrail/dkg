@@ -88,6 +88,7 @@ describe('install.sh validation', () => {
     const content = await readFile(INSTALL_SCRIPT, 'utf-8');
     expect(content).toContain('bundle-markitdown-binaries.mjs');
     expect(content).toContain('--build-current-platform');
+    expect(content).toContain('--force');
     expect(content).toContain('--best-effort');
   });
 });

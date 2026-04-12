@@ -18,6 +18,11 @@ def main() -> int:
         sys.stderr.write("usage: markitdown <file-path>\n")
         return 2
 
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     file_path = sys.argv[1]
     result = MarkItDown(enable_plugins=False).convert(file_path)
     sys.stdout.write(result.text_content)
