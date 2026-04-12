@@ -1,6 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
 
+const MARKITDOWN_TARGETS_JSON = JSON.stringify([
+  { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
+  { platform: 'darwin', arch: 'arm64', assetName: 'markitdown-darwin-arm64', runner: 'macos-14' },
+  { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe', runner: 'windows-latest' },
+]);
+
+function mockReadFileSyncValue(path: unknown): string {
+  const normalized = String(path).replace(/\\/g, '/');
+  if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
+  if (normalized.endsWith('/package.json')) return JSON.stringify({ version: '9.0.0-beta.6' });
+  return `${process.pid}:${Date.now()}:testtoken`;
+}
+
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
   exec: vi.fn((_cmd: string, _opts: any, cb: Function) => cb(null, '', '')),
@@ -31,7 +44,7 @@ vi.mock('node:fs', async (importOriginal) => {
     openSync: vi.fn(() => 99),
     closeSync: vi.fn(),
     writeFileSync: vi.fn(),
-    readFileSync: vi.fn(() => `${process.pid}:${Date.now()}:testtoken`),
+    readFileSync: vi.fn((path: unknown) => mockReadFileSyncValue(path)),
     unlinkSync: vi.fn(),
   };
 });
@@ -118,7 +131,7 @@ describe('blue-green checkForUpdate', () => {
     mockedOpenSync.mockReturnValue(99 as any);
     mockedCloseSync.mockReturnValue(undefined as any);
     mockedFsWriteFileSync.mockReturnValue(undefined as any);
-    mockedReadFileSync.mockReturnValue(`${process.pid}:${Date.now()}:testtoken` as any);
+    mockedReadFileSync.mockImplementation((path: unknown) => mockReadFileSyncValue(path) as any);
     mockedUnlinkSync.mockReturnValue(undefined as any);
     (mockedExec as any).mockImplementation((_cmd: string, _opts: any, cb: Function) => cb(null, '', ''));
     (mockedExecFile as any).mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => cb(null, '', ''));

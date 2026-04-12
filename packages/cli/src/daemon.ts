@@ -62,6 +62,38 @@ import { parseBoundary, parseMultipart, MultipartParseError } from './http/multi
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
 
+type MarkItDownTarget = {
+  platform: string;
+  arch: string;
+  assetName: string;
+  runner?: string;
+};
+
+let cachedMarkItDownTargets: MarkItDownTarget[] | null = null;
+
+function loadMarkItDownTargets(): MarkItDownTarget[] {
+  if (cachedMarkItDownTargets) return cachedMarkItDownTargets;
+  try {
+    const raw = readFileSync(new URL('../markitdown-targets.json', import.meta.url), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      cachedMarkItDownTargets = [];
+      return cachedMarkItDownTargets;
+    }
+    cachedMarkItDownTargets = parsed.filter((entry): entry is MarkItDownTarget => (
+      !!entry
+      && typeof entry === 'object'
+      && typeof entry.platform === 'string'
+      && typeof entry.arch === 'string'
+      && typeof entry.assetName === 'string'
+    ));
+    return cachedMarkItDownTargets;
+  } catch {
+    cachedMarkItDownTargets = [];
+    return cachedMarkItDownTargets;
+  }
+}
+
 function getNodeVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
@@ -153,12 +185,10 @@ function normalizeDetectedContentType(contentType: string | undefined): string {
 }
 
 function currentBundledMarkItDownAssetName(): string | null {
-  const supported =
-    (process.platform === 'linux' && process.arch === 'x64')
-    || (process.platform === 'darwin' && process.arch === 'arm64')
-    || (process.platform === 'win32' && process.arch === 'x64');
-  if (!supported) return null;
-  return `markitdown-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`;
+  return loadMarkItDownTargets().find((target) => (
+    target.platform === process.platform
+    && target.arch === process.arch
+  ))?.assetName ?? null;
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {

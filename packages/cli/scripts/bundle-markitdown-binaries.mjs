@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile as execFileCb, execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
@@ -13,16 +13,35 @@ const execFile = promisify(execFileCb);
 export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';
 export const PYINSTALLER_VERSION = '6.19.0';
 export const DEFAULT_RELEASE_REPO = 'OriginTrail/dkg-v9';
-
-export const SUPPORTED_TARGETS = [
-  { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64' },
-  { platform: 'darwin', arch: 'arm64', assetName: 'markitdown-darwin-arm64' },
-  { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe' },
-];
+export const RELEASE_BINARY_FETCH_TIMEOUT_MS = 15_000;
+export const RELEASE_CHECKSUM_FETCH_TIMEOUT_MS = 5_000;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DEFAULT_PACKAGE_DIR = resolve(__dirname, '..');
+
+function loadSupportedTargets(packageDir = DEFAULT_PACKAGE_DIR) {
+  const raw = readFileSync(join(resolvePackageDir(packageDir), 'markitdown-targets.json'), 'utf-8');
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error('markitdown-targets.json must contain an array');
+  }
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error(`markitdown-targets.json entry ${index} must be an object`);
+    }
+    const { platform, arch, assetName, runner } = entry;
+    if (typeof platform !== 'string' || typeof arch !== 'string' || typeof assetName !== 'string') {
+      throw new Error(`markitdown-targets.json entry ${index} is missing platform/arch/assetName`);
+    }
+    if (runner != null && typeof runner !== 'string') {
+      throw new Error(`markitdown-targets.json entry ${index} has an invalid runner`);
+    }
+    return { platform, arch, assetName, ...(runner ? { runner } : {}) };
+  });
+}
+
+export const SUPPORTED_TARGETS = loadSupportedTargets();
 
 function logLine(message) {
   process.stdout.write(`${message}\n`);
@@ -143,7 +162,7 @@ export function parseSha256File(text) {
 async function fetchBytes(url) {
   const res = await fetch(url, {
     headers: { Accept: 'application/octet-stream' },
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(RELEASE_BINARY_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`${url} returned ${res.status}`);
@@ -154,7 +173,7 @@ async function fetchBytes(url) {
 async function fetchText(url) {
   const res = await fetch(url, {
     headers: { Accept: 'text/plain' },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(RELEASE_CHECKSUM_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`${url} returned ${res.status}`);
@@ -185,6 +204,25 @@ async function verifyChecksum(binaryPath, expectedHash) {
   return actualHash;
 }
 
+async function hasVerifiedBinary(binaryPath) {
+  const binaryChecksumPath = checksumPathFor(binaryPath);
+  if (!existsSync(binaryPath) || !existsSync(binaryChecksumPath)) {
+    return false;
+  }
+  try {
+    const checksumText = await readFile(binaryChecksumPath, 'utf-8');
+    const expectedHash = parseSha256File(checksumText);
+    await verifyChecksum(binaryPath, expectedHash);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeIfExists(path) {
+  await rm(path, { force: true });
+}
+
 export async function downloadBinaryAsset({
   assetName,
   destinationDir,
@@ -192,8 +230,15 @@ export async function downloadBinaryAsset({
   force = false,
 }) {
   const destination = join(destinationDir, assetName);
+  const destinationChecksumPath = checksumPathFor(destination);
   if (!force && existsSync(destination)) {
-    return { status: 'present', binaryPath: destination };
+    if (await hasVerifiedBinary(destination)) {
+      return { status: 'present', binaryPath: destination };
+    }
+    await Promise.all([
+      removeIfExists(destination),
+      removeIfExists(destinationChecksumPath),
+    ]);
   }
 
   await ensureDir(destinationDir);
@@ -209,9 +254,26 @@ export async function downloadBinaryAsset({
     throw new Error(`Checksum mismatch for ${assetName}: expected ${expectedHash}, got ${actualHash}`);
   }
 
-  await writeFile(destination, bytes);
-  ensureExecutable(destination);
-  await writeFile(checksumPathFor(destination), checksumText, 'utf-8');
+  const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const tempDestination = `${destination}${tempSuffix}`;
+  const tempChecksumPath = `${destinationChecksumPath}${tempSuffix}`;
+  try {
+    await writeFile(tempDestination, bytes);
+    ensureExecutable(tempDestination);
+    await writeFile(tempChecksumPath, `${expectedHash}  ${assetName}\n`, 'utf-8');
+    await Promise.all([
+      removeIfExists(destination),
+      removeIfExists(destinationChecksumPath),
+    ]);
+    await rename(tempDestination, destination);
+    await rename(tempChecksumPath, destinationChecksumPath);
+  } catch (err) {
+    await Promise.all([
+      removeIfExists(tempDestination),
+      removeIfExists(tempChecksumPath),
+    ]);
+    throw err;
+  }
   return { status: 'downloaded', binaryPath: destination, hash: actualHash };
 }
 
@@ -250,7 +312,13 @@ export async function buildCurrentPlatformBinary({
   const binDir = resolveBinDir(packageDir, outputDir);
   const binaryPath = targetBinaryPath(target, packageDir, outputDir);
   if (!force && existsSync(binaryPath)) {
-    return { status: 'present', binaryPath };
+    if (await hasVerifiedBinary(binaryPath)) {
+      return { status: 'present', binaryPath };
+    }
+    await Promise.all([
+      removeIfExists(binaryPath),
+      removeIfExists(checksumPathFor(binaryPath)),
+    ]);
   }
 
   await ensureDir(binDir);
@@ -355,7 +423,13 @@ export async function ensureCurrentPlatformBinary({
 
   const binaryPath = targetBinaryPath(target, packageDir, outputDir);
   if (!force && existsSync(binaryPath)) {
-    return { status: 'present', binaryPath };
+    if (await hasVerifiedBinary(binaryPath)) {
+      return { status: 'present', binaryPath };
+    }
+    await Promise.all([
+      removeIfExists(binaryPath),
+      removeIfExists(checksumPathFor(binaryPath)),
+    ]);
   }
 
   const resolvedVersion = version ?? readCliVersion(packageDir);

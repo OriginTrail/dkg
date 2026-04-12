@@ -1,0 +1,20 @@
+[
+  {
+    "platform": "linux",
+    "arch": "x64",
+    "assetName": "markitdown-linux-x64",
+    "runner": "ubuntu-latest"
+  },
+  {
+    "platform": "darwin",
+    "arch": "arm64",
+    "assetName": "markitdown-darwin-arm64",
+    "runner": "macos-14"
+  },
+  {
+    "platform": "win32",
+    "arch": "x64",
+    "assetName": "markitdown-win32-x64.exe",
+    "runner": "windows-latest"
+  }
+]

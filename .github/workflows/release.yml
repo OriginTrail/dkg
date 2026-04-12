@@ -12,20 +12,36 @@ permissions:
   contents: write
 
 jobs:
+  markitdown-target-matrix:
+    name: Resolve MarkItDown target matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node setup
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Build MarkItDown matrix from shared target metadata
+        id: matrix
+        shell: bash
+        run: |
+          MATRIX="$(node -e "const fs = require('fs'); const targets = JSON.parse(fs.readFileSync('packages/cli/markitdown-targets.json', 'utf8')); const include = targets.map(({ runner, assetName }) => ({ runner, asset_name: assetName })); process.stdout.write(JSON.stringify({ include }));")"
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
   markitdown-assets:
+    needs: markitdown-target-matrix
     name: Build MarkItDown binary (${{ matrix.asset_name }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            asset_name: markitdown-linux-x64
-          - runner: macos-14
-            asset_name: markitdown-darwin-arm64
-          - runner: windows-latest
-            asset_name: markitdown-win32-x64.exe
+      matrix: ${{ fromJSON(needs.markitdown-target-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout
