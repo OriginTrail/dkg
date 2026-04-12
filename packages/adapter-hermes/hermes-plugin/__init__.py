@@ -193,6 +193,155 @@ DKG_STATUS_SCHEMA = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+DKG_WALLET_SCHEMA = {
+    "name": "dkg_wallet_balances",
+    "description": (
+        "Check TRAC and ETH balances for the node's operational wallets. "
+        "Call this BEFORE using dkg_publish to verify you have enough TRAC "
+        "to cover publishing costs. Returns per-wallet balances and chain info."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+DKG_FIND_AGENTS_SCHEMA = {
+    "name": "dkg_find_agents",
+    "description": (
+        "Discover other DKG agents on the network. Returns agent names, peer IDs, "
+        "frameworks, and available skills. Use this to find collaborators, check "
+        "who's online, or locate agents with specific capabilities before sending "
+        "messages or invoking skills."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "framework": {
+                "type": "string",
+                "description": "Filter by framework (e.g. 'OpenClaw', 'hermes-agent', 'ElizaOS').",
+            },
+            "skill_type": {
+                "type": "string",
+                "description": "Filter by skill URI to find agents offering a specific capability.",
+            },
+        },
+        "required": [],
+    },
+}
+
+DKG_SEND_MESSAGE_SCHEMA = {
+    "name": "dkg_send_message",
+    "description": (
+        "Send an encrypted P2P message to another DKG agent by peer ID or name. "
+        "Both agents must be online. Use dkg_find_agents first to discover peer IDs. "
+        "Messages are end-to-end encrypted and routed through the DKG network."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer_id": {
+                "type": "string",
+                "description": "Recipient peer ID (starts with 12D3KooW...) or agent name.",
+            },
+            "text": {
+                "type": "string",
+                "description": "Message text to send.",
+            },
+        },
+        "required": ["peer_id", "text"],
+    },
+}
+
+DKG_READ_MESSAGES_SCHEMA = {
+    "name": "dkg_read_messages",
+    "description": (
+        "Read P2P messages from other DKG agents. Returns both sent and received "
+        "messages. Filter by peer to see conversation with a specific agent."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer": {
+                "type": "string",
+                "description": "Filter by peer ID or agent name (optional).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max messages to return (default: 50).",
+            },
+        },
+        "required": [],
+    },
+}
+
+DKG_INVOKE_SKILL_SCHEMA = {
+    "name": "dkg_invoke_skill",
+    "description": (
+        "Invoke a skill on a remote DKG agent. The remote agent executes the "
+        "skill and returns the result. Use dkg_find_agents with skill_type first "
+        "to discover which agents offer the skill you need."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "peer_id": {
+                "type": "string",
+                "description": "Target agent peer ID or name.",
+            },
+            "skill_uri": {
+                "type": "string",
+                "description": "Skill URI to invoke (e.g. 'ImageAnalysis').",
+            },
+            "input": {
+                "type": "string",
+                "description": "Input data for the skill as text.",
+            },
+        },
+        "required": ["peer_id", "skill_uri", "input"],
+    },
+}
+
+DKG_SUBSCRIBE_SCHEMA = {
+    "name": "dkg_subscribe",
+    "description": (
+        "Subscribe to a Context Graph to receive its data and updates from the "
+        "network. After subscribing, the node syncs data from peers in the "
+        "background. Use dkg_status to check sync progress."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {
+                "type": "string",
+                "description": "Context Graph ID to subscribe to (e.g. 'pharma-research').",
+            },
+        },
+        "required": ["context_graph_id"],
+    },
+}
+
+DKG_CREATE_CONTEXT_GRAPH_SCHEMA = {
+    "name": "dkg_context_graph_create",
+    "description": (
+        "Create a new Context Graph — a bounded knowledge space for a project "
+        "or team. Context Graphs organize knowledge into Working Memory, "
+        "Shared Memory, and Verified Memory layers. Use dkg_status first to "
+        "check if the Context Graph already exists."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Human-readable name (e.g. 'Pharma Drug Interactions').",
+            },
+            "description": {
+                "type": "string",
+                "description": "What this Context Graph is for.",
+            },
+        },
+        "required": ["name"],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Provider
@@ -267,6 +416,10 @@ class DKGMemoryProvider(MemoryProvider):
         # Flush any queued writes from previous offline session
         self._flush_queued_writes()
 
+        # Backlog import: if DKG assertion is empty and local MEMORY.md/USER.md
+        # exist, import them so the agent doesn't start with blank memory.
+        self._backlog_import_if_needed(kwargs.get("hermes_home", ""))
+
     def system_prompt_block(self) -> str:
         """Recall facts from DKG assertion for system prompt injection."""
         facts = self._recall_facts()
@@ -299,9 +452,32 @@ class DKGMemoryProvider(MemoryProvider):
             )
 
         blocks.append(
-            "DKG tools available: dkg_memory (store facts), dkg_query (SPARQL), "
-            "dkg_share (share with team), dkg_publish (publish on-chain), "
-            "dkg_status (node health)."
+            "DKG TOOLS — Your node is connected to a Decentralized Knowledge Graph.\n"
+            "\n"
+            "MEMORY WORKFLOW:\n"
+            "  dkg_memory — Store/update/remove persistent facts (your primary memory)\n"
+            "  dkg_query — Search knowledge via SPARQL (fast, local)\n"
+            "\n"
+            "COLLABORATION WORKFLOW:\n"
+            "  dkg_share — Share findings to Shared Working Memory (team-visible, free)\n"
+            "  dkg_publish — Publish to Verified Memory (chain-anchored, costs TRAC)\n"
+            "  dkg_wallet_balances — Check TRAC balance BEFORE publishing\n"
+            "\n"
+            "NETWORK & DISCOVERY:\n"
+            "  dkg_find_agents — Discover other agents on the network\n"
+            "  dkg_send_message — Send encrypted P2P message to another agent\n"
+            "  dkg_read_messages — Read messages from other agents\n"
+            "  dkg_invoke_skill — Call a remote agent's skill\n"
+            "\n"
+            "PROJECT MANAGEMENT:\n"
+            "  dkg_context_graph_create — Create a new project/knowledge space\n"
+            "  dkg_subscribe — Join an existing project on the network\n"
+            "  dkg_status — Node health, peers, context graphs\n"
+            "\n"
+            "TRUST FLOW: Working Memory (local, free) → SHARE → Shared Memory "
+            "(team, free) → PUBLISH → Verified Memory (chain, TRAC cost, permanent).\n"
+            "Knowledge gains trust as it moves through layers. Only publish when "
+            "findings are verified and ready for permanent record."
         )
 
         return "\n\n".join(blocks)
@@ -313,19 +489,33 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_SHARE_SCHEMA,
             DKG_PUBLISH_SCHEMA,
             DKG_STATUS_SCHEMA,
+            DKG_WALLET_SCHEMA,
+            DKG_FIND_AGENTS_SCHEMA,
+            DKG_SEND_MESSAGE_SCHEMA,
+            DKG_READ_MESSAGES_SCHEMA,
+            DKG_INVOKE_SKILL_SCHEMA,
+            DKG_SUBSCRIBE_SCHEMA,
+            DKG_CREATE_CONTEXT_GRAPH_SCHEMA,
         ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        if tool_name == "dkg_memory":
-            return self._handle_memory(args)
-        elif tool_name == "dkg_query":
-            return self._handle_query(args)
-        elif tool_name == "dkg_share":
-            return self._handle_share(args)
-        elif tool_name == "dkg_publish":
-            return self._handle_publish(args)
-        elif tool_name == "dkg_status":
-            return self._handle_status(args)
+        handlers = {
+            "dkg_memory": self._handle_memory,
+            "dkg_query": self._handle_query,
+            "dkg_share": self._handle_share,
+            "dkg_publish": self._handle_publish,
+            "dkg_status": self._handle_status,
+            "dkg_wallet_balances": self._handle_wallet,
+            "dkg_find_agents": self._handle_find_agents,
+            "dkg_send_message": self._handle_send_message,
+            "dkg_read_messages": self._handle_read_messages,
+            "dkg_invoke_skill": self._handle_invoke_skill,
+            "dkg_subscribe": self._handle_subscribe,
+            "dkg_context_graph_create": self._handle_create_cg,
+        }
+        handler = handlers.get(tool_name)
+        if handler:
+            return handler(args)
         return tool_error(f"Unknown DKG tool: {tool_name}")
 
     # -- Prefetch --------------------------------------------------------------
@@ -568,6 +758,130 @@ class DKGMemoryProvider(MemoryProvider):
             "session_id": self._session_id,
             "turn_count": self._turn_count,
         })
+
+    # -- Handlers: network & discovery -----------------------------------------
+
+    def _handle_wallet(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        return json.dumps(self._client._get("/api/wallet/balances"))
+
+    def _handle_find_agents(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot discover agents.")
+        params = {}
+        if args.get("framework"):
+            params["framework"] = args["framework"]
+        if args.get("skill_type"):
+            params["skill_type"] = args["skill_type"]
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        path = f"/api/agents?{qs}" if qs else "/api/agents"
+        return json.dumps(self._client._get(path))
+
+    def _handle_send_message(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot send messages.")
+        peer_id = args.get("peer_id", "")
+        text = args.get("text", "")
+        if not peer_id or not text:
+            return tool_error("Both peer_id and text are required.")
+        return json.dumps(self._client._post("/api/chat", {
+            "peerId": peer_id,
+            "text": text,
+        }))
+
+    def _handle_read_messages(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot read messages.")
+        params = {}
+        if args.get("peer"):
+            params["peer"] = args["peer"]
+        if args.get("limit"):
+            params["limit"] = str(args["limit"])
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        path = f"/api/messages?{qs}" if qs else "/api/messages"
+        return json.dumps(self._client._get(path))
+
+    def _handle_invoke_skill(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot invoke remote skills.")
+        peer_id = args.get("peer_id", "")
+        skill_uri = args.get("skill_uri", "")
+        input_data = args.get("input", "")
+        if not peer_id or not skill_uri:
+            return tool_error("peer_id and skill_uri are required.")
+        return json.dumps(self._client._post("/api/invoke-skill", {
+            "peerId": peer_id,
+            "skillUri": skill_uri,
+            "input": input_data,
+        }))
+
+    def _handle_subscribe(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot subscribe.")
+        cg_id = args.get("context_graph_id", "")
+        if not cg_id:
+            return tool_error("context_graph_id is required.")
+        return json.dumps(self._client._post("/api/context-graph/subscribe", {
+            "contextGraphId": cg_id,
+        }))
+
+    def _handle_create_cg(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot create Context Graph.")
+        name = args.get("name", "").strip()
+        if not name:
+            return tool_error("name is required.")
+        description = args.get("description", "")
+        result = self._client.create_context_graph(name, description)
+        return json.dumps(result)
+
+    # -- Internal: backlog import ----------------------------------------------
+
+    def _backlog_import_if_needed(self, hermes_home: str) -> None:
+        """On first activation, import existing MEMORY.md + USER.md into DKG."""
+        if self._offline or not self._client:
+            return
+
+        # Check if assertion already has content (not first activation)
+        existing = self._recall_facts()
+        if existing:
+            return
+
+        # Look for existing memory files to import
+        if not hermes_home:
+            return
+
+        memories_dir = Path(hermes_home) / "memories"
+        imported = 0
+
+        for filename in ["MEMORY.md", "USER.md"]:
+            filepath = memories_dir / filename
+            if not filepath.exists():
+                continue
+            try:
+                content = filepath.read_text(encoding="utf-8").strip()
+                if not content:
+                    continue
+
+                target = "user" if filename == "USER.md" else "memory"
+                # Split by § delimiter (same as built-in memory format)
+                entries = [e.strip() for e in content.split("\n\xA7\n") if e.strip()]
+
+                for entry in entries:
+                    self._handle_memory({
+                        "action": "add",
+                        "target": target,
+                        "content": entry,
+                    })
+                    imported += 1
+
+                logger.info(f"[dkg] Backlog import: {len(entries)} entries from {filename}")
+            except Exception as e:
+                logger.warning(f"[dkg] Backlog import failed for {filename}: {e}")
+
+        if imported > 0:
+            logger.info(f"[dkg] Backlog import complete: {imported} entries imported from existing memory files")
 
     # -- Internal: recall facts from DKG or cache ------------------------------
 
