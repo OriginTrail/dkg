@@ -2688,11 +2688,14 @@ async function handleRequest(
         documentIri: assertionUri,
         sourceFileIri: fileUri,
       });
-      // Issue #122: if frontmatter resolves a different root entity than
-      // the assertion container URI, re-run extraction with that resolved
-      // entity as the document subject so content triples and later
-      // subject-based promote partitioning align on the same identity.
+      // Issue #122 interim rule: the import-file path still pins the
+      // document subject to the assertion URI. A divergent frontmatter
+      // `rootEntity` would require distinct document-vs-root identity
+      // plumbing through promote/update paths; until that lands, reject
+      // the override explicitly rather than silently rewriting content
+      // triples onto a different subject during import.
       if (result.resolvedRootEntity !== assertionUri) {
+        importRootEntity = result.resolvedRootEntity;
         const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
         if (reservedPrefix) {
           return respondWithFailedExtraction(
@@ -2708,13 +2711,11 @@ async function handleRequest(
             0,
           );
         }
-        result = extractFromMarkdown({
-          markdown: mdIntermediate,
-          agentDid,
-          ontologyRef,
-          documentIri: result.resolvedRootEntity,
-          sourceFileIri: fileUri,
-        });
+        return respondWithFailedExtraction(
+          400,
+          `Frontmatter 'rootEntity' override is not yet supported on the import-file path when it diverges from the imported document subject. Remove the 'rootEntity' key from frontmatter or make it match the document subject; tracking issue #122.`,
+          0,
+        );
       }
       triples = result.triples;
       // Round 13 Bug 39: `provenance` renamed to `sourceFileLinkage`.

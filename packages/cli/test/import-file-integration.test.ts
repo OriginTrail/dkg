@@ -529,10 +529,12 @@ async function runImportFileOrchestration(params: {
       documentIri: assertionUri,
       sourceFileIri: fileUri,
     });
-    // Mirror daemon issue #122 behavior: when frontmatter resolves a
-    // different root entity than the assertion container URI, re-run the
-    // extractor with that resolved entity as the document subject.
+    // Mirror daemon issue #122 interim behavior: the import-file path
+    // still pins the document subject to the assertion URI. A divergent
+    // frontmatter `rootEntity` is rejected explicitly until distinct
+    // document-vs-root identity is plumbed through the promote path.
     if (result.resolvedRootEntity !== assertionUri) {
+      importRootEntity = result.resolvedRootEntity;
       const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
       if (reservedPrefix) {
         fail(
@@ -548,13 +550,11 @@ async function runImportFileOrchestration(params: {
           0,
         );
       }
-      result = extractFromMarkdown({
-        markdown: mdIntermediate,
-        agentDid,
-        ontologyRef,
-        documentIri: result.resolvedRootEntity,
-        sourceFileIri: fileUri,
-      });
+      fail(
+        400,
+        `Frontmatter 'rootEntity' override is not yet supported on the import-file path when it diverges from the imported document subject. Remove the 'rootEntity' key from frontmatter or make it match the document subject; tracking issue #122.`,
+        0,
+      );
     }
     triples = result.triples;
     // Round 13 Bug 39: rename mirror — see daemon for rationale.
@@ -2062,13 +2062,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(result.extraction.status).toBe('completed');
   });
 
-  it('Issue 122: frontmatter `rootEntity` override retargets imported content and promote roots to the resolved entity URI', async () => {
-    // Issue #122: the import path used to pin the document subject to the
-    // assertion UAL while only rows 3 and 14 pointed at the frontmatter
-    // override. Promote partitions by actual subjects, so that made the
-    // override informational only. The fix retargets the imported content
-    // and linkage rows to the resolved root entity while keeping `_meta`
-    // keyed by the assertion UAL.
+  it('Issue 122: divergent frontmatter `rootEntity` overrides are rejected on the import-file path', async () => {
     const ROOT_OVERRIDE = 'urn:note:climate-report';
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
@@ -2081,63 +2075,28 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       },
     ]);
 
-    const result = await runImportFileOrchestration({
-      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
-      multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
-    });
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
+      });
+    } catch (err) {
+      thrown = err;
+    }
 
-    expect(result.rootEntity).toBe(ROOT_OVERRIDE);
-    expect(status.get(result.assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.rootEntity).toBe(ROOT_OVERRIDE);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/not yet supported on the import-file path/);
 
-    const dataQuads = getDataGraphQuads(agent, 'cg', 'climate');
-    const fileUri = `urn:dkg:file:${result.fileHash}`;
-    expect(dataQuads).toContainEqual({
-      subject: ROOT_OVERRIDE,
-      predicate: `${DKG}sourceFile`,
-      object: fileUri,
-    });
-    expect(dataQuads).toContainEqual({
-      subject: ROOT_OVERRIDE,
-      predicate: `${DKG}sourceContentType`,
-      object: '"text/markdown"',
-    });
-    expect(dataQuads).toContainEqual({
-      subject: ROOT_OVERRIDE,
-      predicate: `${DKG}rootEntity`,
-      object: ROOT_OVERRIDE,
-    });
-    expect(dataQuads).toContainEqual({
-      subject: ROOT_OVERRIDE,
-      predicate: 'http://schema.org/name',
-      object: '"Climate"',
-    });
-    expect(dataQuads.some(q => q.subject === result.assertionUri && q.predicate === `${DKG}rootEntity`)).toBe(false);
-    expect(dataQuads.some(q => q.subject === result.assertionUri && q.predicate === `${DKG}sourceContentType`)).toBe(false);
-
-    const metaGraph = contextGraphMetaUri('cg');
-    const row14 = agent.insertedQuads.find(q =>
-      q.graph === metaGraph &&
-      q.subject === result.assertionUri &&
-      q.predicate === `${DKG}rootEntity`,
-    );
-    expect(row14?.object).toBe(ROOT_OVERRIDE);
-
-    // Promote filters only the reserved bookkeeping URNs; after that,
-    // subject identity is what partitioning sees.
-    const promotableSubjects = [...new Set(
-      dataQuads
-        .filter(q => {
-          const lower = q.subject.toLowerCase();
-          return !lower.startsWith('urn:dkg:file:') && !lower.startsWith('urn:dkg:extraction:');
-        })
-        .map(q => q.subject),
-    )];
-    expect(promotableSubjects).toContain(ROOT_OVERRIDE);
-    expect(promotableSubjects).not.toContain(result.assertionUri);
-    expect(row14?.object).toBe(ROOT_OVERRIDE);
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'climate');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(status.get(assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(agent.insertedQuads).toHaveLength(0);
   });
 
-  it('Issue 122: fragment-bearing frontmatter `rootEntity` keeps section IRIs fragment-safe after retargeting', async () => {
+  it('Issue 122: fragment-bearing frontmatter `rootEntity` overrides are rejected on the import-file path', async () => {
     const ROOT_OVERRIDE = 'https://example.org/doc#root';
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
@@ -2150,24 +2109,25 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       },
     ]);
 
-    const result = await runImportFileOrchestration({
-      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
-      multipartBody: body, boundary: BOUNDARY, assertionName: 'fragment-root',
-    });
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'fragment-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
 
-    expect(result.rootEntity).toBe(ROOT_OVERRIDE);
-    const dataQuads = getDataGraphQuads(agent, 'cg', 'fragment-root');
-    expect(dataQuads).toContainEqual({
-      subject: ROOT_OVERRIDE,
-      predicate: `${DKG}hasSection`,
-      object: `${ROOT_OVERRIDE}/section-1-intro`,
-    });
-    expect(dataQuads).toContainEqual({
-      subject: `${ROOT_OVERRIDE}/section-1-intro`,
-      predicate: `${DKG}hasSection`,
-      object: `${ROOT_OVERRIDE}/section-2-details`,
-    });
-    expect(dataQuads.some(q => q.subject.includes('#root#section') || q.object.includes('#root#section'))).toBe(false);
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.rootEntity).toBe(ROOT_OVERRIDE);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/not yet supported on the import-file path/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'fragment-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(status.get(assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(agent.insertedQuads).toHaveLength(0);
   });
 
   it('Issue 122: reserved frontmatter `rootEntity` prefixes are rejected before retargeting content subjects', async () => {
