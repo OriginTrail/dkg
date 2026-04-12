@@ -13,6 +13,7 @@ import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -2540,6 +2541,7 @@ async function handleRequest(
     let mdIntermediate: string | null = null;
     let pipelineUsed: string | null = null;
     let mdIntermediateHash: string | undefined;
+    let importRootEntity: string | undefined;
     const respondWithImportFileResponse = (statusCode: number, extraction: ImportFileExtractionPayload) =>
       jsonResponse(
         res,
@@ -2547,6 +2549,7 @@ async function handleRequest(
         buildImportFileResponse({
           assertionUri,
           fileHash: fileStoreEntry.keccak256,
+          rootEntity: importRootEntity,
           detectedContentType,
           extraction,
         }),
@@ -2570,6 +2573,7 @@ async function handleRequest(
       const failedRecord: ExtractionStatusRecord = {
         status: 'failed',
         fileHash: fileStoreEntry.keccak256,
+        ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
         detectedContentType,
         pipelineUsed: failedPipelineUsed,
         tripleCount,
@@ -2669,6 +2673,7 @@ async function handleRequest(
     // ── Phase 2: markdown → triples + linkage ──
     let triples;
     let sourceFileLinkage;
+    let documentSubjectIri: string;
     let resolvedRootEntity: string;
     try {
       // The extractor owns rows 1 and 3. Row 2 (dkg:sourceContentType) is
@@ -2676,13 +2681,42 @@ async function handleRequest(
       // target), not the markdown intermediate the extractor processes.
       // Only the daemon has `detectedContentType` here, so it emits row 2
       // itself below alongside the file descriptor block.
-      const result = extractFromMarkdown({
+      let result = extractFromMarkdown({
         markdown: mdIntermediate,
         agentDid,
         ontologyRef,
         documentIri: assertionUri,
         sourceFileIri: fileUri,
       });
+      // Issue #122 interim rule: the import-file path still pins the
+      // document subject to the assertion URI. A divergent frontmatter
+      // `rootEntity` would require distinct document-vs-root identity
+      // plumbing through promote/update paths; until that lands, reject
+      // the override explicitly rather than silently rewriting content
+      // triples onto a different subject during import.
+      if (result.resolvedRootEntity !== assertionUri) {
+        importRootEntity = result.resolvedRootEntity;
+        const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
+        if (reservedPrefix) {
+          return respondWithFailedExtraction(
+            400,
+            `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+            0,
+          );
+        }
+        if (isSkolemizedUri(result.resolvedRootEntity)) {
+          return respondWithFailedExtraction(
+            400,
+            `Frontmatter 'rootEntity' resolves to the skolemized URI '${result.resolvedRootEntity}', but import-file rootEntity must identify a root subject rather than a skolemized child (/.well-known/genid/...).`,
+            0,
+          );
+        }
+        return respondWithFailedExtraction(
+          400,
+          `Frontmatter 'rootEntity' override is not yet supported on the import-file path when it diverges from the imported document subject. Remove the 'rootEntity' key from frontmatter or make it match the document subject; tracking issue #122.`,
+          0,
+        );
+      }
       triples = result.triples;
       // Round 13 Bug 39: `provenance` renamed to `sourceFileLinkage`.
       // The old name conflicted with its original extraction-run
@@ -2691,11 +2725,13 @@ async function handleRequest(
       // The extractor now only emits rows 1 and 3 of the source-file
       // linkage block, so the field's name reflects that directly.
       sourceFileLinkage = result.sourceFileLinkage;
+      documentSubjectIri = result.subjectIri;
       // §19.10.1:508 precedence: frontmatter `rootEntity` > explicit input >
       // reflexive subject. The extractor has already applied it to row 3;
       // reuse the resolved value for `_meta` row 14 below so row 3 and row
       // 14 are guaranteed to agree on the same root entity.
       resolvedRootEntity = result.resolvedRootEntity;
+      importRootEntity = resolvedRootEntity;
     } catch (err: any) {
       // Bug 13 + Round 7 Bug 20: invalid frontmatter IRIs AND invalid
       // programmatic `rootEntityIri` / `sourceFileIri` inputs both
@@ -2762,8 +2798,9 @@ async function handleRequest(
       // Row 2 — daemon-owned. Describes the ORIGINAL upload blob (row 1's
       // target), so for a PDF upload this is "application/pdf" — NOT the
       // markdown intermediate the extractor processes. Extractor never
-      // emits this row; the daemon is the single source of truth.
-      { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+      // emits this row; the daemon is the single source of truth. Its
+      // subject matches rows 1 and 3 on the resolved document entity.
+      { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
       // Row 4 — file descriptor block subject is the content-addressed URN
       { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
       // Row 5 — on-chain canonical hash format is keccak256:<hex>
@@ -3049,6 +3086,7 @@ async function handleRequest(
     const completedRecord: ExtractionStatusRecord = {
       status: 'completed',
       fileHash: fileStoreEntry.keccak256,
+      ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed,
       tripleCount: triples.length,
@@ -3113,6 +3151,7 @@ async function handleRequest(
       assertionUri,
       status: record.status,
       fileHash: record.fileHash,
+      ...(record.rootEntity ? { rootEntity: record.rootEntity } : {}),
       detectedContentType: record.detectedContentType,
       pipelineUsed: record.pipelineUsed,
       tripleCount: record.tripleCount,
@@ -3898,12 +3937,14 @@ interface ImportFileExtractionPayload {
 function buildImportFileResponse(args: {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: ImportFileExtractionPayload;
 }) {
   return {
     assertionUri: args.assertionUri,
     fileHash: args.fileHash,
+    ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
     detectedContentType: args.detectedContentType,
     extraction: {
       status: args.extraction.status,

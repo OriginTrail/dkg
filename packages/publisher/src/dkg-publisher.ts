@@ -5,6 +5,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
+import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import { computeTripleHashV10 as computeTripleHash, computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
@@ -20,6 +21,8 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+
+export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
 export interface DKGPublisherConfig {
   store: TripleStore;
@@ -112,11 +115,6 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bare `urn:dkg:file:` (not `urn:dkg:file:keccak256:`) so any future
 // hash-algorithm variant (e.g., `urn:dkg:file:blake3:...`) is also
 // covered without a guard update.
-export const RESERVED_SUBJECT_PREFIXES = [
-  'urn:dkg:file:',
-  'urn:dkg:extraction:',
-] as const;
-
 export class ReservedNamespaceError extends Error {
   readonly subject: string;
   readonly prefix: string;
@@ -179,17 +177,8 @@ function isInternalOrigin(options: PublishOptions): boolean {
 // case-sensitive, so a malicious or accidentally-mixed-case subject
 // like `URN:dkg:file:keccak256:<hex>` bypassed both defenses. Codex
 // Bug 41 flagged this. The fix replaces both byte-level comparisons
-// with this single case-insensitive helper, preserving the SSOT
-// property established in Round 12.
-//
-// `RESERVED_SUBJECT_PREFIXES` is already lowercase in the declaration
-// above, so the check just lowercases the incoming subject before
-// calling `startsWith`.
-function isReservedSubject(subject: string): boolean {
-  const lower = subject.toLowerCase();
-  return RESERVED_SUBJECT_PREFIXES.some((prefix) => lower.startsWith(prefix));
-}
-
+// with the shared case-insensitive helper from `reserved-subjects.ts`,
+// preserving the SSOT property established in Round 12.
 function rejectReservedSubjectPrefixes(quads: Quad[]): void {
   for (const q of quads) {
     if (isReservedSubject(q.subject)) {
@@ -197,9 +186,7 @@ function rejectReservedSubjectPrefixes(quads: Quad[]): void {
       // — re-scan with the lowercased subject since the constants are
       // lowercase. Byte-level comparison here is fine because by this
       // point we've already confirmed a match exists.
-      const lower = q.subject.toLowerCase();
-      const prefix = RESERVED_SUBJECT_PREFIXES.find((p) => lower.startsWith(p))!;
-      throw new ReservedNamespaceError(q.subject, prefix);
+      throw new ReservedNamespaceError(q.subject, findReservedSubjectPrefix(q.subject)!);
     }
   }
 }

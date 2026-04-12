@@ -12,6 +12,10 @@
  *        - registered converter → converter.extract(...)
  *        - neither → graceful degrade, status="skipped"
  *   4. extractFromMarkdown({ markdown, agentDid, ontologyRef, documentIri })
+ *      using the assertion URI as the pinned import subject; if frontmatter
+ *      resolves a different `rootEntity`, the public import-file path rejects
+ *      that divergent override with a 400 until the broader promote/update
+ *      identity plumbing lands
  *   5. mockAgent.assertion.write(contextGraphId, name, triples)
  *   6. record in extractionStatus Map
  *
@@ -38,6 +42,7 @@ import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { parseBoundary, parseMultipart } from '../src/http/multipart.js';
@@ -304,6 +309,7 @@ function getDataGraphQuads(
 interface ImportFileResult {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: {
     status: 'completed' | 'skipped' | 'failed';
@@ -328,12 +334,14 @@ class ImportFileRouteError extends Error {
 function buildImportFileResponse(args: {
   assertionUri: string;
   fileHash: string;
+  rootEntity?: string;
   detectedContentType: string;
   extraction: ImportFileResult['extraction'];
 }): ImportFileResult {
   return {
     assertionUri: args.assertionUri,
     fileHash: args.fileHash,
+    ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
     detectedContentType: args.detectedContentType,
     extraction: {
       status: args.extraction.status,
@@ -412,6 +420,7 @@ async function runImportFileOrchestration(params: {
   let mdIntermediate: string | null = null;
   let pipelineUsed: string | null = null;
   let mdIntermediateHash: string | undefined;
+  let importRootEntity: string | undefined;
   const recordInProgress = async (): Promise<void> => {
     const record: ExtractionStatusRecord = {
       status: 'in_progress',
@@ -431,6 +440,7 @@ async function runImportFileOrchestration(params: {
     extractionStatus.set(assertionUri, {
       status: 'failed',
       fileHash: fileStoreEntry.keccak256,
+      ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
       detectedContentType,
       pipelineUsed: failedPipelineUsed,
       tripleCount,
@@ -445,6 +455,7 @@ async function runImportFileOrchestration(params: {
     throw new ImportFileRouteError(statusCode, buildImportFileResponse({
       assertionUri,
       fileHash: fileStoreEntry.keccak256,
+      rootEntity: importRootEntity,
       detectedContentType,
       extraction: {
         status: 'failed',
@@ -510,20 +521,53 @@ async function runImportFileOrchestration(params: {
   const agentDid = `did:dkg:agent:${agent.peerId}`;
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let sourceFileLinkage: ReturnType<typeof extractFromMarkdown>['sourceFileLinkage'];
+  let documentSubjectIri: string;
   let resolvedRootEntity: string;
   try {
-    const result = extractFromMarkdown({
+    let result = extractFromMarkdown({
       markdown: mdIntermediate,
       agentDid,
       ontologyRef,
       documentIri: assertionUri,
       sourceFileIri: fileUri,
     });
+    // Mirror daemon issue #122 interim behavior: the import-file path
+    // still pins the document subject to the assertion URI. A divergent
+    // frontmatter `rootEntity` is rejected explicitly until distinct
+    // document-vs-root identity is plumbed through the promote path.
+    if (result.resolvedRootEntity !== assertionUri) {
+      importRootEntity = result.resolvedRootEntity;
+      const reservedPrefix = findReservedSubjectPrefix(result.resolvedRootEntity);
+      if (reservedPrefix) {
+        fail(
+          400,
+          `Frontmatter 'rootEntity' resolves to the reserved namespace '${reservedPrefix}*', which is protocol-reserved for daemon-generated import bookkeeping subjects.`,
+          0,
+        );
+      }
+      if (isSkolemizedUri(result.resolvedRootEntity)) {
+        fail(
+          400,
+          `Frontmatter 'rootEntity' resolves to the skolemized URI '${result.resolvedRootEntity}', but import-file rootEntity must identify a root subject rather than a skolemized child (/.well-known/genid/...).`,
+          0,
+        );
+      }
+      fail(
+        400,
+        `Frontmatter 'rootEntity' override is not yet supported on the import-file path when it diverges from the imported document subject. Remove the 'rootEntity' key from frontmatter or make it match the document subject; tracking issue #122.`,
+        0,
+      );
+    }
     triples = result.triples;
     // Round 13 Bug 39: rename mirror — see daemon for rationale.
     sourceFileLinkage = result.sourceFileLinkage;
+    documentSubjectIri = result.subjectIri;
     resolvedRootEntity = result.resolvedRootEntity;
+    importRootEntity = resolvedRootEntity;
   } catch (err: any) {
+    if (err instanceof ImportFileRouteError) {
+      throw err;
+    }
     const message = err?.message ?? String(err);
     // Bug 13 + Round 7 Bug 20: invalid frontmatter IRIs AND invalid
     // programmatic `rootEntityIri` / `sourceFileIri` inputs both
@@ -557,7 +601,8 @@ async function runImportFileOrchestration(params: {
     ...sourceFileLinkage.map(t => ({ ...t, graph: assertionGraph })),
     // Row 2 — daemon-owned. Always the ORIGINAL upload content type, so
     // for PDF this is "application/pdf", not the markdown intermediate.
-    { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+    // Its subject matches rows 1 and 3 on the resolved document entity.
+    { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
     // Rows 4, 5, 8 file descriptor — intrinsic-to-content properties only
     { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
     { subject: fileUri, predicate: 'http://dkg.io/ontology/contentHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: assertionGraph },
@@ -728,6 +773,7 @@ async function runImportFileOrchestration(params: {
   const completedRecord: ExtractionStatusRecord = {
     status: 'completed',
     fileHash: fileStoreEntry.keccak256,
+    ...(importRootEntity ? { rootEntity: importRootEntity } : {}),
     detectedContentType,
     pipelineUsed,
     tripleCount: triples.length,
@@ -740,6 +786,7 @@ async function runImportFileOrchestration(params: {
   return buildImportFileResponse({
     assertionUri,
     fileHash: fileStoreEntry.keccak256,
+    rootEntity: importRootEntity,
     detectedContentType,
     extraction: {
       status: 'completed',
@@ -2017,13 +2064,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(result.extraction.status).toBe('completed');
   });
 
-  it('Bug 3: frontmatter `rootEntity` override produces row 3 and row 14 pointing at the same IRI', async () => {
-    // Regression guard for Bug 3: a markdown upload with frontmatter
-    // `rootEntity: urn:note:climate-report` must emit BOTH row 3 (data
-    // graph, on the document subject) and row 14 (CG root `_meta`, on
-    // the assertion UAL) pointing at the frontmatter override, NOT the
-    // reflexive assertion UAL. Previously the daemon hardcoded row 14
-    // to `assertionUri`, silently dropping the override.
+  it('Issue 122: divergent frontmatter `rootEntity` overrides are rejected on the import-file path', async () => {
     const ROOT_OVERRIDE = 'urn:note:climate-report';
     const body = buildMultipart([
       { kind: 'text', name: 'contextGraphId', value: 'cg' },
@@ -2036,31 +2077,123 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       },
     ]);
 
-    const result = await runImportFileOrchestration({
-      agent, fileStore, extractionRegistry: registry, extractionStatus: status,
-      multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
-    });
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'climate',
+      });
+    } catch (err) {
+      thrown = err;
+    }
 
-    // Row 3: in the data graph, the document subject (= the assertion
-    // UAL because the daemon pins `documentIri: assertionUri`) points
-    // at the override.
-    const dataQuads = getDataGraphQuads(agent, 'cg', 'climate');
-    const row3 = dataQuads.find(q => q.predicate === `${DKG}rootEntity` && q.subject === result.assertionUri);
-    expect(row3?.object).toBe(ROOT_OVERRIDE);
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.rootEntity).toBe(ROOT_OVERRIDE);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/not yet supported on the import-file path/);
 
-    // Row 14: in CG root `_meta`, the assertion UAL also points at the
-    // override — NOT at itself, which was the pre-fix behavior.
-    const metaGraph = contextGraphMetaUri('cg');
-    const row14 = agent.insertedQuads.find(q =>
-      q.graph === metaGraph &&
-      q.subject === result.assertionUri &&
-      q.predicate === `${DKG}rootEntity`,
-    );
-    expect(row14?.object).toBe(ROOT_OVERRIDE);
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'climate');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(status.get(assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(agent.insertedQuads).toHaveLength(0);
+  });
 
-    // Row 3 and Row 14 point at the SAME IRI — the core invariant of
-    // the Bug 3 fix.
-    expect(row3?.object).toBe(row14?.object);
+  it('Issue 122: fragment-bearing frontmatter `rootEntity` overrides are rejected on the import-file path', async () => {
+    const ROOT_OVERRIDE = 'https://example.org/doc#root';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'fragment-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: fragment-doc\nrootEntity: ${ROOT_OVERRIDE}\n---\n\n# Fragment Title\n\n## Intro\n\n### Details\n`, 'utf-8'),
+      },
+    ]);
+
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'fragment-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.rootEntity).toBe(ROOT_OVERRIDE);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/not yet supported on the import-file path/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'fragment-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(status.get(assertionUri)?.rootEntity).toBe(ROOT_OVERRIDE);
+    expect(agent.insertedQuads).toHaveLength(0);
+  });
+
+  it('Issue 122: reserved frontmatter `rootEntity` prefixes are rejected before retargeting content subjects', async () => {
+    const RESERVED_ROOT = 'urn:dkg:file:keccak256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'reserved-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: reserved\nrootEntity: ${RESERVED_ROOT}\n---\n\n# Reserved\n`, 'utf-8'),
+      },
+    ]);
+
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'reserved-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/reserved namespace 'urn:dkg:file:\*'/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'reserved-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(agent.insertedQuads).toHaveLength(0);
+  });
+
+  it('Issue 122: skolemized frontmatter `rootEntity` values are rejected before retargeting content subjects', async () => {
+    const SKOLEM_ROOT = 'did:dkg:doc:root/.well-known/genid/child';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'cg' },
+      {
+        kind: 'file',
+        name: 'file',
+        filename: 'skolem-root.md',
+        contentType: 'text/markdown',
+        content: Buffer.from(`---\nid: skolem\nrootEntity: ${SKOLEM_ROOT}\n---\n\n# Skolem\n`, 'utf-8'),
+      },
+    ]);
+
+    let thrown: unknown;
+    try {
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'skolem-root',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(ImportFileRouteError);
+    expect((thrown as ImportFileRouteError).statusCode).toBe(400);
+    expect((thrown as ImportFileRouteError).body.extraction.error).toMatch(/skolemized URI/);
+
+    const assertionUri = contextGraphAssertionUri('cg', agent.peerId, 'skolem-root');
+    expect(status.get(assertionUri)?.status).toBe('failed');
+    expect(agent.insertedQuads).toHaveLength(0);
   });
 
   it('Bug 5a: re-import replaces (not appends) stale `_meta` rows for the same assertion name', async () => {
