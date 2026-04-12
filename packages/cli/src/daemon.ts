@@ -2777,9 +2777,12 @@ async function handleRequest(
     );
     const metaGraph = contextGraphMetaUri(contextGraphId!);
     const startedAtLiteral = `"${startedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
+    const markdownFormUri = mdIntermediateHash
+      ? `urn:dkg:file:${mdIntermediateHash}`
+      : fileUri;
 
     // Data-graph quads: content (triples) + extractor linkage (provenance)
-    // + daemon-owned rows 2, 4, 5, 8, 9-13. Every quad is pinned to the
+    // + daemon-owned rows 2, markdownForm, 4, 5, 8, 9-13. Every quad is pinned to the
     // assertion graph URI. `triples` and `provenance` come from the
     // extractor without a `graph` field, so we stamp each one here.
     //
@@ -2803,6 +2806,10 @@ async function handleRequest(
       // emits this row; the daemon is the single source of truth. Its
       // subject matches rows 1 and 3 on the resolved document entity.
       { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+      // Graph-level link to the markdown bytes structural extraction ran
+      // against. For markdown-native uploads this equals row 1's object;
+      // for converter-backed uploads it points at the stored intermediate.
+      { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/markdownForm', object: markdownFormUri, graph: assertionGraph },
       // Row 4 — file descriptor block subject is the content-addressed URN
       { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
       // Row 5 — on-chain canonical hash format is keccak256:<hex>
@@ -2811,7 +2818,9 @@ async function handleRequest(
       { subject: fileUri, predicate: 'http://dkg.io/ontology/size', object: `"${fileStoreEntry.size}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: assertionGraph },
       // Row 9 — ExtractionProvenance subject is a fresh UUID URN per import
       { subject: provUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ExtractionProvenance', graph: assertionGraph },
-      // Row 10 — back-references the file URN (same value as rows 4-5, 8 subject)
+      // Row 10 — back-references the ORIGINAL upload file URN (same value
+      // as rows 4-5, 8 subject). The new `dkg:markdownForm` entity link
+      // above separately exposes the markdown bytes Phase 2 actually read.
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractedFrom', object: fileUri, graph: assertionGraph },
       // Row 11
       { subject: provUri, predicate: 'http://dkg.io/ontology/extractedBy', object: agentDid, graph: assertionGraph },
