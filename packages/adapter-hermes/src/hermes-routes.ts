@@ -20,12 +20,14 @@ export function registerHermesRoutes(api: DaemonPluginApi): void {
     path: '/api/hermes/session-turn',
     handler: async (req, res) => {
       try {
-        const body: SessionTurnPayload = req.body;
+        const body = req.body as SessionTurnPayload & { agentName?: string };
 
         if (!body.sessionId || (!body.user && !body.assistant)) {
           res.status(400).json({ success: false, error: 'sessionId and at least one of user/assistant required' });
           return;
         }
+
+        const agentTag = body.agentName ? `${body.agentName}:` : '';
 
         // Store the chat turn for session history
         if (api.agent.storeChatTurn) {
@@ -33,13 +35,13 @@ export function registerHermesRoutes(api: DaemonPluginApi): void {
         }
 
         // Extract entities from the assistant's response using the daemon's
-        // LLM pipeline. This is the key integration point — the daemon handles
-        // entity extraction, the Python plugin just sends raw text.
+        // LLM pipeline. agentName is included in the source tag so entities
+        // are scoped to the correct agent's assertion in the triple store.
         if (api.agent.importMemories && body.assistant) {
           try {
             await api.agent.importMemories(
               body.assistant,
-              `hermes-session:${body.sessionId}`,
+              `${agentTag}hermes-session:${body.sessionId}`,
             );
           } catch (extractErr) {
             // Non-fatal: entity extraction failure shouldn't break turn persistence

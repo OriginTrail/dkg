@@ -57,14 +57,15 @@ def _load_config() -> dict:
     return config
 
 
-def _cache_path() -> Path:
+def _cache_path(agent_name: str = "") -> Path:
     from hermes_constants import get_hermes_home
-    return get_hermes_home() / "dkg_cache.json"
+    suffix = f"_{agent_name}" if agent_name else ""
+    return get_hermes_home() / f"dkg_cache{suffix}.json"
 
 
-def _load_cache() -> dict:
-    """Load offline cache."""
-    cp = _cache_path()
+def _load_cache(agent_name: str = "") -> dict:
+    """Load offline cache scoped to agent."""
+    cp = _cache_path(agent_name)
     if cp.exists():
         try:
             return json.loads(cp.read_text(encoding="utf-8"))
@@ -73,9 +74,9 @@ def _load_cache() -> dict:
     return {"memory": [], "user": [], "queued_writes": []}
 
 
-def _save_cache(cache: dict) -> None:
-    """Write offline cache atomically."""
-    cp = _cache_path()
+def _save_cache(cache: dict, agent_name: str = "") -> None:
+    """Write offline cache atomically, scoped to agent."""
+    cp = _cache_path(agent_name)
     tmp = cp.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
@@ -228,12 +229,12 @@ class DKGMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
         self._session_id = session_id
-        self._cache = _load_cache()
         self._agent_name = (
             self._config.get("agent_name")
             or kwargs.get("agent_identity", "")
             or "hermes"
         )
+        self._cache = _load_cache(self._agent_name)
         self._context_graph = self._config.get("context_graph", "hermes-memory")
 
         # Create HTTP client
@@ -335,14 +336,17 @@ class DKGMemoryProvider(MemoryProvider):
             return ""
 
         try:
-            # Simple text search across the context graph
+            # Search within this agent's assertion only — prevents cross-agent contamination
             sparql = (
                 f"SELECT ?s ?p ?o WHERE {{ "
                 f"?s ?p ?o . "
-                f"FILTER(ISLTERAL(?o) && CONTAINS(LCASE(STR(?o)), LCASE(\"{_escape_sparql(query)}\")))"
+                f"FILTER(ISLITERAL(?o) && CONTAINS(LCASE(STR(?o)), LCASE(\"{_escape_sparql(query)}\")))"
                 f"}} LIMIT 10"
             )
-            result = self._client.query(sparql, self._context_graph)
+            if self._assertion_id:
+                result = self._client.query_assertion(self._assertion_id, sparql)
+            else:
+                result = self._client.query(sparql, self._context_graph)
             bindings = result.get("results", {}).get("bindings", [])
             if not bindings:
                 return ""
@@ -373,16 +377,18 @@ class DKGMemoryProvider(MemoryProvider):
                     "user": user_content[:2000],
                     "assistant": assistant_content[:2000],
                 })
-                _save_cache(self._cache)
+                _save_cache(self._cache, self._agent_name)
             return
 
         # Fire-and-forget in background thread
+        agent_name = self._agent_name
         def _sync():
             try:
                 self._client.store_turn(
                     self._session_id,
                     user_content[:2000],
                     assistant_content[:2000],
+                    agent_name=agent_name,
                 )
             except Exception as e:
                 logger.debug(f"[dkg] sync_turn failed: {e}")
@@ -416,7 +422,7 @@ class DKGMemoryProvider(MemoryProvider):
             with self._lock:
                 self._cache["memory"] = [f for f in facts if f.get("target") == "memory"]
                 self._cache["user"] = [f for f in facts if f.get("target") == "user"]
-                _save_cache(self._cache)
+                _save_cache(self._cache, self._agent_name)
 
     def shutdown(self) -> None:
         """Close HTTP client."""
@@ -484,7 +490,7 @@ class DKGMemoryProvider(MemoryProvider):
                 entries = [e for e in entries if content not in e.get("content", "")]
 
             self._cache[target] = entries
-            _save_cache(self._cache)
+            _save_cache(self._cache, self._agent_name)
 
         # Write to DKG assertion if online
         if self._client and not self._offline:
@@ -502,7 +508,7 @@ class DKGMemoryProvider(MemoryProvider):
                     "target": target,
                     "content": content,
                 })
-                _save_cache(self._cache)
+                _save_cache(self._cache, self._agent_name)
 
         count = len(entries)
         return json.dumps({
@@ -619,7 +625,7 @@ class DKGMemoryProvider(MemoryProvider):
 
         with self._lock:
             self._cache["queued_writes"] = []
-            _save_cache(self._cache)
+            _save_cache(self._cache, self._agent_name)
 
 
 # ---------------------------------------------------------------------------

@@ -159,13 +159,16 @@ class DKGClient:
 
     # -- Hermes-specific routes (served by adapter-hermes on daemon) -----------
 
-    def store_turn(self, session_id: str, user_content: str, assistant_content: str) -> Dict[str, Any]:
+    def store_turn(self, session_id: str, user_content: str, assistant_content: str, agent_name: str = "") -> Dict[str, Any]:
         """POST /api/hermes/session-turn — persist turn + trigger entity extraction."""
-        return self._post("/api/hermes/session-turn", {
+        payload: Dict[str, Any] = {
             "sessionId": session_id,
             "user": user_content,
             "assistant": assistant_content,
-        })
+        }
+        if agent_name:
+            payload["agentName"] = agent_name
+        return self._post("/api/hermes/session-turn", payload)
 
     def end_session(self, session_id: str, turn_count: int = 0) -> Dict[str, Any]:
         """POST /api/hermes/session-end — finalize session."""
