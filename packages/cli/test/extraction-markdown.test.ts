@@ -46,6 +46,29 @@ describe('extractFromMarkdown — frontmatter', () => {
     expect(triples.some(t => t.predicate === RDF_TYPE && t.object === 'https://example.org/ontology/Thing')).toBe(true);
   });
 
+  it('Issue 123: preserves safe absolute-scheme IRIs in `type` and generic frontmatter scalars', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `---\nid: doc\ntype: tag:origintrail.org,2026:Document\nauthor: doi:10.1234/example\nhomepage: https://example.org/home\n---\n\n# Doc\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: RDF_TYPE,
+      object: 'tag:origintrail.org,2026:Document',
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/author',
+      object: 'doi:10.1234/example',
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/homepage',
+      object: 'https://example.org/home',
+    });
+  });
+
   it('maps `title` to schema:name and `description` to schema:description', () => {
     const { triples } = extractFromMarkdown({
       markdown: `---\nid: doc-1\ntitle: Hello World\ndescription: A short doc\n---\n\nBody.\n`,
@@ -77,6 +100,26 @@ describe('extractFromMarkdown — frontmatter', () => {
       predicate: 'http://schema.org/authors',
       object: '"Alice"',
     });
+  });
+
+  it('Issue 123: malformed scheme-prefixed frontmatter values fall back instead of emitting unsafe IRIs', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `---\nid: doc\ntype: "urn:x y"\nhomepage: "tag:example.org,2026:x y"\n---\n\n# Doc\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: RDF_TYPE,
+      object: 'http://schema.org/UrnXY',
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/homepage',
+      object: '"tag:example.org,2026:x y"',
+    });
+    expect(triples.some(t => t.object === 'urn:x y')).toBe(false);
+    expect(triples.some(t => t.object === 'tag:example.org,2026:x y')).toBe(false);
   });
 
   it('emits one triple per element for array values in frontmatter', () => {
@@ -294,6 +337,33 @@ describe('extractFromMarkdown — Dataview inline fields', () => {
       now: FIXED_NOW,
     });
     expect(triples).toContainEqual({ subject: subjectIri, predicate: 'http://schema.org/homepage', object: 'https://example.org/home' });
+  });
+
+  it('Issue 123: preserves safe non-whitelist scheme IRIs in Dataview fields', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `# Doc\n\nref:: ark:/12025/654xz321\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/ref',
+      object: 'ark:/12025/654xz321',
+    });
+  });
+
+  it('Issue 123: malformed scheme-prefixed Dataview values fall back to literals', () => {
+    const { triples, subjectIri } = extractFromMarkdown({
+      markdown: `# Doc\n\nref:: tag:example.org,2026:x y\n`,
+      agentDid: AGENT,
+      now: FIXED_NOW,
+    });
+    expect(triples).toContainEqual({
+      subject: subjectIri,
+      predicate: 'http://schema.org/ref',
+      object: '"tag:example.org,2026:x y"',
+    });
+    expect(triples.some(t => t.object === 'tag:example.org,2026:x y')).toBe(false);
   });
 
   it('ignores dataview-like syntax inside code fences', () => {

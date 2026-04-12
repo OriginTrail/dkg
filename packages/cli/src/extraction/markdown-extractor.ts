@@ -205,6 +205,19 @@ function shortHash(input: string): string {
   return createHash('sha256').update(input).digest('hex').slice(0, 12);
 }
 
+// Issue #123 / Round 11 Bug 33 follow-up: user-content extraction paths
+// (`type`, generic frontmatter scalars, Dataview inline values) should
+// treat ANY absolute scheme-based IRI as eligible, then use `isSafeIri`
+// as the strictness gate. Narrow allowlists silently rewrote valid IRIs
+// like `tag:` / `doi:` / `ark:`, while unchecked allowlist hits could
+// pass malformed `urn:x y` values through raw.
+const ABSOLUTE_IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+function resolveSafeAbsoluteIri(value: string): string | null {
+  if (!ABSOLUTE_IRI_SCHEME_RE.test(value)) return null;
+  return isSafeIri(value) ? value : null;
+}
+
 function typedLiteral(lexicalForm: string, datatypeIri: string): string {
   return `${JSON.stringify(lexicalForm)}^^<${datatypeIri}>`;
 }
@@ -269,7 +282,8 @@ function resolveSubjectIri(
 /** Resolve a value from a frontmatter `type` field to a full IRI. */
 function resolveTypeIri(typeValue: unknown): string | null {
   if (typeof typeValue !== 'string' || typeValue.length === 0) return null;
-  if (/^(https?:|did:|urn:)/.test(typeValue)) return typeValue;
+  const iri = resolveSafeAbsoluteIri(typeValue);
+  if (iri) return iri;
   // Treat bare identifiers as schema.org classes by convention (Report, Person, etc.)
   const localName = normalizeSchemaLocalName(typeValue, 'class');
   return localName ? `http://schema.org/${localName}` : null;
@@ -279,7 +293,8 @@ function resolveTypeIri(typeValue: unknown): string | null {
 function resolveFrontmatterValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') {
-    if (/^(https?:|did:|urn:)/.test(value)) return value;
+    const iri = resolveSafeAbsoluteIri(value);
+    if (iri) return iri;
     return JSON.stringify(value);
   }
   if (value instanceof Date) {
@@ -455,7 +470,7 @@ export function extractFromMarkdown(input: MarkdownExtractInput): MarkdownExtrac
   for (const { key, value } of extractDataviewFields(body)) {
     const predicate = frontmatterKeyToPredicate(key);
     if (predicate === null) continue;
-    const obj = /^(https?:|did:|urn:)/.test(value) ? value : JSON.stringify(value);
+    const obj = resolveSafeAbsoluteIri(value) ?? JSON.stringify(value);
     triples.push({ subject, predicate, object: obj });
   }
 
