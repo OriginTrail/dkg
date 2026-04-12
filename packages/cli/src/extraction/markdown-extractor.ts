@@ -96,13 +96,6 @@ export interface MarkdownExtractInput {
    * for the `_meta` row 14 write without re-resolving.
    */
   rootEntityIri?: string;
-  /**
-   * @deprecated Unused compatibility shim. Extraction-run timestamps moved
-   * to the daemon route handler in Round 9 Bug 27, so the extractor no
-   * longer consumes this field. It remains accepted to avoid breaking
-   * TypeScript callers that still pass `now`.
-   */
-  now?: Date;
 }
 
 export interface MarkdownExtractOutput {

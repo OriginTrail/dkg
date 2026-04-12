@@ -415,22 +415,6 @@ describe('extractFromMarkdown - subject IRI resolution', () => {
     expect(subjectIri).toBe('did:dkg:context-graph:foo/assertion/0xabc/mydoc');
   });
 
-  it('accepts deprecated `now` input without affecting extraction output', () => {
-    const markdown = `---\nid: doc\n---\n\n# Doc\n\nref:: value\n`;
-    const withoutNow = extractFromMarkdown({
-      markdown,
-      agentDid: AGENT,
-      sourceFileIri: FILE_URI,
-    });
-    const withNow = extractFromMarkdown({
-      markdown,
-      agentDid: AGENT,
-      sourceFileIri: FILE_URI,
-      now: new Date('2026-01-01T00:00:00.000Z'),
-    });
-    expect(withNow).toEqual(withoutNow);
-  });
-
   it('uses frontmatter id as-is when it looks like an IRI', () => {
     const { subjectIri } = extractFromMarkdown({
       markdown: `---\nid: https://example.org/thing/42\n---\n`,
