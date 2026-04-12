@@ -590,9 +590,12 @@ async function runImportFileOrchestration(params: {
   const assertionGraph = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const startedAtLiteral = `"${startedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
+  const markdownFormUri = mdIntermediateHash
+    ? `urn:dkg:file:${mdIntermediateHash}`
+    : fileUri;
 
   // Data-graph quads: content + extractor linkage + daemon-owned rows
-  // 2, 4, 5, 8, 9-13. Round 9 Bug 27 removed rows 6 (`dkg:fileName`)
+  // 2, markdownForm, 4, 5, 8, 9-13. Round 9 Bug 27 removed rows 6 (`dkg:fileName`)
   // and 7 (`dkg:contentType`) from the file descriptor block — those
   // per-upload facts now live on the assertion UAL in `_meta`, not on
   // the content-addressed `<fileUri>` subject. See daemon equivalent.
@@ -603,12 +606,16 @@ async function runImportFileOrchestration(params: {
     // for PDF this is "application/pdf", not the markdown intermediate.
     // Its subject matches rows 1 and 3 on the resolved document entity.
     { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: assertionGraph },
+    // Graph-level link to the markdown bytes structural extraction ran against.
+    { subject: documentSubjectIri, predicate: 'http://dkg.io/ontology/markdownForm', object: markdownFormUri, graph: assertionGraph },
     // Rows 4, 5, 8 file descriptor — intrinsic-to-content properties only
     { subject: fileUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/File', graph: assertionGraph },
     { subject: fileUri, predicate: 'http://dkg.io/ontology/contentHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: assertionGraph },
     { subject: fileUri, predicate: 'http://dkg.io/ontology/size', object: `"${fileStoreEntry.size}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: assertionGraph },
     // Rows 9-13 extraction provenance — URI subject (filtered out of promote)
     { subject: provUri, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/ExtractionProvenance', graph: assertionGraph },
+    // Provenance still points at the ORIGINAL upload file URN; the new
+    // entity-level `dkg:markdownForm` link exposes the Phase 2 markdown input.
     { subject: provUri, predicate: 'http://dkg.io/ontology/extractedFrom', object: fileUri, graph: assertionGraph },
     { subject: provUri, predicate: 'http://dkg.io/ontology/extractedBy', object: agentDid, graph: assertionGraph },
     { subject: provUri, predicate: 'http://dkg.io/ontology/extractedAt', object: startedAtLiteral, graph: assertionGraph },
@@ -1164,11 +1171,12 @@ describe('import-file orchestration — happy paths', () => {
     expect(agent.createdAssertions).toHaveLength(1);
     expect(agent.createdAssertions[0]).toEqual({ contextGraphId: 'cg', name: 'empty-doc', subGraphName: undefined });
     // Data-graph quads: rows 1, 3 (linkage from extractor) + row 2
-    // (daemon-owned) + rows 4, 5, 8 (file descriptor intrinsic-to-content
-    // properties, 3 quads — Round 9 Bug 27 dropped rows 6+7) + rows 9-13
-    // (extraction provenance, 5 quads) = 11 quads total.
+    // (daemon-owned original content type) + `dkg:markdownForm`
+    // (daemon-owned markdown-input link) + rows 4, 5, 8 (file descriptor
+    // intrinsic-to-content properties, 3 quads — Round 9 Bug 27 dropped
+    // rows 6+7) + rows 9-13 (extraction provenance, 5 quads) = 12 total.
     const dataQuads = getDataGraphQuads(agent, 'cg', 'empty-doc');
-    expect(dataQuads).toHaveLength(11);
+    expect(dataQuads).toHaveLength(12);
     // Meta graph still populated with the structural row 14-19 quads.
     const metaGraph = contextGraphMetaUri('cg');
     const metaQuads = agent.insertedQuads.filter(q => q.graph === metaGraph);
@@ -1687,6 +1695,7 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
 
   const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const DKG = 'http://dkg.io/ontology/';
+  const DKG_MARKDOWN_FORM = `${DKG}markdownForm`;
   const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
   beforeEach(async () => {
@@ -1728,6 +1737,11 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(row1!.object).toMatch(/^urn:dkg:file:keccak256:[0-9a-f]{64}$/);
     const fileUri = row1!.object;
     expect(fileUri).toBe(`urn:dkg:file:${result.fileHash}`);
+    // New graph-level link to the markdown bytes structural extraction
+    // actually read. For markdown-native uploads it matches row 1.
+    const markdownFormRow = written.find(t => t.subject === subjectIri && t.predicate === DKG_MARKDOWN_FORM);
+    expect(markdownFormRow).toBeDefined();
+    expect(markdownFormRow!.object).toBe(fileUri);
 
     // Row 2 — daemon-owned, uses the ORIGINAL upload content type. For a
     // direct markdown upload that's "text/markdown"; the PDF test below
@@ -1764,7 +1778,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(provTypeQuads).toHaveLength(1);
     const provUri = provTypeQuads[0]!.subject;
     expect(provUri).toMatch(/^urn:dkg:extraction:[0-9a-f-]{36}$/); // UUID v4
-    // Row 10 — back-references the SAME file URN as rows 4-8 subject
+    // Row 10 — still back-references the ORIGINAL upload file URN, while
+    // the new `dkg:markdownForm` row above points at the markdown bytes
+    // structural extraction consumed.
     expect(written).toContainEqual({ subject: provUri, predicate: `${DKG}extractedFrom`, object: fileUri });
     // Row 11
     expect(written).toContainEqual({ subject: provUri, predicate: `${DKG}extractedBy`, object: `did:dkg:agent:${agent.peerId}` });
@@ -1833,10 +1849,11 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
   });
 
   it('application/pdf import writes row 15 in _meta and row 20 for mdIntermediateHash, with rows 2 and 15 both = application/pdf', async () => {
+    const convertedMarkdown = '---\nid: paper\n---\n\n# Paper\n\nBody.\n';
     const stubConverter: ExtractionPipeline = {
       contentTypes: ['application/pdf'],
       async extract(_input: ExtractionInput): Promise<ConverterOutput> {
-        return { mdIntermediate: '---\nid: paper\n---\n\n# Paper\n\nBody.\n' };
+        return { mdIntermediate: convertedMarkdown };
       },
     };
     registry.register(stubConverter);
@@ -1893,6 +1910,18 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(row1!.object).toMatch(/^urn:dkg:file:keccak256:[0-9a-f]{64}$/);
     const fileUri = row1!.object;
     expect(fileUri).toBe(`urn:dkg:file:${result.fileHash}`);
+    const markdownFormRow = dataQuads.find(q =>
+      q.subject === result.assertionUri && q.predicate === DKG_MARKDOWN_FORM,
+    );
+    expect(markdownFormRow).toBeDefined();
+    expect(markdownFormRow!.object).toBe(`urn:dkg:file:${result.extraction.mdIntermediateHash}`);
+    const markdownFormHash = markdownFormRow!.object.replace(/^urn:dkg:file:/, '');
+    const markdownFormBytes = await fileStore.get(markdownFormHash);
+    expect(markdownFormBytes?.toString('utf-8')).toBe(convertedMarkdown);
+    const row10 = dataQuads.find(q =>
+      q.subject.startsWith('urn:dkg:extraction:') && q.predicate === `${DKG}extractedFrom`,
+    );
+    expect(row10?.object).toBe(fileUri);
     expect(dataQuads.some(q => q.subject === fileUri && q.predicate === `${DKG}contentType`)).toBe(false);
     expect(dataQuads.some(q => q.subject === fileUri && q.predicate === `${DKG}fileName`)).toBe(false);
   });
