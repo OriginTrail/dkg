@@ -441,7 +441,7 @@ describe('extractFromMarkdown â€” subject IRI resolution', () => {
 
   it('uses a hash fallback when non-ASCII titles and headings would slugify to empty strings', () => {
     const { triples, subjectIri } = extractFromMarkdown({
-      markdown: `# æ±äº¬\n\nSee [[å¤§é˜ª]].\n\n## æ„Ÿæƒ³\n`,
+      markdown: `# 東京\n\nSee [[大阪]].\n\n## 感想\n`,
       agentDid: AGENT,
     });
     expect(subjectIri).toMatch(/^urn:dkg:md:hash-[0-9a-f]{12}$/);
