@@ -4475,8 +4475,7 @@ async function _performNpmUpdateInner(
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
     if (!existsSync(bundledMarkItDownPath)) {
-      log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Aborting swap.`);
-      return 'failed';
+      log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
     }
   }
 
@@ -4863,7 +4862,7 @@ async function _performUpdateInner(
     }
 
     log('Auto-update: staging MarkItDown binary for the inactive slot...');
-    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform', {
+    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort', {
       cwd: targetDir,
       encoding: 'utf-8',
       timeout: 900_000,
@@ -4882,8 +4881,7 @@ async function _performUpdateInner(
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
     if (!existsSync(bundledMarkItDownPath)) {
-      log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Aborting swap.`);
-      return 'failed';
+      log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
     }
   }
 

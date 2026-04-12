@@ -219,6 +219,7 @@ describe('blue-green checkForUpdate', () => {
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('--best-effort') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build') && c.cwd === targetDir)).toBe(false);
 
     const activeDir = '/tmp/dkg-test/releases/a';
@@ -365,7 +366,7 @@ describe('blue-green checkForUpdate', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('build output missing'));
   });
 
-  it('aborts swap when the bundled MarkItDown binary is missing after build', async () => {
+  it('continues the swap when the bundled MarkItDown binary is missing after build', async () => {
     mockedReadFile.mockResolvedValueOnce('aaa111' as any);
     makeFetchOk('newcommit');
 
@@ -377,9 +378,9 @@ describe('blue-green checkForUpdate', () => {
 
     const log = vi.fn();
     const result = await performUpdate(AU, log);
-    expect(result).toBe(false);
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('bundled MarkItDown binary missing'));
+    expect(result).toBe(true);
+    expect(mockedSwapSlot).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
   });
 
   it('self-heals when target slot has no .git directory (empty dir from failed migration)', async () => {
@@ -730,7 +731,7 @@ describe('performNpmUpdate', () => {
     expect(mockedSwapSlot).not.toHaveBeenCalled();
   });
 
-  it('returns failed when the bundled MarkItDown binary is missing after install', async () => {
+  it('continues when the bundled MarkItDown binary is missing after install', async () => {
     mockedExistsSync.mockImplementation((p: any) => {
       const path = String(p);
       if (path.includes('markitdown-')) return false;
@@ -738,9 +739,9 @@ describe('performNpmUpdate', () => {
     });
     const log = vi.fn();
     const result = await performNpmUpdate('9.0.0-beta.5', log);
-    expect(result).toBe('failed');
-    expect(mockedSwapSlot).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('bundled MarkItDown binary missing'));
+    expect(result).toBe('updated');
+    expect(mockedSwapSlot).toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
   });
 
   it('recovers pending state if swap succeeded but version was not written', async () => {
