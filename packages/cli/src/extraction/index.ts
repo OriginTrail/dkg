@@ -4,3 +4,4 @@ export {
   type MarkdownExtractInput,
   type MarkdownExtractOutput,
 } from './markdown-extractor.js';
+export { extractWithLlm, type LlmExtractionInput, type LlmExtractionOutput } from './llm-extractor.js';
