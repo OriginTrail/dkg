@@ -213,8 +213,12 @@ function shortHash(input: string): string {
 // pass malformed `urn:x y` values through raw.
 const ABSOLUTE_IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
+function looksLikeAbsoluteIri(value: string): boolean {
+  return ABSOLUTE_IRI_SCHEME_RE.test(value);
+}
+
 function resolveSafeAbsoluteIri(value: string): string | null {
-  if (!ABSOLUTE_IRI_SCHEME_RE.test(value)) return null;
+  if (!looksLikeAbsoluteIri(value)) return null;
   return isSafeIri(value) ? value : null;
 }
 
@@ -282,8 +286,7 @@ function resolveSubjectIri(
 /** Resolve a value from a frontmatter `type` field to a full IRI. */
 function resolveTypeIri(typeValue: unknown): string | null {
   if (typeof typeValue !== 'string' || typeValue.length === 0) return null;
-  const iri = resolveSafeAbsoluteIri(typeValue);
-  if (iri) return iri;
+  if (looksLikeAbsoluteIri(typeValue)) return resolveSafeAbsoluteIri(typeValue);
   // Treat bare identifiers as schema.org classes by convention (Report, Person, etc.)
   const localName = normalizeSchemaLocalName(typeValue, 'class');
   return localName ? `http://schema.org/${localName}` : null;

@@ -102,17 +102,13 @@ describe('extractFromMarkdown — frontmatter', () => {
     });
   });
 
-  it('Issue 123: malformed scheme-prefixed frontmatter values fall back instead of emitting unsafe IRIs', () => {
+  it('Issue 123: malformed scheme-prefixed frontmatter values never emit unsafe IRIs', () => {
     const { triples, subjectIri } = extractFromMarkdown({
       markdown: `---\nid: doc\ntype: "urn:x y"\nhomepage: "tag:example.org,2026:x y"\n---\n\n# Doc\n`,
       agentDid: AGENT,
       now: FIXED_NOW,
     });
-    expect(triples).toContainEqual({
-      subject: subjectIri,
-      predicate: RDF_TYPE,
-      object: 'http://schema.org/UrnXY',
-    });
+    expect(triples.some(t => t.subject === subjectIri && t.predicate === RDF_TYPE)).toBe(false);
     expect(triples).toContainEqual({
       subject: subjectIri,
       predicate: 'http://schema.org/homepage',
