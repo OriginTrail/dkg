@@ -24,10 +24,6 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
 fi
 command -v pnpm >/dev/null 2>&1 || { red "Error: pnpm is not installed. Install with: npm install -g pnpm"; exit 1; }
 command -v git >/dev/null 2>&1 || { red "Error: git is not installed."; exit 1; }
-command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 || {
-  red "Error: python3 or python is required to build the bundled MarkItDown binary for source installs."
-  exit 1
-}
 
 green "Prerequisites OK (node v$(node -v | tr -d v), pnpm $(pnpm -v), git $(git --version | awk '{print $3}'))"
 echo ""

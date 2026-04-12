@@ -34,7 +34,6 @@ describe('install.sh validation', () => {
     expect(content).toContain('command -v node');
     expect(content).toContain('command -v pnpm');
     expect(content).toContain('command -v git');
-    expect(content).toContain('command -v python3');
   });
 
   it('script creates correct directory structure markers', async () => {

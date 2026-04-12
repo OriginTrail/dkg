@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { execFile as execFileCb } from 'node:child_process';
+import { execFile as execFileCb, execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -213,7 +213,16 @@ export async function downloadBinaryAsset({
 
 function resolvePythonCommand() {
   if (process.env.PYTHON) return process.env.PYTHON;
-  return process.platform === 'win32' ? 'python' : 'python3';
+  const candidates = process.platform === 'win32' ? ['python'] : ['python3', 'python'];
+  for (const candidate of candidates) {
+    try {
+      execFileSync(candidate, ['--version'], { stdio: 'pipe' });
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  throw new Error('Python executable not found. Install python3/python or set the PYTHON environment variable.');
 }
 
 function venvPythonPath(venvDir) {
@@ -229,7 +238,7 @@ export async function buildCurrentPlatformBinary({
 }) {
   const target = getSupportedTarget();
   if (!target) {
-    throw new Error(`Unsupported MarkItDown bundle target: ${process.platform}-${process.arch}`);
+    return { status: 'unsupported' };
   }
 
   const binDir = resolveBinDir(packageDir, outputDir);
@@ -356,6 +365,9 @@ export async function ensureCurrentPlatformBinary({
   } catch (downloadErr) {
     if (!allowBuildFromSource) throw downloadErr;
     const built = await buildCurrentPlatformBinary({ packageDir, outputDir, force });
+    if (built.status === 'unsupported') {
+      return built;
+    }
     return { ...built, source: 'build' };
   }
 }
@@ -391,6 +403,10 @@ async function main() {
       outputDir: opts.outputDir,
       force: opts.force,
     });
+    if (result.status === 'unsupported') {
+      log(`MarkItDown bundle: ${process.platform}-${process.arch} is not a supported bundled target.`);
+      return;
+    }
     log(`MarkItDown bundle: built ${result.binaryPath}.`);
     return;
   }
