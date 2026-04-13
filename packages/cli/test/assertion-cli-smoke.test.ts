@@ -11,17 +11,19 @@ import { tmpdir } from 'node:os';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
-const SMOKE_API_PORT = '19292';
 
 describe.sequential('assertion CLI smoke', () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
+  let smokeApiPort: string;
   let lastImportBody = '';
   let lastImportContentType = '';
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-assertion-cli-'));
-    await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
+    if (!existsSync(CLI_ENTRY)) {
+      await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
+    }
     if (!existsSync(CLI_ENTRY)) {
       throw new Error(`CLI entry not found after build: ${CLI_ENTRY}`);
     }
@@ -59,6 +61,19 @@ describe.sequential('assertion CLI smoke', () => {
           tripleCount: 14,
           pipelineUsed: 'application/pdf',
           mdIntermediateHash: 'keccak256:mdhash',
+        }));
+        return;
+      }
+
+      if (req.method === 'GET' && req.url === '/api/assertion/paper/extraction-status?contextGraphId=research&subGraphName=lab') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          assertionUri: 'did:dkg:context-graph:research/sub-graph/lab/assertion/0xAgent/paper',
+          fileHash: 'keccak256:filehash-subgraph',
+          status: 'completed',
+          tripleCount: 9,
+          pipelineUsed: 'application/pdf',
+          mdIntermediateHash: 'keccak256:mdhash-subgraph',
         }));
         return;
       }
@@ -103,7 +118,11 @@ describe.sequential('assertion CLI smoke', () => {
 
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(Number.parseInt(SMOKE_API_PORT, 10), '127.0.0.1', () => resolve());
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        smokeApiPort = typeof addr === 'object' && addr ? String(addr.port) : '0';
+        resolve();
+      });
     });
   });
 
@@ -113,7 +132,7 @@ describe.sequential('assertion CLI smoke', () => {
   });
 
   it('imports a PDF file through the CLI multipart wrapper, queries status, inspects assertion quads, and promotes it', async () => {
-    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: SMOKE_API_PORT };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
 
     const imported = await execFileAsync('node', [
       CLI_ENTRY,
@@ -147,6 +166,20 @@ describe.sequential('assertion CLI smoke', () => {
     expect(status.stdout).toContain('Extraction status for "paper":');
     expect(status.stdout).toContain('Status:         completed');
     expect(status.stdout).toContain('Pipeline:       application/pdf');
+
+    const subgraphStatus = await execFileAsync('node', [
+      CLI_ENTRY,
+      'assertion',
+      'extraction-status',
+      'paper',
+      '--context-graph',
+      'research',
+      '--sub-graph-name',
+      'lab',
+    ], { env });
+
+    expect(subgraphStatus.stdout).toContain('did:dkg:context-graph:research/sub-graph/lab/assertion/0xAgent/paper');
+    expect(subgraphStatus.stdout).toContain('keccak256:filehash-subgraph');
 
     const queried = await execFileAsync('node', [
       CLI_ENTRY,

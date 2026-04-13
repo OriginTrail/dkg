@@ -20,15 +20,16 @@ This smoke test exercises the CLI flow for:
 Recommended fixture shape:
 
 - `report-a.pdf` extracts to facts including:
-  - one shared document/entity subject, `urn:company:acme`
+  - a root entity (auto-assigned by the extractor based on document content)
   - `schema:name "Acme"`
   - `schema:industry "Logistics"`
-- `report-b.pdf` extracts to facts including the same shared document/entity subject and at least one overlapping triple:
+  - `schema:url <https://acme.example>`
+- `report-b.pdf` extracts to facts including at least one overlapping triple:
   - `schema:name "Acme"`
   - `schema:industry "Logistics"`
-  - plus one new fact such as `schema:url "https://acme.example"`
+  - plus one new IRI-valued fact such as `schema:url <https://acme.example/contact>`
 
-The important part is that both documents resolve at least one identical RDF triple after extraction.
+The important part is that both documents resolve at least one identical RDF triple after extraction. Note: the extractor assigns root entities automatically (typically derived from the assertion URI), so do not assume a hand-picked subject like `urn:company:acme` will be preserved.
 
 ## Suggested Test IDs
 
@@ -102,25 +103,25 @@ Expected:
 
 Run a query for the shared root entity or the overlapping predicate/object pair.
 
-Example query by entity:
+Example query for the overlapping triple (uses a variable for the subject since root entity URIs are extractor-assigned):
 
 ```bash
 dkg query "$CG_ID" --sparql '
-SELECT ?p ?o WHERE {
+SELECT ?s ?g WHERE {
   GRAPH ?g {
-    <urn:company:acme> ?p ?o .
+    ?s <http://schema.org/industry> "Logistics" .
   }
 }
 '
 ```
 
-If you want a strict duplicate check for one overlapping triple, use:
+If you want a strict duplicate count for that triple across graphs:
 
 ```bash
 dkg query "$CG_ID" --sparql '
-SELECT ?g WHERE {
+SELECT (COUNT(DISTINCT ?g) AS ?graphs) WHERE {
   GRAPH ?g {
-    <urn:company:acme> <http://schema.org/industry> "Logistics" .
+    ?s <http://schema.org/industry> "Logistics" .
   }
 }
 '
@@ -184,13 +185,13 @@ Pass condition:
 - it does not appear more times than expected after the second publish
 - the new non-overlapping triple from `report-b.pdf` is present
 
-Recommended follow-up query for the new fact:
+Recommended follow-up query for the new fact (note: URL values are extracted as IRIs, not string literals):
 
 ```bash
 dkg query "$CG_ID" --sparql '
-SELECT ?g WHERE {
+SELECT ?s ?g WHERE {
   GRAPH ?g {
-    <urn:company:acme> <http://schema.org/url> "https://acme.example" .
+    ?s <http://schema.org/url> <https://acme.example/contact> .
   }
 }
 '

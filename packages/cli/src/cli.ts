@@ -583,17 +583,6 @@ program
       }
       console.log('Daemon still running after 10s — you may need to kill it manually.');
     } catch (err) {
-      const message = toErrorMessage(err);
-      if (message.includes('participantIdentityIds') && message.includes('requiredSignatures')) {
-        console.error('The running daemon is using an older context-graph create contract.');
-        console.error('Restart the daemon from this repository build, then retry:');
-        console.error('  node packages/cli/dist/cli.js stop');
-        console.error('  pnpm --filter @origintrail-official/dkg build');
-        console.error('  node packages/cli/dist/cli.js start');
-        console.error('Or use an existing context graph from:');
-        console.error('  node packages/cli/dist/cli.js context-graph list');
-        process.exit(1);
-      }
       console.error(toErrorMessage(err));
       process.exit(1);
     }
@@ -1137,7 +1126,17 @@ contextGraphCmd
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
     } catch (err) {
-      console.error(toErrorMessage(err));
+      const message = toErrorMessage(err);
+      if (message.includes('participantIdentityIds') && message.includes('requiredSignatures')) {
+        console.error('Context-graph contract mismatch — the daemon was built against an older ABI.');
+        console.error('Rebuild and restart the daemon, then retry:');
+        console.error('  pnpm --filter @origintrail-official/dkg build');
+        console.error('  node packages/cli/dist/cli.js start');
+        console.error('Or use an existing context graph from:');
+        console.error('  node packages/cli/dist/cli.js context-graph list');
+        process.exit(1);
+      }
+      console.error(message);
       process.exit(1);
     }
   });
@@ -1291,10 +1290,11 @@ assertionCmd
   .command('extraction-status <name>')
   .description('Show the latest extraction status for an imported assertion document')
   .requiredOption('-c, --context-graph <id>', 'Target context graph')
+  .option('--sub-graph-name <name>', 'Target registered sub-graph inside the context graph')
   .action(async (name: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.assertionExtractionStatus(name, opts.contextGraph);
+      const result = await client.assertionExtractionStatus(name, opts.contextGraph, opts.subGraphName);
       console.log(`Extraction status for "${name}":`);
       if (result.assertionUri) {
         console.log(`  Assertion URI:  ${result.assertionUri}`);

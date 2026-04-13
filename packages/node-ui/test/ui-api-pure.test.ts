@@ -64,15 +64,15 @@ afterEach(() => {
 
 describe('fileUrl', () => {
   it('preserves sha256: prefix', () => {
-    expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256:abcdef');
+    expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256%3Aabcdef');
   });
 
   it('preserves keccak256: prefix', () => {
-    expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256:abcdef');
+    expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256%3Aabcdef');
   });
 
   it('adds sha256: prefix to bare hashes', () => {
-    expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256:abcdef0123456789');
+    expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256%3Aabcdef0123456789');
   });
 
   it('appends contentType query param when provided', () => {

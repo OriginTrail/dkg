@@ -419,7 +419,7 @@ export class ApiClient {
     return this.postForm(`/api/assertion/${encodeURIComponent(name)}/import-file`, form);
   }
 
-  async assertionExtractionStatus(name: string, contextGraphId: string): Promise<{
+  async assertionExtractionStatus(name: string, contextGraphId: string, subGraphName?: string): Promise<{
     assertionUri?: string;
     fileHash?: string;
     status?: string;
@@ -428,8 +428,10 @@ export class ApiClient {
     mdIntermediateHash?: string;
     error?: string;
   }> {
+    const params = new URLSearchParams({ contextGraphId });
+    if (subGraphName) params.set('subGraphName', subGraphName);
     return this.get(
-      `/api/assertion/${encodeURIComponent(name)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+      `/api/assertion/${encodeURIComponent(name)}/extraction-status?${params.toString()}`,
     );
   }
 
@@ -575,7 +577,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, (body as Record<string, unknown>).error as string);
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
     }
     return res.json() as Promise<T>;
   }
@@ -588,7 +590,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, (data as Record<string, unknown>).error as string);
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
     }
     return res.json() as Promise<T>;
   }
@@ -601,27 +603,57 @@ export class ApiClient {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, (data as Record<string, unknown>).error as string);
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
     }
     return res.json() as Promise<T>;
   }
 
   /** Create an Error with an `httpStatus` property so callers can distinguish
    *  application-level responses from connection failures. */
-  static httpError(status: number, message?: string): Error & { httpStatus: number } {
-    const err = new Error(message ?? `HTTP ${status}`) as Error & { httpStatus: number };
+  static httpError(status: number, message?: string, responseBody?: unknown): Error & { httpStatus: number; responseBody?: unknown } {
+    const err = new Error(message ?? `HTTP ${status}`) as Error & { httpStatus: number; responseBody?: unknown };
     err.httpStatus = status;
+    if (responseBody !== undefined) err.responseBody = responseBody;
     return err;
+  }
+
+  private static errorMessageFromBody(body: unknown, fallback?: string): string | undefined {
+    if (!body || typeof body !== 'object') return fallback;
+    const record = body as Record<string, unknown>;
+    const extraction = record.extraction;
+    if (extraction && typeof extraction === 'object') {
+      const extractionError = (extraction as Record<string, unknown>).error;
+      if (typeof extractionError === 'string' && extractionError.length > 0) {
+        return extractionError;
+      }
+    }
+    if (typeof record.error === 'string' && record.error.length > 0) {
+      return record.error;
+    }
+    return fallback;
   }
 }
 
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.md': 'text/markdown',
+  '.markdown': 'text/markdown',
+  '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xml': 'application/xml',
+  '.epub': 'application/epub+zip',
+};
+
 function inferUploadContentType(filePath: string): string | undefined {
   const lower = filePath.toLowerCase();
-  if (lower.endsWith('.pdf')) return 'application/pdf';
-  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
-  if (lower.endsWith('.txt')) return 'text/plain';
-  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
-  if (lower.endsWith('.csv')) return 'text/csv';
-  if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  for (const [ext, ct] of Object.entries(UPLOAD_CONTENT_TYPES)) {
+    if (lower.endsWith(ext)) return ct;
+  }
   return undefined;
 }

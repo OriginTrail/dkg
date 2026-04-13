@@ -327,11 +327,11 @@ export const fetchExtractionStatus = (assertionName: string, contextGraphId: str
 
 /** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {
+  const normalizedHash = hash.startsWith('sha256:') || hash.startsWith('keccak256:')
+    ? hash
+    : `sha256:${hash}`;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  if (hash.startsWith('keccak256:') || hash.startsWith('sha256:')) {
-    return `${BASE}/api/file/${hash}${params}`;
-  }
-  return `${BASE}/api/file/sha256:${hash}${params}`;
+  return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
 export interface SwmRootEntity {
