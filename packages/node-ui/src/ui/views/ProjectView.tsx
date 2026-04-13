@@ -13,12 +13,18 @@ interface ProjectViewProps {
   contextGraphId: string;
 }
 
-type ViewTab = 'conversation' | 'timeline' | 'graph' | 'entities';
+type ViewTab = 'timeline' | 'graph' | 'knowledge';
 
 const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',
   shared: '#f59e0b',
   working: '#64748b',
+};
+
+const TRUST_LABELS: Record<TrustLevel, string> = {
+  verified: 'Verified',
+  shared: 'Shared',
+  working: 'Private',
 };
 
 const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
@@ -31,6 +37,7 @@ const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
   DefinedTerm: { icon: '📘', group: 'Concepts' },
   CreativeWork: { icon: '📄', group: 'Documents' },
   Product: { icon: '🪙', group: 'Products' },
+  ConversationTurn: { icon: '💬', group: 'Conversations' },
   Thing: { icon: '◆', group: 'Other' },
 };
 
@@ -55,6 +62,10 @@ function entityMeta(e: MemoryEntity) {
   return { ...info, type: primaryType };
 }
 
+function isConversationTurn(e: MemoryEntity): boolean {
+  return e.types.some(t => t.includes('ConversationTurn'));
+}
+
 function getDate(e: MemoryEntity): string | null {
   const datePreds = ['http://schema.org/startDate', 'http://schema.org/dateCreated', 'http://schema.org/datePublished'];
   for (const p of datePreds) {
@@ -76,6 +87,14 @@ function getDescription(e: MemoryEntity): string | null {
 function getAgentTool(e: MemoryEntity): string | null {
   const v = e.properties.get('http://schema.org/additionalType');
   return v?.[0] ?? null;
+}
+
+function humanizeLabel(entity: MemoryEntity | undefined, uri: string): string {
+  if (entity) return entity.label;
+  const slash = uri.lastIndexOf('/');
+  const hash = uri.lastIndexOf('#');
+  const cut = Math.max(slash, hash);
+  return cut >= 0 ? uri.slice(cut + 1) : uri;
 }
 
 const CONTRIBUTOR_PREDS = new Set([
@@ -107,69 +126,137 @@ function neighborhoodTriples(entityUri: string, allTriples: Triple[], hops: numb
   return allTriples.filter(t => visited.has(t.subject) || visited.has(t.object));
 }
 
-// ─── Timeline View ───────────────────────────────────────────
+// ─── Trust Status Box ────────────────────────────────────────
+
+function TrustStatusBox({ level }: { level: TrustLevel }) {
+  const color = TRUST_COLORS[level];
+  const label = TRUST_LABELS[level];
+  return (
+    <span className="v10-trust-status-box" style={{ borderColor: color, color }}>
+      {label}
+    </span>
+  );
+}
+
+// ─── Project Home Header ─────────────────────────────────────
+
+function ProjectHome({ cg, memory }: {
+  cg: any;
+  memory: ReturnType<typeof useMemoryEntities>;
+}) {
+  const agents = useMemo(() => {
+    const found: Array<{ uri: string; label: string; tool: string | null }> = [];
+    const seen = new Set<string>();
+    for (const [, e] of memory.entities) {
+      const isPerson = e.types.some(t => t.includes('Person'));
+      const isAgent = e.types.some(t => t.includes('SoftwareApplication'));
+      if (!isPerson && !isAgent) continue;
+      const tool = getAgentTool(e);
+      if ((tool || isPerson) && !seen.has(e.uri)) {
+        seen.add(e.uri);
+        found.push({ uri: e.uri, label: e.label, tool });
+      }
+    }
+    return found;
+  }, [memory.entities]);
+
+  const turnCount = useMemo(() => {
+    let c = 0;
+    for (const e of memory.entityList) {
+      if (isConversationTurn(e)) c++;
+    }
+    return c;
+  }, [memory.entityList]);
+
+  return (
+    <div className="v10-ph">
+      {cg.description && <p className="v10-ph-desc">{cg.description}</p>}
+      <div className="v10-ph-stats">
+        <div className="v10-ph-stat">
+          <span className="v10-ph-stat-val">{memory.counts.total}</span>
+          <span className="v10-ph-stat-label">entities</span>
+        </div>
+        <div className="v10-ph-stat">
+          <span className="v10-ph-stat-val">{memory.graphTriples.length}</span>
+          <span className="v10-ph-stat-label">facts</span>
+        </div>
+        <div className="v10-ph-stat">
+          <span className="v10-ph-stat-val">{turnCount}</span>
+          <span className="v10-ph-stat-label">turns</span>
+        </div>
+        <div className="v10-ph-stat">
+          <span className="v10-ph-stat-val">{agents.length}</span>
+          <span className="v10-ph-stat-label">participants</span>
+        </div>
+      </div>
+      {agents.length > 0 && (
+        <div className="v10-ph-agents">
+          <span className="v10-ph-agents-label">Participants</span>
+          <div className="v10-ph-agents-list">
+            {agents.map(a => (
+              <span key={a.uri} className="v10-ph-agent-chip">
+                {a.label}
+                {a.tool && <span className="v10-ph-agent-tool">{a.tool}</span>}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Timeline (only dated items — conversation turns + dated entities) ─────
 
 function TimelineView({ memory, search, onSelect }: {
   memory: ReturnType<typeof useMemoryEntities>;
   search: string;
   onSelect: (uri: string) => void;
 }) {
-  const groups = useMemo(() => {
-    const dated: Array<{ date: string; entities: MemoryEntity[] }> = [];
-    const undated: MemoryEntity[] = [];
-    const dateMap = new Map<string, MemoryEntity[]>();
+  const items = useMemo(() => {
+    const dated: Array<{ date: string; time: string | null; entity: MemoryEntity; isConvTurn: boolean }> = [];
 
     for (const e of memory.entityList) {
       if (search && !matchesSearch(e, search)) continue;
       const d = getDate(e);
-      if (d) {
-        const list = dateMap.get(d) ?? [];
-        list.push(e);
-        dateMap.set(d, list);
-      } else {
-        undated.push(e);
-      }
+      if (!d) continue;
+      const isTurn = isConversationTurn(e);
+      const dateStr = d.split('T')[0] ?? d;
+      const timeStr = d.includes('T') ? d.split('T')[1]?.slice(0, 5) ?? null : null;
+      dated.push({ date: dateStr, time: timeStr, entity: e, isConvTurn: isTurn });
     }
 
-    for (const [date, entities] of [...dateMap.entries()].sort((a, b) => b[0].localeCompare(a[0]))) {
-      dated.push({ date, entities });
+    dated.sort((a, b) => {
+      const cmp = b.date.localeCompare(a.date);
+      if (cmp !== 0) return cmp;
+      return (b.time ?? '').localeCompare(a.time ?? '');
+    });
+
+    const dateGroups = new Map<string, typeof dated>();
+    for (const item of dated) {
+      const list = dateGroups.get(item.date) ?? [];
+      list.push(item);
+      dateGroups.set(item.date, list);
     }
 
-    const typeGroups = new Map<string, MemoryEntity[]>();
-    for (const e of undated) {
-      const { group } = entityMeta(e);
-      const list = typeGroups.get(group) ?? [];
-      list.push(e);
-      typeGroups.set(group, list);
-    }
-
-    return { dated, typeGroups: [...typeGroups.entries()] };
+    return [...dateGroups.entries()];
   }, [memory.entityList, search]);
 
-  if (groups.dated.length === 0 && groups.typeGroups.length === 0) {
-    return <div className="v10-tl-empty">No matching entities.</div>;
+  if (items.length === 0) {
+    return <div className="v10-tl-empty">No dated entries found.</div>;
   }
 
   return (
     <div className="v10-tl-scroll">
-      {groups.dated.map(({ date, entities }) => (
+      {items.map(([date, entries]) => (
         <div key={date} className="v10-tl-date-group">
           <div className="v10-tl-date-label">{date}</div>
           <div className="v10-tl-date-items">
-            {entities.map(e => (
-              <NarrativeCard key={e.uri} entity={e} allEntities={memory.entities} onSelect={onSelect} />
-            ))}
-          </div>
-        </div>
-      ))}
-
-      {groups.typeGroups.map(([group, entities]) => (
-        <div key={group} className="v10-tl-type-group">
-          <div className="v10-tl-type-label">{group}</div>
-          <div className="v10-tl-date-items">
-            {entities.map(e => (
-              <NarrativeCard key={e.uri} entity={e} allEntities={memory.entities} onSelect={onSelect} />
-            ))}
+            {entries.map(({ entity, isConvTurn, time }) =>
+              isConvTurn
+                ? <ConversationTurnCard key={entity.uri} entity={entity} allEntities={memory.entities} onSelect={onSelect} time={time} />
+                : <NarrativeCard key={entity.uri} entity={entity} allEntities={memory.entities} onSelect={onSelect} />
+            )}
           </div>
         </div>
       ))}
@@ -177,151 +264,80 @@ function TimelineView({ memory, search, onSelect }: {
   );
 }
 
-// ─── Conversation View (read-only transcript) ───────────────
+// ─── Conversation Turn Card ──────────────────────────────────
 
-interface ConversationTurn {
-  uri: string;
-  speaker: string;
-  speakerLabel: string;
-  speakerTool: string | null;
-  timestamp: string | null;
-  markdown: string | null;
-  entityMentions: Array<{ uri: string; label: string }>;
-  trustLevel: TrustLevel;
-}
-
-function useConversationTurns(memory: ReturnType<typeof useMemoryEntities>): ConversationTurn[] {
-  return useMemo(() => {
-    const turns: ConversationTurn[] = [];
-    for (const entity of memory.entityList) {
-      const isConvTurn = entity.types.some(t =>
-        t.includes('ConversationTurn') || t.includes('conversationturn')
-      );
-      if (!isConvTurn) continue;
-
-      const speaker = entity.connections.find(c =>
-        c.predicate === 'http://schema.org/agent' || c.predicate === 'http://schema.org/author'
-      );
-      const speakerToolVal = entity.properties.get('http://dkg.io/ontology/speakerTool');
-      const descVal = entity.properties.get('http://schema.org/description')
-        ?? entity.properties.get('http://schema.org/text');
-      const dateVal = getDate(entity);
-
-      const mentions: Array<{ uri: string; label: string }> = [];
-      for (const conn of entity.connections) {
-        if (conn.predicate === 'http://schema.org/mentions') {
-          mentions.push({ uri: conn.targetUri, label: conn.targetLabel });
-        }
-      }
-
-      turns.push({
-        uri: entity.uri,
-        speaker: speaker?.targetUri ?? 'unknown',
-        speakerLabel: speaker?.targetLabel ?? entity.label,
-        speakerTool: speakerToolVal?.[0] ?? null,
-        timestamp: dateVal,
-        markdown: descVal?.[0] ?? null,
-        entityMentions: mentions,
-        trustLevel: entity.trustLevel,
-      });
-    }
-
-    turns.sort((a, b) => {
-      if (a.timestamp && b.timestamp) return a.timestamp.localeCompare(b.timestamp);
-      if (a.timestamp) return -1;
-      if (b.timestamp) return 1;
-      return 0;
-    });
-
-    return turns;
-  }, [memory.entityList]);
-}
-
-function ConversationView({ memory, search, onSelect }: {
-  memory: ReturnType<typeof useMemoryEntities>;
-  search: string;
+function ConversationTurnCard({ entity, allEntities, onSelect, time }: {
+  entity: MemoryEntity;
+  allEntities: Map<string, MemoryEntity>;
   onSelect: (uri: string) => void;
+  time: string | null;
 }) {
-  const turns = useConversationTurns(memory);
+  const speaker = entity.connections.find(c =>
+    c.predicate === 'http://schema.org/agent' || c.predicate === 'http://schema.org/author'
+  );
+  const speakerEntity = speaker ? allEntities.get(speaker.targetUri) : undefined;
+  const speakerName = humanizeLabel(speakerEntity, speaker?.targetUri ?? '');
+  const speakerTool = entity.properties.get('http://dkg.io/ontology/speakerTool')?.[0]
+    ?? (speakerEntity ? getAgentTool(speakerEntity) : null);
 
-  const filtered = useMemo(() => {
-    if (!search) return turns;
-    const lower = search.toLowerCase();
-    return turns.filter(t =>
-      t.speakerLabel.toLowerCase().includes(lower) ||
-      t.markdown?.toLowerCase().includes(lower) ||
-      t.entityMentions.some(m => m.label.toLowerCase().includes(lower))
-    );
-  }, [turns, search]);
+  const desc = getDescription(entity);
 
-  if (filtered.length === 0) {
-    return (
-      <div className="v10-tl-empty">
-        {turns.length === 0
-          ? 'No conversation turns yet. Ingest turns via POST /api/memory/turn.'
-          : 'No matching turns.'}
-      </div>
-    );
-  }
+  const mentions = useMemo(() => {
+    const result: Array<{ uri: string; label: string }> = [];
+    for (const conn of entity.connections) {
+      if (conn.predicate === 'http://schema.org/mentions') {
+        result.push({ uri: conn.targetUri, label: conn.targetLabel });
+      }
+    }
+    return result;
+  }, [entity.connections]);
 
-  let currentDate = '';
+  const trustColor = TRUST_COLORS[entity.trustLevel];
 
   return (
-    <div className="v10-conv-scroll">
-      {filtered.map(turn => {
-        const dateLabel = turn.timestamp?.split('T')[0] ?? '';
-        const showDate = dateLabel !== currentDate;
-        if (showDate) currentDate = dateLabel;
+    <div className="v10-conv-turn" style={{ borderLeftColor: trustColor }} onClick={() => onSelect(entity.uri)} role="button" tabIndex={0}>
+      <div className="v10-conv-turn-main">
+        <div className="v10-conv-turn-header">
+          <span className="v10-conv-speaker">{speakerName}</span>
+          {speakerTool && <span className="v10-conv-tool">{speakerTool}</span>}
+          {time && <span className="v10-conv-time">{time}</span>}
+        </div>
 
-        return (
-          <React.Fragment key={turn.uri}>
-            {showDate && dateLabel && (
-              <div className="v10-conv-date-divider">{dateLabel}</div>
-            )}
-            <button className="v10-conv-turn" onClick={() => onSelect(turn.uri)}>
-              <div className="v10-conv-turn-header">
-                <span className="v10-conv-speaker">{turn.speakerLabel}</span>
-                {turn.speakerTool && (
-                  <span className="v10-conv-tool">{turn.speakerTool}</span>
-                )}
-                <TrustBadge level={turn.trustLevel} />
-                {turn.timestamp && (
-                  <span className="v10-conv-time">
-                    {turn.timestamp.split('T')[1]?.slice(0, 5) ?? turn.timestamp}
-                  </span>
-                )}
-              </div>
-              {turn.markdown && (
-                <div className="v10-conv-body">
-                  {turn.markdown.length > 300
-                    ? turn.markdown.slice(0, 300) + '...'
-                    : turn.markdown}
-                </div>
-              )}
-              {turn.entityMentions.length > 0 && (
-                <div className="v10-conv-mentions">
-                  {turn.entityMentions.map(m => (
-                    <span
-                      key={m.uri}
-                      className="v10-conv-mention"
-                      onClick={(e) => { e.stopPropagation(); onSelect(m.uri); }}
-                      role="link"
-                      tabIndex={0}
-                    >
-                      {m.label}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </button>
-          </React.Fragment>
-        );
-      })}
+        <div className="v10-conv-title">{entity.label}</div>
+
+        {desc && (
+          <div className="v10-conv-body">
+            {desc.length > 400 ? desc.slice(0, 400) + '...' : desc}
+          </div>
+        )}
+
+        {mentions.length > 0 && (
+          <div className="v10-conv-mentions">
+            {mentions.map(m => (
+              <span
+                key={m.uri}
+                className="v10-conv-mention"
+                onClick={(e) => { e.stopPropagation(); onSelect(m.uri); }}
+                role="link"
+                tabIndex={0}
+              >
+                {m.label}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="v10-conv-turn-footer">
+          <span className="v10-conv-turn-uri">{entity.uri.split('/').pop()}</span>
+        </div>
+      </div>
+
+      <TrustStatusBox level={entity.trustLevel} />
     </div>
   );
 }
 
-// ─── Narrative Card (rich entity card) ───────────────────────
+// ─── Narrative Card (non-turn entities) ──────────────────────
 
 function NarrativeCard({ entity, allEntities, onSelect }: {
   entity: MemoryEntity;
@@ -330,7 +346,7 @@ function NarrativeCard({ entity, allEntities, onSelect }: {
 }) {
   const { icon, type } = entityMeta(entity);
   const desc = getDescription(entity);
-  const date = getDate(entity);
+  const trustColor = TRUST_COLORS[entity.trustLevel];
 
   const { contributors, otherOut, incoming } = useMemo(() => {
     const contribs: Array<{ uri: string; label: string; agentTool: string | null }> = [];
@@ -357,11 +373,7 @@ function NarrativeCard({ entity, allEntities, onSelect }: {
       for (const conn of o.connections) {
         if (conn.targetUri === entity.uri) {
           if (CONTRIBUTOR_PREDS.has(conn.predicate)) {
-            contribs.push({
-              uri: o.uri,
-              label: o.label,
-              agentTool: getAgentTool(o),
-            });
+            contribs.push({ uri: o.uri, label: o.label, agentTool: getAgentTool(o) });
           } else {
             inc.push({ pred: shortPred(conn.predicate), uri: o.uri, label: o.label, agentTool: null });
           }
@@ -381,125 +393,107 @@ function NarrativeCard({ entity, allEntities, onSelect }: {
   };
 
   return (
-    <button className="v10-nc" onClick={() => onSelect(entity.uri)}>
-      <div className="v10-nc-header">
-        <span className="v10-nc-icon">{icon}</span>
-        <span className="v10-nc-label">{entity.label}</span>
-        <TrustBadge level={entity.trustLevel} />
-      </div>
-
-      {/* Contributor byline — prominent, clickable */}
-      {contributors.length > 0 && (
-        <div className="v10-nc-contributors">
-          {contributors.map((c, i) => (
-            <span
-              key={c.uri}
-              className="v10-nc-contributor"
-              onClick={(e) => clickEntity(e, c.uri)}
-              role="link"
-              tabIndex={0}
-            >
-              {i > 0 && <span className="v10-nc-contrib-sep">·</span>}
-              <span className="v10-nc-contrib-name">{c.label}</span>
-              {c.agentTool && <span className="v10-nc-contrib-tool">{c.agentTool}</span>}
-            </span>
-          ))}
+    <div className="v10-nc" style={{ borderLeftColor: trustColor }} onClick={() => onSelect(entity.uri)} role="button" tabIndex={0}>
+      <div className="v10-nc-main">
+        <div className="v10-nc-header">
+          <span className="v10-nc-icon">{icon}</span>
+          <span className="v10-nc-label">{entity.label}</span>
         </div>
-      )}
 
-      {desc && <p className="v10-nc-desc">{desc}</p>}
-
-      {/* Other relationships */}
-      {(otherOut.length > 0 || incoming.length > 0) && (
-        <div className="v10-nc-rels">
-          {otherOut.map(([pred, targets]) => (
-            <span key={pred} className="v10-nc-rel">
-              <span className="v10-nc-rel-pred">{pred}</span>
-              {targets.map((t, i) => (
-                <span
-                  key={t.uri}
-                  className="v10-nc-rel-target v10-nc-rel-clickable"
-                  onClick={(e) => clickEntity(e, t.uri)}
-                  role="link"
-                  tabIndex={0}
-                >
-                  {i > 0 && ', '}{t.label}
-                </span>
-              ))}
-            </span>
-          ))}
-          {incoming.map((inc, i) => (
-            <span key={`in-${i}`} className="v10-nc-rel">
-              <span className="v10-nc-rel-pred">← {inc.pred}</span>
-              <span
-                className="v10-nc-rel-target v10-nc-rel-clickable"
-                onClick={(e) => clickEntity(e, inc.uri)}
-                role="link"
-                tabIndex={0}
-              >
-                {inc.label}
+        {contributors.length > 0 && (
+          <div className="v10-nc-contributors">
+            {contributors.map((c, i) => (
+              <span key={c.uri} className="v10-nc-contributor" onClick={(e) => clickEntity(e, c.uri)} role="link" tabIndex={0}>
+                {i > 0 && <span className="v10-nc-contrib-sep">·</span>}
+                <span className="v10-nc-contrib-name">{c.label}</span>
+                {c.agentTool && <span className="v10-nc-contrib-tool">{c.agentTool}</span>}
               </span>
-            </span>
-          ))}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
 
-      <div className="v10-nc-footer">
-        <span className="v10-nc-type">{type}</span>
-        {date && <span className="v10-nc-date">{date}</span>}
-        <span className="v10-nc-stats">
-          {entity.connections.length} links · {entity.properties.size} props
-        </span>
+        {desc && <p className="v10-nc-desc">{desc}</p>}
+
+        {(otherOut.length > 0 || incoming.length > 0) && (
+          <div className="v10-nc-rels">
+            {otherOut.map(([pred, targets]) => (
+              <span key={pred} className="v10-nc-rel">
+                <span className="v10-nc-rel-pred">{pred}</span>
+                {targets.map((t, i) => (
+                  <span key={t.uri} className="v10-nc-rel-target v10-nc-rel-clickable" onClick={(e) => clickEntity(e, t.uri)} role="link" tabIndex={0}>
+                    {i > 0 && ', '}{t.label}
+                  </span>
+                ))}
+              </span>
+            ))}
+            {incoming.map((inc, i) => (
+              <span key={`in-${i}`} className="v10-nc-rel">
+                <span className="v10-nc-rel-pred">← {inc.pred}</span>
+                <span className="v10-nc-rel-target v10-nc-rel-clickable" onClick={(e) => clickEntity(e, inc.uri)} role="link" tabIndex={0}>
+                  {inc.label}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="v10-nc-footer">
+          <span className="v10-nc-type">{type}</span>
+          <span className="v10-nc-stats">
+            {entity.connections.length} links · {entity.properties.size} props
+          </span>
+        </div>
       </div>
-    </button>
+
+      <TrustStatusBox level={entity.trustLevel} />
+    </div>
   );
 }
 
-// ─── Entity List View ────────────────────────────────────────
+// ─── Knowledge Assets View (all non-turn entities, rich cards) ─────
 
-function EntitiesView({ memory, search, onSelect, selectedUri }: {
+function KnowledgeAssetsView({ memory, search, onSelect }: {
   memory: ReturnType<typeof useMemoryEntities>;
   search: string;
   onSelect: (uri: string) => void;
-  selectedUri: string | null;
 }) {
   const typeGroups = useMemo(() => {
     const groups = new Map<string, MemoryEntity[]>();
     for (const e of memory.entityList) {
+      if (isConversationTurn(e)) continue;
       if (search && !matchesSearch(e, search)) continue;
       const { group } = entityMeta(e);
       const list = groups.get(group) ?? [];
       list.push(e);
       groups.set(group, list);
     }
-    return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+    const entries = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+    for (const [, entities] of entries) {
+      entities.sort((a, b) => {
+        const connDiff = b.connections.length - a.connections.length;
+        if (connDiff !== 0) return connDiff;
+        return a.label.localeCompare(b.label);
+      });
+    }
+    return entries;
   }, [memory.entityList, search]);
 
+  if (typeGroups.length === 0) {
+    return <div className="v10-tl-empty">No knowledge assets found.</div>;
+  }
+
   return (
-    <div className="v10-ev-scroll">
+    <div className="v10-tl-scroll">
       {typeGroups.map(([group, entities]) => (
-        <div key={group} className="v10-ev-group">
-          <div className="v10-ev-group-label">{group} ({entities.length})</div>
-          {entities.map(e => {
-            const { icon } = entityMeta(e);
-            return (
-              <button
-                key={e.uri}
-                className={`v10-ev-item ${selectedUri === e.uri ? 'selected' : ''}`}
-                onClick={() => onSelect(e.uri)}
-              >
-                <span className="v10-ev-item-icon">{icon}</span>
-                <span className="v10-ev-item-label">{e.label}</span>
-                <TrustBadge level={e.trustLevel} />
-                <span className="v10-ev-item-links">{e.connections.length}</span>
-              </button>
-            );
-          })}
+        <div key={group} className="v10-tl-type-group">
+          <div className="v10-tl-type-label">{group} ({entities.length})</div>
+          <div className="v10-tl-date-items">
+            {entities.map(e => (
+              <NarrativeCard key={e.uri} entity={e} allEntities={memory.entities} onSelect={onSelect} />
+            ))}
+          </div>
         </div>
       ))}
-      {typeGroups.length === 0 && (
-        <div className="v10-tl-empty">No matching entities.</div>
-      )}
     </div>
   );
 }
@@ -521,14 +515,16 @@ function GraphView({ memory, nodeColors, onNodeClick }: {
         'http://purl.org/dc/terms/title',
         'http://schema.org/text',
       ],
+      minZoomForLabels: 0.3,
     },
     style: {
       nodeColors,
       defaultNodeColor: TRUST_COLORS.working,
       defaultEdgeColor: '#334155',
       edgeWidth: 0.7,
+      fontSize: 16,
     },
-    hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+    hexagon: { baseSize: 7, minSize: 5, maxSize: 10, scaleWithDegree: true },
     focus: { maxNodes: 3000, hops: 999 },
   }), [nodeColors]);
 
@@ -581,14 +577,18 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
   const hoodOptions = useMemo(() => ({
     labelMode: 'humanized' as const,
     renderer: '2d' as const,
-    labels: { predicates: ['http://schema.org/name', 'http://www.w3.org/2000/01/rdf-schema#label'] },
+    labels: {
+      predicates: ['http://schema.org/name', 'http://www.w3.org/2000/01/rdf-schema#label'],
+      minZoomForLabels: 0.2,
+    },
     style: {
       nodeColors,
       defaultNodeColor: TRUST_COLORS.working,
       defaultEdgeColor: '#475569',
       edgeWidth: 1.0,
+      fontSize: 16,
     },
-    hexagon: { baseSize: 5, minSize: 3, maxSize: 8, scaleWithDegree: true },
+    hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
     focus: { maxNodes: 500, hops: 999 },
     autoFitDisabled: true,
   }), [nodeColors]);
@@ -605,12 +605,10 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
     return result;
   }, [entity.uri, allEntities]);
 
-  // 'Mentioned in' — conversation turns that reference this entity
   const mentionedIn = useMemo(() => {
     const turns: Array<{ entity: MemoryEntity; date: string | null }> = [];
     for (const [, other] of allEntities) {
-      const isConvTurn = other.types.some(t => t.includes('ConversationTurn'));
-      if (!isConvTurn) continue;
+      if (!isConversationTurn(other)) continue;
       const mentions = other.connections.some(c =>
         c.targetUri === entity.uri && c.predicate === 'http://schema.org/mentions'
       );
@@ -622,13 +620,11 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
     return turns;
   }, [entity.uri, allEntities]);
 
-  // 'Source' — source file link
   const sourceFile = useMemo(() => {
     const sf = entity.properties.get('http://dkg.io/ontology/sourceFile');
     return sf?.[0] ?? null;
   }, [entity]);
 
-  // 'Similar' — vector-similar entities (fetched from API)
   const [similar, setSimilar] = useState<Array<{ entityUri: string; label: string | null; similarity: number }>>([]);
   useEffect(() => {
     const label = entity.label;
@@ -685,7 +681,7 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
             <h2 className="v10-dd-title">{entity.label}</h2>
             <div className="v10-dd-type-row">
               <span className="v10-dd-type">{type}</span>
-              <TrustBadge level={entity.trustLevel} showLabel />
+              <TrustStatusBox level={entity.trustLevel} />
             </div>
           </div>
         </div>
@@ -694,7 +690,6 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
 
         <div className="v10-dd-uri mono">{entity.uri}</div>
 
-        {/* Source file link */}
         {sourceFile && (
           <div className="v10-dd-section">
             <h4 className="v10-dd-section-title">Source</h4>
@@ -742,7 +737,6 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
           </div>
         )}
 
-        {/* Mentioned in — conversation turns */}
         {mentionedIn.length > 0 && (
           <div className="v10-dd-section">
             <h4 className="v10-dd-section-title">Mentioned in ({mentionedIn.length} turns)</h4>
@@ -755,7 +749,6 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
           </div>
         )}
 
-        {/* Similar — vector proximity */}
         {similar.length > 0 && (
           <div className="v10-dd-section">
             <h4 className="v10-dd-section-title">Similar</h4>
@@ -796,7 +789,7 @@ function matchesSearch(e: MemoryEntity, q: string): boolean {
 export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const { data: cgData } = useFetch(api.fetchContextGraphs, [], 30_000);
   const [showImport, setShowImport] = useState(false);
-  const [activeTab, setActiveTab] = useState<ViewTab>('conversation');
+  const [activeTab, setActiveTab] = useState<ViewTab>('timeline');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [search, setSearch] = useState('');
 
@@ -850,11 +843,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           <div className="v10-me-project-dot" />
           <div>
             <h1 className="v10-me-title">{cg.name || cg.id}</h1>
-            <div className="v10-me-meta">
-              <span>{memory.counts.total} entities</span>
-              <span className="v10-me-meta-sep">·</span>
-              <span>{memory.graphTriples.length} facts</span>
-            </div>
           </div>
         </div>
         <div className="v10-me-header-actions">
@@ -863,19 +851,21 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </div>
       </div>
 
+      {hasData && <ProjectHome cg={cg} memory={memory} />}
+
       <TrustSummaryBar counts={memory.counts} />
 
       {/* ── Search + Tab bar ── */}
       {hasData && (
         <div className="v10-me-toolbar">
           <div className="v10-me-tabs">
-            {(['conversation', 'timeline', 'graph', 'entities'] as ViewTab[]).map(tab => (
+            {(['timeline', 'graph', 'knowledge'] as ViewTab[]).map(tab => (
               <button
                 key={tab}
                 className={`v10-me-tab ${activeTab === tab ? 'active' : ''}`}
                 onClick={() => { setActiveTab(tab); setSelectedUri(null); }}
               >
-                {tab === 'conversation' ? '💬 Conversation' : tab === 'timeline' ? '◷ Timeline' : tab === 'graph' ? '⬡ Graph' : '☰ Entities'}
+                {tab === 'timeline' ? '◷ Timeline' : tab === 'graph' ? '⬡ Graph' : '◈ Knowledge Assets'}
               </button>
             ))}
           </div>
@@ -912,17 +902,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {/* ── Tab content ── */}
       {!memory.loading && hasData && !selectedEntity && (
         <>
-          {activeTab === 'conversation' && (
-            <ConversationView memory={memory} search={search} onSelect={handleSelect} />
-          )}
           {activeTab === 'timeline' && (
             <TimelineView memory={memory} search={search} onSelect={handleSelect} />
           )}
           {activeTab === 'graph' && (
             <GraphView memory={memory} nodeColors={nodeColors} onNodeClick={handleNodeClick} />
           )}
-          {activeTab === 'entities' && (
-            <EntitiesView memory={memory} search={search} onSelect={handleSelect} selectedUri={selectedUri} />
+          {activeTab === 'knowledge' && (
+            <KnowledgeAssetsView memory={memory} search={search} onSelect={handleSelect} />
           )}
         </>
       )}

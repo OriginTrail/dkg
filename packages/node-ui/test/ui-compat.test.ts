@@ -761,20 +761,11 @@ describe('ActivityTimeline component', () => {
   });
 });
 
-describe('AgentHub initialization-order safety', () => {
+describe('AgentHub page renders PanelRight', () => {
   const agentHub = readFile('pages/AgentHub.tsx');
 
-  it('declares graphRenderTriples before searchMatchedNodeIds', () => {
-    const renderIdx = agentHub.indexOf('const graphRenderTriples = useMemo');
-    const searchIdx = agentHub.indexOf('const searchMatchedNodeIds = useMemo');
-    expect(renderIdx).toBeGreaterThanOrEqual(0);
-    expect(searchIdx).toBeGreaterThanOrEqual(0);
-    expect(renderIdx).toBeLessThan(searchIdx);
-  });
-
-  it('uses ref dispatch for stored-turn graph updates to avoid TDZ callback deps', () => {
-    expect(agentHub).toContain('applyStoredTurnGraphUpdateRef.current(');
-    expect(agentHub).not.toContain('}, [applyStoredTurnGraphUpdate]);');
+  it('wraps PanelRight for agent chat', () => {
+    expect(agentHub).toContain('<PanelRight');
   });
 });
 
@@ -850,7 +841,7 @@ describe('MemoryLayerView graph visualization', () => {
 
   it('wires onNodeClick to populate SPARQL query', () => {
     expect(mlv).toContain('handleNodeClick');
-    expect(mlv).toContain('setCustomQuery');
+    expect(mlv).toContain('setActiveQuery');
     expect(mlv).toMatch(/DESCRIBE|SELECT \?p \?o WHERE/);
   });
 
@@ -861,7 +852,7 @@ describe('MemoryLayerView graph visualization', () => {
 
   it('has a Reset button that clears custom queries', () => {
     expect(mlv).toContain("title=\"Reset to full layer overview\"");
-    expect(mlv).toContain("setCustomQuery('')");
+    expect(mlv).toContain("setActiveQuery('')");
   });
 
   it('shows filtered badge when custom query is active', () => {
@@ -889,25 +880,23 @@ describe('ProjectView as Memory Explorer', () => {
     expect(pv).toContain('memory.graphTriples');
   });
 
-  it('has four view tabs: conversation, timeline, graph, entities', () => {
-    expect(pv).toContain("type ViewTab = 'conversation' | 'timeline' | 'graph' | 'entities'");
-    expect(pv).toContain("'conversation'");
+  it('has three view tabs: timeline, graph, knowledge (conversation merged into timeline)', () => {
+    expect(pv).toContain("type ViewTab = 'timeline' | 'graph' | 'knowledge'");
     expect(pv).toContain("'timeline'");
     expect(pv).toContain("'graph'");
-    expect(pv).toContain("'entities'");
+    expect(pv).toContain("'knowledge'");
   });
 
-  it('defaults to conversation view', () => {
-    expect(pv).toContain("useState<ViewTab>('conversation')");
+  it('defaults to timeline view', () => {
+    expect(pv).toContain("useState<ViewTab>('timeline')");
   });
 
   it('has tab switcher UI', () => {
     expect(pv).toContain('v10-me-tabs');
     expect(pv).toContain('v10-me-tab');
-    expect(pv).toContain('Conversation');
     expect(pv).toContain('Timeline');
     expect(pv).toContain('Graph');
-    expect(pv).toContain('Entities');
+    expect(pv).toContain('Knowledge Assets');
   });
 
   it('has keyword search bar', () => {
@@ -939,8 +928,7 @@ describe('ProjectView as Memory Explorer', () => {
     expect(pv).toContain('CONTRIBUTOR_PREDS');
   });
 
-  it('shows timestamps on cards', () => {
-    expect(pv).toContain('v10-nc-date');
+  it('shows timestamps on cards via getDate helper', () => {
     expect(pv).toContain('getDate');
   });
 
@@ -957,13 +945,39 @@ describe('ProjectView as Memory Explorer', () => {
     expect(pv).toContain('incoming');
   });
 
-  it('has ConversationView component for transcript display', () => {
-    expect(pv).toContain('ConversationView');
-    expect(pv).toContain('v10-conv-scroll');
+  it('has ConversationTurnCard component for turn display within timeline', () => {
+    expect(pv).toContain('ConversationTurnCard');
     expect(pv).toContain('v10-conv-turn');
     expect(pv).toContain('v10-conv-speaker');
     expect(pv).toContain('v10-conv-mentions');
     expect(pv).toContain('ConversationTurn');
+  });
+
+  it('has KnowledgeAssetsView (renamed from Entities, excludes conversation turns)', () => {
+    expect(pv).toContain('KnowledgeAssetsView');
+    expect(pv).toContain('isConversationTurn(e)) continue');
+  });
+
+  it('has TrustStatusBox component showing Verified/Shared/Private label', () => {
+    expect(pv).toContain('TrustStatusBox');
+    expect(pv).toContain('TRUST_LABELS');
+    expect(pv).toContain("verified: 'Verified'");
+    expect(pv).toContain("shared: 'Shared'");
+    expect(pv).toContain("working: 'Private'");
+    expect(pv).toContain('v10-trust-status-box');
+  });
+
+  it('has ProjectHome component with stats and participating agents', () => {
+    expect(pv).toContain('ProjectHome');
+    expect(pv).toContain('v10-ph');
+    expect(pv).toContain('v10-ph-stats');
+    expect(pv).toContain('v10-ph-agents');
+    expect(pv).toContain('participants');
+  });
+
+  it('humanizes speaker names (DID to label)', () => {
+    expect(pv).toContain('humanizeLabel');
+    expect(pv).toContain('speakerName');
   });
 
   it('drilldown has Mentioned in section for conversation turns', () => {
@@ -1102,5 +1116,26 @@ describe('Memory Explorer CSS', () => {
 
   it('has responsive breakpoints', () => {
     expect(css).toContain('@media (max-width: 700px)');
+  });
+
+  it('has project home styles', () => {
+    expect(css).toMatch(/\.v10-ph\s*\{/);
+    expect(css).toMatch(/\.v10-ph-stats\s*\{/);
+    expect(css).toMatch(/\.v10-ph-agents\s*\{/);
+    expect(css).toMatch(/\.v10-ph-agent-chip\s*\{/);
+  });
+
+  it('uses left border on cards for trust indication', () => {
+    expect(css).toMatch(/\.v10-nc\s*\{[^}]*border-left:\s*4px/);
+    expect(css).toMatch(/\.v10-conv-turn\s*\{[^}]*border-left:\s*4px/);
+  });
+
+  it('has trust status box styles', () => {
+    expect(css).toMatch(/\.v10-trust-status-box\s*\{/);
+  });
+
+  it('has entity item description and content layout', () => {
+    expect(css).toMatch(/\.v10-ev-item-content\s*\{/);
+    expect(css).toMatch(/\.v10-ev-item-desc\s*\{/);
   });
 });

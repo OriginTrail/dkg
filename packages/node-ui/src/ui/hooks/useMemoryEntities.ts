@@ -63,7 +63,10 @@ function shortPredicate(uri: string): string {
   return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 }
 
-const SPARQL_SPO = `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT 1500`;
+function wmSparql(cgId: string) {
+  const cgUri = `did:dkg:context-graph:${cgId}`;
+  return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1500`;
+}
 const SPARQL_SWM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
 const SPARQL_VM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
 
@@ -178,7 +181,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
 
     try {
       const [wmTriples, swmTriples, vmTriples] = await Promise.all([
-        queryLayer(SPARQL_SPO, contextGraphId),
+        queryLayer(wmSparql(contextGraphId), contextGraphId),
         queryLayer(SPARQL_SWM, contextGraphId, { view: 'shared-working-memory' }),
         queryLayer(SPARQL_VM, contextGraphId, { view: 'verified-memory' }),
       ]);
