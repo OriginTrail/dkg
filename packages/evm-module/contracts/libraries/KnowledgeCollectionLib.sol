@@ -18,10 +18,6 @@ library KnowledgeCollectionLib {
         uint40 endEpoch;
         uint96 tokenAmount;
         bool isImmutable;
-        // Optional triple-level merkle root for selective disclosure proofs.
-        // bytes32(0) means not set. When populated, allows proving individual
-        // triples belong to this KC without revealing the full dataset.
-        bytes32 selectiveDisclosureMerkleRoot;
     }
 
     error ExceededKnowledgeCollectionMaxSize(uint256 id, uint256 minted, uint256 requested, uint256 maxSize);
