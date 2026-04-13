@@ -195,65 +195,6 @@ describe('V10 E2E Conviction System', function () {
       expect(multiplier).to.equal(SCALE18);
     });
 
-    it('upgrades to 6-epoch conviction lock (3.5x multiplier)', async () => {
-      await Staking.connect(staker).stake(identityId, STAKE_AMOUNT);
-
-      const multiplierBefore = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
-      expect(multiplierBefore).to.equal(SCALE18);
-
-      // stakeWithLock requires addedStake > 0, so add 1 wei to upgrade the lock tier
-      await Staking.connect(staker).stakeWithLock(identityId, 1, 6);
-
-      const multiplierAfter = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
-      expect(multiplierAfter).to.equal(35n * SCALE18 / 10n);
-    });
-
-    it('reverts withdrawal while lock is active', async () => {
-      await Staking.connect(staker).stakeWithLock(identityId, STAKE_AMOUNT, 6);
-
-      await expect(
-        Staking.connect(staker).requestWithdrawal(identityId, STAKE_AMOUNT),
-      ).to.be.revertedWithCustomError(Staking, 'ConvictionLockActive');
-    });
-
-    it('full lifecycle: stake → lock → wait → withdraw', async () => {
-      await Staking.connect(staker).stakeWithLock(identityId, STAKE_AMOUNT, 6);
-
-      const [lockEpochs, lockStartEpoch] = await DelegatorsInfo.getDelegatorLock(identityId, staker.address);
-      expect(lockEpochs).to.equal(6);
-
-      // Advance time past lock expiry (6 epochs), claiming rewards each epoch
-      const epochLength = await Chronos.epochLength();
-      for (let i = 0; i < 7; i++) {
-        await time.increase(epochLength);
-        const epoch = await Chronos.getCurrentEpoch();
-        try {
-          await Staking.connect(staker).claimDelegatorRewards(identityId, epoch - 1n, staker.address);
-        } catch (err: any) {
-          expect(err.message).to.include('No rewards');
-        }
-      }
-
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      expect(currentEpoch).to.be.greaterThanOrEqual(lockStartEpoch + lockEpochs);
-
-      await Staking.connect(staker).requestWithdrawal(identityId, STAKE_AMOUNT);
-
-      const delegatorKey = ethers.keccak256(ethers.solidityPacked(['address'], [staker.address]));
-      const [withdrawalAmount, , releaseTimestamp] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        delegatorKey,
-      );
-      expect(withdrawalAmount).to.equal(STAKE_AMOUNT);
-
-      await time.increaseTo(releaseTimestamp);
-      const balanceBefore = await Token.balanceOf(staker.address);
-      await Staking.connect(staker).finalizeWithdrawal(identityId);
-      const balanceAfter = await Token.balanceOf(staker.address);
-
-      expect(balanceAfter - balanceBefore).to.equal(STAKE_AMOUNT);
-    });
-
     it('verifies all conviction multiplier tiers', async () => {
       expect(await Staking.convictionMultiplier(1)).to.equal(SCALE18);
       expect(await Staking.convictionMultiplier(2)).to.equal(15n * SCALE18 / 10n);
@@ -503,7 +444,7 @@ describe('V10 E2E Conviction System', function () {
       const [lockBefore] = await newDelegatorsInfo.getDelegatorLock(identityId, delegator);
       expect(lockBefore).to.equal(0);
 
-      // Simulate a stakeWithLock by directly setting lock on new DelegatorsInfo
+      // Simulate a locked stake by directly setting lock on new DelegatorsInfo
       // (In production, the Staking contract would call setDelegatorLock)
       const migratorAddress = await Migrator.getAddress();
       const migratorSigner = await hre.ethers.getImpersonatedSigner(migratorAddress);

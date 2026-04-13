@@ -85,8 +85,8 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
      *
      * TRAC is held in this contract until staking protocol integration is
      * complete (requires stakeOnBehalf in Staking.sol). Once integrated,
-     * stake() will delegate to Staking.stakeWithLock() so positions are
-     * tracked for rewards, slashing, and voting power.
+     * stake() will delegate to the internal Staking locked-stake path so
+     * positions are tracked for rewards, slashing, and voting power.
      */
     function stake(
         uint72 identityId,
