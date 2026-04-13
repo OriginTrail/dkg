@@ -323,31 +323,6 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "addedAmount",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "newTotal",
-        "type": "uint96"
-      }
-    ],
-    "name": "PositionIncreased",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "positionId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
         "name": "amount",
         "type": "uint96"
       }
@@ -560,24 +535,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "positionId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "addedAmount",
-        "type": "uint96"
-      }
-    ],
-    "name": "increaseStake",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

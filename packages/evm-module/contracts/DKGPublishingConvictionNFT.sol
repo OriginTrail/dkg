@@ -20,7 +20,6 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *   - Discount is based on discrete commitment tiers (6 tiers, 0%-50%).
  *   - On publish, discounted cost is deducted from the current epoch's allowance.
  *   - topUp() sends TRAC directly to StakingStorage and distributes across next 12 epochs.
- *   - releaseUnspentTRAC() distributes unspent epoch allowance across the next 12 epochs.
  *   - Agents are tracked per account with a governance-configurable cap.
  */
 contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
@@ -40,7 +39,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
 
     IERC20 public tokenContract;
     address public stakingStorageAddress;
-    address public epochStorageAddress;
     address public chronosAddress;
 
     uint256 private _nextAccountId;
@@ -62,7 +60,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
     event AgentRegistered(uint256 indexed accountId, address indexed agent);
     event AgentDeregistered(uint256 indexed accountId, address indexed agent);
     event AllowanceThresholdReached(uint256 indexed accountId, uint40 epoch, uint8 thresholdPercent);
-    event UnspentTRACReleased(uint256 indexed accountId, uint40 epoch, uint96 amount);
 
     // --- Errors ---
 
@@ -75,7 +72,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
     error AgentAlreadyRegistered(address agent, uint256 existingAccountId);
     error AgentNotRegistered(uint256 accountId, address agent);
     error AgentCapReached(uint256 accountId, uint256 cap);
-    error EpochAlreadyReleased(uint256 accountId, uint40 epoch);
 
     constructor(address hubAddress) ContractStatus(hubAddress) ERC721("DKG Publishing Conviction", "DKGPC") {}
 
@@ -83,9 +79,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         tokenContract = IERC20(hub.getContractAddress("Token"));
         try hub.getContractAddress("StakingStorage") returns (address addr) {
             stakingStorageAddress = addr;
-        } catch {}
-        try hub.getContractAddress("EpochStorageV8") returns (address addr) {
-            epochStorageAddress = addr;
         } catch {}
         try hub.getContractAddress("Chronos") returns (address addr) {
             chronosAddress = addr;
@@ -155,7 +148,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         // Top-ups do NOT increase committedTRAC (discount tier) — they only add
         // spending capacity. The top-up amount is distributed over the remaining
         // epochs, not the global epochAllowance, to avoid over-allocating
-        // on old epochs (which releaseUnspentTRAC reads).
+        // on old epochs.
         //
         // Extend expiry by 12 epochs from now so top-up funds have a full window.
         uint40 newExpiry = currentEpoch + uint40(LOCK_DURATION_EPOCHS);
@@ -275,41 +268,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
     }
 
     // ========================================================================
-    // Unspent TRAC Release
-    // ========================================================================
-
-    /**
-     * @notice Release unspent allowance from a past epoch. The unspent amount is
-     *         distributed equally across the next 12 epochs via EpochStorage.
-     */
-    function releaseUnspentTRAC(uint256 accountId, uint40 epoch) external {
-        _requireOwner(accountId);
-        Account storage acct = accounts[accountId];
-        uint40 currentEpoch = _getCurrentEpoch();
-
-        require(epoch < currentEpoch, "Epoch not yet complete");
-        require(epoch >= acct.createdAtEpoch && epoch < acct.expiresAtEpoch, "Epoch out of account range");
-
-        uint96 spent = epochSpent[accountId][epoch];
-        // Base allowance only applies within the original commitment window
-        uint96 baseForEpoch = epoch < acct.originalExpiresAtEpoch ? acct.epochAllowance : 0;
-        uint96 epochCap = baseForEpoch + topUpCredits[accountId][epoch];
-        uint96 unspent = epochCap > spent ? epochCap - spent : 0;
-
-        if (unspent == 0) revert EpochAlreadyReleased(accountId, epoch);
-
-        epochSpent[accountId][epoch] = epochCap;
-
-        if (!tokenContract.transfer(stakingStorageAddress, unspent)) {
-            revert InvalidAmount();
-        }
-
-        _distributeToEpochs(unspent);
-
-        emit UnspentTRACReleased(accountId, epoch, unspent);
-    }
-
-    // ========================================================================
     // Governance
     // ========================================================================
 
@@ -406,24 +364,6 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, ContractStatus, IInit
         );
         if (!ok || ret.length < 32) return 1;
         return uint40(abi.decode(ret, (uint256)));
-    }
-
-    function _distributeToEpochs(uint96 amount) internal {
-        if (epochStorageAddress == address(0)) return;
-        uint40 currentEpoch = _getCurrentEpoch();
-        uint40 startEpoch = currentEpoch + 1;
-        uint40 endEpoch = currentEpoch + uint40(LOCK_DURATION_EPOCHS);
-
-        (bool ok,) = epochStorageAddress.call(
-            abi.encodeWithSignature(
-                "addTokensToEpochRange(uint256,uint256,uint256,uint96)",
-                uint256(1),
-                uint256(startEpoch),
-                uint256(endEpoch),
-                amount
-            )
-        );
-        require(ok, "EpochStorage distribution failed");
     }
 
     function _checkThresholds(

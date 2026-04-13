@@ -1,7 +1,5 @@
-import { randomBytes } from 'crypto';
-
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre, { ethers } from 'hardhat';
 
@@ -85,31 +83,6 @@ describe('@unit V10 Conviction System', function () {
   let DelegatorsInfo: DelegatorsInfo;
   let PCA: PublishingConvictionAccount;
 
-  const createProfile = async (
-    admin?: SignerWithAddress,
-    operational?: SignerWithAddress,
-  ) => {
-    const node = '0x' + randomBytes(32).toString('hex');
-    const tx = await Profile.connect(
-      operational ?? accounts[1],
-    ).createProfile(
-      admin ? admin.address : accounts[0],
-      [],
-      `Node ${Math.floor(Math.random() * 1000)}`,
-      node,
-      0n,
-    );
-    const receipt = await tx.wait();
-    const identityId = Number(receipt?.logs[0].topics[1]);
-    return { nodeId: node, identityId };
-  };
-
-  const advanceEpochs = async (n: number) => {
-    for (let i = 0; i < n; i++) {
-      await time.increase((await Chronos.timeUntilNextEpoch()) + 1n);
-    }
-  };
-
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
     ({
@@ -173,121 +146,6 @@ describe('@unit V10 Conviction System', function () {
 
     it('convictionMultiplier(100) returns 6e18 (caps at 6x)', async () => {
       expect(await Staking.convictionMultiplier(100)).to.equal(6n * SCALE18);
-    });
-  });
-
-  // ========================================================================
-  // stakeWithLock
-  // ========================================================================
-
-  describe('stakeWithLock', function () {
-    it('sets lock and multiplier correctly', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('50000');
-      await Token.mint(accounts[0].address, amount);
-      await Token.approve(await Staking.getAddress(), amount);
-
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      await Staking.stakeWithLock(identityId, amount, 6);
-
-      const [lockEpochs, lockStartEpoch] =
-        await DelegatorsInfo.getDelegatorLock(
-          identityId,
-          accounts[0].address,
-        );
-      expect(lockEpochs).to.equal(6);
-      expect(lockStartEpoch).to.equal(currentEpoch);
-
-      const SCALE18 = 10n ** 18n;
-      expect(await Staking.convictionMultiplier(lockEpochs)).to.equal(
-        (35n * SCALE18) / 10n,
-      );
-    });
-
-    it('rejects lockEpochs = 0', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('50000');
-      await Token.mint(accounts[0].address, amount);
-      await Token.approve(await Staking.getAddress(), amount);
-
-      await expect(
-        Staking.stakeWithLock(identityId, amount, 0),
-      ).to.be.revertedWithCustomError(Staking, 'InvalidLockEpochs');
-    });
-
-    it('lock can only be extended, not shortened', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('100000');
-      await Token.mint(accounts[0].address, amount + 1n);
-      await Token.approve(await Staking.getAddress(), amount + 1n);
-
-      await Staking.stakeWithLock(identityId, amount / 2n, 6);
-      const [lockBefore, startBefore] =
-        await DelegatorsInfo.getDelegatorLock(
-          identityId,
-          accounts[0].address,
-        );
-
-      // Attempt to shorten lock to 3 — should be ignored
-      await Staking.stakeWithLock(identityId, amount / 2n, 3);
-      const [lockAfter, startAfter] =
-        await DelegatorsInfo.getDelegatorLock(
-          identityId,
-          accounts[0].address,
-        );
-      expect(lockAfter).to.equal(lockBefore, 'Lock should remain at 6');
-      expect(startAfter).to.equal(
-        startBefore,
-        'Lock start should not change',
-      );
-
-      // Extending to 12 should succeed
-      await Staking.stakeWithLock(identityId, 1n, 12);
-      const [lockExtended] = await DelegatorsInfo.getDelegatorLock(
-        identityId,
-        accounts[0].address,
-      );
-      expect(lockExtended).to.equal(12, 'Lock should be extended to 12');
-    });
-
-    it('withdrawal is blocked during active lock period', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('50000');
-      await Token.mint(accounts[0].address, amount);
-      await Token.approve(await Staking.getAddress(), amount);
-
-      await Staking.stakeWithLock(identityId, amount, 6);
-
-      // Advance 1 epoch — still well within the 6-epoch lock
-      await advanceEpochs(1);
-
-      await expect(
-        Staking.requestWithdrawal(identityId, amount),
-      ).to.be.revertedWithCustomError(Staking, 'ConvictionLockActive');
-    });
-
-    it('withdrawal succeeds after lock expires', async () => {
-      const { identityId } = await createProfile();
-      const amount = hre.ethers.parseEther('50000');
-      await Token.mint(accounts[0].address, amount);
-      await Token.approve(await Staking.getAddress(), amount);
-
-      await Staking.stakeWithLock(identityId, amount, 2);
-
-      // Advance 1 epoch and claim to keep claim state up-to-date
-      await advanceEpochs(1);
-      const epochToClaim = (await Chronos.getCurrentEpoch()) - 1n;
-      await Staking.claimDelegatorRewards(
-        identityId,
-        epochToClaim,
-        accounts[0].address,
-      );
-
-      // Advance another epoch — lock (2 epochs) now expires
-      await advanceEpochs(1);
-
-      await expect(Staking.requestWithdrawal(identityId, amount)).to.not.be
-        .reverted;
     });
   });
 

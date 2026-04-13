@@ -243,18 +243,6 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
   });
 
-  describe('regression: releaseUnspentTRAC requires owner', () => {
-    it('reverts when called by non-owner', async () => {
-      const amount = hre.ethers.parseEther('60000');
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.createAccount(amount);
-
-      await expect(
-        NFT.connect(accounts[5]).releaseUnspentTRAC(1, 0),
-      ).to.be.revertedWithCustomError(NFT, 'NotAccountOwner');
-    });
-  });
-
   describe('regression: agent registrations cleared on NFT transfer', () => {
     it('clears agents when NFT is transferred', async () => {
       const amount = hre.ethers.parseEther('60000');
