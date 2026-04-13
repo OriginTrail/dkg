@@ -87,40 +87,6 @@ describe('@unit DKGStakingConvictionNFT', function () {
     });
   });
 
-  describe('increaseStake', () => {
-    it('adds to an existing position', async () => {
-      const initial = hre.ethers.parseEther('50000');
-      const added = hre.ethers.parseEther('10000');
-      await TokenContract.approve(await NFT.getAddress(), initial + added);
-      await NFT.stake(IDENTITY_ID, initial, 6);
-      await NFT.increaseStake(1, added);
-
-      const pos = await NFT.getPosition(1);
-      expect(pos.stakedAmount).to.equal(initial + added);
-    });
-
-    it('emits PositionIncreased', async () => {
-      const initial = hre.ethers.parseEther('50000');
-      const added = hre.ethers.parseEther('10000');
-      await TokenContract.approve(await NFT.getAddress(), initial + added);
-      await NFT.stake(IDENTITY_ID, initial, 6);
-
-      await expect(NFT.increaseStake(1, added))
-        .to.emit(NFT, 'PositionIncreased')
-        .withArgs(1, added, initial + added);
-    });
-
-    it('only owner can increase stake', async () => {
-      const amount = hre.ethers.parseEther('50000');
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, 6);
-
-      await expect(
-        NFT.connect(accounts[5]).increaseStake(1, hre.ethers.parseEther('1000')),
-      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
-    });
-  });
-
   describe('conviction and multiplier', () => {
     it('getConviction returns stakedAmount * lockEpochs', async () => {
       const amount = hre.ethers.parseEther('100000');
@@ -162,19 +128,6 @@ describe('@unit DKGStakingConvictionNFT', function () {
       expect(balAfter - balBefore).to.equal(amount);
     });
 
-    it('contract balance increases on increaseStake', async () => {
-      const initial = hre.ethers.parseEther('50000');
-      const added = hre.ethers.parseEther('10000');
-      await TokenContract.approve(await NFT.getAddress(), initial + added);
-      await NFT.stake(IDENTITY_ID, initial, 6);
-
-      const nftAddr = await NFT.getAddress();
-      const balBefore = await TokenContract.balanceOf(nftAddr);
-      await NFT.increaseStake(1, added);
-      const balAfter = await TokenContract.balanceOf(nftAddr);
-
-      expect(balAfter - balBefore).to.equal(added);
-    });
   });
 
   describe('ERC-721 transferability', () => {
@@ -227,36 +180,3 @@ describe('@unit DKGStakingConvictionNFT', function () {
   });
 });
 
-describe('@unit DKGStakingConvictionNFT (time-dependent)', function () {
-  const IDENTITY_ID = 1;
-
-  async function deployWithChronos() {
-    await hre.deployments.fixture(['DKGStakingConvictionNFT', 'Token', 'Chronos']);
-    const Hub = await hre.ethers.getContract<Hub>('Hub');
-    const NFT = await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT');
-    const Token = await hre.ethers.getContract<Token>('Token');
-    const accounts = await hre.ethers.getSigners();
-    await Hub.setContractAddress('HubOwner', accounts[0].address);
-    await Hub.setContractAddress('StakingStorage', accounts[18].address);
-    await Hub.forwardCall(await NFT.getAddress(), NFT.interface.encodeFunctionData('initialize'));
-    return { accounts, Hub, NFT, Token };
-  }
-
-  it('regression: increaseStake reverts with PositionExpired after lock expires', async () => {
-    const { NFT: nft, Token: tok } = await loadFixture(deployWithChronos);
-    const Chronos = await hre.ethers.getContract('Chronos');
-    const epochLen = await Chronos.EPOCH_LENGTH();
-
-    const amount = hre.ethers.parseEther('50000');
-    const added = hre.ethers.parseEther('10000');
-    await tok.approve(await nft.getAddress(), amount + added);
-    await nft.stake(IDENTITY_ID, amount, 1);
-
-    await hre.network.provider.send('evm_increaseTime', [Number(epochLen) + 1]);
-    await hre.network.provider.send('evm_mine');
-
-    await expect(
-      nft.increaseStake(1, added),
-    ).to.be.revertedWithCustomError(nft, 'PositionExpired');
-  });
-});

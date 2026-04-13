@@ -105,18 +105,6 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         _stakeWithLock(identityId, addedStake, 1);
     }
 
-    /**
-     * @notice Stake TRAC with a conviction lock for higher reward multipliers.
-     * V8-compatible: stake() defaults to 1-epoch lock (1x multiplier).
-     * @param identityId Node to stake to
-     * @param addedStake Amount of TRAC to stake
-     * @param lockEpochs Lock duration in epochs (min 1). Tiers: 1=1x, 2=1.5x, 3=2x, 6=3.5x, 12=6x.
-     */
-    function stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) external profileExists(identityId) {
-        if (lockEpochs == 0) revert StakingLib.InvalidLockEpochs();
-        _stakeWithLock(identityId, addedStake, lockEpochs);
-    }
-
     function _stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) internal {
         IERC20 token = tokenContract;
         StakingStorage ss = stakingStorage;
