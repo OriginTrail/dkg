@@ -12,7 +12,23 @@
   },
   {
     "inputs": [],
+    "name": "BackfillForbidden",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NegativeCumulative",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintToInt",
     "type": "error"
   },
   {
@@ -54,6 +70,12 @@
         "indexed": false,
         "internalType": "uint256",
         "name": "startEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "endEpoch",
         "type": "uint256"
       },
       {

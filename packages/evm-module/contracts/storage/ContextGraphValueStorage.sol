@@ -2,6 +2,8 @@
 
 pragma solidity ^0.8.20;
 
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+
 import {Chronos} from "./Chronos.sol";
 import {HubDependent} from "../abstract/HubDependent.sol";
 import {INamed} from "../interfaces/INamed.sol";
@@ -34,6 +36,7 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     event CGValueAddedForEpochRange(
         uint256 indexed cgId,
         uint256 startEpoch,
+        uint256 endEpoch,
         uint256 lifetime,
         uint256 value,
         uint256 perEpoch
@@ -44,6 +47,7 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     error ZeroLifetime();
     error ZeroValue();
     error NegativeCumulative();
+    error BackfillForbidden();
 
     Chronos public chronos;
 
@@ -87,6 +91,12 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
      *      global ledgers up to `currentEpoch - 1` after the diff writes so
      *      stale epochs are crystallized before the next read. Rounding dust is
      *      discarded per the spec (challenge weighting, not reward payout).
+     *
+     *      Invariant: `startEpoch >= currentEpoch`. Backfilling into an
+     *      already-finalized epoch would corrupt `cgValueCumulative` silently
+     *      because the cumulative at that epoch has already been crystallized
+     *      and subsequent reads hit the fast path. Reverts `BackfillForbidden`
+     *      if the caller tries.
      */
     function addCGValueForEpochRange(
         uint256 cgId,
@@ -101,8 +111,13 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
             revert ZeroValue();
         }
 
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (startEpoch < currentEpoch) {
+            revert BackfillForbidden();
+        }
+
         uint256 perEpoch = value / lifetime;
-        int256 perEpochSigned = int256(perEpoch);
+        int256 perEpochSigned = SafeCast.toInt256(perEpoch);
 
         cgValueDiff[cgId][startEpoch] += perEpochSigned;
         cgValueDiff[cgId][startEpoch + lifetime] -= perEpochSigned;
@@ -110,13 +125,19 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
         totalValueDiff[startEpoch] += perEpochSigned;
         totalValueDiff[startEpoch + lifetime] -= perEpochSigned;
 
-        uint256 currentEpoch = chronos.getCurrentEpoch();
         if (currentEpoch > 1) {
             _finalizeCGValueUpTo(cgId, currentEpoch - 1);
             _finalizeGlobalValueUpTo(currentEpoch - 1);
         }
 
-        emit CGValueAddedForEpochRange(cgId, startEpoch, lifetime, value, perEpoch);
+        emit CGValueAddedForEpochRange(
+            cgId,
+            startEpoch,
+            startEpoch + lifetime - 1,
+            lifetime,
+            value,
+            perEpoch
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -219,11 +240,16 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
 
         for (uint256 e = lastFinalized + 1; e <= epoch; e++) {
             running += cgValueDiff[cgId][e];
+            // Unify policy with the mutate path (`_finalizeCGValueUpTo`): a
+            // negative running total would signal ledger corruption and is an
+            // unrecoverable invariant break. Reverting here — even from a view
+            // function — gives RPC clients immediate visibility instead of
+            // silently clamping to zero.
+            if (running < 0) {
+                revert NegativeCumulative();
+            }
         }
 
-        if (running < 0) {
-            return 0;
-        }
         return uint256(running);
     }
 
@@ -240,11 +266,11 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
 
         for (uint256 e = lastFinalized + 1; e <= epoch; e++) {
             running += totalValueDiff[e];
+            if (running < 0) {
+                revert NegativeCumulative();
+            }
         }
 
-        if (running < 0) {
-            return 0;
-        }
         return uint256(running);
     }
 }
