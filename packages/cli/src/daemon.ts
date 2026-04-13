@@ -1229,8 +1229,15 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
 const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
 const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
-const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 20_000;
+const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
 const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
+const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+type PendingOpenClawUiAttachJob = {
+  job: Promise<void>;
+  controller: AbortController;
+  cancelled: boolean;
+};
+const pendingOpenClawUiAttachJobs = new Map<string, PendingOpenClawUiAttachJob>();
 
 function isOpenClawBridgeHealthCacheValid(cache: { ok: boolean; ts: number } | null): boolean {
   if (!cache) return false;
@@ -1721,17 +1728,19 @@ export function getOpenClawUiSetupCommand(
   };
 }
 
-async function runOpenClawUiSetup(packageName: string): Promise<void> {
+async function runOpenClawUiSetup(packageName: string, signal?: AbortSignal): Promise<void> {
   const setupCommand = getOpenClawUiSetupCommand(packageName);
   await execFileAsync(setupCommand.command, setupCommand.args, {
     shell: setupCommand.source === 'npx' && process.platform === 'win32',
+    signal,
     timeout: 120_000,
   });
 }
 
-async function restartOpenClawGateway(): Promise<void> {
+async function restartOpenClawGateway(signal?: AbortSignal): Promise<void> {
   await execFileAsync('openclaw', ['gateway', 'restart'], {
     shell: process.platform === 'win32',
+    signal,
     timeout: 120_000,
   });
 }
@@ -1739,30 +1748,110 @@ async function restartOpenClawGateway(): Promise<void> {
 async function waitForOpenClawChatReady(
   config: DkgConfig,
   bridgeAuthToken: string | undefined,
+  signal?: AbortSignal,
 ): Promise<OpenClawChannelHealthReport> {
+  const throwIfCancelled = () => {
+    if (signal?.aborted) {
+      throw new Error('OpenClaw attach cancelled');
+    }
+  };
+  const waitForPoll = async () => new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, OPENCLAW_UI_CONNECT_POLL_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('OpenClaw attach cancelled'));
+    };
+    if (!signal) return;
+    if (signal.aborted) {
+      clearTimeout(timer);
+      reject(new Error('OpenClaw attach cancelled'));
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
   const deadline = Date.now() + OPENCLAW_UI_CONNECT_TIMEOUT_MS;
+  throwIfCancelled();
   let latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
   while (!latest.ok && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, OPENCLAW_UI_CONNECT_POLL_MS));
+    await waitForPoll();
+    throwIfCancelled();
     latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
   }
   return latest;
+}
+
+type OpenClawUiAttachDeps = {
+  runSetup?: (packageName: string, signal?: AbortSignal) => Promise<void>;
+  restartGateway?: (signal?: AbortSignal) => Promise<void>;
+  waitForReady?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    signal?: AbortSignal,
+  ) => Promise<OpenClawChannelHealthReport>;
+  probeHealth?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
+  ) => Promise<OpenClawChannelHealthReport>;
+  saveConfig?: (config: DkgConfig) => Promise<void>;
+  onAttachScheduled?: (id: string, job: Promise<void>) => void;
+};
+
+function formatOpenClawUiAttachFailure(err: any): string {
+  return err?.stderr?.trim?.()
+    || err?.stdout?.trim?.()
+    || err?.message
+    || 'OpenClaw attach failed';
+}
+
+function scheduleOpenClawUiAttachJob(
+  integrationId: string,
+  task: (job: PendingOpenClawUiAttachJob) => Promise<void>,
+  onAttachScheduled?: (id: string, job: Promise<void>) => void,
+): { started: boolean; job: Promise<void>; controller: AbortController } {
+  const existing = pendingOpenClawUiAttachJobs.get(integrationId);
+  if (existing) {
+    onAttachScheduled?.(integrationId, existing.job);
+    return { started: false, job: existing.job, controller: existing.controller };
+  }
+
+  const controller = new AbortController();
+  const jobState: PendingOpenClawUiAttachJob = {
+    controller,
+    cancelled: false,
+    job: Promise.resolve().then(() => task(jobState)).finally(() => {
+      const current = pendingOpenClawUiAttachJobs.get(integrationId);
+      if (current === jobState) {
+        pendingOpenClawUiAttachJobs.delete(integrationId);
+      }
+    }),
+  };
+  pendingOpenClawUiAttachJobs.set(integrationId, jobState);
+  onAttachScheduled?.(integrationId, jobState.job);
+  return { started: true, job: jobState.job, controller };
+}
+
+export function cancelPendingLocalAgentAttachJob(integrationId: string): void {
+  const job = pendingOpenClawUiAttachJobs.get(integrationId);
+  if (!job) return;
+  job.cancelled = true;
+  job.controller.abort();
+  pendingOpenClawUiAttachJobs.delete(integrationId);
+}
+
+function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
+  return job.cancelled || job.controller.signal.aborted;
 }
 
 export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
   bridgeAuthToken: string | undefined,
-  deps: {
-    runSetup?: (packageName: string) => Promise<void>;
-    restartGateway?: () => Promise<void>;
-    waitForReady?: (config: DkgConfig, bridgeAuthToken: string | undefined) => Promise<OpenClawChannelHealthReport>;
-    probeHealth?: (
-      config: DkgConfig,
-      bridgeAuthToken: string | undefined,
-      opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
-    ) => Promise<OpenClawChannelHealthReport>;
-  } = {},
+  deps: OpenClawUiAttachDeps = {},
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
@@ -1787,6 +1876,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
   const runSetup = deps.runSetup ?? runOpenClawUiSetup;
   const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+  const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
   if (health.ok) {
@@ -1812,56 +1902,90 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  try {
-    bridgeHealthCache = null;
-    await runSetup(packageName);
-    bridgeHealthCache = null;
-    health = await waitForReady(config, bridgeAuthToken);
-    if (!health.ok) {
-      await restartGateway();
-      bridgeHealthCache = null;
-      health = await waitForReady(config, bridgeAuthToken);
+  const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+    const current = getLocalAgentIntegration(config, requested.id);
+    if (current?.enabled === false && patch.enabled !== false) {
+      return null;
     }
-  } catch (err: any) {
-    const message = err?.stderr?.trim?.() || err?.stdout?.trim?.() || err?.message || 'OpenClaw attach failed';
-    const integration = updateLocalAgentIntegration(config, requested.id, {
-      enabled: hadAttachedBridgeBeforeConnect ? true : false,
-      ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport ? { transport: existingBeforeConnect.transport } : {}),
-      runtime: {
-        status: 'error',
-        ready: false,
-        lastError: message,
-      },
-    });
-    throw new Error(integration.runtime.lastError ?? 'OpenClaw attach failed');
-  }
+    const integration = updateLocalAgentIntegration(config, requested.id, patch);
+    if (saveConfigState) {
+      await saveConfigState(config);
+    }
+    return integration;
+  };
 
-  if (health.ok) {
-    const integration = updateLocalAgentIntegration(config, requested.id, {
-      transport: transportPatchFromOpenClawTarget(config, health.target),
-      runtime: {
-        status: 'ready',
-        ready: true,
-        lastError: null,
-      },
-    });
-    return {
-      integration,
-      notice: `${integration.name} attached successfully and is chat-ready.`,
-    };
-  }
+  const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
+    try {
+      bridgeHealthCache = null;
+      await runSetup(packageName, attachJob.controller.signal);
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+      bridgeHealthCache = null;
+
+      let latest = await probeHealth(config, bridgeAuthToken, {
+        ignoreBridgeCache: true,
+        timeoutMs: 3_000,
+      });
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+      if (!latest.ok) {
+        await restartGateway(attachJob.controller.signal);
+        if (isOpenClawUiAttachCancelled(attachJob)) return;
+        bridgeHealthCache = null;
+        latest = await waitForReady(config, bridgeAuthToken, attachJob.controller.signal);
+      }
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+
+      if (latest.ok) {
+        await persistIntegrationState({
+          transport: transportPatchFromOpenClawTarget(config, latest.target),
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        });
+        return;
+      }
+
+      await persistIntegrationState({
+        transport: transportPatchFromOpenClawTarget(config, latest.target),
+        runtime: {
+          status: 'connecting',
+          ready: false,
+          lastError: latest.error ?? null,
+        },
+      });
+    } catch (err: any) {
+      if (isOpenClawUiAttachCancelled(attachJob)) {
+        return;
+      }
+      await persistIntegrationState({
+        enabled: hadAttachedBridgeBeforeConnect ? true : false,
+        ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport
+          ? { transport: existingBeforeConnect.transport }
+          : {}),
+        runtime: {
+          status: 'error',
+          ready: false,
+          lastError: formatOpenClawUiAttachFailure(err),
+        },
+      });
+    } finally {
+      bridgeHealthCache = null;
+    }
+  }, deps.onAttachScheduled);
 
   const integration = updateLocalAgentIntegration(config, requested.id, {
-    transport: transportPatchFromOpenClawTarget(config, health.target),
     runtime: {
       status: 'connecting',
       ready: false,
-      lastError: health.error ?? null,
+      lastError: null,
     },
   });
   return {
     integration,
-    notice: 'OpenClaw setup completed. Waiting for the gateway to finish exposing the DKG chat bridge.',
+    notice: started
+      ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
+      : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
   };
 }
 
@@ -2403,7 +2527,7 @@ async function handleRequest(
             { 'Content-Type': 'application/json' },
           ),
           body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
@@ -2477,7 +2601,7 @@ async function handleRequest(
             },
           ),
           body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {
@@ -4081,7 +4205,7 @@ async function handleRequest(
         ? parsed.metadata.source
         : undefined;
       const result = source === 'node-ui'
-        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken)
+        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
@@ -4099,6 +4223,12 @@ async function handleRequest(
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
+      const normalizedId = normalizeIntegrationId(id);
+      const disconnectRequested = parsed.enabled === false
+        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
+      if (disconnectRequested && normalizedId) {
+        cancelPendingLocalAgentAttachJob(normalizedId);
+      }
       const integration = updateLocalAgentIntegration(config, id, parsed);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });

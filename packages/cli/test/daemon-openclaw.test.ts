@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
+  cancelPendingLocalAgentAttachJob,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
   getOpenClawUiSetupCommand,
@@ -421,22 +422,36 @@ describe('local agent integration registry helpers', () => {
       ok: false,
       error: 'bridge offline',
     });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
 
-    await expect(connectLocalAgentIntegrationFromUi(
+    const result = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
         metadata: { source: 'node-ui' },
       },
       'bridge-token',
-      { runSetup, restartGateway, waitForReady, probeHealth },
-    )).rejects.toThrow('setup failed');
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
 
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.enabled).toBe(false);
     expect(integration?.status).toBe('error');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
+    expect(saveConfig).toHaveBeenCalled();
   });
 
   it('keeps an already attached OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
@@ -458,21 +473,35 @@ describe('local agent integration registry helpers', () => {
       ok: false,
       error: 'bridge offline',
     });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
 
-    await expect(connectLocalAgentIntegrationFromUi(
+    const result = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
         metadata: { source: 'node-ui' },
       },
       'bridge-token',
-      { runSetup, restartGateway, waitForReady, probeHealth },
-    )).rejects.toThrow('setup failed');
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
 
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.enabled).toBe(true);
     expect(integration?.status).toBe('error');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(saveConfig).toHaveBeenCalled();
   });
 
   it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
@@ -481,18 +510,21 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = vi.fn().mockResolvedValue(undefined);
     const waitForReady = vi
       .fn()
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         ok: false,
         error: 'bridge still starting',
+      });
+    const probeHealth = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge offline',
       })
       .mockResolvedValueOnce({
         ok: false,
         error: 'bridge still starting',
       });
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: false,
-      error: 'bridge offline',
-    });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
       config,
@@ -501,16 +533,31 @@ describe('local agent integration registry helpers', () => {
         metadata: { source: 'node-ui' },
       },
       'bridge-token',
-      { runSetup, restartGateway, waitForReady, probeHealth },
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
     );
 
-    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw');
-    expect(restartGateway).toHaveBeenCalledTimes(1);
-    expect(waitForReady).toHaveBeenCalledTimes(2);
     expect(result.integration.status).toBe('connecting');
     expect(result.integration.runtime.ready).toBe(false);
-    expect(result.integration.runtime.lastError).toBe('bridge still starting');
-    expect(result.notice).toContain('Waiting for the gateway');
+    expect(result.notice).toContain('come online automatically');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(waitForReady).toHaveBeenCalledTimes(1);
+    expect(probeHealth).toHaveBeenCalledTimes(2);
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('connecting');
+    expect(integration?.runtime.ready).toBe(false);
+    expect(integration?.runtime.lastError).toBe('bridge still starting');
+    expect(saveConfig).toHaveBeenCalled();
   });
 
   it('UI connect retries OpenClaw readiness after a gateway restart and reports chat-ready when the bridge comes up', async () => {
@@ -519,18 +566,21 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = vi.fn().mockResolvedValue(undefined);
     const waitForReady = vi
       .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        error: 'bridge still starting',
-      })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         ok: true,
         target: 'bridge',
       });
-    const probeHealth = vi.fn().mockResolvedValue({
-      ok: false,
-      error: 'bridge offline',
-    });
+    const probeHealth = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge offline',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge still starting',
+      });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
       config,
@@ -539,16 +589,152 @@ describe('local agent integration registry helpers', () => {
         metadata: { source: 'node-ui' },
       },
       'bridge-token',
-      { runSetup, restartGateway, waitForReady, probeHealth },
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
     );
 
-    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw');
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
     expect(restartGateway).toHaveBeenCalledTimes(1);
-    expect(waitForReady).toHaveBeenCalledTimes(2);
-    expect(result.integration.status).toBe('ready');
-    expect(result.integration.runtime.ready).toBe(true);
-    expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
-    expect(result.notice).toBe('OpenClaw attached successfully and is chat-ready.');
+    expect(waitForReady).toHaveBeenCalledTimes(1);
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('ready');
+    expect(integration?.runtime.ready).toBe(true);
+    expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(saveConfig).toHaveBeenCalled();
+  });
+
+  it('cancels a pending OpenClaw attach job when the integration is disconnected before attach finishes', async () => {
+    const config = makeConfig();
+    let releaseSetup!: () => void;
+    const runSetup = vi.fn().mockImplementation(() => new Promise<void>((resolve) => {
+      releaseSetup = resolve;
+    }));
+    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'bridge offline',
+    });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    cancelPendingLocalAgentAttachJob('openclaw');
+    updateLocalAgentIntegration(config, 'openclaw', {
+      enabled: false,
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+    releaseSetup();
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.enabled).toBe(false);
+    expect(integration?.status).toBe('disconnected');
+    expect(integration?.runtime.lastError).toBeNull();
+  });
+
+  it('cancels readiness polling when the integration is disconnected mid-attach', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn().mockResolvedValue(undefined);
+    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    let markWaitForReadyStarted!: () => void;
+    const waitForReadyStarted = new Promise<void>((resolve) => {
+      markWaitForReadyStarted = resolve;
+    });
+    const waitForReady = vi.fn().mockImplementation((_cfg, _token, signal?: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      markWaitForReadyStarted();
+      const onAbort = () => reject(new Error('OpenClaw attach cancelled'));
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(new Error('OpenClaw attach cancelled'));
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }));
+    const probeHealth = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge offline',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'still starting',
+      });
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    await waitForReadyStarted;
+    cancelPendingLocalAgentAttachJob('openclaw');
+    updateLocalAgentIntegration(config, 'openclaw', {
+      enabled: false,
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw', expect.anything());
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(waitForReady).toHaveBeenCalledTimes(1);
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.enabled).toBe(false);
+    expect(integration?.status).toBe('disconnected');
+    expect(integration?.runtime.lastError).toBeNull();
   });
 
   it('rechecks OpenClaw bridge health quickly after a cached failure so recovery is not sticky', async () => {

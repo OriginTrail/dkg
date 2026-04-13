@@ -32,10 +32,19 @@ import type { DkgDaemonClient } from './dkg-client.js';
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function finalizeAgentReplyText(text: string): string {
+  if (text.trim().length === 0) {
+    throw new Error(NO_TEXT_RESPONSE_ERROR);
+  }
+  return text;
 }
 const moduleRequire = createRequire(import.meta.url);
 
@@ -470,7 +479,7 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -498,7 +507,7 @@ export class DkgChannelPlugin {
         },
       }).then(() => {
         clearTimeout(timer);
-        const replyText = replyChunks.join('\n') || '(no response)';
+        const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
         resolve({ text: replyText, correlationId });
       }).catch((err: any) => {
@@ -520,7 +529,7 @@ export class DkgChannelPlugin {
     const log = this.api!.logger;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -547,7 +556,7 @@ export class DkgChannelPlugin {
         ))
         .then(() => {
           clearTimeout(timer);
-          const replyText = replyChunks.join('\n') || '(no response)';
+          const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
           resolve({ text: replyText, correlationId });
         })
@@ -629,7 +638,7 @@ export class DkgChannelPlugin {
       if (resolve) { const r = resolve; resolve = null; r(); }
     };
 
-    const TIMEOUT_MS = 120_000;
+    const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
     const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
 
     let replyText = '';
@@ -693,7 +702,7 @@ export class DkgChannelPlugin {
 
     // Only yield final if the stream completed normally (not cancelled)
     if (completed) {
-      const finalText = replyText || '(no response)';
+      const finalText = finalizeAgentReplyText(replyText);
       this.queueTurnPersistence(text, finalText, correlationId, identity);
       yield { type: 'final', text: finalText, correlationId };
     }

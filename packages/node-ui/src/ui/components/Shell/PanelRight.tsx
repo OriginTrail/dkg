@@ -233,6 +233,39 @@ function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
   return 'offline';
 }
 
+function localAgentToolbarLabel(
+  integration: LocalAgentIntegration,
+  showingSessionHistory: boolean,
+): string {
+  if (showingSessionHistory) {
+    return 'Session history';
+  }
+  if (integration.chatReady) {
+    return `${integration.name} connected`;
+  }
+  if (integration.status === 'connecting') {
+    return `${integration.name} is connecting…`;
+  }
+  return `${integration.name} is unavailable`;
+}
+
+function formatLocalAgentErrorMessage(
+  integration: LocalAgentIntegration,
+  err: unknown,
+): string {
+  const message = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+  if (/OpenClaw bridge unreachable/i.test(message)) {
+    return `${integration.name} is unavailable right now.`;
+  }
+  if (/Agent response timeout/i.test(message)) {
+    return `${integration.name} took too long to respond.`;
+  }
+  if (/Agent returned no text response/i.test(message) || /\(no response\)/i.test(message)) {
+    return `${integration.name} did not return a text reply.`;
+  }
+  return message;
+}
+
 function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
@@ -286,14 +319,6 @@ function ConnectedAgentsTab(props: {
     || (!selected && connectedAgents.length === 0)
     || Boolean(selected && !selected.persistentChat && !selectedHasConversation);
   const inputDisabled = localSending || !selected?.chatReady;
-  const statusLabel = showingSessionHistory ? 'Session history' : (selected?.bridgeStatusLabel ?? 'Ready to connect');
-  const statusDetail = showingSessionHistory
-    ? 'history available; reconnect from + to resume live chat'
-    : selected?.bridgeOnline
-      ? (selected.target === 'gateway' ? 'gateway route live' : 'local bridge live')
-      : selected?.status === 'connecting'
-        ? 'waiting for the bridge to come up'
-        : 'refresh to retry once the bridge is back';
 
   return (
     <div className="v10-agents-tab">
@@ -378,17 +403,17 @@ function ConnectedAgentsTab(props: {
         </div>
       ) : (
         selected && (
-          <div className="v10-local-agent-detail v10-local-agent-chat-shell">
-            <div className="v10-agents-summary v10-agents-summary-active">
-              <span className="v10-agents-stat">
+          <div className="v10-local-agent-chat-shell">
+            <div className="v10-local-agent-chat-toolbar">
+              <span className="v10-agents-stat v10-local-agent-chat-toolbar-label">
                 <span className={`v10-agents-stat-dot ${bridgeStatusDotClass(selected)}`} />
-                {statusLabel}
+                {localAgentToolbarLabel(selected, showingSessionHistory)}
               </span>
-              <span className="v10-agents-status-detail">{statusDetail}</span>
-              <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title="Refresh bridge status">
-                Refresh
-              </button>
-              {selected.persistentChat && (
+              <div className="v10-local-agent-chat-actions">
+                <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title={`Refresh ${selected.name}`}>
+                  Refresh
+                </button>
+                {selected.persistentChat && (
                 <button
                   className="v10-agents-refresh disconnect"
                   onClick={() => onDisconnectIntegration(selected.id)}
@@ -396,28 +421,20 @@ function ConnectedAgentsTab(props: {
                 >
                   Disconnect
                 </button>
-              )}
+                )}
+              </div>
             </div>
 
             {connectNotice && <div className="v10-local-agent-notice">{connectNotice}</div>}
             {connectError && <div className="v10-local-agent-error">{connectError}</div>}
-
-            <div className="v10-local-agent-chat-meta">
-              <span>Messages stay anchored in your private DKG memory graph.</span>
-              <span>{showingSessionHistory
-                ? 'Session history only'
-                : selected.chatReady
-                  ? (selected.target === 'gateway' ? 'Gateway bridge live' : 'Local bridge live')
-                  : 'Agent stays attached to this node'}</span>
-            </div>
 
             {!selected.chatReady && (
               <div className={`v10-local-agent-warning ${selected.status === 'connecting' ? 'connecting' : 'offline'}`}>
                 {showingSessionHistory
                   ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
                   : selected.status === 'connecting'
-                  ? `${selected.name} is still finishing bridge setup. This chat tab stays in place and will go live automatically when the bridge responds.`
-                  : `${selected.name} stays connected to this node, but the bridge is currently offline. Refresh after the bridge recovers to resume chatting here.`}
+                  ? `${selected.name} is still finishing setup. This chat tab stays in place and will go live automatically when the connection is ready.`
+                  : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
               </div>
             )}
 
@@ -658,19 +675,19 @@ export function PanelRight() {
       const sessionSummaries = summarizeLocalAgentSessions(memorySessions, items);
       const connected = [...items].sort(compareLocalAgentIntegrations).filter((item) => item.persistentChat);
       const selectedItem = items.find((item) => item.id === selectedIntegrationId) ?? null;
-      const preserveSelected = selectedIntegrationId !== ADD_AGENT_TAB_ID
-        && Boolean(selectedItem)
-        && (selectedItem.persistentChat || hasLocalAgentConversation(
-          selectedIntegrationId,
-          localMessagesByIntegration,
-          localHistoryLoadedByIntegration,
-          sessionSummaries,
-        ));
+      const preserveSelected = selectedIntegrationId === ADD_AGENT_TAB_ID
+        || (Boolean(selectedItem)
+          && (selectedItem.persistentChat || hasLocalAgentConversation(
+            selectedIntegrationId,
+            localMessagesByIntegration,
+            localHistoryLoadedByIntegration,
+            sessionSummaries,
+          )));
       if (!preserveSelected) {
         setSelectedIntegrationId(connected[0]?.id ?? ADD_AGENT_TAB_ID);
       }
       const preferred = connected[0];
-      if (preferred && !autoFocusedLocalAgentRef.current) {
+      if (preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID) {
         autoFocusedLocalAgentRef.current = true;
         setSelectedIntegrationId(preferred.id);
         setMode('agents');
@@ -714,10 +731,22 @@ export function PanelRight() {
     const intervalId = setInterval(() => {
       loadSessions();
       refreshPeers();
-      refreshLocalIntegrations();
     }, 15_000);
     return () => clearInterval(intervalId);
-  }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
+  }, [loadSessions, refreshPeers]);
+
+  const localIntegrationRefreshMs = integrations.some((integration) =>
+    integration.persistentChat && (!integration.chatReady || integration.status === 'connecting'),
+  )
+    ? 3_000
+    : 15_000;
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      void refreshLocalIntegrations();
+    }, localIntegrationRefreshMs);
+    return () => clearInterval(intervalId);
+  }, [localIntegrationRefreshMs, refreshLocalIntegrations]);
 
   useEffect(() => {
     if (!selectedIntegration?.chatSupported || (!selectedIntegration.persistentChat && !selectedHasConversation)) {
@@ -796,7 +825,9 @@ export function PanelRight() {
           message.id === assistantId
             ? {
                 ...message,
-                content: err?.name === 'AbortError' ? 'Request cancelled.' : `Error: ${err.message}`,
+                content: err?.name === 'AbortError'
+                  ? 'Request cancelled.'
+                  : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
                 streaming: false,
               }
             : message,

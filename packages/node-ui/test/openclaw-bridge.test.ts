@@ -140,9 +140,15 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Connect Another Agent');
     expect(panelRight).toContain('Disconnect');
     expect(panelRight).toContain('Session history');
-    expect(panelRight).toContain('Messages stay anchored in your private DKG memory graph');
     expect(panelRight).toContain('OpenClaw');
     expect(panelRight).toContain('v10-agent-subtabs');
+    expect(panelRight).toContain('v10-local-agent-chat-toolbar');
+    expect(panelRight).not.toContain('Messages stay anchored in your private DKG memory graph');
+  });
+
+  it('keeps the + add-agent tab selected during background refreshes', () => {
+    expect(panelRight).toContain('const preserveSelected = selectedIntegrationId === ADD_AGENT_TAB_ID');
+    expect(panelRight).toContain("preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID");
   });
 
   it('keeps the interface future-friendly for Hermes', () => {
@@ -424,7 +430,7 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(openclaw?.chatReady).toBe(true);
       expect(openclaw?.persistentChat).toBe(true);
       expect(openclaw?.bridgeOnline).toBe(true);
-      expect(openclaw?.bridgeStatusLabel).toBe('Bridge live');
+      expect(openclaw?.bridgeStatusLabel).toBe('Connected');
       expect(openclaw?.status).toBe('chat_ready');
       expect(openclaw?.target).toBe('gateway');
       expect(hermes?.status).toBe('coming_soon');

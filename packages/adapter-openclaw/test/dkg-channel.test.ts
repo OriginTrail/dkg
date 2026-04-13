@@ -649,6 +649,39 @@ describe('DkgChannelPlugin', () => {
     expect(storeSpy).not.toHaveBeenCalled();
   });
 
+  it('processInboundStream should surface a real error when the agent returns no text', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher() {
+            // Complete without yielding any text chunks.
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-empty', 'owner');
+    await expect(stream.next()).rejects.toThrow('Agent returned no text response');
+    expect(storeSpy).not.toHaveBeenCalled();
+  });
+
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {
     const mockRuntime = {
       channel: {

@@ -808,18 +808,18 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   if (bridgeOnline) {
     status = 'chat_ready';
     statusLabel = 'Chat ready';
-    detail = `Connected through the ${health?.target ?? 'local bridge'}.`;
+    detail = `${record.name} is connected to this node and ready for chat.`;
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
     detail = record.runtime?.lastError
-      ?? `${record.name} is registered and the local chat bridge is still starting.`;
+      ?? `${record.name} is registered and still starting up.`;
   } else if (persistentChat) {
     status = 'bridge_offline';
     statusLabel = 'Bridge offline';
     detail = health?.error
       ?? record.runtime?.lastError
-      ?? `${record.name} is attached to this node, but the local bridge is not responding right now.`;
+      ?? `${record.name} is attached to this node, but it is not responding right now.`;
   } else if (surface) {
     status = 'available';
     statusLabel = connectSupported ? 'Ready to connect' : 'Awaiting chat bridge';
@@ -836,11 +836,11 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   }
 
   const bridgeStatusLabel = bridgeOnline
-    ? 'Bridge live'
+    ? 'Connected'
     : status === 'connecting'
       ? 'Connecting'
       : persistentChat
-        ? 'Bridge offline'
+        ? 'Unavailable'
         : connectSupported
           ? 'Ready to connect'
           : 'Coming next';
