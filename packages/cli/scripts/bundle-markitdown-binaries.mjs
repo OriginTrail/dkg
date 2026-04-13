@@ -7,6 +7,13 @@ import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import {
+  checksumPathFor,
+  hasVerifiedBundledBinary,
+  metadataMatchesExpected,
+  metadataPathFor,
+  parseSha256File,
+} from './markitdown-bundle-validation.mjs';
 
 const execFile = promisify(execFileCb);
 
@@ -142,13 +149,7 @@ export function pyInstallerNameForTarget(target) {
   return target.assetName.replace(/\.exe$/i, '');
 }
 
-export function checksumPathFor(binaryPath) {
-  return `${binaryPath}.sha256`;
-}
-
-export function metadataPathFor(binaryPath) {
-  return `${binaryPath}.meta.json`;
-}
+export { checksumPathFor, metadataPathFor, parseSha256File };
 
 export function releaseTagForVersion(version) {
   return `v${version.replace(/^v/, '')}`;
@@ -178,18 +179,6 @@ function buildFingerprintForPackage(packageDir = DEFAULT_PACKAGE_DIR) {
   ].join('\n'));
 }
 
-function metadataMatchesExpected(actualMetadata, expectedMetadata) {
-  if (!expectedMetadata) return true;
-  if (!actualMetadata || typeof actualMetadata !== 'object') return false;
-  if (expectedMetadata.buildFingerprint) {
-    if (actualMetadata.buildFingerprint) return actualMetadata.buildFingerprint === expectedMetadata.buildFingerprint;
-    if (expectedMetadata.cliVersion) return actualMetadata.cliVersion === expectedMetadata.cliVersion;
-    return false;
-  }
-  if (expectedMetadata.cliVersion) return actualMetadata.cliVersion === expectedMetadata.cliVersion;
-  return true;
-}
-
 function parseMetadataText(text) {
   const parsed = JSON.parse(text);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -200,22 +189,6 @@ function parseMetadataText(text) {
 
 async function writeMetadataFile(binaryPath, metadata) {
   await writeFile(metadataPathFor(binaryPath), `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
-}
-
-async function readMetadataFile(binaryPath) {
-  const path = metadataPathFor(binaryPath);
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(await readFile(path, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-export function parseSha256File(text) {
-  const [hash] = text.trim().split(/\s+/);
-  if (!hash) throw new Error('Malformed sha256 file');
-  return hash.toLowerCase();
 }
 
 async function fetchBytes(url) {
@@ -263,25 +236,6 @@ async function verifyChecksum(binaryPath, expectedHash) {
   return actualHash;
 }
 
-async function hasVerifiedBinary(binaryPath, expectedMetadata = null) {
-  const binaryChecksumPath = checksumPathFor(binaryPath);
-  if (!existsSync(binaryPath) || !existsSync(binaryChecksumPath)) {
-    return false;
-  }
-  try {
-    const checksumText = await readFile(binaryChecksumPath, 'utf-8');
-    const expectedHash = parseSha256File(checksumText);
-    await verifyChecksum(binaryPath, expectedHash);
-    const metadata = await readMetadataFile(binaryPath);
-    if (!metadataMatchesExpected(metadata, expectedMetadata)) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function removeIfExists(path) {
   await rm(path, { force: true });
 }
@@ -298,7 +252,7 @@ export async function downloadBinaryAsset({
   const destinationMetadataPath = metadataPathFor(destination);
   const expectedMetadata = { source: 'release', cliVersion };
   if (!force && existsSync(destination)) {
-    if (await hasVerifiedBinary(destination, expectedMetadata)) {
+    if (await hasVerifiedBundledBinary(destination, expectedMetadata)) {
       return { status: 'present', binaryPath: destination };
     }
   }
@@ -429,7 +383,7 @@ export async function buildCurrentPlatformBinary({
     buildFingerprint: buildFingerprintForPackage(packageDir),
   };
   if (!force && existsSync(binaryPath)) {
-    if (await hasVerifiedBinary(binaryPath, expectedMetadata)) {
+    if (await hasVerifiedBundledBinary(binaryPath, expectedMetadata)) {
       return { status: 'present', binaryPath };
     }
   }
@@ -540,7 +494,7 @@ export async function ensureCurrentPlatformBinary({
   const resolvedVersion = version ?? readCliVersion(packageDir);
   const expectedMetadata = { source: 'release', cliVersion: resolvedVersion };
   if (!force && existsSync(binaryPath)) {
-    if (await hasVerifiedBinary(binaryPath, expectedMetadata)) {
+    if (await hasVerifiedBundledBinary(binaryPath, expectedMetadata)) {
       return { status: 'present', binaryPath };
     }
   }

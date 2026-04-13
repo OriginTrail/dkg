@@ -9,7 +9,7 @@
  */
 
 import { execFile, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { platform, arch } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -17,62 +17,27 @@ import type { ExtractionPipeline, ExtractionInput, ConverterOutput } from '@orig
 import {
   bundledMarkItDownBuildFingerprint,
   readCliPackageVersion,
-  sha256Hex,
-  type BundledMarkItDownMetadata,
 } from './markitdown-bundle-metadata.js';
+import { bundledBinaryValidationFailureSync, hasVerifiedBundledBinarySync } from '../../scripts/markitdown-bundle-validation.mjs';
 
 const MAX_OUTPUT_BYTES = 50 * 1024 * 1024; // 50 MB
 
-function checksumPathFor(binaryPath: string): string {
-  return `${binaryPath}.sha256`;
-}
-
-function metadataPathFor(binaryPath: string): string {
-  return `${binaryPath}.meta.json`;
-}
-
-function parseSha256Sidecar(text: string): string | null {
-  const [hash] = text.trim().split(/\s+/);
-  return hash ? hash.toLowerCase() : null;
-}
-
 const CLI_DIR = fileURLToPath(new URL('../../', import.meta.url));
 
-function readBundledMetadata(candidate: string): BundledMarkItDownMetadata | null {
-  const metadataPath = metadataPathFor(candidate);
-  if (!existsSync(metadataPath)) return null;
-  try {
-    return JSON.parse(readFileSync(metadataPath, 'utf-8')) as BundledMarkItDownMetadata;
-  } catch {
-    return null;
-  }
-}
-
-function bundledMetadataMatchesCurrentPackage(metadata: BundledMarkItDownMetadata | null): boolean {
-  if (!metadata || typeof metadata !== 'object') return false;
+function expectedBundledMetadataForCurrentPackage(): { buildFingerprint?: string; cliVersion?: string } | null {
   const buildFingerprint = bundledMarkItDownBuildFingerprint(CLI_DIR);
-  if (buildFingerprint && metadata.buildFingerprint) return metadata.buildFingerprint === buildFingerprint;
   const cliVersion = readCliPackageVersion(CLI_DIR);
-  return !!cliVersion && metadata.cliVersion === cliVersion;
+  if (buildFingerprint) return { buildFingerprint, ...(cliVersion ? { cliVersion } : {}) };
+  if (cliVersion) return { cliVersion };
+  return null;
 }
 
 function bundledBinaryValidationFailure(candidate: string): 'checksum' | 'metadata' | null {
-  const checksumPath = checksumPathFor(candidate);
-  if (!existsSync(candidate) || !existsSync(checksumPath)) return 'checksum';
-  try {
-    const expectedHash = parseSha256Sidecar(readFileSync(checksumPath, 'utf-8'));
-    if (!expectedHash) return 'checksum';
-    const actualHash = sha256Hex(readFileSync(candidate));
-    if (actualHash !== expectedHash) return 'checksum';
-    const metadata = readBundledMetadata(candidate);
-    return bundledMetadataMatchesCurrentPackage(metadata) ? null : 'metadata';
-  } catch {
-    return 'checksum';
-  }
+  return bundledBinaryValidationFailureSync(candidate, expectedBundledMetadataForCurrentPackage());
 }
 
 function hasVerifiedBundledBinary(candidate: string): boolean {
-  return bundledBinaryValidationFailure(candidate) === null;
+  return hasVerifiedBundledBinarySync(candidate, expectedBundledMetadataForCurrentPackage());
 }
 
 function resolveMarkItDownBin(): string | null {

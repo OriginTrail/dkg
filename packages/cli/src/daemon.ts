@@ -60,6 +60,11 @@ import {
   readCliPackageVersion,
   type BundledMarkItDownMetadata,
 } from './extraction/markitdown-bundle-metadata.js';
+import {
+  checksumPathFor as markItDownChecksumPath,
+  hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
+  metadataPathFor as markItDownMetadataPath,
+} from '../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
 import { FileStore } from './file-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
@@ -193,63 +198,6 @@ function currentBundledMarkItDownAssetName(): string | null {
     target.platform === process.platform
     && target.arch === process.arch
   ))?.assetName ?? null;
-}
-
-function markItDownChecksumPath(binaryPath: string): string {
-  return `${binaryPath}.sha256`;
-}
-
-function markItDownMetadataPath(binaryPath: string): string {
-  return `${binaryPath}.meta.json`;
-}
-
-function parseSha256Sidecar(text: string): string | null {
-  const [hash] = text.trim().split(/\s+/);
-  return hash ? hash.toLowerCase() : null;
-}
-
-function bundledMarkItDownMetadataMatchesExpected(
-  actual: BundledMarkItDownMetadata | null,
-  expected: BundledMarkItDownMetadata | null,
-): boolean {
-  if (!expected) return true;
-  if (!actual || typeof actual !== 'object') return false;
-  if (expected.buildFingerprint) {
-    if (actual.buildFingerprint) return actual.buildFingerprint === expected.buildFingerprint;
-    if (expected.cliVersion) return actual.cliVersion === expected.cliVersion;
-    return false;
-  }
-  if (expected.cliVersion) return actual.cliVersion === expected.cliVersion;
-  return true;
-}
-
-async function readBundledMarkItDownMetadata(binaryPath: string): Promise<BundledMarkItDownMetadata | null> {
-  const metadataPath = markItDownMetadataPath(binaryPath);
-  if (!existsSync(metadataPath)) return null;
-  try {
-    return JSON.parse(await readFile(metadataPath, 'utf-8')) as BundledMarkItDownMetadata;
-  } catch {
-    return null;
-  }
-}
-
-async function hasVerifiedBundledMarkItDownBinary(
-  binaryPath: string,
-  expectedMetadata: BundledMarkItDownMetadata | null = null,
-): Promise<boolean> {
-  const checksumPath = markItDownChecksumPath(binaryPath);
-  if (!existsSync(binaryPath) || !existsSync(checksumPath)) return false;
-  try {
-    const checksumText = await readFile(checksumPath, 'utf-8');
-    const expectedHash = parseSha256Sidecar(checksumText);
-    if (!expectedHash) return false;
-    const actualHash = createHash('sha256').update(await readFile(binaryPath)).digest('hex');
-    if (actualHash !== expectedHash) return false;
-    const metadata = await readBundledMarkItDownMetadata(binaryPath);
-    return bundledMarkItDownMetadataMatchesExpected(metadata, expectedMetadata);
-  } catch {
-    return false;
-  }
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {
