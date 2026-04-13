@@ -7,41 +7,32 @@ import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
-import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
-import {KnowledgeAssetsStorageLike} from "./interfaces/KnowledgeAssetsStorageLike.sol";
-import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
  * @title ContextGraphs
  * @notice Stateless logic facade for Context Graph operations. All state lives in
  *         ContextGraphStorage (ERC-721 registry). This contract is replaceable via Hub.
+ *
+ * @dev V10 Phase 7 Task 1 (interim): the legacy `addBatchToContextGraph`
+ *      attestation/inclusion-proof path has been REMOVED (closes audit H2),
+ *      and the participant model is split into hosting nodes (uint72) and
+ *      participant agents (address). This file is the *minimal* facade kept
+ *      compiling under the new storage shape; Phase 7 Task 2 will rewrite the
+ *      full curator-aware logic (3-curator-type publish gating, NFT-owner
+ *      governance modifiers, etc.).
  */
 contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "ContextGraphs";
     string private constant _VERSION = "1.0.0";
 
     ContextGraphStorage public contextGraphStorage;
-    IdentityStorage public identityStorage;
-    KnowledgeAssetsStorageLike public knowledgeAssetsStorage;
-    KnowledgeCollectionStorage public knowledgeCollectionStorage;
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
     function initialize() public onlyHub {
         contextGraphStorage = ContextGraphStorage(
             hub.getAssetStorageAddress("ContextGraphStorage")
-        );
-        identityStorage = IdentityStorage(
-            hub.getContractAddress("IdentityStorage")
-        );
-        knowledgeAssetsStorage = KnowledgeAssetsStorageLike(
-            hub.getAssetStorageAddress("KnowledgeAssetsStorage")
-        );
-        knowledgeCollectionStorage = KnowledgeCollectionStorage(
-            hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
     }
 
@@ -57,34 +48,41 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Create a new context graph. Mints an ERC-721 to msg.sender.
-     * @param participantIdentityIds Participant node identity IDs (sorted ascending)
-     * @param requiredSignatures     M-of-N threshold
-     * @param metadataBatchId        Batch ID holding the context graph metadata (0 if none)
-     * @param publishPolicy          0 = curated (only publishAuthority can publish), 1 = open
-     * @param publishAuthority       Curator address; defaults to msg.sender when zero and open
-     * @return contextGraphId        Newly assigned context graph ID (= ERC-721 token ID)
+     * @param hostingNodes              Sorted ascending node identity IDs (storage attestation set)
+     * @param participantAgents         EOA allow-list (no zeros, no dups)
+     * @param requiredSignatures        M-of-N quorum (≤ hostingNodes.length)
+     * @param metadataBatchId           Batch ID describing the CG metadata (0 if none)
+     * @param publishPolicy             0 = curated, 1 = open
+     * @param publishAuthority          Curator address (required when curated; ignored when open)
+     * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Ignored when open.
+     * @return contextGraphId           Newly assigned context graph ID (= ERC-721 token ID)
      */
     function createContextGraph(
-        uint72[] calldata participantIdentityIds,
+        uint72[] calldata hostingNodes,
+        address[] calldata participantAgents,
         uint8 requiredSignatures,
         uint256 metadataBatchId,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     ) external returns (uint256 contextGraphId) {
-        uint72 prevPid;
-        for (uint256 i; i < participantIdentityIds.length; i++) {
-            require(participantIdentityIds[i] != 0, "Zero participant ID");
-            require(participantIdentityIds[i] > prevPid, "Duplicate or unsorted participant");
-            prevPid = participantIdentityIds[i];
+        // Storage validates sorting/dedup/zero-rejection, but a friendly
+        // default for curated CGs: if caller passes zero authority and the
+        // policy is curated, use msg.sender.
+        address authority = publishAuthority;
+        if (publishPolicy == 0 && authority == address(0)) {
+            authority = msg.sender;
         }
-        address authority = publishAuthority == address(0) ? msg.sender : publishAuthority;
+
         contextGraphId = contextGraphStorage.createContextGraph(
             msg.sender,
-            participantIdentityIds,
+            hostingNodes,
+            participantAgents,
             requiredSignatures,
             metadataBatchId,
             publishPolicy,
-            authority
+            authority,
+            publishAuthorityAccountId
         );
     }
 
@@ -100,23 +98,48 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     function updatePublishPolicy(
         uint256 contextGraphId,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     ) external onlyContextGraphOwner(contextGraphId) {
-        contextGraphStorage.updatePublishPolicy(contextGraphId, publishPolicy, publishAuthority);
+        contextGraphStorage.updatePublishPolicy(
+            contextGraphId,
+            publishPolicy,
+            publishAuthority,
+            publishAuthorityAccountId
+        );
     }
 
-    function addParticipant(
+    function updatePublishAuthority(
         uint256 contextGraphId,
-        uint72 identityId
+        address newAuthority,
+        uint256 newAuthorityAccountId
     ) external onlyContextGraphOwner(contextGraphId) {
-        contextGraphStorage.addParticipant(contextGraphId, identityId);
+        contextGraphStorage.updatePublishAuthority(
+            contextGraphId,
+            newAuthority,
+            newAuthorityAccountId
+        );
     }
 
-    function removeParticipant(
+    function setHostingNodes(
         uint256 contextGraphId,
-        uint72 identityId
+        uint72[] calldata nodes
     ) external onlyContextGraphOwner(contextGraphId) {
-        contextGraphStorage.removeParticipant(contextGraphId, identityId);
+        contextGraphStorage.setHostingNodes(contextGraphId, nodes);
+    }
+
+    function addParticipantAgent(
+        uint256 contextGraphId,
+        address agent
+    ) external onlyContextGraphOwner(contextGraphId) {
+        contextGraphStorage.addParticipantAgent(contextGraphId, agent);
+    }
+
+    function removeParticipantAgent(
+        uint256 contextGraphId,
+        address agent
+    ) external onlyContextGraphOwner(contextGraphId) {
+        contextGraphStorage.removeParticipantAgent(contextGraphId, agent);
     }
 
     function updateQuorum(
@@ -130,7 +153,13 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Check whether `publisher` is authorized to publish to a context graph.
-     * @return authorized True if the publisher passes the publish policy gate.
+     *
+     * @dev Phase 7 Task 1 keeps this minimal: open policy is universal,
+     *      curated policy gates on a direct address match against
+     *      `publishAuthority`. The 3-curator-type logic (Safe ERC-1271 check
+     *      + PCA agent resolution via DKGPublishingConvictionNFT) is added in
+     *      Task 2 — KAV10 callsite (line 188) keeps the same external
+     *      signature `(uint256, address)` so it continues to compile.
      */
     function isAuthorizedPublisher(
         uint256 contextGraphId,
@@ -142,82 +171,5 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
         if (policy == 1) return true; // open
         return publisher == authority;
-    }
-
-    // --- Batch attestation ---
-
-    function addBatchToContextGraph(
-        uint256 contextGraphId,
-        uint256 batchId,
-        bytes32 merkleRoot,
-        uint72[] calldata signerIdentityIds,
-        bytes32[] calldata signatureRs,
-        bytes32[] calldata signatureVss
-    ) external {
-        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) {
-            revert KnowledgeAssetsLib.ContextGraphNotActive(contextGraphId);
-        }
-        (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
-        if (policy == 0) {
-            require(msg.sender == authority, "Unauthorized: curated CG");
-        }
-        require(contextGraphStorage.getAttestedRoot(contextGraphId, batchId) == bytes32(0), "Batch already registered");
-        _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
-        // Check V9 storage first (KnowledgeAssetsStorage), then V10 (KnowledgeCollectionStorage)
-        bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
-        if (onChainRoot == bytes32(0) && address(knowledgeCollectionStorage) != address(0)) {
-            onChainRoot = knowledgeCollectionStorage.getLatestMerkleRoot(batchId);
-        }
-        require(onChainRoot != bytes32(0), "Batch does not exist");
-        require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
-        contextGraphStorage.setAttestedRoot(contextGraphId, batchId, merkleRoot);
-        contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
-    }
-
-    function getAttestedMerkleRoot(
-        uint256 contextGraphId,
-        uint256 batchId
-    ) external view returns (bytes32) {
-        return contextGraphStorage.getAttestedRoot(contextGraphId, batchId);
-    }
-
-    // --- Internal ---
-
-    function _verifyParticipantSignatures(
-        uint256 contextGraphId,
-        bytes32 merkleRoot,
-        uint72[] calldata signerIdentityIds,
-        bytes32[] calldata signatureRs,
-        bytes32[] calldata signatureVss
-    ) internal view {
-        uint8 required = contextGraphStorage.getContextGraphRequiredSignatures(contextGraphId);
-        require(
-            signerIdentityIds.length >= required,
-            "Not enough signatures"
-        );
-        require(
-            signerIdentityIds.length == signatureRs.length &&
-            signerIdentityIds.length == signatureVss.length,
-            "Array length mismatch"
-        );
-
-        bytes32 digest = keccak256(abi.encodePacked(contextGraphId, merkleRoot));
-
-        uint72 prevId = 0;
-        for (uint256 i; i < signerIdentityIds.length; i++) {
-            require(signerIdentityIds[i] > prevId, "Duplicate or unsorted signer");
-            prevId = signerIdentityIds[i];
-
-            require(
-                contextGraphStorage.isParticipant(contextGraphId, signerIdentityIds[i]),
-                "Signer not a participant"
-            );
-
-            bytes32 ethHash = MessageHashUtils.toEthSignedMessageHash(digest);
-            address recovered = ECDSA.recover(ethHash, signatureRs[i], signatureVss[i]);
-
-            uint72 recoveredId = identityStorage.getIdentityId(recovered);
-            require(recoveredId == signerIdentityIds[i], "Invalid signature");
-        }
     }
 }

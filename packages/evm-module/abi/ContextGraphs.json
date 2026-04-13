@@ -16,44 +16,6 @@
         "internalType": "uint256",
         "name": "contextGraphId",
         "type": "uint256"
-      }
-    ],
-    "name": "ContextGraphNotActive",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "ECDSAInvalidSignature",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "length",
-        "type": "uint256"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureLength",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "s",
-        "type": "bytes32"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureS",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
       },
       {
         "internalType": "address",
@@ -88,50 +50,12 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "signerIdentityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "signatureRs",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "signatureVss",
-        "type": "bytes32[]"
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
       }
     ],
-    "name": "addBatchToContextGraph",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "addParticipant",
+    "name": "addParticipantAgent",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -153,8 +77,13 @@
     "inputs": [
       {
         "internalType": "uint72[]",
-        "name": "participantIdentityIds",
+        "name": "hostingNodes",
         "type": "uint72[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "participantAgents",
+        "type": "address[]"
       },
       {
         "internalType": "uint8",
@@ -175,6 +104,11 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "createContextGraph",
@@ -189,48 +123,11 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getAttestedMerkleRoot",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "hub",
     "outputs": [
       {
         "internalType": "contract Hub",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "identityStorage",
-    "outputs": [
-      {
-        "internalType": "contract IdentityStorage",
         "name": "",
         "type": "address"
       }
@@ -271,32 +168,6 @@
   },
   {
     "inputs": [],
-    "name": "knowledgeAssetsStorage",
-    "outputs": [
-      {
-        "internalType": "contract KnowledgeAssetsStorageLike",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "knowledgeCollectionStorage",
-    "outputs": [
-      {
-        "internalType": "contract KnowledgeCollectionStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "name",
     "outputs": [
       {
@@ -316,12 +187,30 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
       }
     ],
-    "name": "removeParticipant",
+    "name": "removeParticipantAgent",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "nodes",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "setHostingNodes",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -360,6 +249,29 @@
         "type": "uint256"
       },
       {
+        "internalType": "address",
+        "name": "newAuthority",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newAuthorityAccountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "updatePublishAuthority",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
         "internalType": "uint8",
         "name": "publishPolicy",
         "type": "uint8"
@@ -368,6 +280,11 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "updatePublishPolicy",

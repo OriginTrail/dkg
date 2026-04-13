@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 
 import {Guardian} from "../Guardian.sol";
 import {KnowledgeAssetsLib} from "../libraries/KnowledgeAssetsLib.sol";
-import {KnowledgeAssetsStorageLike} from "../interfaces/KnowledgeAssetsStorageLike.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
@@ -18,33 +17,76 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  * Inherits Guardian for Hub-based access control and ERC721Enumerable for
  * transferable governance tokens. The logic facade (ContextGraphs.sol) remains
  * stateless and replaceable; all state lives here.
+ *
+ * V10 Phase 7 redesign:
+ *   - Hosting nodes (uint72 identityIds) and participant agents (addresses)
+ *     are tracked as two SEPARATE lists. Decision #21 — nodes and agents are
+ *     different principals; the old conflated `participantIdentityIds` field
+ *     is gone.
+ *   - Quorum (`requiredSignatures`) is bound to hosting nodes only — ACK
+ *     signatures attest storage and come from hosting nodes.
+ *   - 3 curator types are supported via (publishAuthority, publishAuthorityAccountId):
+ *       EOA      -> publishAuthority = wallet, accountId = 0
+ *       Safe     -> publishAuthority = multisig contract, accountId = 0
+ *       PCA      -> publishAuthority = account-owner address (read-only marker),
+ *                   accountId = DKGPublishingConvictionNFT account ID
+ *     The facade is responsible for resolving curator type at publish time.
+ *   - `kcToContextGraph` reverse lookup and `_contextGraphKCList` forward list
+ *     are written via `registerKCToContextGraph` (called from the publish flow
+ *     in Phase 8) and read by Phase 10 random sampling.
+ *   - The legacy `addBatchToContextGraph` / `_contextGraphBatches` /
+ *     `_attestedRoots` / `verifyTripleInclusion` surface is REMOVED. The
+ *     deleted Merkle-inclusion path closes audit finding H2 (forged inclusion
+ *     proofs via caller-supplied storage address).
  */
 contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     string private constant _NAME = "ContextGraphStorage";
     string private constant _VERSION = "1.0.0";
 
+    // -----------------------------------------------------------------------
+    // Storage layout — fresh design (no prior deployments to preserve).
+    // -----------------------------------------------------------------------
+
     uint256 private _contextGraphCounter;
-    mapping(uint256 => KnowledgeAssetsLib.ContextGraph) private _contextGraphs;
 
-    mapping(uint256 => uint256[]) private _contextGraphBatches;
+    // Core context graph metadata (no participant lists; those live in their
+    // own mappings to avoid struct↔dynamic-array mutability constraints).
+    mapping(uint256 contextGraphId => KnowledgeAssetsLib.ContextGraph) private _contextGraphs;
 
-    mapping(uint256 => mapping(uint256 => bytes32)) private _attestedRoots;
+    // Hosting nodes: identity IDs of nodes that store this CG's data.
+    // Sorted ascending, no zeros, no duplicates.
+    mapping(uint256 contextGraphId => uint72[]) private _hostingNodes;
 
-    // --- Events ---
+    // Participant agents: EOA addresses authorised to publish into a curated
+    // CG (used as an allow-list for Safe / PCA-agent flows). Insertion order
+    // preserved; duplicates rejected.
+    mapping(uint256 contextGraphId => address[]) private _participantAgents;
+
+    // Non-zero when curator type is PCA: the DKGPublishingConvictionNFT
+    // account ID whose registered agents are authorised to publish.
+    mapping(uint256 contextGraphId => uint256) private _publishAuthorityAccountId;
+
+    // KC -> CG reverse lookup (Phase 10 random sampling).
+    // Public for convenience; zero means "not registered".
+    mapping(uint256 kcId => uint256 contextGraphId) public kcToContextGraph;
+
+    // CG -> [KC IDs] forward list for uniform random KC selection within a CG.
+    mapping(uint256 contextGraphId => uint256[]) private _contextGraphKCList;
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
 
     event ContextGraphCreated(
         uint256 indexed contextGraphId,
         address indexed owner,
-        uint72[] participantIdentityIds,
+        uint72[] hostingNodes,
+        address[] participantAgents,
         uint8 requiredSignatures,
         uint256 metadataBatchId,
         uint8 publishPolicy,
-        address publishAuthority
-    );
-
-    event ContextGraphExpanded(
-        uint256 indexed contextGraphId,
-        uint256 indexed batchId
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     );
 
     event ContextGraphDeactivated(
@@ -54,22 +96,39 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     event PublishPolicyUpdated(
         uint256 indexed contextGraphId,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     );
 
-    event ParticipantAdded(
+    event PublishAuthorityUpdated(
         uint256 indexed contextGraphId,
-        uint72 identityId
+        address newAuthority,
+        uint256 newAuthorityAccountId
     );
 
-    event ParticipantRemoved(
+    event HostingNodesSet(
         uint256 indexed contextGraphId,
-        uint72 identityId
+        uint72[] nodes
+    );
+
+    event AgentParticipantAdded(
+        uint256 indexed contextGraphId,
+        address indexed agent
+    );
+
+    event AgentParticipantRemoved(
+        uint256 indexed contextGraphId,
+        address indexed agent
     );
 
     event QuorumUpdated(
         uint256 indexed contextGraphId,
         uint8 requiredSignatures
+    );
+
+    event KCRegisteredToContextGraph(
+        uint256 indexed contextGraphId,
+        uint256 indexed kcId
     );
 
     constructor(
@@ -84,30 +143,67 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         return _VERSION;
     }
 
-    // --- Creation ---
+    // -----------------------------------------------------------------------
+    // Creation
+    // -----------------------------------------------------------------------
 
+    /**
+     * @notice Create a new context graph and mint its governance NFT.
+     * @param owner_                       Recipient of the ERC-721 (token holder == manager).
+     * @param hostingNodes                 Sorted ascending, no zeros, no duplicates.
+     * @param participantAgents            EOA allow-list (no zeros, no duplicates).
+     * @param requiredSignatures           ACK quorum, must be in (0, hostingNodes.length].
+     * @param metadataBatchId              Batch ID describing the CG metadata (0 if none).
+     * @param publishPolicy                0 = curated, 1 = open.
+     * @param publishAuthority             Curator address. Required when curated; ignored
+     *                                     (and forced to address(0)) when open.
+     * @param publishAuthorityAccountId    Non-zero for PCA curator type. Requires curated.
+     *                                     Forced to 0 when open.
+     */
     function createContextGraph(
         address owner_,
-        uint72[] calldata participantIdentityIds,
+        uint72[] calldata hostingNodes,
+        address[] calldata participantAgents,
         uint8 requiredSignatures,
         uint256 metadataBatchId,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     ) external onlyContracts returns (uint256 contextGraphId) {
         if (owner_ == address(0)) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero address owner");
         }
-        if (participantIdentityIds.length == 0) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty participants");
+        if (hostingNodes.length == 0) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
         }
-        if (requiredSignatures == 0 || requiredSignatures > participantIdentityIds.length) {
+        if (requiredSignatures == 0 || requiredSignatures > hostingNodes.length) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid M/N threshold");
         }
         if (publishPolicy > 1) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid publishPolicy");
         }
-        if (publishPolicy == 0 && publishAuthority == address(0)) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("curated requires publishAuthority");
+        _validateHostingNodes(hostingNodes);
+
+        // Curator config is policy-dependent.
+        address normalizedAuthority;
+        uint256 normalizedAccountId;
+        if (publishPolicy == 0) {
+            // Curated: authority required; accountId optional (non-zero -> PCA).
+            if (publishAuthority == address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("curated requires publishAuthority");
+            }
+            normalizedAuthority = publishAuthority;
+            normalizedAccountId = publishAuthorityAccountId;
+        } else {
+            // Open: authority + accountId must be empty.
+            if (publishAuthority != address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("open policy: zero authority required");
+            }
+            if (publishAuthorityAccountId != 0) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("open policy: zero accountId required");
+            }
+            normalizedAuthority = address(0);
+            normalizedAccountId = 0;
         }
 
         contextGraphId = ++_contextGraphCounter;
@@ -115,56 +211,109 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         _mint(owner_, contextGraphId);
 
         KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[contextGraphId];
-        cg.participantIdentityIds = participantIdentityIds;
         cg.requiredSignatures = requiredSignatures;
         cg.metadataBatchId = metadataBatchId;
         cg.active = true;
         cg.createdAt = block.timestamp;
         cg.publishPolicy = publishPolicy;
-        cg.publishAuthority = publishAuthority;
+        cg.publishAuthority = normalizedAuthority;
+
+        // Copy split lists into their own mappings.
+        uint72[] storage storedNodes = _hostingNodes[contextGraphId];
+        for (uint256 i; i < hostingNodes.length; i++) {
+            storedNodes.push(hostingNodes[i]);
+        }
+
+        address[] storage storedAgents = _participantAgents[contextGraphId];
+        for (uint256 i; i < participantAgents.length; i++) {
+            address agent = participantAgents[i];
+            if (agent == address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero participant agent");
+            }
+            // Linear dedup; small lists in practice.
+            for (uint256 j; j < i; j++) {
+                if (participantAgents[j] == agent) {
+                    revert KnowledgeAssetsLib.AgentParticipantAlreadyExists(contextGraphId, agent);
+                }
+            }
+            storedAgents.push(agent);
+        }
+
+        if (normalizedAccountId != 0) {
+            _publishAuthorityAccountId[contextGraphId] = normalizedAccountId;
+        }
 
         emit ContextGraphCreated(
             contextGraphId,
             owner_,
-            participantIdentityIds,
+            hostingNodes,
+            participantAgents,
             requiredSignatures,
             metadataBatchId,
             publishPolicy,
-            publishAuthority
+            normalizedAuthority,
+            normalizedAccountId
         );
     }
 
-    // --- Expansion tracking ---
+    function _validateHostingNodes(uint72[] calldata hostingNodes) internal pure {
+        uint72 prev = 0;
+        for (uint256 i; i < hostingNodes.length; i++) {
+            uint72 current = hostingNodes[i];
+            if (current == 0) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero hosting node id");
+            }
+            if (current <= prev) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("hosting nodes unsorted or duplicate");
+            }
+            prev = current;
+        }
+    }
 
-    function addBatchToContextGraph(
+    // -----------------------------------------------------------------------
+    // KC <-> CG registration (Phase 8 publish flow + Phase 10 sampling)
+    // -----------------------------------------------------------------------
+
+    /**
+     * @notice Bind a Knowledge Collection to a Context Graph.
+     * @dev Records both the reverse lookup (`kcToContextGraph[kcId] = cgId`)
+     *      and the forward list (`_contextGraphKCList[cgId].push(kcId)`).
+     *      Reverts on double registration.
+     */
+    function registerKCToContextGraph(
         uint256 contextGraphId,
-        uint256 batchId
+        uint256 kcId
     ) external onlyContracts {
+        if (kcId == 0) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero kcId");
+        }
         if (!_contextGraphs[contextGraphId].active) {
             revert KnowledgeAssetsLib.ContextGraphNotActive(contextGraphId);
         }
-        _contextGraphBatches[contextGraphId].push(batchId);
-        emit ContextGraphExpanded(contextGraphId, batchId);
+        uint256 existing = kcToContextGraph[kcId];
+        if (existing != 0) {
+            revert KnowledgeAssetsLib.KCAlreadyRegisteredToContextGraph(kcId, existing);
+        }
+        kcToContextGraph[kcId] = contextGraphId;
+        _contextGraphKCList[contextGraphId].push(kcId);
+        emit KCRegisteredToContextGraph(contextGraphId, kcId);
     }
 
-    // --- Attested roots (moved from ContextGraphs for stateless facade) ---
-
-    function setAttestedRoot(
-        uint256 contextGraphId,
-        uint256 batchId,
-        bytes32 merkleRoot
-    ) external onlyContracts {
-        _attestedRoots[contextGraphId][batchId] = merkleRoot;
+    function getContextGraphKCList(
+        uint256 contextGraphId
+    ) external view returns (uint256[] memory) {
+        return _contextGraphKCList[contextGraphId];
     }
 
-    function getAttestedRoot(
-        uint256 contextGraphId,
-        uint256 batchId
-    ) external view returns (bytes32) {
-        return _attestedRoots[contextGraphId][batchId];
+    function getContextGraphKCCount(
+        uint256 contextGraphId
+    ) external view returns (uint256) {
+        return _contextGraphKCList[contextGraphId].length;
     }
 
-    // --- Deactivation ---
+    // -----------------------------------------------------------------------
+    // Deactivation
+    // -----------------------------------------------------------------------
 
     function deactivateContextGraph(
         uint256 contextGraphId
@@ -174,135 +323,206 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         emit ContextGraphDeactivated(contextGraphId);
     }
 
-    // --- Publish policy ---
+    // -----------------------------------------------------------------------
+    // Publish policy & authority
+    // -----------------------------------------------------------------------
 
+    /**
+     * @notice Replace the publish policy + curator config in a single call.
+     * @dev When `publishPolicy == 1` (open), the new authority and accountId
+     *      MUST both be zero — open CGs have no curator.
+     */
     function updatePublishPolicy(
         uint256 contextGraphId,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     ) external onlyContracts {
         _requireExists(contextGraphId);
         if (publishPolicy > 1) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid publishPolicy");
         }
-        if (publishPolicy == 0 && publishAuthority == address(0)) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("curated requires publishAuthority");
-        }
-
-        _contextGraphs[contextGraphId].publishPolicy = publishPolicy;
-        _contextGraphs[contextGraphId].publishAuthority = publishAuthority;
-
-        emit PublishPolicyUpdated(contextGraphId, publishPolicy, publishAuthority);
-    }
-
-    // --- Participant governance ---
-
-    function addParticipant(
-        uint256 contextGraphId,
-        uint72 identityId
-    ) external onlyContracts {
-        _requireExists(contextGraphId);
-        require(identityId != 0, "Identity ID cannot be zero");
-        uint72[] storage participants = _contextGraphs[contextGraphId].participantIdentityIds;
-        uint256 len = participants.length;
-
-        // Find insertion point to maintain ascending sort order
-        uint256 insertAt = len;
-        for (uint256 i; i < len; i++) {
-            if (participants[i] == identityId) {
-                revert KnowledgeAssetsLib.ParticipantAlreadyExists(contextGraphId, identityId);
+        if (publishPolicy == 0) {
+            if (publishAuthority == address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("curated requires publishAuthority");
             }
-            if (participants[i] > identityId && insertAt == len) {
-                insertAt = i;
+        } else {
+            if (publishAuthority != address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("open policy: zero authority required");
+            }
+            if (publishAuthorityAccountId != 0) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("open policy: zero accountId required");
             }
         }
 
-        participants.push(0); // extend array
-        for (uint256 j = len; j > insertAt; j--) {
-            participants[j] = participants[j - 1];
-        }
-        participants[insertAt] = identityId;
+        KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[contextGraphId];
+        cg.publishPolicy = publishPolicy;
+        cg.publishAuthority = publishAuthority;
+        _publishAuthorityAccountId[contextGraphId] = publishAuthorityAccountId;
 
-        emit ParticipantAdded(contextGraphId, identityId);
+        emit PublishPolicyUpdated(
+            contextGraphId,
+            publishPolicy,
+            publishAuthority,
+            publishAuthorityAccountId
+        );
     }
 
-    function removeParticipant(
+    /**
+     * @notice Update only the curator (authority + accountId), keeping policy.
+     * @dev Convenience for rotating an EOA / Safe / PCA without touching the
+     *      open/curated bit. Caller is the facade — it is responsible for
+     *      gating to the NFT owner.
+     */
+    function updatePublishAuthority(
         uint256 contextGraphId,
-        uint72 identityId
+        address newAuthority,
+        uint256 newAuthorityAccountId
     ) external onlyContracts {
         _requireExists(contextGraphId);
-        uint72[] storage participants = _contextGraphs[contextGraphId].participantIdentityIds;
-        uint256 len = participants.length;
+        KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[contextGraphId];
+        if (cg.publishPolicy == 0) {
+            // Curated: authority required.
+            if (newAuthority == address(0)) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("curated requires publishAuthority");
+            }
+        } else {
+            // Open: authority + accountId must remain empty.
+            if (newAuthority != address(0) || newAuthorityAccountId != 0) {
+                revert KnowledgeAssetsLib.InvalidContextGraphConfig("open policy: clear authority/accountId");
+            }
+        }
+        cg.publishAuthority = newAuthority;
+        _publishAuthorityAccountId[contextGraphId] = newAuthorityAccountId;
 
-        if (len <= _contextGraphs[contextGraphId].requiredSignatures) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("removal would break quorum");
+        emit PublishAuthorityUpdated(contextGraphId, newAuthority, newAuthorityAccountId);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hosting node governance — full-replace
+    // -----------------------------------------------------------------------
+
+    /**
+     * @notice Replace the hosting node list entirely. New list is validated
+     *         (sorted, no zeros, no duplicates) and the existing quorum must
+     *         still fit in the new size.
+     */
+    function setHostingNodes(
+        uint256 contextGraphId,
+        uint72[] calldata nodes
+    ) external onlyContracts {
+        _requireExists(contextGraphId);
+        if (nodes.length == 0) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
+        }
+        if (_contextGraphs[contextGraphId].requiredSignatures > nodes.length) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("setHostingNodes would break quorum");
+        }
+        _validateHostingNodes(nodes);
+
+        // Full replace.
+        delete _hostingNodes[contextGraphId];
+        uint72[] storage stored = _hostingNodes[contextGraphId];
+        for (uint256 i; i < nodes.length; i++) {
+            stored.push(nodes[i]);
         }
 
+        emit HostingNodesSet(contextGraphId, nodes);
+    }
+
+    // -----------------------------------------------------------------------
+    // Participant agent governance
+    // -----------------------------------------------------------------------
+
+    function addParticipantAgent(
+        uint256 contextGraphId,
+        address agent
+    ) external onlyContracts {
+        _requireExists(contextGraphId);
+        if (agent == address(0)) {
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero participant agent");
+        }
+        address[] storage agents = _participantAgents[contextGraphId];
+        uint256 len = agents.length;
         for (uint256 i; i < len; i++) {
-            if (participants[i] == identityId) {
-                // Shift left to preserve sorted order (no swap-pop)
+            if (agents[i] == agent) {
+                revert KnowledgeAssetsLib.AgentParticipantAlreadyExists(contextGraphId, agent);
+            }
+        }
+        agents.push(agent);
+        emit AgentParticipantAdded(contextGraphId, agent);
+    }
+
+    function removeParticipantAgent(
+        uint256 contextGraphId,
+        address agent
+    ) external onlyContracts {
+        _requireExists(contextGraphId);
+        address[] storage agents = _participantAgents[contextGraphId];
+        uint256 len = agents.length;
+
+        for (uint256 i; i < len; i++) {
+            if (agents[i] == agent) {
+                // Shift left to preserve insertion order (no swap-pop).
                 for (uint256 j = i; j < len - 1; j++) {
-                    participants[j] = participants[j + 1];
+                    agents[j] = agents[j + 1];
                 }
-                participants.pop();
-                emit ParticipantRemoved(contextGraphId, identityId);
+                agents.pop();
+                emit AgentParticipantRemoved(contextGraphId, agent);
                 return;
             }
         }
-        revert KnowledgeAssetsLib.ParticipantNotFound(contextGraphId, identityId);
+        revert KnowledgeAssetsLib.AgentParticipantNotFound(contextGraphId, agent);
     }
+
+    // -----------------------------------------------------------------------
+    // Quorum
+    // -----------------------------------------------------------------------
 
     function updateQuorum(
         uint256 contextGraphId,
         uint8 requiredSignatures
     ) external onlyContracts {
         _requireExists(contextGraphId);
-        uint256 participantCount = _contextGraphs[contextGraphId].participantIdentityIds.length;
-        if (requiredSignatures == 0 || requiredSignatures > participantCount) {
+        uint256 hostCount = _hostingNodes[contextGraphId].length;
+        if (requiredSignatures == 0 || requiredSignatures > hostCount) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid M/N threshold");
         }
         _contextGraphs[contextGraphId].requiredSignatures = requiredSignatures;
         emit QuorumUpdated(contextGraphId, requiredSignatures);
     }
 
-    // --- Participant verification ---
-
-    function isParticipant(
-        uint256 contextGraphId,
-        uint72 identityId
-    ) external view returns (bool) {
-        uint72[] storage participants = _contextGraphs[contextGraphId].participantIdentityIds;
-        for (uint256 i; i < participants.length; i++) {
-            if (participants[i] == identityId) return true;
-        }
-        return false;
-    }
-
-    // --- Getters ---
+    // -----------------------------------------------------------------------
+    // Read APIs
+    // -----------------------------------------------------------------------
 
     function getContextGraph(
         uint256 contextGraphId
     ) external view returns (
         address owner_,
-        uint72[] memory participantIdentityIds,
+        uint72[] memory hostingNodes,
+        address[] memory participantAgents,
         uint8 requiredSignatures,
         uint256 metadataBatchId,
         bool active,
         uint256 createdAt,
         uint8 publishPolicy,
-        address publishAuthority
+        address publishAuthority,
+        uint256 publishAuthorityAccountId
     ) {
         _requireExists(contextGraphId);
         KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[contextGraphId];
         return (
             ownerOf(contextGraphId),
-            cg.participantIdentityIds,
+            _hostingNodes[contextGraphId],
+            _participantAgents[contextGraphId],
             cg.requiredSignatures,
             cg.metadataBatchId,
             cg.active,
             cg.createdAt,
             cg.publishPolicy,
-            cg.publishAuthority
+            cg.publishAuthority,
+            _publishAuthorityAccountId[contextGraphId]
         );
     }
 
@@ -312,10 +532,38 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         return _contextGraphs[contextGraphId].requiredSignatures;
     }
 
-    function getContextGraphParticipants(
+    function getHostingNodes(
         uint256 contextGraphId
     ) external view returns (uint72[] memory) {
-        return _contextGraphs[contextGraphId].participantIdentityIds;
+        return _hostingNodes[contextGraphId];
+    }
+
+    function getParticipantAgents(
+        uint256 contextGraphId
+    ) external view returns (address[] memory) {
+        return _participantAgents[contextGraphId];
+    }
+
+    function isHostingNode(
+        uint256 contextGraphId,
+        uint72 identityId
+    ) external view returns (bool) {
+        uint72[] storage nodes = _hostingNodes[contextGraphId];
+        for (uint256 i; i < nodes.length; i++) {
+            if (nodes[i] == identityId) return true;
+        }
+        return false;
+    }
+
+    function isParticipantAgent(
+        uint256 contextGraphId,
+        address agent
+    ) external view returns (bool) {
+        address[] storage agents = _participantAgents[contextGraphId];
+        for (uint256 i; i < agents.length; i++) {
+            if (agents[i] == agent) return true;
+        }
+        return false;
     }
 
     function getContextGraphOwner(
@@ -330,18 +578,6 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         return _contextGraphs[contextGraphId].active;
     }
 
-    function getContextGraphBatches(
-        uint256 contextGraphId
-    ) external view returns (uint256[] memory) {
-        return _contextGraphBatches[contextGraphId];
-    }
-
-    function getContextGraphBatchCount(
-        uint256 contextGraphId
-    ) external view returns (uint256) {
-        return _contextGraphBatches[contextGraphId].length;
-    }
-
     function getPublishPolicy(
         uint256 contextGraphId
     ) external view returns (uint8 publishPolicy, address publishAuthority) {
@@ -349,50 +585,28 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         return (cg.publishPolicy, cg.publishAuthority);
     }
 
+    function getPublishAuthorityAccountId(
+        uint256 contextGraphId
+    ) external view returns (uint256) {
+        return _publishAuthorityAccountId[contextGraphId];
+    }
+
+    /**
+     * @notice Convenience helper: true iff the CG is curated (publishPolicy == 0).
+     */
+    function getIsCurated(
+        uint256 contextGraphId
+    ) external view returns (bool) {
+        return _contextGraphs[contextGraphId].publishPolicy == 0;
+    }
+
     function getLatestContextGraphId() external view returns (uint256) {
         return _contextGraphCounter;
     }
 
-    // --- Merkle verification ---
-
-    function verifyTripleInclusion(
-        uint256 contextGraphId,
-        uint256 batchId,
-        bytes32 tripleHash,
-        uint256 leafIndex,
-        bytes32[] calldata siblings,
-        address kaStorageAddress
-    ) external view returns (bool valid) {
-        require(_contextGraphs[contextGraphId].active, "ContextGraph not active");
-
-        bool batchBelongs = false;
-        uint256[] storage batches = _contextGraphBatches[contextGraphId];
-        for (uint256 i = 0; i < batches.length; i++) {
-            if (batches[i] == batchId) {
-                batchBelongs = true;
-                break;
-            }
-        }
-        require(batchBelongs, "Batch not in context graph");
-
-        bytes32 onChainRoot = KnowledgeAssetsStorageLike(kaStorageAddress)
-            .getBatchMerkleRoot(batchId);
-
-        bytes32 computed = tripleHash;
-        uint256 idx = leafIndex;
-        for (uint256 i = 0; i < siblings.length; i++) {
-            if (idx % 2 == 0) {
-                computed = keccak256(abi.encodePacked(computed, siblings[i]));
-            } else {
-                computed = keccak256(abi.encodePacked(siblings[i], computed));
-            }
-            idx /= 2;
-        }
-
-        return computed == onChainRoot;
-    }
-
-    // --- Internal ---
+    // -----------------------------------------------------------------------
+    // Internal
+    // -----------------------------------------------------------------------
 
     function _requireExists(uint256 contextGraphId) internal view {
         _requireOwned(contextGraphId);
@@ -423,16 +637,18 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
 
         // On transfer (not mint/burn): if the curated publishAuthority was the
         // previous owner, auto-rotate it to the new owner so governance follows
-        // the NFT and the old owner can't keep publishing.
+        // the NFT and the old owner can't keep publishing. Always clear the
+        // PCA accountId — the new owner is unlikely to be the same PCA, and
+        // they must explicitly opt back into PCA mode if desired.
         if (from != address(0) && to != address(0)) {
             KnowledgeAssetsLib.ContextGraph storage cg = _contextGraphs[tokenId];
             if (cg.publishAuthority == from) {
                 cg.publishAuthority = to;
-                emit PublishPolicyUpdated(tokenId, cg.publishPolicy, to);
+                _publishAuthorityAccountId[tokenId] = 0;
+                emit PublishAuthorityUpdated(tokenId, to, 0);
             }
         }
 
         return from;
     }
 }
-

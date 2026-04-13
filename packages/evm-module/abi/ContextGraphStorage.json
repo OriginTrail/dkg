@@ -16,6 +16,38 @@
         "internalType": "uint256",
         "name": "contextGraphId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentParticipantAlreadyExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentParticipantNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
       }
     ],
     "name": "ContextGraphNotActive",
@@ -209,32 +241,16 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "kcId",
         "type": "uint256"
       },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "ParticipantAlreadyExists",
-    "type": "error"
-  },
-  {
-    "inputs": [
       {
         "internalType": "uint256",
-        "name": "contextGraphId",
+        "name": "existingContextGraphId",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
       }
     ],
-    "name": "ParticipantNotFound",
+    "name": "KCAlreadyRegisteredToContextGraph",
     "type": "error"
   },
   {
@@ -262,6 +278,44 @@
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentParticipantAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "AgentParticipantRemoved",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -331,8 +385,14 @@
       {
         "indexed": false,
         "internalType": "uint72[]",
-        "name": "participantIdentityIds",
+        "name": "hostingNodes",
         "type": "uint72[]"
+      },
+      {
+        "indexed": false,
+        "internalType": "address[]",
+        "name": "participantAgents",
+        "type": "address[]"
       },
       {
         "indexed": false,
@@ -357,6 +417,12 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "ContextGraphCreated",
@@ -385,13 +451,32 @@
         "type": "uint256"
       },
       {
+        "indexed": false,
+        "internalType": "uint72[]",
+        "name": "nodes",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "HostingNodesSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": true,
         "internalType": "uint256",
-        "name": "batchId",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "kcId",
         "type": "uint256"
       }
     ],
-    "name": "ContextGraphExpanded",
+    "name": "KCRegisteredToContextGraph",
     "type": "event"
   },
   {
@@ -449,31 +534,18 @@
       },
       {
         "indexed": false,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "ParticipantAdded",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "newAuthority",
+        "type": "address"
       },
       {
         "indexed": false,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "uint256",
+        "name": "newAuthorityAccountId",
+        "type": "uint256"
       }
     ],
-    "name": "ParticipantRemoved",
+    "name": "PublishAuthorityUpdated",
     "type": "event"
   },
   {
@@ -496,6 +568,12 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "PublishPolicyUpdated",
@@ -572,30 +650,12 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
       }
     ],
-    "name": "addBatchToContextGraph",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "addParticipant",
+    "name": "addParticipantAgent",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -646,8 +706,13 @@
       },
       {
         "internalType": "uint72[]",
-        "name": "participantIdentityIds",
+        "name": "hostingNodes",
         "type": "uint72[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "participantAgents",
+        "type": "address[]"
       },
       {
         "internalType": "uint8",
@@ -668,6 +733,11 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "createContextGraph",
@@ -719,30 +789,6 @@
         "internalType": "uint256",
         "name": "contextGraphId",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getAttestedRoot",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
       }
     ],
     "name": "getContextGraph",
@@ -754,8 +800,13 @@
       },
       {
         "internalType": "uint72[]",
-        "name": "participantIdentityIds",
+        "name": "hostingNodes",
         "type": "uint72[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "participantAgents",
+        "type": "address[]"
       },
       {
         "internalType": "uint8",
@@ -786,6 +837,11 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -799,7 +855,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getContextGraphBatchCount",
+    "name": "getContextGraphKCCount",
     "outputs": [
       {
         "internalType": "uint256",
@@ -818,7 +874,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getContextGraphBatches",
+    "name": "getContextGraphKCList",
     "outputs": [
       {
         "internalType": "uint256[]",
@@ -856,7 +912,26 @@
         "type": "uint256"
       }
     ],
-    "name": "getContextGraphParticipants",
+    "name": "getContextGraphRequiredSignatures",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getHostingNodes",
     "outputs": [
       {
         "internalType": "uint72[]",
@@ -875,12 +950,12 @@
         "type": "uint256"
       }
     ],
-    "name": "getContextGraphRequiredSignatures",
+    "name": "getIsCurated",
     "outputs": [
       {
-        "internalType": "uint8",
+        "internalType": "bool",
         "name": "",
-        "type": "uint8"
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -889,6 +964,44 @@
   {
     "inputs": [],
     "name": "getLatestContextGraphId",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getParticipantAgents",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getPublishAuthorityAccountId",
     "outputs": [
       {
         "internalType": "uint256",
@@ -999,12 +1112,55 @@
         "type": "uint72"
       }
     ],
-    "name": "isParticipant",
+    "name": "isHostingNode",
     "outputs": [
       {
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "isParticipantAgent",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "kcId",
+        "type": "uint256"
+      }
+    ],
+    "name": "kcToContextGraph",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1050,12 +1206,30 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
+        "internalType": "uint256",
+        "name": "kcId",
+        "type": "uint256"
       }
     ],
-    "name": "removeParticipant",
+    "name": "registerKCToContextGraph",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "agent",
+        "type": "address"
+      }
+    ],
+    "name": "removeParticipantAgent",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1137,17 +1311,12 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
+        "internalType": "uint72[]",
+        "name": "nodes",
+        "type": "uint72[]"
       }
     ],
-    "name": "setAttestedRoot",
+    "name": "setHostingNodes",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1316,6 +1485,29 @@
         "type": "uint256"
       },
       {
+        "internalType": "address",
+        "name": "newAuthority",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newAuthorityAccountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "updatePublishAuthority",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
         "internalType": "uint8",
         "name": "publishPolicy",
         "type": "uint8"
@@ -1324,6 +1516,11 @@
         "internalType": "address",
         "name": "publishAuthority",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
       }
     ],
     "name": "updatePublishPolicy",
@@ -1347,50 +1544,6 @@
     "name": "updateQuorum",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "tripleHash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "leafIndex",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "siblings",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "address",
-        "name": "kaStorageAddress",
-        "type": "address"
-      }
-    ],
-    "name": "verifyTripleInclusion",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "valid",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

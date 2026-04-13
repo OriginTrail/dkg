@@ -38,14 +38,27 @@ library KnowledgeAssetsLib {
         uint256 createdAt;
     }
 
+    /**
+     * @dev Core context graph metadata.
+     *
+     * The two participant lists (hosting nodes — uint72 identity IDs — and
+     * participant agents — addresses) live in their own mappings inside
+     * ContextGraphStorage rather than as struct fields, because Solidity's
+     * memory↔storage copy semantics make struct-level dynamic arrays
+     * awkward to mutate.
+     *
+     * `publishAuthority` stores the curator address for EOA / Safe curator
+     * types AND the account-owner address for PCA. The curator type is
+     * disambiguated by the `_publishAuthorityAccountId` mapping — non-zero
+     * means PCA.
+     */
     struct ContextGraph {
-        uint72[] participantIdentityIds;
         uint8 requiredSignatures;
         uint256 metadataBatchId;
         bool active;
         uint256 createdAt;
         uint8 publishPolicy;      // 0 = curated (default), 1 = open
-        address publishAuthority;  // Curator address (EOA, multisig, or PCA)
+        address publishAuthority;  // Curator address (EOA, Safe multisig, or PCA owner)
     }
 
     error PublisherRangeExhausted(address publisher, uint64 needed, uint64 available);
@@ -68,6 +81,7 @@ library KnowledgeAssetsLib {
     error ContextGraphNotFound(uint256 contextGraphId);
     error UnauthorizedPublisher(uint256 contextGraphId, address publisher);
     error NotContextGraphOwner(uint256 contextGraphId, address caller);
-    error ParticipantAlreadyExists(uint256 contextGraphId, uint72 identityId);
-    error ParticipantNotFound(uint256 contextGraphId, uint72 identityId);
+    error AgentParticipantAlreadyExists(uint256 contextGraphId, address agent);
+    error AgentParticipantNotFound(uint256 contextGraphId, address agent);
+    error KCAlreadyRegisteredToContextGraph(uint256 kcId, uint256 existingContextGraphId);
 }
