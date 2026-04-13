@@ -60,6 +60,33 @@ jobs:
       - name: Build current-platform MarkItDown binary
         run: node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --force
 
+      - name: Smoke test bundled MarkItDown binary
+        shell: bash
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+        run: |
+          node - <<'NODE'
+          const { spawnSync } = require('node:child_process');
+          const path = require('node:path');
+
+          const binaryPath = path.resolve('packages/cli/bin', process.env.ASSET_NAME);
+          const result = spawnSync(binaryPath, [], { encoding: 'utf8' });
+
+          if (result.error) {
+            throw result.error;
+          }
+          if (result.status !== 2) {
+            throw new Error(
+              `Expected ${binaryPath} to exit with code 2 on the no-arg usage path, got ${result.status}.\n`
+              + `stdout:\n${result.stdout ?? ''}\n`
+              + `stderr:\n${result.stderr ?? ''}`,
+            );
+          }
+          if (!String(result.stderr ?? '').includes('usage: markitdown <file-path>')) {
+            throw new Error(`Smoke test for ${binaryPath} did not print the expected usage text.`);
+          }
+          NODE
+
       - name: Upload MarkItDown binary artifact
         uses: actions/upload-artifact@v4
         with:

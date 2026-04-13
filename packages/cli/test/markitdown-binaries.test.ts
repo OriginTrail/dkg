@@ -353,5 +353,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     const workflowRaw = await readFile(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf-8');
     expect(workflowRaw).toContain('markitdown-targets.json');
     expect(workflowRaw).toContain('fromJSON(needs.markitdown-target-matrix.outputs.matrix)');
+    expect(workflowRaw).toContain('Smoke test bundled MarkItDown binary');
+    expect(workflowRaw).toContain('usage: markitdown <file-path>');
   });
 });

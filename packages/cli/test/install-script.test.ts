@@ -89,7 +89,6 @@ describe('install.sh validation', () => {
     expect(content).toContain('bundle-markitdown-binaries.mjs');
     expect(content).toContain('this checkout predates bundled MarkItDown support');
     expect(content).toContain('--build-current-platform');
-    expect(content).toContain('--force');
     expect(content).toContain('--best-effort');
   });
 });

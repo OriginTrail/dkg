@@ -240,7 +240,7 @@ describe('blue-green checkForUpdate', () => {
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
-    expect(allCmds.some(c => c.cmd.includes('--force') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('--force') && c.cwd === targetDir)).toBe(false);
     expect(allCmds.some(c => c.cmd.includes('--best-effort') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build') && c.cwd === targetDir)).toBe(false);
 

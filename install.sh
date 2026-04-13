@@ -53,7 +53,7 @@ stage_markitdown() {
     return
   fi
   info "Staging MarkItDown binary in slot $slot_name ..."
-  (cd "$cli_dir" && node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform --force --best-effort)
+  (cd "$cli_dir" && node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort)
 }
 
 mkdir -p "$RELEASES_DIR"

@@ -4968,7 +4968,7 @@ async function _performUpdateInner(
     }
 
     log('Auto-update: staging MarkItDown binary for the inactive slot...');
-    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --force --best-effort', {
+    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort', {
       cwd: targetDir,
       encoding: 'utf-8',
       timeout: 900_000,

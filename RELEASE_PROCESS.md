@@ -90,8 +90,9 @@ published in one command. Private packages (`@origintrail-official/dkg-evm-modul
 
 The published `@origintrail-official/dkg` package now runs a best-effort postinstall
 step that downloads the current-platform MarkItDown binary from the matching GitHub
-Release into `packages/cli/bin`. Make sure the GitHub Release for the same version
-already exists before publishing to npm.
+Release into the installed package `bin/` directory (for example
+`node_modules/@origintrail-official/dkg/bin`). Make sure the GitHub Release for the
+same version already exists before publishing to npm.
 
 Verify after publishing:
 
