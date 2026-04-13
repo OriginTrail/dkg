@@ -5050,11 +5050,15 @@ async function _performUpdateInner(
     }
 
     log('Auto-update: staging MarkItDown binary for the inactive slot...');
-    await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort', {
-      cwd: targetDir,
-      encoding: 'utf-8',
-      timeout: 900_000,
-    });
+    try {
+      await execAsync('node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort', {
+        cwd: targetDir,
+        encoding: 'utf-8',
+        timeout: 900_000,
+      });
+    } catch (markItDownErr: any) {
+      log(`Auto-update: MarkItDown staging failed in slot ${target} â€” ${markItDownErr.message}. Continuing without document conversion on this node.`);
+    }
   } catch (err: any) {
     log(`Auto-update: build failed in slot ${target} — ${err.message}. Active slot untouched.`);
     return 'failed';

@@ -175,6 +175,14 @@ function metadataMatchesExpected(actualMetadata, expectedMetadata) {
   return Object.entries(expectedMetadata).every(([key, value]) => actualMetadata[key] === value);
 }
 
+function parseMetadataText(text) {
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Malformed metadata file');
+  }
+  return parsed;
+}
+
 async function writeMetadataFile(binaryPath, metadata) {
   await writeFile(metadataPathFor(binaryPath), `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
 }
@@ -283,14 +291,22 @@ export async function downloadBinaryAsset({
   await ensureDir(destinationDir);
   const assetUrl = releaseAssetUrl(baseUrl, assetName);
   const checksumUrl = `${assetUrl}.sha256`;
-  const [bytes, checksumText] = await Promise.all([
+  const metadataUrl = `${assetUrl}.meta.json`;
+  const [bytes, checksumText, metadataText] = await Promise.all([
     fetchBytes(assetUrl),
     fetchText(checksumUrl),
+    fetchText(metadataUrl),
   ]);
   const expectedHash = parseSha256File(checksumText);
   const actualHash = sha256Hex(bytes);
   if (actualHash !== expectedHash) {
     throw new Error(`Checksum mismatch for ${assetName}: expected ${expectedHash}, got ${actualHash}`);
+  }
+  const releaseMetadata = parseMetadataText(metadataText);
+  if (!metadataMatchesExpected(releaseMetadata, expectedMetadata)) {
+    throw new Error(
+      `Metadata mismatch for ${assetName}: expected ${JSON.stringify(expectedMetadata)}, got ${JSON.stringify(releaseMetadata)}`,
+    );
   }
 
   const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -311,7 +327,7 @@ export async function downloadBinaryAsset({
     await writeFile(tempDestination, bytes);
     ensureExecutable(tempDestination);
     await writeFile(tempChecksumPath, `${expectedHash}  ${assetName}\n`, 'utf-8');
-    await writeFile(tempMetadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`, 'utf-8');
+    await writeFile(tempMetadataPath, metadataText.endsWith('\n') ? metadataText : `${metadataText}\n`, 'utf-8');
     if (backupDestination) {
       await rename(destination, backupDestination);
       movedDestinationToBackup = true;

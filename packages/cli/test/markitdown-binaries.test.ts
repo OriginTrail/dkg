@@ -22,6 +22,7 @@ import {
 
 describe('bundle-markitdown-binaries helpers', () => {
   const CLI_VERSION = '9.0.0-rc.3';
+  const RELEASE_METADATA_TEXT = `${JSON.stringify({ source: 'release', cliVersion: CLI_VERSION }, null, 2)}\n`;
   let tmpPaths: string[] = [];
 
   afterEach(async () => {
@@ -67,6 +68,11 @@ describe('bundle-markitdown-binaries helpers', () => {
       if (req.url === `/release/${assetName}.sha256`) {
         res.writeHead(200, { 'content-type': 'text/plain' });
         res.end(`${hash}  ${assetName}\n`);
+        return;
+      }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
         return;
       }
       res.writeHead(404);
@@ -140,6 +146,11 @@ describe('bundle-markitdown-binaries helpers', () => {
         res.end(`${hash}  ${assetName}\n`);
         return;
       }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
+        return;
+      }
       res.writeHead(404);
       res.end();
     });
@@ -188,6 +199,11 @@ describe('bundle-markitdown-binaries helpers', () => {
       if (req.url === `/release/${assetName}.sha256`) {
         res.writeHead(200, { 'content-type': 'text/plain' });
         res.end(`${refreshedHash}  ${assetName}\n`);
+        return;
+      }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
         return;
       }
       res.writeHead(404);
@@ -275,6 +291,11 @@ describe('bundle-markitdown-binaries helpers', () => {
         res.end(`${refreshedHash}  ${assetName}\n`);
         return;
       }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
+        return;
+      }
       res.writeHead(404);
       res.end();
     });
@@ -335,6 +356,11 @@ describe('bundle-markitdown-binaries helpers', () => {
         res.end(`deadbeef  ${assetName}\n`);
         return;
       }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
+        return;
+      }
       res.writeHead(404);
       res.end();
     });
@@ -349,6 +375,49 @@ describe('bundle-markitdown-binaries helpers', () => {
         baseUrl: `http://127.0.0.1:${port}/release`,
         cliVersion: CLI_VERSION,
       })).rejects.toThrow(/Checksum mismatch/);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    }
+  });
+
+  it('rejects release assets whose published metadata targets a different CLI version', async () => {
+    const destinationDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-bad-meta-'));
+    tmpPaths.push(destinationDir);
+
+    const assetName = 'markitdown-test';
+    const bytes = Buffer.from('bad metadata case', 'utf-8');
+    const hash = sha256Hex(bytes);
+
+    const server = createServer((req, res) => {
+      if (req.url === `/release/${assetName}`) {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(bytes);
+        return;
+      }
+      if (req.url === `/release/${assetName}.sha256`) {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(`${hash}  ${assetName}\n`);
+        return;
+      }
+      if (req.url === `/release/${assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(`${JSON.stringify({ source: 'release', cliVersion: '9.0.0-rc.2' }, null, 2)}\n`);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      await expect(downloadBinaryAsset({
+        assetName,
+        destinationDir,
+        baseUrl: `http://127.0.0.1:${port}/release`,
+        cliVersion: CLI_VERSION,
+      })).rejects.toThrow(/Metadata mismatch/);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     }
@@ -376,6 +445,11 @@ describe('bundle-markitdown-binaries helpers', () => {
       if (req.url === `/release/${target.assetName}.sha256`) {
         res.writeHead(200, { 'content-type': 'text/plain' });
         res.end(`${hash}  ${target.assetName}\n`);
+        return;
+      }
+      if (req.url === `/release/${target.assetName}.meta.json`) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(RELEASE_METADATA_TEXT);
         return;
       }
       res.writeHead(404);

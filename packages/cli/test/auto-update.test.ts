@@ -271,6 +271,26 @@ describe('blue-green checkForUpdate', () => {
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
   });
 
+  it('continues the update when MarkItDown staging fails inside the best-effort git-update step', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb223';
+    mockedReadFile.mockResolvedValueOnce(current as any);
+    makeFetchOk(latest);
+    (mockedExec as any).mockImplementation((cmd: string, _opts: any, cb: Function) => {
+      if (String(cmd).includes('bundle-markitdown-binaries.mjs')) {
+        return cb(new Error('markitdown staging spawn failed'), '', '');
+      }
+      return cb(null, '', '');
+    });
+
+    const log = vi.fn();
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(true);
+    expect(mockedSwapSlot).toHaveBeenCalledWith('b');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('MarkItDown staging failed in slot b'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
+  });
+
   it('swaps symlink after successful build', async () => {
     const current = 'aaa111';
     const latest = 'ccc333';
