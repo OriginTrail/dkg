@@ -17,6 +17,11 @@
   },
   {
     "inputs": [],
+    "name": "FutureOrCurrentEpoch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NegativeCumulative",
     "type": "error"
   },

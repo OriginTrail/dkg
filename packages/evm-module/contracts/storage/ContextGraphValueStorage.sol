@@ -49,6 +49,7 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     error ZeroValue();
     error NegativeCumulative();
     error BackfillForbidden();
+    error FutureOrCurrentEpoch();
 
     Chronos public chronos;
 
@@ -157,8 +158,14 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
      *      (see V10_CONTRACTS_REDESIGN_v2 "On challenge generation"), but any
      *      Hub-registered contract may call it. Reads stay pure `view`; this
      *      is the state-changing half of the "finalize then read" pattern.
+     * @dev Reverts FutureOrCurrentEpoch if `epoch` is at or beyond the current
+     *      epoch. Only past epochs may be finalized; current-epoch reads always
+     *      take the simulation path to reflect in-flight diff writes.
      */
     function finalizeCGValueUpTo(uint256 cgId, uint256 epoch) external onlyContracts {
+        if (epoch >= chronos.getCurrentEpoch()) {
+            revert FutureOrCurrentEpoch();
+        }
         if (epoch <= cgLastFinalizedEpoch[cgId]) {
             return;
         }
@@ -168,8 +175,14 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     /**
      * @notice Crystallizes `totalValueCumulative` up to `epoch`. See
      *         {finalizeCGValueUpTo} for semantics.
+     * @dev Reverts FutureOrCurrentEpoch if `epoch` is at or beyond the current
+     *      epoch. Only past epochs may be finalized; current-epoch reads always
+     *      take the simulation path to reflect in-flight diff writes.
      */
     function finalizeGlobalValueUpTo(uint256 epoch) external onlyContracts {
+        if (epoch >= chronos.getCurrentEpoch()) {
+            revert FutureOrCurrentEpoch();
+        }
         if (epoch <= globalLastFinalizedEpoch) {
             return;
         }
