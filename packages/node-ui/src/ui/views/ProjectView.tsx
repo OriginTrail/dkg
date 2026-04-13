@@ -621,8 +621,8 @@ function DrilldownPanel({ entity, allEntities, allTriples, nodeColors, onNavigat
   }, [entity.uri, allEntities]);
 
   const sourceFile = useMemo(() => {
-    const sf = entity.properties.get('http://dkg.io/ontology/sourceFile');
-    return sf?.[0] ?? null;
+    const conn = entity.connections.find(c => c.predicate === 'http://dkg.io/ontology/sourceFile');
+    return conn?.targetUri ?? null;
   }, [entity]);
 
   const [similar, setSimilar] = useState<Array<{ entityUri: string; label: string | null; similarity: number }>>([]);

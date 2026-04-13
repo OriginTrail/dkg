@@ -132,9 +132,11 @@ export class VectorStore {
     }>;
 
     const minSim = opts.minSimilarity ?? 0.0;
+    const queryDim = queryEmbedding.length;
     const scored: VectorSearchResult[] = [];
 
     for (const row of rows) {
+      if (row.dimensions !== queryDim) continue;
       const stored = blobToFloat32(row.embedding, row.dimensions);
       const sim = cosineSimilarity(queryEmbedding, stored);
       if (sim >= minSim) {

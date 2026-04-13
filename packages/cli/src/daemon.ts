@@ -4691,7 +4691,16 @@ async function handleRequest(
       object: 'http://schema.org/ConversationTurn',
       graph: targetGraph,
     });
-    // Link to source file
+    // Persist the markdown body so the UI can display turn content
+    // without fetching the source file separately
+    const truncatedBody = markdown.length > 2000 ? markdown.slice(0, 2000) + '…' : markdown;
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/description',
+      object: JSON.stringify(truncatedBody),
+      graph: targetGraph,
+    });
+    // Source content type
     quads.push({
       subject: turnUri,
       predicate: 'http://dkg.io/ontology/sourceContentType',
@@ -4845,8 +4854,14 @@ async function handleRequest(
       }
     }
 
-    // Fan-out 2: SPARQL text search
+    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers)
     const escapedQuery = query.replace(/"/g, '\\"').toLowerCase();
+    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
+    const graphFilters = memoryLayers.map((l: string) => {
+      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
+      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verified")`;
+      return `STRSTARTS(STR(?g), "${cgUri}/")`;
+    }).join(' || ');
     try {
       const sparqlResult = await agent.store.query(`
         SELECT DISTINCT ?entity ?name ?desc WHERE {
@@ -4854,6 +4869,7 @@ async function handleRequest(
             ?entity <http://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
             OPTIONAL { ?entity <http://schema.org/description> ?desc }
           }
+          FILTER(${graphFilters})
           FILTER(
             CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
             || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))

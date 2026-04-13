@@ -842,7 +842,7 @@ describe('MemoryLayerView graph visualization', () => {
   it('wires onNodeClick to populate SPARQL query', () => {
     expect(mlv).toContain('handleNodeClick');
     expect(mlv).toContain('setActiveQuery');
-    expect(mlv).toMatch(/DESCRIBE|SELECT \?p \?o WHERE/);
+    expect(mlv).toMatch(/DESCRIBE|SELECT.*\?p \?o WHERE/);
   });
 
   it('renders NodePanel inside RdfGraph for detail overlay', () => {

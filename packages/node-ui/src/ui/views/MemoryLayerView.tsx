@@ -120,7 +120,7 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
 
   const handleNodeClick = useCallback((node: any) => {
     if (node?.id) {
-      setActiveQuery(`SELECT ?p ?o WHERE { <${node.id}> ?p ?o } LIMIT 100`);
+      setActiveQuery(`SELECT (<${node.id}> AS ?s) ?p ?o WHERE { <${node.id}> ?p ?o } LIMIT 100`);
     }
   }, []);
 
