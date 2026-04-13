@@ -8,7 +8,7 @@ import {
   writeDkgConfig,
   mergeOpenClawConfig,
   writeWorkspaceConfig,
-  removeLegacyWorkspaceSkills,
+  installCanonicalNodeSkill,
 } from '../src/setup.js';
 
 // ---------------------------------------------------------------------------
@@ -328,63 +328,47 @@ describe('writeWorkspaceConfig', () => {
 });
 
 // ---------------------------------------------------------------------------
-// removeLegacyWorkspaceSkills
+// installCanonicalNodeSkill
 // ---------------------------------------------------------------------------
 
-describe('removeLegacyWorkspaceSkills', () => {
-  it('removes legacy adapter-owned workspace skill folders', () => {
+describe('installCanonicalNodeSkill', () => {
+  it('resolves the canonical skill from the current CLI package layout by default', () => {
     const ws = join(testDir, 'workspace');
-    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    mkdirSync(join(ws, 'skills', 'origin-trail-game'), { recursive: true });
-    mkdirSync(join(ws, 'skills', 'ccl'), { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({ 'dkg-node': {} }, null, 2));
-    writeFileSync(
-      join(ws, 'skills', 'dkg-node', 'SKILL.md'),
-      '# legacy dkg node skill',
-    );
-    writeFileSync(
-      join(ws, 'skills', 'origin-trail-game', 'SKILL.md'),
-      '# legacy origin trail game skill',
-    );
-    writeFileSync(
-      join(ws, 'skills', 'ccl', 'SKILL.md'),
-      '# legacy ccl skill',
-    );
 
-    removeLegacyWorkspaceSkills(ws);
+    const targetPath = installCanonicalNodeSkill(ws);
 
-    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
-    expect(existsSync(join(ws, 'skills', 'origin-trail-game'))).toBe(false);
-    expect(existsSync(join(ws, 'skills', 'ccl'))).toBe(false);
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    expect(config['dkg-node'].workspaceSkillCleanupVersion).toBe(1);
+    expect(targetPath).toBe(join(ws, 'skills', 'dkg-node', 'SKILL.md'));
+    const copied = readFileSync(targetPath, 'utf-8');
+    expect(copied).toContain('name: dkg-node');
+    expect(copied).toContain('# DKG V10 Node Skill');
+    expect(copied).toContain('OriginTrail');
   });
 
-  it('leaves unrelated workspace skills untouched', () => {
+  it('copies the canonical CLI skill into the OpenClaw workspace', () => {
     const ws = join(testDir, 'workspace');
-    mkdirSync(join(ws, 'skills', 'custom-agent'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'custom-agent', 'SKILL.md'), '# Existing Skill');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
 
-    removeLegacyWorkspaceSkills(ws);
+    const targetPath = installCanonicalNodeSkill(ws, sourcePath);
 
-    expect(readFileSync(join(ws, 'skills', 'custom-agent', 'SKILL.md'), 'utf-8')).toBe('# Existing Skill');
+    expect(targetPath).toBe(join(ws, 'skills', 'dkg-node', 'SKILL.md'));
+    expect(readFileSync(targetPath, 'utf-8')).toBe('# Canonical DKG Node Skill\n');
   });
 
-  it('marks cleanup complete so reruns do not remove later user-managed legacy-named folders', () => {
+  it('overwrites an existing workspace dkg-node skill with the canonical CLI copy', () => {
     const ws = join(testDir, 'workspace');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
     mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({ 'dkg-node': {} }, null, 2));
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# legacy dkg node skill');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Old Adapter Skill\n');
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
 
-    removeLegacyWorkspaceSkills(ws);
-    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+    installCanonicalNodeSkill(ws, sourcePath);
 
-    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# user-managed dkg node skill');
-
-    removeLegacyWorkspaceSkills(ws);
-
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# user-managed dkg node skill');
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Canonical DKG Node Skill\n');
   });
 });
 
