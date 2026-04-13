@@ -168,9 +168,17 @@ class DKGClient:
         """GET /api/context-graph/list — list subscribed context graphs."""
         return self._get("/api/context-graph/list")
 
-    def create_context_graph(self, name: str, description: str = "") -> Dict[str, Any]:
-        """POST /api/context-graph/create — create a new context graph."""
+    def create_context_graph(self, name: str, description: str = "", cg_id: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/context-graph/create — create a new context graph.
+        Daemon requires both `id` and `name`; auto-generates id from name if not given."""
+        if not cg_id:
+            import time, random
+            slug = name.lower().replace(" ", "-")
+            slug = "".join(c for c in slug if c.isalnum() or c == "-")[:40]
+            rand = random.randint(0, 0xFFFF)
+            cg_id = f"cg:{slug}-{int(time.time()):x}{rand:04x}"
         return self._post("/api/context-graph/create", {
+            "id": cg_id,
             "name": name,
             "description": description,
         })

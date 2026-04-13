@@ -552,6 +552,134 @@ describe('Agent Hub merged with messages and private memories', () => {
   });
 });
 
+describe('backward-compatible URL redirects (V10 consolidation)', () => {
+  const app = readFile('App.tsx');
+
+  for (const path of ['/agent', '/explorer', '/apps/*', '/settings', '/messages']) {
+    it(`redirects ${path} to /`, () => {
+      expect(app).toContain(`path="${path}"`);
+      const pattern = new RegExp(`path="${path.replace('*', '\\*')}".*element=\\{<Navigate to="/"`);
+      expect(app).toMatch(pattern);
+    });
+  }
+
+  it('uses replace to avoid pushing redirect onto history', () => {
+    const redirectSection = app.slice(app.indexOf('path="/agent"'), app.indexOf('path="*"'));
+    expect(redirectSection).toContain('replace');
+  });
+});
+
+describe('synced status logic', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
+
+  it('uses statusLoaded guard before evaluating synced', () => {
+    expect(header).toContain('const statusLoaded = nodeStatus != null');
+    expect(header).toMatch(/const synced = statusLoaded && nodeStatus\?\.synced !== false/);
+  });
+
+  it('shows synced/syncing text based on synced state', () => {
+    expect(header).toMatch(/synced \? ['"]synced['"] : ['"]syncing['"]/);
+  });
+
+  it('status dot uses online/offline class', () => {
+    expect(header).toContain("synced ? 'online' : 'offline'");
+  });
+});
+
+describe('clickable notification items', () => {
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
+
+  it('conditionally adds clickable class for peer notifications', () => {
+    expect(header).toContain("n.peer ? 'clickable' : ''");
+  });
+
+  it('sets role=button and tabIndex for keyboard accessibility', () => {
+    expect(header).toContain("role={n.peer ? 'button' : undefined}");
+    expect(header).toContain("tabIndex={n.peer ? 0 : undefined}");
+  });
+
+  it('handles Enter and Space key events', () => {
+    expect(header).toContain("e.key === 'Enter'");
+    expect(header).toContain("e.key === ' '");
+  });
+
+  it('closes notification dropdown on peer click', () => {
+    expect(header).toMatch(/onClick=\{.*setShowNotifs\(false\)/s);
+    expect(header).toMatch(/onKeyDown=\{.*setShowNotifs\(false\)/s);
+  });
+});
+
+describe('dashboard import target derived from cgData', () => {
+  const dashboard = readFile('views/DashboardView.tsx');
+
+  it('import memories checks cgData.contextGraphs, not projects store', () => {
+    expect(dashboard).toContain("const cgs = cgData?.contextGraphs ?? []");
+    expect(dashboard).toContain("cgs.length > 0");
+  });
+
+  it('ImportFilesModal target comes from cgData, not activeProjectId', () => {
+    expect(dashboard).toMatch(/contextGraphId=\{\(cgData\?\.contextGraphs \?\? \[\]\)\[0\]\?\.id/);
+    expect(dashboard).toMatch(/contextGraphName=\{\(cgData\?\.contextGraphs \?\? \[\]\)\[0\]\?\.name/);
+  });
+
+  it('shows create-project when no context graphs exist', () => {
+    expect(dashboard).toContain('setShowCreateProject(true)');
+  });
+});
+
+describe('file serving security (daemon)', () => {
+  const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
+
+  it('uses SAFE_PREVIEW_TYPES allowlist for content types', () => {
+    expect(daemon).toContain('SAFE_PREVIEW_TYPES');
+  });
+
+  it('does NOT allow text/html inline (XSS vector)', () => {
+    const safeTypesMatch = daemon.match(/SAFE_PREVIEW_TYPES = new Set\(\[([\s\S]*?)\]\)/);
+    expect(safeTypesMatch).not.toBeNull();
+    const safeTypes = safeTypesMatch![1];
+    expect(safeTypes).not.toContain('text/html');
+    expect(safeTypes).not.toContain('image/svg+xml');
+  });
+
+  it('sends nosniff header to prevent MIME sniffing', () => {
+    expect(daemon).toContain("'X-Content-Type-Options': 'nosniff'");
+  });
+
+  it('uses private cache control', () => {
+    expect(daemon).toContain("'Cache-Control': 'private, max-age=3600'");
+  });
+
+  it('forces attachment disposition for unsafe types', () => {
+    expect(daemon).toMatch(/SAFE_PREVIEW_TYPES\.has\(rawCt\) \? 'inline' : 'attachment'/);
+  });
+});
+
+describe('fileUrl hash handling', () => {
+  const api = readFile('api.ts');
+
+  it('preserves keccak256: prefix in file URLs', () => {
+    expect(api).toContain("hash.startsWith('keccak256:')");
+  });
+
+  it('preserves sha256: prefix in file URLs', () => {
+    expect(api).toContain("hash.startsWith('sha256:')");
+  });
+
+  it('defaults bare hashes to sha256: prefix', () => {
+    expect(api).toContain('`${BASE}/api/file/sha256:${hash}');
+  });
+});
+
+describe('listAssertions query path', () => {
+  const api = readFile('api.ts');
+
+  it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
+    expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, contextGraphId\)/);
+    expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
+  });
+});
+
 describe('AgentHub initialization-order safety', () => {
   const agentHub = readFile('pages/AgentHub.tsx');
 

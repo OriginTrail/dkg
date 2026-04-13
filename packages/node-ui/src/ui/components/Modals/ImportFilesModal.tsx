@@ -207,13 +207,13 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
               )}
 
               <div className="v10-form-divider" />
-              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options</div>
-              <label className="v10-import-option">
-                <input type="checkbox" checked={storeOriginals} onChange={() => setStoreOriginals(!storeOriginals)} />
+              <div className="v10-form-label" style={{ marginBottom: 8 }}>Ingestion Options <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></div>
+              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+                <input type="checkbox" checked={storeOriginals} disabled readOnly />
                 Store original files as Knowledge Assets
               </label>
-              <label className="v10-import-option">
-                <input type="checkbox" checked={extractKnowledge} onChange={() => setExtractKnowledge(!extractKnowledge)} />
+              <label className="v10-import-option" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+                <input type="checkbox" checked={extractKnowledge} disabled readOnly />
                 Let agent extract structured knowledge from content
               </label>
             </>

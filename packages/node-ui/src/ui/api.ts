@@ -272,8 +272,8 @@ export const executeQuery = (sparql: string, contextGraphId?: string, includeSha
 
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
-  await post<any>('/api/shared-memory/write', { paranetId: contextGraphId, quads });
-  return post<any>('/api/shared-memory/publish', { paranetId: contextGraphId, selection: 'all', clearAfter: true });
+  await post<any>('/api/shared-memory/write', { contextGraphId, quads });
+  return post<any>('/api/shared-memory/publish', { contextGraphId, selection: 'all', clearAfter: true });
 };
 
 // --- Assertions (WM objects) ---
@@ -325,11 +325,13 @@ export interface ExtractionStatus {
 export const fetchExtractionStatus = (assertionName: string, contextGraphId: string) =>
   get<ExtractionStatus>(`/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
 
-/** Build a URL to serve a stored file by its hash. */
+/** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {
-  const h = hash.startsWith('sha256:') ? hash.slice('sha256:'.length) : hash;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  return `${BASE}/api/file/sha256:${h}${params}`;
+  if (hash.startsWith('keccak256:') || hash.startsWith('sha256:')) {
+    return `${BASE}/api/file/${hash}${params}`;
+  }
+  return `${BASE}/api/file/sha256:${hash}${params}`;
 }
 
 export interface SwmRootEntity {
@@ -341,7 +343,7 @@ export interface SwmRootEntity {
 /** List root entities in SWM with their triple counts. */
 export async function listSwmEntities(contextGraphId: string): Promise<SwmRootEntity[]> {
   const sparql = `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?cnt)`;
-  const data = await executeQuery(sparql, contextGraphId, true, '_shared_memory');
+  const data = await post<{ result: any }>('/api/query', { sparql, contextGraphId, view: 'shared-working-memory' });
   const bindings: any[] = data?.result?.bindings ?? [];
   return bindings.map((b) => {
     const uri = typeof b.s === 'string' ? b.s : b.s?.value ?? '';
@@ -367,7 +369,7 @@ export interface PublishResult {
 /** Publish SWM content on-chain (SWM -> VM). Pass rootEntities to selectively publish, or omit for all. */
 export const publishSharedMemory = (contextGraphId: string, rootEntities?: string[]) =>
   post<PublishResult>('/api/shared-memory/publish', {
-    paranetId: contextGraphId,
+    contextGraphId,
     selection: rootEntities ?? 'all',
     clearAfter: !rootEntities,
   });

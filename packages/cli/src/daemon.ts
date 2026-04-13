@@ -3281,6 +3281,32 @@ async function handleRequest(
     });
   }
 
+  // GET /api/file/:hash — serve a stored file by its content hash.
+  // Accepts sha256:<hex>, keccak256:<hex>, or bare <hex> (treated as sha256).
+  if (req.method === 'GET' && path.startsWith('/api/file/')) {
+    const hash = safeDecodeURIComponent(path.slice('/api/file/'.length), res);
+    if (hash === null) return;
+    const bytes = await fileStore.get(hash);
+    if (!bytes) return jsonResponse(res, 404, { error: `File not found: ${hash}` });
+    const SAFE_PREVIEW_TYPES = new Set([
+      'application/pdf', 'application/json',
+      'text/plain', 'text/csv', 'text/markdown',
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    ]);
+    const rawCt = url.searchParams.get('contentType') ?? 'application/octet-stream';
+    const ct = SAFE_PREVIEW_TYPES.has(rawCt) ? rawCt : 'application/octet-stream';
+    const disposition = SAFE_PREVIEW_TYPES.has(rawCt) ? 'inline' : 'attachment';
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Length': bytes.length,
+      'Content-Disposition': disposition,
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, max-age=3600',
+    });
+    res.end(bytes);
+    return;
+  }
+
   // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
   if (req.method === 'POST' && path === '/api/shared-memory/conditional-write') {
     const body = await readBody(req);

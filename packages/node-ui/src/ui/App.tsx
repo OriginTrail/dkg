@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useCallback } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -146,6 +146,11 @@ export function App() {
           <NetworkDebugPage />
         </React.Suspense>
       } />
+      <Route path="/agent" element={<Navigate to="/" replace />} />
+      <Route path="/explorer" element={<Navigate to="/" replace />} />
+      <Route path="/apps/*" element={<Navigate to="/" replace />} />
+      <Route path="/settings" element={<Navigate to="/" replace />} />
+      <Route path="/messages" element={<Navigate to="/" replace />} />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );
