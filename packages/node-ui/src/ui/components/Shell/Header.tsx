@@ -80,7 +80,8 @@ export function Header() {
   }, []);
 
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
-  const synced = nodeStatus?.synced === true;
+  const statusLoaded = nodeStatus != null;
+  const synced = statusLoaded && nodeStatus?.synced !== false;
 
   return (
     <header className="v10-header">

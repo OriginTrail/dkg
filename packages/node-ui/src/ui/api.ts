@@ -325,11 +325,13 @@ export interface ExtractionStatus {
 export const fetchExtractionStatus = (assertionName: string, contextGraphId: string) =>
   get<ExtractionStatus>(`/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
 
-/** Build a URL to serve a stored file by its hash. */
+/** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
 export function fileUrl(hash: string, contentType?: string): string {
-  const h = hash.startsWith('sha256:') ? hash.slice('sha256:'.length) : hash;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  return `${BASE}/api/file/sha256:${h}${params}`;
+  if (hash.startsWith('keccak256:') || hash.startsWith('sha256:')) {
+    return `${BASE}/api/file/${hash}${params}`;
+  }
+  return `${BASE}/api/file/sha256:${hash}${params}`;
 }
 
 export interface SwmRootEntity {

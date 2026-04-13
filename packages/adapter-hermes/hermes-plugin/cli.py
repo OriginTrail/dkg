@@ -85,48 +85,27 @@ def register_cli(cli_group):
             click.echo("Error: DKG daemon is not reachable.", err=True)
             sys.exit(1)
 
-        cache = _load_cache(agent_name)
+        from plugins.memory.dkg import DKGMemoryProvider
+
+        provider = DKGMemoryProvider()
+        provider.initialize("cli-sync", agent_identity=agent_name)
+
+        if provider._offline:
+            click.echo("Error: DKG daemon is not reachable (provider is offline).", err=True)
+            sys.exit(1)
+
+        cache = provider._cache
         queued = cache.get("queued_writes", [])
         if not queued:
             click.echo("Nothing to sync — no queued writes.")
+            provider.shutdown()
             return
 
         click.echo(f"Syncing {len(queued)} queued writes...")
-        synced = 0
-        failed = []
-        for item in queued:
-            try:
-                if item.get("type") == "turn":
-                    client.store_turn(
-                        item["session_id"],
-                        item.get("user", ""),
-                        item.get("assistant", ""),
-                    )
-                    synced += 1
-                elif item.get("type") == "memory":
-                    context_graph = config.get("context_graph", "hermes-memory")
-                    quads = [{
-                        "subject": f"urn:hermes:{agent_name}:{item.get('target', 'memory')}",
-                        "predicate": "urn:hermes:content",
-                        "object": item.get("content", ""),
-                    }]
-                    result = client.write_assertion(
-                        agent_name or "hermes",
-                        context_graph,
-                        quads,
-                    )
-                    if result.get("success") is not False:
-                        synced += 1
-                    else:
-                        failed.append(item)
-                        click.echo(f"  Failed (memory): {result.get('error', 'unknown')}")
-                else:
-                    synced += 1
-            except Exception as e:
-                click.echo(f"  Failed: {e}")
-                failed.append(item)
+        pre_count = len(queued)
+        provider._flush_queued_writes()
+        post_count = len(provider._cache.get("queued_writes", []))
+        synced = pre_count - post_count
 
-        cache["queued_writes"] = failed
-        _save_cache(cache, agent_name)
-        click.echo(f"Synced {synced}/{len(queued)} writes. {len(failed)} remaining.")
-        client.close()
+        click.echo(f"Synced {synced}/{pre_count} writes. {post_count} remaining.")
+        provider.shutdown()
