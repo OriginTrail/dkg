@@ -66,24 +66,33 @@ jobs:
           ASSET_NAME: ${{ matrix.asset_name }}
         run: |
           node - <<'NODE'
+          const fs = require('node:fs');
           const { spawnSync } = require('node:child_process');
           const path = require('node:path');
 
           const binaryPath = path.resolve('packages/cli/bin', process.env.ASSET_NAME);
-          const result = spawnSync(binaryPath, [], { encoding: 'utf8' });
+          const fixturePath = path.resolve('packages/cli/bin', 'markitdown-smoke.html');
+          fs.writeFileSync(
+            fixturePath,
+            '<html><body><h1>Smoke Test</h1><p>Hello from MarkItDown smoke test.</p></body></html>',
+            'utf8',
+          );
+
+          const result = spawnSync(binaryPath, [fixturePath], { encoding: 'utf8' });
 
           if (result.error) {
             throw result.error;
           }
-          if (result.status !== 2) {
+          if (result.status !== 0) {
             throw new Error(
-              `Expected ${binaryPath} to exit with code 2 on the no-arg usage path, got ${result.status}.\n`
+              `Expected ${binaryPath} to exit with code 0 on the smoke conversion path, got ${result.status}.\n`
               + `stdout:\n${result.stdout ?? ''}\n`
               + `stderr:\n${result.stderr ?? ''}`,
             );
           }
-          if (!String(result.stderr ?? '').includes('usage: markitdown <file-path>')) {
-            throw new Error(`Smoke test for ${binaryPath} did not print the expected usage text.`);
+          const output = String(result.stdout ?? '');
+          if (!output.includes('Smoke Test') || !output.includes('Hello from MarkItDown smoke test.')) {
+            throw new Error(`Smoke test for ${binaryPath} did not emit the expected Markdown content.\n${output}`);
           }
           NODE
 

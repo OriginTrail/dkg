@@ -354,6 +354,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(workflowRaw).toContain('markitdown-targets.json');
     expect(workflowRaw).toContain('fromJSON(needs.markitdown-target-matrix.outputs.matrix)');
     expect(workflowRaw).toContain('Smoke test bundled MarkItDown binary');
-    expect(workflowRaw).toContain('usage: markitdown <file-path>');
+    expect(workflowRaw).toContain('markitdown-smoke.html');
+    expect(workflowRaw).toContain('Hello from MarkItDown smoke test.');
   });
 });
