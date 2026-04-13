@@ -13,7 +13,7 @@ describe('@unit Paymaster', () => {
   let Paymaster: Paymaster;
   let owner: SignerWithAddress;
   let user: SignerWithAddress;
-  let knowledgeCollectionAddress: string;
+  let stakingStorageAddress: string;
 
   async function deployPaymasterFixture() {
     await hre.deployments.fixture(['Hub', 'Token']);
@@ -28,12 +28,10 @@ describe('@unit Paymaster', () => {
     const PaymasterFactory = await hre.ethers.getContractFactory('Paymaster');
     Paymaster = await PaymasterFactory.deploy(Hub.getAddress());
 
-    // Set mock KnowledgeCollection address in Hub
-    knowledgeCollectionAddress = accounts[3].address;
-    await Hub.setContractAddress(
-      'KnowledgeCollection',
-      knowledgeCollectionAddress,
-    );
+    // Set mock StakingStorage address in Hub — V10 publishing fees flow
+    // to stakers via StakingStorage, so coverCost() must route TRAC there.
+    stakingStorageAddress = accounts[3].address;
+    await Hub.setContractAddress('StakingStorage', stakingStorageAddress);
 
     // Reset user's balance to zero first
     const initialBalance = await Token.balanceOf(user.address);
@@ -184,9 +182,53 @@ describe('@unit Paymaster', () => {
         .to.emit(Token, 'Transfer')
         .withArgs(
           await Paymaster.getAddress(),
-          knowledgeCollectionAddress,
+          stakingStorageAddress,
           coverAmount,
         );
+    });
+
+    it('Should send TRAC to StakingStorage, not KnowledgeCollection (H1 regression)', async () => {
+      // Register a DIFFERENT mock address under "KnowledgeCollection" so we
+      // can prove the Transfer destination is StakingStorage and explicitly
+      // NOT KnowledgeCollection. If a future change ever flips the Hub
+      // lookup string back to "KnowledgeCollection", this test fires.
+      const knowledgeCollectionMock = accounts[5].address;
+      await Hub.setContractAddress(
+        'KnowledgeCollection',
+        knowledgeCollectionMock,
+      );
+
+      // Sanity: the two mocks are distinct addresses.
+      expect(stakingStorageAddress).to.not.equal(knowledgeCollectionMock);
+
+      const tx = await Paymaster.connect(user).coverCost(coverAmount);
+      const receipt = await tx.wait();
+      if (!receipt) {
+        throw new Error('coverCost transaction had no receipt');
+      }
+
+      const tokenAddress = await Token.getAddress();
+      const paymasterAddress = await Paymaster.getAddress();
+      const transferTopic = Token.interface.getEvent('Transfer').topicHash;
+
+      const transfers = receipt.logs
+        .filter(
+          (log) => log.address === tokenAddress && log.topics[0] === transferTopic,
+        )
+        .map((log) => Token.interface.parseLog(log)!);
+
+      const coverTransfer = transfers.find(
+        (parsed) => parsed.args.from === paymasterAddress,
+      );
+      expect(
+        coverTransfer,
+        'expected a Transfer emitted from Paymaster',
+      ).to.not.equal(undefined);
+
+      // Anti-regression: must land at StakingStorage, NOT KnowledgeCollection.
+      expect(coverTransfer!.args.to).to.equal(stakingStorageAddress);
+      expect(coverTransfer!.args.to).to.not.equal(knowledgeCollectionMock);
+      expect(coverTransfer!.args.value).to.equal(coverAmount);
     });
 
     it('Should revert when non-allowed address tries to cover cost', async () => {
