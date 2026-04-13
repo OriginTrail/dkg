@@ -26,8 +26,9 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
  * wei of rounding dust per publish is acceptable — this mapping is used for
  * challenge weighting, not reward distribution.
  *
- * The dormant shard mappings (`cgShard`, `shardKnowledgeValue`) are present for
- * V11 sharding readiness but are unused at V10 launch.
+ * The dormant shard mappings (`cgShard`, `shardKnowledgeValue`) are reserved
+ * storage slots for future V11 sharding. Setters will be added alongside the
+ * V11 logic contracts; no API exists today.
  */
 contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ContextGraphValueStorage";
@@ -61,7 +62,8 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     mapping(uint256 epoch => uint256) public totalValueCumulative;
     uint256 public globalLastFinalizedEpoch;
 
-    // Dormant shard mappings (not used at launch, present for V11 sharding).
+    /// @dev Reserved storage slots for future V11 sharding. Setters will be
+    ///      added alongside the V11 logic contracts; no API exists today.
     mapping(uint256 cgId => uint256) public cgShard;
     mapping(uint256 shardId => mapping(uint256 epoch => uint256)) public shardKnowledgeValue;
 
@@ -97,6 +99,12 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
      *      because the cumulative at that epoch has already been crystallized
      *      and subsequent reads hit the fast path. Reverts `BackfillForbidden`
      *      if the caller tries.
+     *
+     *      Retraction / expiry is automatic via the paired negative diff
+     *      written at `startEpoch + lifetime`. There is no removal function
+     *      by design: Phase 8 value-changing ops (CREATE, byte-size-grow
+     *      UPDATE, lifetime extension) are all positive deltas, and natural
+     *      expiry is handled by the diff ledger itself.
      */
     function addCGValueForEpochRange(
         uint256 cgId,
@@ -138,6 +146,34 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
             value,
             perEpoch
         );
+    }
+
+    /**
+     * @notice Crystallizes `cgValueCumulative[cgId]` up to `epoch` so
+     *         subsequent reads at or below `epoch` become O(1). Safe to call
+     *         repeatedly: a call with `epoch <= cgLastFinalizedEpoch[cgId]`
+     *         is a no-op.
+     * @dev Intended to be called by RandomSampling before a challenge draw
+     *      (see V10_CONTRACTS_REDESIGN_v2 "On challenge generation"), but any
+     *      Hub-registered contract may call it. Reads stay pure `view`; this
+     *      is the state-changing half of the "finalize then read" pattern.
+     */
+    function finalizeCGValueUpTo(uint256 cgId, uint256 epoch) external onlyContracts {
+        if (epoch <= cgLastFinalizedEpoch[cgId]) {
+            return;
+        }
+        _finalizeCGValueUpTo(cgId, epoch);
+    }
+
+    /**
+     * @notice Crystallizes `totalValueCumulative` up to `epoch`. See
+     *         {finalizeCGValueUpTo} for semantics.
+     */
+    function finalizeGlobalValueUpTo(uint256 epoch) external onlyContracts {
+        if (epoch <= globalLastFinalizedEpoch) {
+            return;
+        }
+        _finalizeGlobalValueUpTo(epoch);
     }
 
     // -------------------------------------------------------------------------

@@ -384,6 +384,109 @@ describe('@unit ContextGraphValueStorage', () => {
     expect(await CGV.getCGValueAtEpoch(cgId, startEpoch2 + lifetime2)).to.equal(0);
   });
 
+  it('finalizeCGValueUpTo crystallizes cgValueCumulative to storage and emits CGValueFinalized', async () => {
+    const cgId = 80n;
+    const epoch1 = await ChronosCtr.getCurrentEpoch();
+    expect(epoch1).to.equal(1n);
+
+    // Seed: 1000 over 10 epochs -> 100/epoch.
+    await CGV.addCGValueForEpochRange(cgId, epoch1, 10, 1000);
+
+    // Advance 2 epochs so we can finalize up to epoch 2.
+    const epochLength = await ChronosCtr.epochLength();
+    await time.increase(Number(epochLength) * 2 + 1);
+    const nowEpoch = await ChronosCtr.getCurrentEpoch();
+    expect(nowEpoch).to.equal(epoch1 + 2n);
+
+    // Pre-assert: nothing finalized yet (no mutate call touched cgId post-publish).
+    expect(await CGV.cgLastFinalizedEpoch(cgId)).to.equal(0n);
+
+    const tx = await CGV.finalizeCGValueUpTo(cgId, epoch1 + 2n);
+    await expect(tx)
+      .to.emit(CGV, 'CGValueFinalized')
+      .withArgs(cgId, epoch1, epoch1 + 2n);
+
+    expect(await CGV.cgLastFinalizedEpoch(cgId)).to.equal(epoch1 + 2n);
+    expect(await CGV.cgValueCumulative(cgId, epoch1)).to.equal(100n);
+    expect(await CGV.cgValueCumulative(cgId, epoch1 + 1n)).to.equal(100n);
+    expect(await CGV.cgValueCumulative(cgId, epoch1 + 2n)).to.equal(100n);
+  });
+
+  it('finalizeGlobalValueUpTo crystallizes totalValueCumulative to storage and emits GlobalValueFinalized', async () => {
+    const cgId = 81n;
+    const epoch1 = await ChronosCtr.getCurrentEpoch();
+    expect(epoch1).to.equal(1n);
+
+    await CGV.addCGValueForEpochRange(cgId, epoch1, 10, 1000);
+
+    const epochLength = await ChronosCtr.epochLength();
+    await time.increase(Number(epochLength) * 2 + 1);
+    const nowEpoch = await ChronosCtr.getCurrentEpoch();
+    expect(nowEpoch).to.equal(epoch1 + 2n);
+
+    expect(await CGV.globalLastFinalizedEpoch()).to.equal(0n);
+
+    const tx = await CGV.finalizeGlobalValueUpTo(epoch1 + 2n);
+    await expect(tx)
+      .to.emit(CGV, 'GlobalValueFinalized')
+      .withArgs(epoch1, epoch1 + 2n);
+
+    expect(await CGV.globalLastFinalizedEpoch()).to.equal(epoch1 + 2n);
+    expect(await CGV.totalValueCumulative(epoch1)).to.equal(100n);
+    expect(await CGV.totalValueCumulative(epoch1 + 1n)).to.equal(100n);
+    expect(await CGV.totalValueCumulative(epoch1 + 2n)).to.equal(100n);
+  });
+
+  it('External finalizers are idempotent no-ops when epoch already finalized', async () => {
+    const cgId = 82n;
+    const epoch1 = await ChronosCtr.getCurrentEpoch();
+    expect(epoch1).to.equal(1n);
+
+    await CGV.addCGValueForEpochRange(cgId, epoch1, 5, 500);
+
+    const epochLength = await ChronosCtr.epochLength();
+    await time.increase(Number(epochLength) * 2 + 1);
+    const nowEpoch = await ChronosCtr.getCurrentEpoch();
+    expect(nowEpoch).to.equal(epoch1 + 2n);
+
+    // First call finalizes up to epoch1 + 2.
+    await CGV.finalizeCGValueUpTo(cgId, epoch1 + 2n);
+    await CGV.finalizeGlobalValueUpTo(epoch1 + 2n);
+
+    const cgLastFinalizedBefore = await CGV.cgLastFinalizedEpoch(cgId);
+    const globalLastFinalizedBefore = await CGV.globalLastFinalizedEpoch();
+    expect(cgLastFinalizedBefore).to.equal(epoch1 + 2n);
+    expect(globalLastFinalizedBefore).to.equal(epoch1 + 2n);
+
+    // Second call with same epoch: must not emit, must not advance.
+    const tx1 = await CGV.finalizeCGValueUpTo(cgId, epoch1 + 2n);
+    await expect(tx1).to.not.emit(CGV, 'CGValueFinalized');
+
+    const tx2 = await CGV.finalizeGlobalValueUpTo(epoch1 + 2n);
+    await expect(tx2).to.not.emit(CGV, 'GlobalValueFinalized');
+
+    // Earlier-epoch call must also be a no-op.
+    const tx3 = await CGV.finalizeCGValueUpTo(cgId, epoch1);
+    await expect(tx3).to.not.emit(CGV, 'CGValueFinalized');
+    const tx4 = await CGV.finalizeGlobalValueUpTo(epoch1);
+    await expect(tx4).to.not.emit(CGV, 'GlobalValueFinalized');
+
+    expect(await CGV.cgLastFinalizedEpoch(cgId)).to.equal(cgLastFinalizedBefore);
+    expect(await CGV.globalLastFinalizedEpoch()).to.equal(
+      globalLastFinalizedBefore,
+    );
+  });
+
+  it('onlyContracts: non-Hub-registered EOA cannot call external finalizers', async () => {
+    const stranger = accounts[1];
+    await expect(
+      CGV.connect(stranger).finalizeCGValueUpTo(1n, 1n),
+    ).to.be.reverted;
+    await expect(
+      CGV.connect(stranger).finalizeGlobalValueUpTo(1n),
+    ).to.be.reverted;
+  });
+
   it('Reverts BackfillForbidden when startEpoch < currentEpoch', async () => {
     // Seed the state at epoch 1 so there is "state to backfill into".
     const cgId = 73n;
