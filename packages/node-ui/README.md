@@ -1,23 +1,22 @@
 # @origintrail-official/dkg-node-ui
 
-Web dashboard for DKG V9 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with agents.
+Web dashboard for DKG V9 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with integrated agents.
 
 ## Features
 
-- **Dashboard** — real-time node metrics (peers, KAs published, queries served, uptime)
-- **Knowledge Explorer** — browse and search Knowledge Assets with interactive graph visualization (powered by `@origintrail-official/dkg-graph-viz`)
-- **SPARQL editor** — write and execute SPARQL queries with syntax highlighting and result tables
-- **Chat interface** — send messages and invoke skills on remote agents
-- **Metrics & telemetry** — `DashboardDB` (SQLite) for persistent metric snapshots, `MetricsCollector` for gauges and counters, `OperationTracker` for request tracing
-- **Structured logging** — `StructuredLogger` with operation context, log levels, and JSON output
-- **Chat assistant** — `ChatAssistant` with configurable LLM backend for in-dashboard AI help
+- **Dashboard** - real-time node metrics (peers, KAs published, queries served, uptime)
+- **Knowledge Explorer** - browse and search Knowledge Assets with interactive graph visualization (powered by `@origintrail-official/dkg-graph-viz`)
+- **SPARQL editor** - write and execute SPARQL queries with syntax highlighting and result tables
+- **Integrated-agent side panel** - connect a local OpenClaw-style agent, chat in the right rail, inspect network peers, and browse persisted sessions
+- **Metrics & telemetry** - `DashboardDB` (SQLite) for persistent metric snapshots, `MetricsCollector` for gauges and counters, `OperationTracker` for request tracing
+- **Structured logging** - `StructuredLogger` with operation context, log levels, and JSON output
 
 ## Architecture
 
 The package has two sides:
 
-1. **Server-side** (exported as a library) — `handleNodeUIRequest()` serves the built UI assets and API endpoints; `DashboardDB`, `MetricsCollector`, and `OperationTracker` provide telemetry infrastructure
-2. **Client-side** (Vite/React app) — the dashboard UI, built separately via `pnpm build:ui`
+1. **Server-side** (exported as a library) - `handleNodeUIRequest()` serves the built UI assets and API endpoints; `DashboardDB`, `MetricsCollector`, and `OperationTracker` provide telemetry infrastructure
+2. **Client-side** (Vite/React app) - the dashboard UI, built separately via `pnpm build:ui`
 
 ## Usage
 
@@ -45,5 +44,5 @@ pnpm build
 
 ## Internal Dependencies
 
-- `@origintrail-official/dkg-core` — configuration types, event bus integration
-- `@origintrail-official/dkg-graph-viz` — interactive RDF graph visualization component
+- `@origintrail-official/dkg-core` - configuration types, event bus integration
+- `@origintrail-official/dkg-graph-viz` - interactive RDF graph visualization component

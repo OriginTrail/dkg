@@ -1,7 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useJourneyStore } from '../../stores/journey.js';
 import {
-  type ChatAssistantStreamEvent,
   type LocalAgentIntegration,
   type LocalAgentHistoryMessage,
   type LocalAgentStreamEvent,
@@ -11,17 +10,9 @@ import {
   fetchConnections,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
-  streamChatMessage,
   streamLocalAgentChat,
 } from '../../api.js';
 import { api } from '../../api-wrapper.js';
-
-interface AssistantMessage {
-  id: number;
-  role: 'user' | 'assistant';
-  content: string;
-  streaming?: boolean;
-}
 
 interface LocalAgentMessage {
   id: string;
@@ -44,6 +35,15 @@ interface AgentInfo {
   connectionDirection?: string;
   lastSeen?: number;
   latencyMs?: number;
+}
+
+interface LocalAgentSessionSummary {
+  sessionId: string;
+  integrationId: string;
+  integrationName: string;
+  preview: string;
+  messageCount: number;
+  lastTs?: string;
 }
 
 const OPENCLAW_DOCS_URL = 'https://docs.openclaw.ai/';
@@ -102,6 +102,46 @@ function mergeLocalAgentMessages(existing: LocalAgentMessage[], incoming: LocalA
   return merged;
 }
 
+function integrationIdFromSessionId(
+  sessionId: string,
+  integrations: LocalAgentIntegration[],
+): { id: string; name: string } | null {
+  for (const integration of integrations) {
+    if (sessionId === integration.id || sessionId.startsWith(`${integration.id}:`)) {
+      return { id: integration.id, name: integration.name };
+    }
+  }
+  return null;
+}
+
+function summarizeLocalAgentSessions(
+  sessions: MemorySession[],
+  integrations: LocalAgentIntegration[],
+): LocalAgentSessionSummary[] {
+  const summaries = sessions.flatMap((session) => {
+    const integration = integrationIdFromSessionId(session.session, integrations);
+    if (!integration) return [];
+    const firstUserMessage = session.messages.find((message) => message.author === 'user');
+    const lastMessage = session.messages[session.messages.length - 1];
+    return [{
+      sessionId: session.session,
+      integrationId: integration.id,
+      integrationName: integration.name,
+      preview: firstUserMessage?.text?.slice(0, 60) || session.session,
+      messageCount: session.messages.length,
+      lastTs: lastMessage?.ts,
+    }];
+  });
+
+  summaries.sort((a, b) => {
+    const aTime = Date.parse(a.lastTs ?? '');
+    const bTime = Date.parse(b.lastTs ?? '');
+    if (Number.isFinite(aTime) && Number.isFinite(bTime)) return bTime - aTime;
+    return String(b.lastTs ?? '').localeCompare(String(a.lastTs ?? ''));
+  });
+  return summaries;
+}
+
 function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
@@ -118,9 +158,6 @@ function ConnectedAgentsTab(props: {
   onLocalInputChange: (value: string) => void;
   onSendLocalMessage: () => void;
   localSending: boolean;
-  peerAgents: AgentInfo[];
-  connections: { total: number; direct: number; relayed: number };
-  loading: boolean;
 }) {
   const {
     integrations,
@@ -138,9 +175,6 @@ function ConnectedAgentsTab(props: {
     onLocalInputChange,
     onSendLocalMessage,
     localSending,
-    peerAgents,
-    connections,
-    loading,
   } = props;
 
   const selected = integrations.find((item) => item.id === selectedIntegrationId) ?? integrations[0] ?? null;
@@ -153,15 +187,12 @@ function ConnectedAgentsTab(props: {
           <span className={`v10-agents-stat-dot ${readyCount > 0 ? 'connected' : 'known'}`} />
           {readyCount} chat-ready
         </span>
-        <span className="v10-agents-stat">
-          {connections.total} peer{connections.total !== 1 ? 's' : ''}
-        </span>
         <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title="Refresh local agent status">
           Refresh
         </button>
       </div>
 
-      <div className="v10-agents-section-label">Connected Agent Chat</div>
+      <div className="v10-agents-section-label">Integrated Agent Chat</div>
       <div className="v10-local-agent-list" role="tablist" aria-label="Local agent integrations">
         {integrations.map((integration) => (
           <button
@@ -259,14 +290,13 @@ function ConnectedAgentsTab(props: {
               {selected.id === 'openclaw' && (
                 <>
                   <p className="v10-local-agent-copy">
-                    Recent OpenClaw releases often use the gateway daemon flow. If chat is still starting or the bridge is offline, run
+                    The node will try to attach your local OpenClaw install automatically and reload the local gateway if needed. If the bridge is still offline after that, run
                     {' '}
                     <code>openclaw doctor</code>
                     {' '}
                     and check
                     {' '}
                     <code>openclaw gateway status</code>
-                    . The node will keep using the local bridge until OpenClaw exposes a confirmed gateway route here
                     .
                   </p>
                   <div className="v10-local-agent-actions">
@@ -288,13 +318,37 @@ function ConnectedAgentsTab(props: {
               )}
               {selected.id === 'hermes' && (
                 <p className="v10-local-agent-copy">
-                  The right panel now uses a reusable local-agent contract so Hermes can plug into the same connect and chat area next.
+                  Hermes will plug into this same local-agent contract next, using the same right-rail chat surface.
                 </p>
               )}
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function NetworkTab(props: {
+  peerAgents: AgentInfo[];
+  connections: { total: number; direct: number; relayed: number };
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const { peerAgents, connections, loading, onRefresh } = props;
+
+  return (
+    <div className="v10-agents-tab">
+      <div className="v10-agents-summary">
+        <span className="v10-agents-stat">
+          <span className={`v10-agents-stat-dot ${connections.total > 0 ? 'connected' : 'known'}`} />
+          {connections.total} peer{connections.total !== 1 ? 's' : ''}
+        </span>
+        <span className="v10-agents-stat">{connections.direct} direct / {connections.relayed} relayed</span>
+        <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
+          Refresh
+        </button>
+      </div>
 
       <div className="v10-agents-section-label">Network Peers</div>
       {loading && <p className="v10-agents-loading">Loading peers...</p>}
@@ -320,16 +374,47 @@ function ConnectedAgentsTab(props: {
   );
 }
 
+function SessionsTab(props: {
+  sessions: LocalAgentSessionSummary[];
+  onOpenSession: (session: LocalAgentSessionSummary) => void;
+}) {
+  const { sessions, onOpenSession } = props;
+
+  return (
+    <div className="v10-agent-content">
+      <div className="v10-sessions-list">
+        <div className="v10-local-agent-copy" style={{ marginBottom: 12 }}>
+          Sessions track DKG-persisted conversations for your integrated agents. The current OpenClaw flow keeps one node-linked session, and separate session threads will expand later.
+        </div>
+        {sessions.length === 0 ? (
+          <p className="v10-agent-empty-state">No integrated-agent sessions yet.</p>
+        ) : (
+          sessions.map((session) => (
+            <button
+              key={session.sessionId}
+              className="v10-session-item"
+              onClick={() => onOpenSession(session)}
+            >
+              <span className="v10-session-preview">
+                {session.integrationName}: {session.preview}
+              </span>
+              <span className="v10-session-count">
+                {session.messageCount} msg{session.messageCount !== 1 ? 's' : ''}
+                {session.lastTs ? ` - ${formatLocalTimestamp(session.lastTs)}` : ''}
+              </span>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function PanelRight() {
   const { stage, advance } = useJourneyStore();
-  const [mode, setMode] = useState<'agents' | 'assistant' | 'sessions'>('agents');
+  const [mode, setMode] = useState<'agents' | 'network' | 'sessions'>('agents');
 
-  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
-  const [assistantInput, setAssistantInput] = useState('');
-  const [assistantSending, setAssistantSending] = useState(false);
-  const [assistantSessionId, setAssistantSessionId] = useState<string | undefined>();
-  const [sessions, setSessions] = useState<MemorySession[]>([]);
-
+  const [memorySessions, setMemorySessions] = useState<MemorySession[]>([]);
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
   const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number }>({ total: 0, direct: 0, relayed: 0 });
   const [peerLoading, setPeerLoading] = useState(true);
@@ -345,9 +430,6 @@ export function PanelRight() {
   const [localSending, setLocalSending] = useState(false);
   const [localHistoryLoadedByIntegration, setLocalHistoryLoadedByIntegration] = useState<Record<string, boolean>>({});
 
-  const assistantMessageIdRef = useRef(0);
-  const assistantChatEndRef = useRef<HTMLDivElement>(null);
-  const assistantAbortRef = useRef<AbortController | null>(null);
   const localAbortRef = useRef<AbortController | null>(null);
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
@@ -359,12 +441,7 @@ export function PanelRight() {
   const selectedLocalHistoryLoaded = selectedIntegration
     ? (localHistoryLoadedByIntegration[selectedIntegration.id] ?? false)
     : false;
-
-  const scrollAssistantToBottom = useCallback(() => {
-    assistantChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, []);
-
-  useEffect(scrollAssistantToBottom, [assistantMessages, scrollAssistantToBottom]);
+  const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
 
   const scrollLocalChatToBottom = useCallback(() => {
     localChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -383,8 +460,8 @@ export function PanelRight() {
   }, []);
 
   const loadSessions = useCallback(() => {
-    api.fetchMemorySessions(20)
-      .then(({ sessions: items }: any) => setSessions(items))
+    api.fetchMemorySessions(50)
+      .then(({ sessions: items }: any) => setMemorySessions(items ?? []))
       .catch(() => {});
   }, []);
 
@@ -441,8 +518,9 @@ export function PanelRight() {
         ...prev,
         [integrationId]: true,
       }));
+      loadSessions();
     }
-  }, [updateLocalMessages]);
+  }, [loadSessions, updateLocalMessages]);
 
   useEffect(() => {
     loadSessions();
@@ -452,11 +530,12 @@ export function PanelRight() {
 
   useEffect(() => {
     const intervalId = setInterval(() => {
+      loadSessions();
       refreshPeers();
       refreshLocalIntegrations();
     }, 15_000);
     return () => clearInterval(intervalId);
-  }, [refreshPeers, refreshLocalIntegrations]);
+  }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
   useEffect(() => {
     if (!selectedIntegration?.chatSupported || !selectedIntegration.chatReady) {
@@ -477,64 +556,6 @@ export function PanelRight() {
       cancelled = true;
     };
   }, [selectedIntegration?.id, selectedIntegration?.chatReady, selectedIntegration?.chatSupported, selectedIntegration?.status, loadLocalHistory]);
-
-  const sendAssistantMessage = useCallback(async () => {
-    const text = assistantInput.trim();
-    if (!text || assistantSending) return;
-
-    const userMessage: AssistantMessage = { id: ++assistantMessageIdRef.current, role: 'user', content: text };
-    const assistantMessage: AssistantMessage = { id: ++assistantMessageIdRef.current, role: 'assistant', content: '', streaming: true };
-    setAssistantMessages((prev) => [...prev, userMessage, assistantMessage]);
-    setAssistantInput('');
-    setAssistantSending(true);
-
-    const assistantId = assistantMessage.id;
-    const controller = new AbortController();
-    assistantAbortRef.current = controller;
-
-    try {
-      const result = await streamChatMessage(text, {
-        sessionId: assistantSessionId,
-        signal: controller.signal,
-        onEvent: (event: ChatAssistantStreamEvent) => {
-          if (event.type === 'text_delta') {
-            setAssistantMessages((prev) =>
-              prev.map((message) =>
-                message.id === assistantId ? { ...message, content: message.content + event.delta } : message,
-              ),
-            );
-          } else if (event.type === 'meta' && event.sessionId) {
-            setAssistantSessionId(event.sessionId);
-          }
-        },
-      });
-
-      setAssistantMessages((prev) =>
-        prev.map((message) =>
-          message.id === assistantId
-            ? { ...message, content: result.reply || message.content, streaming: false }
-            : message,
-        ),
-      );
-
-      if (result.sessionId) setAssistantSessionId(result.sessionId);
-      if (stage === 0) advance();
-      loadSessions();
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        setAssistantMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantId
-              ? { ...message, content: message.content || `Error: ${err.message}`, streaming: false }
-              : message,
-          ),
-        );
-      }
-    } finally {
-      setAssistantSending(false);
-      assistantAbortRef.current = null;
-    }
-  }, [advance, assistantInput, assistantSending, assistantSessionId, loadSessions, stage]);
 
   const sendLocalMessage = useCallback(async () => {
     const integration = selectedIntegration;
@@ -585,6 +606,7 @@ export function PanelRight() {
             : message,
         ),
       );
+      loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
       updateLocalMessages(integrationId, (prev) =>
@@ -602,21 +624,22 @@ export function PanelRight() {
       setLocalSending(false);
       localAbortRef.current = null;
     }
-  }, [advance, localInput, localSending, selectedIntegration, stage, updateLocalMessages]);
+  }, [advance, loadSessions, localInput, localSending, selectedIntegration, stage, updateLocalMessages]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
     setConnectError(null);
     setConnectNotice(null);
     try {
-      const integration = await connectLocalAgentIntegration(integrationId);
+      const result = await connectLocalAgentIntegration(integrationId);
       await refreshLocalIntegrations();
-      if (integration.chatReady) {
-        setConnectNotice(`${integration.name} is connected and chat-ready.`);
-        setMode('agents');
-      } else {
-        setConnectNotice(`${integration.name} was registered. If the bridge is still offline, restart the local OpenClaw gateway and refresh.`);
-      }
+      setConnectNotice(
+        result.notice
+          ?? (result.integration.chatReady
+            ? `${result.integration.name} is connected and chat-ready.`
+            : `${result.integration.name} attach is in progress. The node will keep checking for a live bridge.`),
+      );
+      setMode('agents');
     } catch (err: any) {
       setConnectError(err.message);
     } finally {
@@ -624,16 +647,11 @@ export function PanelRight() {
     }
   }, [refreshLocalIntegrations]);
 
-  const openSession = useCallback((session: MemorySession) => {
-    const mapped: AssistantMessage[] = session.messages.map((message) => ({
-      id: ++assistantMessageIdRef.current,
-      role: message.author === 'user' ? 'user' : 'assistant',
-      content: message.text,
-    }));
-    setAssistantMessages(mapped);
-    setAssistantSessionId(session.session);
-    setMode('assistant');
-  }, []);
+  const openSession = useCallback(async (session: LocalAgentSessionSummary) => {
+    setSelectedIntegrationId(session.integrationId);
+    setMode('agents');
+    await loadLocalHistory(session.integrationId);
+  }, [loadLocalHistory]);
 
   return (
     <div className="v10-panel-right">
@@ -645,10 +663,10 @@ export function PanelRight() {
           Agents
         </button>
         <button
-          className={`v10-agent-mode-tab ${mode === 'assistant' ? 'active' : ''}`}
-          onClick={() => setMode('assistant')}
+          className={`v10-agent-mode-tab ${mode === 'network' ? 'active' : ''}`}
+          onClick={() => setMode('network')}
         >
-          Assistant
+          Network
         </button>
         <button
           className={`v10-agent-mode-tab ${mode === 'sessions' ? 'active' : ''}`}
@@ -675,78 +693,23 @@ export function PanelRight() {
           onLocalInputChange={setLocalInput}
           onSendLocalMessage={sendLocalMessage}
           localSending={localSending}
-          peerAgents={peerAgents}
-          connections={connections}
-          loading={peerLoading}
         />
       )}
 
-      {mode === 'assistant' && (
-        <>
-          <div className="v10-agent-content">
-            {assistantMessages.length === 0 && (
-              <div className="v10-agent-empty-state" style={{ marginTop: 40 }}>
-                Ask the built-in DKG assistant about your node, memory, or operations.
-              </div>
-            )}
-            <div className="v10-chat-messages">
-              {assistantMessages.map((message) => (
-                <div key={message.id} className={`v10-chat-msg ${message.role}`}>
-                  <div className={`v10-chat-bubble ${message.role}`}>
-                    {message.content}
-                    {message.streaming && <span className="v10-chat-cursor" />}
-                  </div>
-                </div>
-              ))}
-              <div ref={assistantChatEndRef} />
-            </div>
-          </div>
-
-          <div className="v10-agent-input-area">
-            <input
-              type="text"
-              placeholder="Ask the DKG assistant..."
-              className="v10-agent-input"
-              value={assistantInput}
-              onChange={(e) => setAssistantInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  sendAssistantMessage();
-                }
-              }}
-              disabled={assistantSending}
-            />
-            <button className="v10-agent-send-btn" onClick={sendAssistantMessage} disabled={assistantSending || !assistantInput.trim()}>
-              Send
-            </button>
-          </div>
-        </>
+      {mode === 'network' && (
+        <NetworkTab
+          peerAgents={peerAgents}
+          connections={connections}
+          loading={peerLoading}
+          onRefresh={refreshPeers}
+        />
       )}
 
       {mode === 'sessions' && (
-        <div className="v10-agent-content">
-          <div className="v10-sessions-list">
-            {sessions.length === 0 ? (
-              <p className="v10-agent-empty-state">No assistant sessions yet.</p>
-            ) : (
-              sessions.map((session) => {
-                const preview = session.messages?.[0]?.text?.slice(0, 60) || session.session;
-                const count = session.messages?.length ?? 0;
-                return (
-                  <button
-                    key={session.session}
-                    className="v10-session-item"
-                    onClick={() => openSession(session)}
-                  >
-                    <span className="v10-session-preview">{preview}</span>
-                    <span className="v10-session-count">{count} msg{count !== 1 ? 's' : ''}</span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </div>
+        <SessionsTab
+          sessions={localSessions}
+          onOpenSession={openSession}
+        />
       )}
     </div>
   );

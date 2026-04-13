@@ -122,13 +122,16 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('defines the connected agents tab in PanelRight', () => {
     expect(panelRight).toContain('function ConnectedAgentsTab');
-    expect(panelRight).toContain("useState<'agents' | 'assistant' | 'sessions'>('agents')");
+    expect(panelRight).toContain("useState<'agents' | 'network' | 'sessions'>('agents')");
   });
 
-  it('preserves the built-in assistant path', () => {
-    expect(panelRight).toContain('Ask the built-in DKG assistant');
-    expect(panelRight).toContain('streamChatMessage');
-    expect(panelRight).toContain('fetchMemorySessions');
+  it('removes the built-in assistant path and splits the right rail into three agent-first tabs', () => {
+    expect(panelRight).not.toContain('Ask the built-in DKG assistant');
+    expect(panelRight).not.toContain('streamChatMessage');
+    expect(panelRight).toContain('Network');
+    expect(panelRight).toContain('Sessions');
+    expect(panelRight).toContain('function NetworkTab');
+    expect(panelRight).toContain('function SessionsTab');
   });
 
   it('renders OpenClaw connect/chat-ready copy in the side panel', () => {
@@ -139,7 +142,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('keeps the interface future-friendly for Hermes', () => {
     expect(panelRight).toContain('Hermes');
-    expect(panelRight).toContain('reusable local-agent contract');
+    expect(panelRight).toContain('same local-agent contract');
   });
 
   it('merges reloaded local history with live messages', () => {
@@ -431,11 +434,11 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
-  it('connectLocalAgentIntegration registers OpenClaw before reloading integration state', async () => {
+  it('connectLocalAgentIntegration returns the refreshed OpenClaw integration plus daemon notice', async () => {
     const fakeFetch = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ ok: true, integration: { id: 'openclaw', enabled: true } }),
+        json: async () => ({ ok: true, notice: 'OpenClaw is connected and chat-ready.', integration: { id: 'openclaw', enabled: true } }),
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -459,7 +462,7 @@ describe('OpenClaw bridge behavioral tests', () => {
     globalThis.fetch = fakeFetch;
     try {
       const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
-      const integration = await connectLocalAgentIntegration('openclaw');
+      const result = await connectLocalAgentIntegration('openclaw');
       const [registerUrl, registerOpts] = fakeFetch.mock.calls[0];
       expect(String(registerUrl)).toContain('/api/local-agent-integrations/connect');
       expect(registerOpts.method).toBe('POST');
@@ -469,7 +472,8 @@ describe('OpenClaw bridge behavioral tests', () => {
           source: 'node-ui',
         },
       });
-      expect(integration.chatReady).toBe(true);
+      expect(result.integration.chatReady).toBe(true);
+      expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
     } finally {
       globalThis.fetch = original;
     }

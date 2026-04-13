@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
+  connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
@@ -325,6 +326,111 @@ describe('local agent integration registry helpers', () => {
     expect(config.openclawChannel).toEqual({
       gatewayUrl: 'http://gateway.local:3030',
     });
+  });
+
+  it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn();
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.runtime.ready).toBe(true);
+    expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
+  it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn().mockResolvedValue(undefined);
+    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    const waitForReady = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge still starting',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge still starting',
+      });
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'bridge offline',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw');
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(waitForReady).toHaveBeenCalledTimes(2);
+    expect(result.integration.status).toBe('connecting');
+    expect(result.integration.runtime.ready).toBe(false);
+    expect(result.integration.runtime.lastError).toBe('bridge still starting');
+    expect(result.notice).toContain('Waiting for the gateway');
+  });
+
+  it('UI connect retries OpenClaw readiness after a gateway restart and reports chat-ready when the bridge comes up', async () => {
+    const config = makeConfig();
+    const runSetup = vi.fn().mockResolvedValue(undefined);
+    const restartGateway = vi.fn().mockResolvedValue(undefined);
+    const waitForReady = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'bridge still starting',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        target: 'bridge',
+      });
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: false,
+      error: 'bridge offline',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).toHaveBeenCalledWith('@origintrail-official/dkg-adapter-openclaw');
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(waitForReady).toHaveBeenCalledTimes(2);
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.runtime.ready).toBe(true);
+    expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(result.notice).toBe('OpenClaw attached successfully and is chat-ready.');
   });
 
   it('updates a stored integration without dropping nested metadata', () => {

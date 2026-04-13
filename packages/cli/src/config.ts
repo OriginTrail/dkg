@@ -149,7 +149,7 @@ export interface DkgConfig {
    * status/capabilities here instead of relying on one-off config flags.
    */
   localAgentIntegrations?: Record<string, LocalAgentIntegrationConfig>;
-  /** Set to true when this node is used with the OpenClaw adapter. Controls Agent Hub tab visibility. */
+  /** Set to true when this node is used with the OpenClaw adapter. Retained as a legacy compatibility flag. */
   openclawAdapter?: boolean;
   /** Optional OpenClaw bridge/gateway routing hints for the local channel transport. */
   openclawChannel?: {

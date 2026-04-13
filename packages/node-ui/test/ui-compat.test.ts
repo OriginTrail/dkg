@@ -429,7 +429,6 @@ describe('x-forwarded-proto allowlist', () => {
 });
 
 describe('clickable notifications', () => {
-  const agentHub = readFile('pages/AgentHub.tsx');
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
   it('Header has notification bell with dropdown', () => {
@@ -470,44 +469,13 @@ describe('clickable notifications', () => {
     expect(header).toContain('No notifications');
     expect(header).toContain('v10-header-notif-empty');
   });
-
-  it('AgentHub reads tab and peer from URL search params', () => {
-    expect(agentHub).toContain('useSearchParams');
-    expect(agentHub).toMatch(/searchParams\.get\(['"]tab['"]\)/);
-    expect(agentHub).toMatch(/searchParams\.get\(['"]peer['"]\)/);
-  });
-
-  it('AgentHub sets initial mode to peers when tab=peers in URL', () => {
-    expect(agentHub).toMatch(/urlTab === ['"]peers['"].*['"]peers['"].*['"]agent['"]/);
-  });
-
-  it('AgentHub clears only tab/peer URL params with proper dependencies', () => {
-    expect(agentHub).toContain("next.delete('tab')");
-    expect(agentHub).toContain("next.delete('peer')");
-    expect(agentHub).toContain('setSearchParams(next, { replace: true })');
-  });
-
-  it('PeerChatView accepts initialPeerId and onPeerSelected props', () => {
-    expect(agentHub).toMatch(/function PeerChatView\(\s*\{\s*initialPeerId\s*,\s*onPeerSelected/);
-    expect(agentHub).toContain('initialPeerId?: string');
-    expect(agentHub).toContain('onPeerSelected?: () => void');
-  });
-
-  it('PeerChatView auto-selects initial peer from prop', () => {
-    expect(agentHub).toContain('peers.find(p => p.peerId === initialPeerId)');
-    expect(agentHub).toContain('onPeerSelected?.()');
-  });
-
-  it('AgentHub captures deep-link peer in stable state before clearing URL', () => {
-    expect(agentHub).toContain('deepLinkPeer');
-    expect(agentHub).toMatch(/useState[\s\S]*urlPeer/);
-    expect(agentHub).toMatch(/PeerChatView\s+initialPeerId=\{deepLinkPeer/);
-  });
 });
 
-describe('Agent Hub merged with messages and private memories', () => {
+describe('right-rail agent shell replaces Agent Hub', () => {
   const app = readFile('App.tsx');
-  const agentHub = readFile('pages/AgentHub.tsx');
+  const panelLeft = readFile('components/Shell/PanelLeft.tsx');
+  const panelCenter = readFile('components/Shell/PanelCenter.tsx');
+  const panelRight = readFile('components/Shell/PanelRight.tsx');
   const api = readFile('api.ts');
 
   it('App has no floating ChatPanel', () => {
@@ -523,31 +491,24 @@ describe('Agent Hub merged with messages and private memories', () => {
     expect(app).toContain('PanelRight');
   });
 
-  it('AgentHub has no mocked agents or canned responses', () => {
-    expect(agentHub).not.toMatch(/AGENTS\s*=\s*\[/);
-    expect(agentHub).not.toMatch(/CANNED\s*[:=]/);
-    expect(agentHub).not.toMatch(/pickResponses/);
+  it('removes the center-panel Agent Hub entry point', () => {
+    expect(panelLeft).not.toContain("id: 'agent-hub'");
+    expect(panelLeft).not.toContain('Agent Hub');
+    expect(panelCenter).not.toContain("activeTabId === 'agent-hub'");
   });
 
-  it('AgentHub uses real APIs for chat and memory', () => {
-    expect(agentHub).toContain('fetchMemorySessions');
-    expect(agentHub).toContain('fetchMemorySession');
-    expect(agentHub).toMatch(/sendChatMessage|streamChatMessage/);
-    expect(agentHub).toContain('New Chat');
-    expect(agentHub).toContain('openSession');
-    expect(agentHub).toContain('visualizeSession');
+  it('moves connected-agent chat into the right rail with Agents, Network, and Sessions tabs', () => {
+    expect(panelRight).toContain("useState<'agents' | 'network' | 'sessions'>('agents')");
+    expect(panelRight).toContain('function NetworkTab');
+    expect(panelRight).toContain('function SessionsTab');
+    expect(panelRight).not.toContain('Assistant');
   });
 
-  it('AgentHub has graph visualization and timeline slider', () => {
-    expect(agentHub).toContain('RdfGraph');
-    expect(agentHub).toContain('timelineCursor');
-    expect(agentHub).toContain('visualizeSession');
-  });
-
-  it('frontend api has memory sessions and sendChatMessage with sessionId', () => {
+  it('frontend api keeps memory sessions and local-agent connect helpers', () => {
     expect(api).toContain('fetchMemorySessions');
-    expect(api).toContain('sendChatMessage');
-    expect(api).toContain('sessionId');
+    expect(api).toContain('connectLocalAgentIntegration');
+    expect(api).toContain('streamLocalAgentChat');
+    expect(api).not.toContain('/api/chat-assistant');
     expect(api).toContain('/api/memory/sessions');
   });
 });
@@ -677,22 +638,5 @@ describe('listAssertions query path', () => {
   it('uses executeQuery without view param (avoids agentAddress requirement)', () => {
     expect(api).toMatch(/listAssertions[\s\S]*?executeQuery\(sparql, contextGraphId\)/);
     expect(api).not.toMatch(/listAssertions[\s\S]*?view:\s*'working-memory'/);
-  });
-});
-
-describe('AgentHub initialization-order safety', () => {
-  const agentHub = readFile('pages/AgentHub.tsx');
-
-  it('declares graphRenderTriples before searchMatchedNodeIds', () => {
-    const renderIdx = agentHub.indexOf('const graphRenderTriples = useMemo');
-    const searchIdx = agentHub.indexOf('const searchMatchedNodeIds = useMemo');
-    expect(renderIdx).toBeGreaterThanOrEqual(0);
-    expect(searchIdx).toBeGreaterThanOrEqual(0);
-    expect(renderIdx).toBeLessThan(searchIdx);
-  });
-
-  it('uses ref dispatch for stored-turn graph updates to avoid TDZ callback deps', () => {
-    expect(agentHub).toContain('applyStoredTurnGraphUpdateRef.current(');
-    expect(agentHub).not.toContain('}, [applyStoredTurnGraphUpdate]);');
   });
 });

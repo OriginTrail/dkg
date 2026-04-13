@@ -47,6 +47,5 @@ export const api = {
   fetchNodeLog: (p?: any) => withFallback(() => realApi.fetchNodeLog(p), mockApi.fetchNodeLog),
   fetchMemorySessions: (n?: number) => withFallback(() => realApi.fetchMemorySessions(n), mockApi.fetchMemorySessions),
   markNotificationsRead: realApi.markNotificationsRead,
-  streamChatMessage: realApi.streamChatMessage,
   executeQuery: realApi.executeQuery,
 };

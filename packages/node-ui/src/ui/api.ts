@@ -387,242 +387,6 @@ export const updateSavedQuery = (id: number, data: any) =>
 export const deleteSavedQuery = (id: number) =>
   del<{ ok: boolean }>(`/api/saved-queries/${id}`);
 
-// --- Chat assistant ---
-export interface ChatLlmDiagnostics {
-  message: string;
-  status?: number;
-  provider?: string;
-  model?: string;
-  compatibilityHint?: string;
-}
-
-export interface ChatAssistantTurnResponse {
-  reply: string;
-  data?: unknown;
-  sparql?: string;
-  sessionId?: string;
-  turnId?: string;
-  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
-  persistError?: string;
-  timings?: { llm_ms: number; store_ms: number; total_ms: number };
-  responseMode?: 'streaming' | 'blocking' | 'rule-based';
-  llmDiagnostics?: ChatLlmDiagnostics;
-}
-
-export type ChatAssistantStreamEvent =
-  | { type: 'meta'; sessionId: string }
-  | { type: 'text_delta'; delta: string }
-  | ({ type: 'final' } & ChatAssistantTurnResponse)
-  | { type: 'error'; error: string; llmDiagnostics?: ChatLlmDiagnostics };
-
-export interface ChatPersistenceStatusEvent {
-  type: 'persist_status';
-  turnId: string;
-  sessionId: string;
-  status: 'pending' | 'in_progress' | 'stored' | 'failed';
-  attempts: number;
-  maxAttempts: number;
-  queuedAt: number;
-  updatedAt: number;
-  nextAttemptAt?: number;
-  storeMs?: number;
-  error?: string;
-}
-
-export interface ChatPersistenceHealthEvent {
-  type: 'persist_health';
-  ts: number;
-  pending: number;
-  inProgress: number;
-  stored: number;
-  failed: number;
-  overduePending: number;
-  oldestPendingAgeMs: number | null;
-}
-
-export type ChatPersistenceStreamEvent = ChatPersistenceStatusEvent | ChatPersistenceHealthEvent;
-
-export const sendChatMessage = (message: string, sessionId?: string) =>
-  post<ChatAssistantTurnResponse>('/api/chat-assistant', { message, sessionId });
-
-export async function streamChatMessage(
-  message: string,
-  opts: {
-    sessionId?: string;
-    signal?: AbortSignal;
-    onEvent?: (event: ChatAssistantStreamEvent) => void;
-  } = {},
-): Promise<ChatAssistantTurnResponse> {
-  const res = await fetch(`${BASE}/api/chat-assistant`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-      ...authHeaders(),
-    },
-    body: JSON.stringify({ message, sessionId: opts.sessionId, stream: true }),
-    signal: opts.signal,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-
-  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
-  if (!res.body || !contentType.includes('text/event-stream')) {
-    const data = await res.json() as ChatAssistantTurnResponse;
-    opts.onEvent?.({ type: 'final', ...data });
-    return data;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finalPayload: ChatAssistantTurnResponse | undefined;
-  let streamError: Error | undefined;
-
-  const handleEvent = (event: ChatAssistantStreamEvent): void => {
-    opts.onEvent?.(event);
-    if (event.type === 'error') {
-      streamError = new Error(event.error || 'Chat stream failed');
-      return;
-    }
-    if (event.type === 'final') {
-      const { type: _ignored, ...payload } = event;
-      finalPayload = payload;
-    }
-  };
-
-  const processBufferLines = (finalFlush: boolean): void => {
-    let lineEnd = buffer.indexOf('\n');
-    while (lineEnd !== -1) {
-      const line = buffer.slice(0, lineEnd).trim();
-      buffer = buffer.slice(lineEnd + 1);
-      lineEnd = buffer.indexOf('\n');
-      if (!line.startsWith('data:')) continue;
-      const dataLine = line.slice(5).trim();
-      if (!dataLine) continue;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
-        handleEvent(parsed);
-      } catch {
-        /* ignore malformed stream frames */
-      }
-      if (streamError) return;
-    }
-
-    if (finalFlush && buffer.trim().startsWith('data:')) {
-      const dataLine = buffer.trim().slice(5).trim();
-      if (!dataLine) return;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
-        handleEvent(parsed);
-      } catch {
-        /* ignore malformed stream frames */
-      }
-      buffer = '';
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    processBufferLines(false);
-    if (streamError) break;
-  }
-  buffer += decoder.decode();
-  processBufferLines(true);
-
-  if (streamError) throw streamError;
-  if (!finalPayload) throw new Error('Chat stream ended without final payload');
-  return finalPayload;
-}
-
-export const fetchChatPersistenceHealth = () =>
-  get<{
-    ts: number;
-    pending: number;
-    inProgress: number;
-    stored: number;
-    failed: number;
-    overduePending: number;
-    oldestPendingAgeMs: number | null;
-  }>('/api/chat-assistant/persistence/health');
-
-export async function streamChatPersistenceEvents(
-  opts: {
-    signal?: AbortSignal;
-    onEvent: (event: ChatPersistenceStreamEvent) => void;
-  },
-): Promise<void> {
-  const res = await fetch(`${BASE}/api/chat-assistant/persistence/events`, {
-    method: 'GET',
-    headers: {
-      'Accept': 'text/event-stream',
-      ...authHeaders(),
-    },
-    signal: opts.signal,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-
-  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
-  if (!res.body || !contentType.includes('text/event-stream')) {
-    throw new Error('Persistence event endpoint did not return SSE stream');
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  const processBuffer = (finalFlush: boolean): void => {
-    let lineEnd = buffer.indexOf('\n');
-    while (lineEnd !== -1) {
-      const line = buffer.slice(0, lineEnd).trim();
-      buffer = buffer.slice(lineEnd + 1);
-      lineEnd = buffer.indexOf('\n');
-      if (!line.startsWith('data:')) continue;
-      const dataLine = line.slice(5).trim();
-      if (!dataLine) continue;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
-        opts.onEvent(parsed);
-      } catch {
-        /* ignore malformed frames */
-      }
-    }
-
-    if (finalFlush && buffer.trim().startsWith('data:')) {
-      const dataLine = buffer.trim().slice(5).trim();
-      if (!dataLine) return;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
-        opts.onEvent(parsed);
-      } catch {
-        /* ignore malformed frames */
-      }
-      buffer = '';
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    processBuffer(false);
-  }
-
-  buffer += decoder.decode();
-  processBuffer(true);
-}
-
 // --- Memory (private chat memories in DKG) ---
 export interface MemorySession {
   session: string;
@@ -936,6 +700,11 @@ export interface LocalAgentIntegration {
   source: 'live' | 'planned';
 }
 
+export interface LocalAgentConnectResult {
+  integration: LocalAgentIntegration;
+  notice?: string;
+}
+
 export interface LocalAgentHistoryMessage {
   uri: string;
   text: string;
@@ -1070,14 +839,14 @@ export async function fetchLocalAgentIntegrations(): Promise<{ integrations: Loc
   return { integrations };
 }
 
-export async function connectLocalAgentIntegration(id: string): Promise<LocalAgentIntegration> {
+export async function connectLocalAgentIntegration(id: string): Promise<LocalAgentConnectResult> {
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (!surface?.connectSupported) {
     throw new Error(`${id} local connect is not available yet.`);
   }
 
-  await post<{ ok: boolean }>('/api/local-agent-integrations/connect', {
+  const response = await post<{ ok: boolean; notice?: string }>('/api/local-agent-integrations/connect', {
     id: normalizedId,
     metadata: {
       source: 'node-ui',
@@ -1088,7 +857,10 @@ export async function connectLocalAgentIntegration(id: string): Promise<LocalAge
   if (!integration) {
     throw new Error(`Missing local agent integration: ${normalizedId}`);
   }
-  return integration;
+  return {
+    integration,
+    notice: response.notice,
+  };
 }
 
 export async function fetchLocalAgentHealth(id: string) {

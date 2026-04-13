@@ -19,7 +19,6 @@ import {
   MetricsCollector,
   OperationTracker,
   handleNodeUIRequest,
-  ChatAssistant,
   ChatMemoryManager,
   LogPushWorker,
   type MetricsSource,
@@ -844,28 +843,20 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
-  const chatAssistant = new ChatAssistant(
-    dashDb,
-    async (sparql: string) => agent.query(sparql),
-    config.llm,
-    agentToolsContext,
-  );
   const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
   log('Memory manager ready');
-  if (config.llm) log('Chat assistant ready (LLM + DKG tools enabled)');
-  else log('Chat assistant ready');
+  if (config.llm) log('Memory enrichment LLM ready');
+  else log('Memory enrichment LLM not configured');
 
   const llmSettings = {
     getLlm: () => config.llm,
     setLlm: async (llm: { apiKey: string; model?: string; baseURL?: string } | null) => {
       if (llm) {
         config.llm = llm;
-        chatAssistant.updateLlmConfig(llm);
         memoryManager.updateConfig(llm);
         log('LLM config updated via settings');
       } else {
         delete config.llm;
-        chatAssistant.updateLlmConfig(undefined);
         memoryManager.updateConfig({ apiKey: '' });
         log('LLM config cleared via settings');
       }
@@ -1055,7 +1046,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
@@ -1185,6 +1176,7 @@ export interface LocalAgentIntegrationDefinition {
   description: string;
   transportKind?: string;
   capabilities: LocalAgentIntegrationCapabilities;
+  manifest?: LocalAgentIntegrationManifest;
 }
 
 export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationConfig {
@@ -1213,6 +1205,10 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
       wmImportPipeline: true,
       nodeServedSkill: true,
     },
+    manifest: {
+      packageName: '@origintrail-official/dkg-adapter-openclaw',
+      setupEntry: './setup-entry.mjs',
+    },
   },
   hermes: {
     id: 'hermes',
@@ -1231,6 +1227,8 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
 const HEALTH_CACHE_TTL = 10_000; // 10 seconds
+const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 20_000;
+const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
 
 export interface OpenClawChannelTarget {
   name: 'bridge' | 'gateway';
@@ -1386,7 +1384,16 @@ function buildLocalAgentIntegrationRecord(
   stored: LocalAgentIntegrationConfig | undefined,
 ): LocalAgentIntegrationRecord {
   const merged = mergeLocalAgentIntegrationConfig(
-    definition ? { id, name: definition.name, description: definition.description, capabilities: definition.capabilities, transport: definition.transportKind ? { kind: definition.transportKind } : undefined } : { id },
+    definition
+      ? {
+          id,
+          name: definition.name,
+          description: definition.description,
+          capabilities: definition.capabilities,
+          manifest: definition.manifest,
+          transport: definition.transportKind ? { kind: definition.transportKind } : undefined,
+        }
+      : { id },
     stored ?? { id },
   );
   const status = computeLocalAgentIntegrationStatus(merged);
@@ -1557,6 +1564,265 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   }
 
   return targets;
+}
+
+export interface OpenClawChannelHealthReport {
+  ok: boolean;
+  target?: 'bridge' | 'gateway';
+  bridge?: { ok: boolean; channel?: string; cached?: boolean; error?: string };
+  gateway?: { ok: boolean; channel?: string; error?: string };
+  error?: string;
+}
+
+function transportPatchFromOpenClawTarget(
+  config: DkgConfig,
+  targetName: 'bridge' | 'gateway' | undefined,
+): LocalAgentIntegrationTransport | undefined {
+  if (!targetName) return undefined;
+  const target = getOpenClawChannelTargets(config).find((item) => item.name === targetName);
+  if (!target) return undefined;
+
+  if (target.name === 'bridge') {
+    const bridgeBase = target.inboundUrl.endsWith('/inbound')
+      ? target.inboundUrl.slice(0, -'/inbound'.length)
+      : target.inboundUrl;
+    return {
+      kind: 'openclaw-channel',
+      bridgeUrl: bridgeBase,
+      ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+    };
+  }
+
+  const gatewayBase = target.inboundUrl.endsWith('/inbound')
+    ? target.inboundUrl.slice(0, -'/inbound'.length)
+    : target.inboundUrl;
+  const gatewayUrl = gatewayBase.endsWith('/api/dkg-channel')
+    ? gatewayBase.slice(0, -'/api/dkg-channel'.length)
+    : gatewayBase;
+  return {
+    kind: 'openclaw-channel',
+    gatewayUrl,
+    ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+  };
+}
+
+export async function probeOpenClawChannelHealth(
+  config: DkgConfig,
+  bridgeAuthToken: string | undefined,
+  opts: { ignoreBridgeCache?: boolean; timeoutMs?: number } = {},
+): Promise<OpenClawChannelHealthReport> {
+  const targets = getOpenClawChannelTargets(config);
+  let bridge: Record<string, unknown> | undefined;
+  let gateway: Record<string, unknown> | undefined;
+  let lastError = 'No OpenClaw channel health endpoint configured';
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+
+  for (const target of targets) {
+    if (!target.healthUrl) continue;
+
+    if (target.name === 'bridge') {
+      if (!bridgeAuthToken) {
+        bridge = { ok: false, error: 'Bridge auth token unavailable' };
+        lastError = 'Bridge auth token unavailable';
+        continue;
+      }
+
+      const cachedBridgeHealth = bridgeHealthCache;
+      const cacheValid = !opts.ignoreBridgeCache
+        && cachedBridgeHealth !== null
+        && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
+      if (cacheValid) {
+        bridge = { ok: cachedBridgeHealth.ok, cached: true };
+        if (cachedBridgeHealth.ok) {
+          return { ok: true, target: 'bridge', bridge };
+        }
+        continue;
+      }
+    }
+
+    try {
+      const healthRes = await fetch(target.healthUrl, {
+        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await healthRes.text().catch(() => '');
+      let parsed: Record<string, unknown> = {};
+      if (body) {
+        try {
+          parsed = JSON.parse(body) as Record<string, unknown>;
+        } catch {
+          parsed = { body };
+        }
+      }
+      const result: Record<string, unknown> & { ok: boolean } = { ok: healthRes.ok, ...parsed };
+      if (target.name === 'bridge') {
+        bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
+        bridge = result;
+      } else {
+        gateway = result;
+      }
+      if (healthRes.ok) {
+        return {
+          ok: true,
+          target: target.name,
+          bridge,
+          gateway,
+        };
+      }
+      lastError = typeof result.error === 'string'
+        ? result.error
+        : `Health endpoint responded ${healthRes.status}`;
+    } catch (err: any) {
+      const result = { ok: false, error: err.message };
+      if (target.name === 'bridge') {
+        bridgeHealthCache = { ok: false, ts: Date.now() };
+        bridge = result;
+      } else {
+        gateway = result;
+      }
+      lastError = err.message;
+    }
+  }
+
+  return { ok: false, bridge, gateway, error: lastError };
+}
+
+async function runOpenClawUiSetup(packageName: string): Promise<void> {
+  await execFileAsync('npx', ['--yes', packageName, 'setup', '--no-fund', '--no-start', '--no-verify'], {
+    shell: process.platform === 'win32',
+    timeout: 120_000,
+  });
+}
+
+async function restartOpenClawGateway(): Promise<void> {
+  await execFileAsync('openclaw', ['gateway', 'restart'], {
+    shell: process.platform === 'win32',
+    timeout: 120_000,
+  });
+}
+
+async function waitForOpenClawChatReady(
+  config: DkgConfig,
+  bridgeAuthToken: string | undefined,
+): Promise<OpenClawChannelHealthReport> {
+  const deadline = Date.now() + OPENCLAW_UI_CONNECT_TIMEOUT_MS;
+  let latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  while (!latest.ok && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, OPENCLAW_UI_CONNECT_POLL_MS));
+    latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  }
+  return latest;
+}
+
+export async function connectLocalAgentIntegrationFromUi(
+  config: DkgConfig,
+  body: Record<string, unknown>,
+  bridgeAuthToken: string | undefined,
+  deps: {
+    runSetup?: (packageName: string) => Promise<void>;
+    restartGateway?: () => Promise<void>;
+    waitForReady?: (config: DkgConfig, bridgeAuthToken: string | undefined) => Promise<OpenClawChannelHealthReport>;
+    probeHealth?: (
+      config: DkgConfig,
+      bridgeAuthToken: string | undefined,
+      opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
+    ) => Promise<OpenClawChannelHealthReport>;
+  } = {},
+): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
+  const requested = connectLocalAgentIntegration(config, {
+    ...body,
+    runtime: {
+      status: 'connecting',
+      ready: false,
+      lastError: null,
+    },
+  });
+  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requested.id];
+  if (requested.id !== 'openclaw') {
+    return {
+      integration: requested,
+      notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
+    };
+  }
+
+  const probeHealth = deps.probeHealth ?? probeOpenClawChannelHealth;
+  const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
+  const runSetup = deps.runSetup ?? runOpenClawUiSetup;
+  const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+
+  let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  if (health.ok) {
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+    return {
+      integration,
+      notice: `${integration.name} is connected and chat-ready.`,
+    };
+  }
+
+  const packageName = definition?.manifest?.packageName;
+  if (!packageName) {
+    return {
+      integration: requested,
+      notice: `${requested.name} was registered, but this node does not yet know how to attach it automatically.`,
+    };
+  }
+
+  try {
+    bridgeHealthCache = null;
+    await runSetup(packageName);
+    bridgeHealthCache = null;
+    health = await waitForReady(config, bridgeAuthToken);
+    if (!health.ok) {
+      await restartGateway();
+      bridgeHealthCache = null;
+      health = await waitForReady(config, bridgeAuthToken);
+    }
+  } catch (err: any) {
+    const message = err?.stderr?.trim?.() || err?.stdout?.trim?.() || err?.message || 'OpenClaw attach failed';
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      runtime: {
+        status: 'error',
+        ready: false,
+        lastError: message,
+      },
+    });
+    throw new Error(integration.runtime.lastError ?? 'OpenClaw attach failed');
+  }
+
+  if (health.ok) {
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+    return {
+      integration,
+      notice: `${integration.name} attached successfully and is chat-ready.`,
+    };
+  }
+
+  const integration = updateLocalAgentIntegration(config, requested.id, {
+    transport: transportPatchFromOpenClawTarget(config, health.target),
+    runtime: {
+      status: 'connecting',
+      ready: false,
+      lastError: health.error ?? null,
+    },
+  });
+  return {
+    integration,
+    notice: 'OpenClaw setup completed. Waiting for the gateway to finish exposing the DKG chat bridge.',
+  };
 }
 
 function shouldTryNextOpenClawTarget(status: number): boolean {
@@ -2245,7 +2511,7 @@ async function handleRequest(
 
   // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
   // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
-  // using the same ChatMemoryManager pathway as built-in Agent Hub chat.
+  // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;
@@ -2275,77 +2541,7 @@ async function handleRequest(
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable
   if (req.method === 'GET' && path === '/api/openclaw-channel/health') {
-    const targets = getOpenClawChannelTargets(config);
-    let bridge: Record<string, unknown> | undefined;
-    let gateway: Record<string, unknown> | undefined;
-    let lastError = 'No OpenClaw channel health endpoint configured';
-
-    for (const target of targets) {
-      if (!target.healthUrl) continue;
-
-      if (target.name === 'bridge') {
-        if (!bridgeAuthToken) {
-          bridge = { ok: false, error: 'Bridge auth token unavailable' };
-          lastError = 'Bridge auth token unavailable';
-          continue;
-        }
-
-        const cachedBridgeHealth = bridgeHealthCache;
-        const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
-        if (cacheValid) {
-          bridge = { ok: cachedBridgeHealth.ok, cached: true };
-          if (cachedBridgeHealth.ok) {
-            return jsonResponse(res, 200, { ok: true, target: 'bridge', bridge });
-          }
-          continue;
-        }
-      }
-
-      try {
-        const healthRes = await fetch(target.healthUrl, {
-          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
-          signal: AbortSignal.timeout(5_000),
-        });
-        const body = await healthRes.text().catch(() => '');
-        let parsed: Record<string, unknown> = {};
-        if (body) {
-          try {
-            parsed = JSON.parse(body) as Record<string, unknown>;
-          } catch {
-            parsed = { body };
-          }
-        }
-        const result: Record<string, unknown> & { ok: boolean } = { ok: healthRes.ok, ...parsed };
-        if (target.name === 'bridge') {
-          bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
-          bridge = result;
-        } else {
-          gateway = result;
-        }
-        if (healthRes.ok) {
-          return jsonResponse(res, 200, {
-            ok: true,
-            target: target.name,
-            bridge,
-            gateway,
-          });
-        }
-        lastError = typeof result.error === 'string'
-          ? result.error
-          : `Health endpoint responded ${healthRes.status}`;
-      } catch (err: any) {
-        const result = { ok: false, error: err.message };
-        if (target.name === 'bridge') {
-          bridgeHealthCache = { ok: false, ts: Date.now() };
-          bridge = result;
-        } else {
-          gateway = result;
-        }
-        lastError = err.message;
-      }
-    }
-
-    return jsonResponse(res, 200, { ok: false, bridge, gateway, error: lastError });
+    return jsonResponse(res, 200, await probeOpenClawChannelHealth(config, bridgeAuthToken));
   }
 
   // POST /api/connect  { multiaddr: "..." }
@@ -3841,9 +4037,14 @@ async function handleRequest(
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
-      const integration = connectLocalAgentIntegration(config, parsed);
+      const source = isPlainRecord(parsed.metadata) && typeof parsed.metadata.source === 'string'
+        ? parsed.metadata.source
+        : undefined;
+      const result = source === 'node-ui'
+        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken)
+        : { integration: connectLocalAgentIntegration(config, parsed) };
       await saveConfig(config);
-      return jsonResponse(res, 200, { ok: true, integration });
+      return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
     }
