@@ -34,6 +34,8 @@ const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
 const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
+const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
+const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
@@ -52,6 +54,11 @@ interface PendingRequest {
   resolve: (reply: ChannelOutboundReply) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PersistTurnOptions {
+  persistenceState?: 'stored' | 'failed' | 'pending';
+  failureReason?: string | null;
 }
 
 export class DkgChannelPlugin {
@@ -74,6 +81,7 @@ export class DkgChannelPlugin {
   private gatewayRoutesRegistered = false;
   private inFlight = 0;
   private readonly maxInFlight = 3;
+  private stopping = false;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -87,6 +95,7 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   register(api: OpenClawPluginApi): void {
+    this.stopping = false;
     this.api = api;
     const log = api.logger;
 
@@ -199,6 +208,8 @@ export class DkgChannelPlugin {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+
     // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
@@ -680,6 +691,9 @@ export class DkgChannelPlugin {
       .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
 
     // Yield events as they arrive
+    let terminalState: 'cancelled' | 'completed' | 'failed' = 'cancelled';
+    let finalText: string | null = null;
+    let failureReason: string | null = null;
     let completed = false;
     try {
       while (true) {
@@ -688,9 +702,19 @@ export class DkgChannelPlugin {
         if (item.type === 'text_delta') {
           yield item;
         } else if (item.type === 'done') {
+          try {
+            finalText = finalizeAgentReplyText(replyText);
+            terminalState = 'completed';
+          } catch (err) {
+            terminalState = 'failed';
+            failureReason = getErrorMessage(err);
+            throw err;
+          }
           completed = true;
           break;
         } else if (item.type === 'error') {
+          terminalState = 'failed';
+          failureReason = item.error.message;
           clearTimeout(timer);
           throw item.error;
         }
@@ -698,12 +722,32 @@ export class DkgChannelPlugin {
     } finally {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
+
+      if (!this.stopping) {
+        if (terminalState === 'completed' && finalText) {
+          this.queueTurnPersistence(text, finalText, correlationId, identity);
+        } else if (terminalState === 'failed') {
+          this.queueTurnPersistence(
+            text,
+            this.buildFailedAssistantReply(failureReason),
+            correlationId,
+            identity,
+            { persistenceState: 'failed', failureReason },
+          );
+        } else {
+          this.queueTurnPersistence(
+            text,
+            CANCELLED_TURN_MESSAGE,
+            correlationId,
+            identity,
+            { persistenceState: 'failed', failureReason: 'cancelled' },
+          );
+        }
+      }
     }
 
     // Only yield final if the stream completed normally (not cancelled)
-    if (completed) {
-      const finalText = finalizeAgentReplyText(replyText);
-      this.queueTurnPersistence(text, finalText, correlationId, identity);
+    if (completed && finalText) {
       yield { type: 'final', text: finalText, correlationId };
     }
   }
@@ -837,6 +881,7 @@ export class DkgChannelPlugin {
     assistantReply: string,
     correlationId: string,
     identity: string,
+    opts?: PersistTurnOptions,
   ): Promise<void> {
     // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
@@ -847,7 +892,11 @@ export class DkgChannelPlugin {
       sessionId,
       userMessage,
       assistantReply,
-      { turnId: correlationId },
+      {
+        turnId: correlationId,
+        ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
+        ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
+      },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
@@ -857,16 +906,24 @@ export class DkgChannelPlugin {
     assistantReply: string,
     correlationId: string,
     identity: string,
+    opts?: PersistTurnOptions,
   ): void {
-    if (this.pendingTurnPersistence.has(correlationId)) return;
+    if (this.stopping || this.pendingTurnPersistence.has(correlationId)) return;
 
     const attemptPersist = (attempt: number): void => {
+      if (this.stopping) return;
       this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
-      void this.persistTurn(userMessage, assistantReply, correlationId, identity)
+      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
         .then(() => {
           this.pendingTurnPersistence.delete(correlationId);
         })
         .catch((err: any) => {
+          const currentJob = this.pendingTurnPersistence.get(correlationId);
+          if (this.stopping || !currentJob) {
+            this.pendingTurnPersistence.delete(correlationId);
+            return;
+          }
+
           const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
           if (retryDelayMs == null) {
             this.pendingTurnPersistence.delete(correlationId);
@@ -880,6 +937,10 @@ export class DkgChannelPlugin {
             `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
           );
           const timer = setTimeout(() => {
+            if (this.stopping) {
+              this.pendingTurnPersistence.delete(correlationId);
+              return;
+            }
             const job = this.pendingTurnPersistence.get(correlationId);
             if (!job) return;
             this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null });
@@ -890,6 +951,14 @@ export class DkgChannelPlugin {
     };
 
     attemptPersist(1);
+  }
+
+  private buildFailedAssistantReply(reason?: string | null): string {
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason || normalizedReason === 'cancelled') {
+      return CANCELLED_TURN_MESSAGE;
+    }
+    return `${FAILED_TURN_MESSAGE_PREFIX}: ${normalizedReason}]`;
   }
 
   // ---------------------------------------------------------------------------
@@ -1124,6 +1193,13 @@ function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
 function formatError(err: unknown): string {
   if (err instanceof Error) {
     return err.stack ?? err.message;
+  }
+  return String(err);
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
   }
   return String(err);
 }

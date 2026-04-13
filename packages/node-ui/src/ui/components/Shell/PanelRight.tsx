@@ -9,6 +9,7 @@ import {
   disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
+  getDefaultLocalAgentSessionId,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
   streamLocalAgentChat,
@@ -104,6 +105,25 @@ function mergeLocalAgentMessages(existing: LocalAgentMessage[], incoming: LocalA
   return merged;
 }
 
+export function getLocalAgentConversationStateKey(
+  integrationId: string,
+  sessionId: string | null,
+): string {
+  return sessionId?.trim() || `integration:${integrationId}`;
+}
+
+function resolveLocalAgentConversation(args: {
+  integrationId: string;
+  sessionId: string | null;
+}): { integrationId: string; sessionId: string | null; stateKey: string } {
+  const resolvedSessionId = args.sessionId ?? getDefaultLocalAgentSessionId(args.integrationId);
+  return {
+    integrationId: args.integrationId,
+    sessionId: resolvedSessionId,
+    stateKey: getLocalAgentConversationStateKey(args.integrationId, resolvedSessionId),
+  };
+}
+
 function integrationIdFromSessionId(
   sessionId: string,
   integrations: LocalAgentIntegration[],
@@ -146,20 +166,26 @@ function summarizeLocalAgentSessions(
 
 function hasLocalAgentConversation(
   integrationId: string,
-  localMessagesByIntegration: Record<string, LocalAgentMessage[]>,
-  localHistoryLoadedByIntegration: Record<string, boolean>,
+  selectedSessionId: string | null,
+  localMessagesByConversation: Record<string, LocalAgentMessage[]>,
   sessions: LocalAgentSessionSummary[],
 ): boolean {
-  return (localMessagesByIntegration[integrationId]?.length ?? 0) > 0
-    || localHistoryLoadedByIntegration[integrationId] === true
+  const conversation = resolveLocalAgentConversation({
+    integrationId,
+    sessionId: selectedSessionId,
+  });
+  return (localMessagesByConversation[conversation.stateKey]?.length ?? 0) > 0
+    || (conversation.sessionId
+      ? sessions.some((session) => session.sessionId === conversation.sessionId)
+      : false)
     || sessions.some((session) => session.integrationId === integrationId);
 }
 
 export function resolveLocalAgentSelectionState(args: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
-  localMessagesByIntegration: Record<string, LocalAgentMessage[]>;
-  localHistoryLoadedByIntegration: Record<string, boolean>;
+  selectedSessionId: string | null;
+  localMessagesByConversation: Record<string, LocalAgentMessage[]>;
   sessions: LocalAgentSessionSummary[];
 }) {
   const sortedIntegrations = [...args.integrations].sort(compareLocalAgentIntegrations);
@@ -167,11 +193,17 @@ export function resolveLocalAgentSelectionState(args: {
   const selectedIntegration = sortedIntegrations.find((item) => item.id === args.selectedIntegrationId)
     ?? connectedIntegrations[0]
     ?? null;
+  const selectedConversation = selectedIntegration
+    ? resolveLocalAgentConversation({
+      integrationId: selectedIntegration.id,
+      sessionId: args.selectedSessionId,
+    })
+    : null;
   const selectedHasConversation = selectedIntegration
     ? hasLocalAgentConversation(
       selectedIntegration.id,
-      args.localMessagesByIntegration,
-      args.localHistoryLoadedByIntegration,
+      args.selectedSessionId,
+      args.localMessagesByConversation,
       args.sessions,
     )
     : false;
@@ -180,6 +212,7 @@ export function resolveLocalAgentSelectionState(args: {
     sortedIntegrations,
     connectedIntegrations,
     selectedIntegration,
+    selectedConversation,
     selectedHasConversation,
   };
 }
@@ -231,6 +264,10 @@ function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
   if (integration.bridgeOnline) return 'connected';
   if (integration.status === 'connecting') return 'known';
   return 'offline';
+}
+
+export function networkPeerCardStatusClass(agent: Pick<AgentInfo, 'connectionStatus'>): 'connected' | 'offline' {
+  return agent.connectionStatus === 'connected' ? 'connected' : 'offline';
 }
 
 function localAgentToolbarLabel(
@@ -528,12 +565,18 @@ function NetworkTab(props: {
       {peerAgents.length === 0 && !loading && (
         <div className="v10-agent-empty-state">No connected peers yet.</div>
       )}
-      {peerAgents.map((agent) => (
-        <div key={agent.peerId} className="v10-agent-card connected">
+      {peerAgents.map((agent) => {
+        const statusClass = networkPeerCardStatusClass(agent);
+        return (
+        <div key={agent.peerId} className={`v10-agent-card ${statusClass}`}>
           <div className="v10-agent-card-header">
-            <span className="v10-agent-card-dot connected" />
+            <span className={`v10-agent-card-dot ${statusClass}`} />
             <span className="v10-agent-card-name">{agent.name}</span>
-            <span className="v10-agent-card-badge">{agent.connectionTransport ?? 'direct'}</span>
+            <span className="v10-agent-card-badge">
+              {agent.connectionStatus === 'connected'
+                ? (agent.connectionTransport ?? 'direct')
+                : 'Disconnected'}
+            </span>
           </div>
           <div className="v10-agent-card-meta">
             <span>{agent.nodeRole ?? 'core'}</span>
@@ -542,7 +585,8 @@ function NetworkTab(props: {
             {agent.lastSeen != null && <span>{formatDuration(Date.now() - agent.lastSeen)} ago</span>}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -594,14 +638,17 @@ export function PanelRight() {
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    () => getDefaultLocalAgentSessionId('openclaw'),
+  );
   const [connectBusyId, setConnectBusyId] = useState<string | null>(null);
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
 
-  const [localMessagesByIntegration, setLocalMessagesByIntegration] = useState<Record<string, LocalAgentMessage[]>>({});
-  const [localInput, setLocalInput] = useState('');
-  const [localSending, setLocalSending] = useState(false);
-  const [localHistoryLoadedByIntegration, setLocalHistoryLoadedByIntegration] = useState<Record<string, boolean>>({});
+  const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
+  const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
+  const [localSendingByConversation, setLocalSendingByConversation] = useState<Record<string, boolean>>({});
+  const [localHistoryLoadedByConversation, setLocalHistoryLoadedByConversation] = useState<Record<string, boolean>>({});
 
   const localAbortRef = useRef<AbortController | null>(null);
   const autoFocusedLocalAgentRef = useRef(false);
@@ -612,35 +659,73 @@ export function PanelRight() {
     sortedIntegrations,
     connectedIntegrations,
     selectedIntegration,
+    selectedConversation,
     selectedHasConversation,
   } = resolveLocalAgentSelectionState({
     integrations,
     selectedIntegrationId,
-    localMessagesByIntegration,
-    localHistoryLoadedByIntegration,
+    selectedSessionId,
+    localMessagesByConversation,
     sessions: localSessions,
   });
-  const selectedLocalMessages = selectedIntegration
-    ? (localMessagesByIntegration[selectedIntegration.id] ?? [])
+  const selectedConversationKey = selectedConversation?.stateKey ?? null;
+  const selectedLocalMessages = selectedConversationKey
+    ? (localMessagesByConversation[selectedConversationKey] ?? [])
     : [];
-  const selectedLocalHistoryLoaded = selectedIntegration
-    ? (localHistoryLoadedByIntegration[selectedIntegration.id] ?? false)
+  const selectedLocalHistoryLoaded = selectedConversationKey
+    ? (localHistoryLoadedByConversation[selectedConversationKey] ?? false)
+    : false;
+  const localInput = selectedConversationKey
+    ? (localInputByConversation[selectedConversationKey] ?? '')
+    : '';
+  const localSending = selectedConversationKey
+    ? (localSendingByConversation[selectedConversationKey] ?? false)
     : false;
 
   const scrollLocalChatToBottom = useCallback(() => {
     localChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  useEffect(scrollLocalChatToBottom, [selectedIntegration?.id, selectedLocalMessages, scrollLocalChatToBottom]);
+  useEffect(scrollLocalChatToBottom, [selectedConversationKey, selectedLocalMessages, scrollLocalChatToBottom]);
 
   const updateLocalMessages = useCallback((
-    integrationId: string,
+    conversationKey: string,
     updater: (messages: LocalAgentMessage[]) => LocalAgentMessage[],
   ) => {
-    setLocalMessagesByIntegration((prev) => ({
+    setLocalMessagesByConversation((prev) => ({
       ...prev,
-      [integrationId]: updater(prev[integrationId] ?? []),
+      [conversationKey]: updater(prev[conversationKey] ?? []),
     }));
+  }, []);
+
+  const setLocalInputForConversation = useCallback((conversationKey: string | null, value: string) => {
+    if (!conversationKey) return;
+    setLocalInputByConversation((prev) => ({
+      ...prev,
+      [conversationKey]: value,
+    }));
+  }, []);
+
+  const setLocalSendingForConversation = useCallback((conversationKey: string, value: boolean) => {
+    setLocalSendingByConversation((prev) => ({
+      ...prev,
+      [conversationKey]: value,
+    }));
+  }, []);
+
+  const setSelectedIntegration = useCallback((
+    integrationId: string,
+    opts: { preserveSession?: boolean; sessionId?: string | null } = {},
+  ) => {
+    setSelectedIntegrationId(integrationId);
+    if (integrationId === ADD_AGENT_TAB_ID) {
+      setSelectedSessionId(null);
+      return;
+    }
+    if (opts.preserveSession) {
+      return;
+    }
+    setSelectedSessionId(opts.sessionId ?? getDefaultLocalAgentSessionId(integrationId));
   }, []);
 
   const loadSessions = useCallback(() => {
@@ -679,43 +764,46 @@ export function PanelRight() {
         || (Boolean(selectedItem)
           && (selectedItem.persistentChat || hasLocalAgentConversation(
             selectedIntegrationId,
-            localMessagesByIntegration,
-            localHistoryLoadedByIntegration,
+            selectedSessionId,
+            localMessagesByConversation,
             sessionSummaries,
           )));
       if (!preserveSelected) {
-        setSelectedIntegrationId(connected[0]?.id ?? ADD_AGENT_TAB_ID);
+        setSelectedIntegration(connected[0]?.id ?? ADD_AGENT_TAB_ID);
       }
       const preferred = connected[0];
       if (preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID) {
         autoFocusedLocalAgentRef.current = true;
-        setSelectedIntegrationId(preferred.id);
+        setSelectedIntegration(preferred.id);
         setMode('agents');
       } else if (!preferred && !preserveSelected) {
         autoFocusedLocalAgentRef.current = false;
-        setSelectedIntegrationId(ADD_AGENT_TAB_ID);
+        setSelectedIntegration(ADD_AGENT_TAB_ID);
       }
     } catch {
       // Keep the last known integrations in place so transient refresh failures
       // do not collapse an attached agent chat surface back into the add-agent UI.
     }
-  }, [localHistoryLoadedByIntegration, localMessagesByIntegration, memorySessions, selectedIntegrationId]);
+  }, [localMessagesByConversation, memorySessions, selectedIntegrationId, selectedSessionId, setSelectedIntegration]);
 
-  const loadLocalHistory = useCallback(async (integrationId: string) => {
-    setLocalHistoryLoadedByIntegration((prev) => ({
+  const loadLocalHistory = useCallback(async (integrationId: string, sessionId: string | null = null) => {
+    const conversation = resolveLocalAgentConversation({ integrationId, sessionId });
+    setLocalHistoryLoadedByConversation((prev) => ({
       ...prev,
-      [integrationId]: false,
+      [conversation.stateKey]: false,
     }));
     try {
-      const history = await fetchLocalAgentHistory(integrationId, 100);
+      const history = await fetchLocalAgentHistory(integrationId, 100, {
+        sessionId: conversation.sessionId ?? undefined,
+      });
       const loaded = history.map(mapHistoryMessage);
-      updateLocalMessages(integrationId, (prev) => mergeLocalAgentMessages(prev, loaded));
+      updateLocalMessages(conversation.stateKey, (prev) => mergeLocalAgentMessages(prev, loaded));
     } catch {
-      updateLocalMessages(integrationId, (prev) => prev);
+      updateLocalMessages(conversation.stateKey, (prev) => prev);
     } finally {
-      setLocalHistoryLoadedByIntegration((prev) => ({
+      setLocalHistoryLoadedByConversation((prev) => ({
         ...prev,
-        [integrationId]: true,
+        [conversation.stateKey]: true,
       }));
       loadSessions();
     }
@@ -750,41 +838,51 @@ export function PanelRight() {
 
   useEffect(() => {
     if (!selectedIntegration?.chatSupported || (!selectedIntegration.persistentChat && !selectedHasConversation)) {
-      if (selectedIntegration) {
-        setLocalHistoryLoadedByIntegration((prev) => ({
+      if (selectedConversationKey) {
+        setLocalHistoryLoadedByConversation((prev) => ({
           ...prev,
-          [selectedIntegration.id]: false,
+          [selectedConversationKey]: false,
         }));
       }
       return;
     }
     let cancelled = false;
     (async () => {
-      await loadLocalHistory(selectedIntegration.id);
+      await loadLocalHistory(selectedIntegration.id, selectedConversation?.sessionId ?? null);
       if (cancelled) return;
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedHasConversation, selectedIntegration?.chatSupported, selectedIntegration?.id, selectedIntegration?.persistentChat, loadLocalHistory]);
+  }, [
+    loadLocalHistory,
+    selectedConversation?.sessionId,
+    selectedConversationKey,
+    selectedHasConversation,
+    selectedIntegration?.chatSupported,
+    selectedIntegration?.id,
+    selectedIntegration?.persistentChat,
+  ]);
 
   const sendLocalMessage = useCallback(async () => {
     const integration = selectedIntegration;
+    const conversation = selectedConversation;
     const text = localInput.trim();
-    if (!integration?.chatSupported || !integration.chatReady || !text || localSending) return;
+    if (!integration?.chatSupported || !integration.chatReady || !text || localSending || !conversation) return;
     const integrationId = integration.id;
+    const conversationKey = conversation.stateKey;
     const correlationId = crypto.randomUUID();
 
-    const userId = `local:${integrationId}:${correlationId}:user`;
-    const assistantId = `local:${integrationId}:${correlationId}:assistant`;
+    const userId = `local:${conversationKey}:${correlationId}:user`;
+    const assistantId = `local:${conversationKey}:${correlationId}:assistant`;
     const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    updateLocalMessages(integrationId, (prev) => [
+    updateLocalMessages(conversationKey, (prev) => [
       ...prev,
       { id: userId, turnId: correlationId, role: 'user', content: text, ts: now },
       { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
     ]);
-    setLocalInput('');
-    setLocalSending(true);
+    setLocalInputForConversation(conversationKey, '');
+    setLocalSendingForConversation(conversationKey, true);
     setConnectError(null);
 
     const controller = new AbortController();
@@ -794,9 +892,10 @@ export function PanelRight() {
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
         signal: controller.signal,
+        sessionId: conversation.sessionId ?? undefined,
         onEvent: (event: LocalAgentStreamEvent) => {
           if (event.type === 'text_delta') {
-            updateLocalMessages(integrationId, (prev) =>
+            updateLocalMessages(conversationKey, (prev) =>
               prev.map((message) =>
                 message.id === assistantId ? { ...message, content: message.content + event.delta } : message,
               ),
@@ -805,7 +904,7 @@ export function PanelRight() {
         },
       });
 
-      updateLocalMessages(integrationId, (prev) =>
+      updateLocalMessages(conversationKey, (prev) =>
         prev.map((message) =>
           message.id === assistantId
             ? {
@@ -820,7 +919,7 @@ export function PanelRight() {
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
-      updateLocalMessages(integrationId, (prev) =>
+      updateLocalMessages(conversationKey, (prev) =>
         prev.map((message) =>
           message.id === assistantId
             ? {
@@ -835,10 +934,22 @@ export function PanelRight() {
       );
       void refreshLocalIntegrations();
     } finally {
-      setLocalSending(false);
+      setLocalSendingForConversation(conversationKey, false);
       localAbortRef.current = null;
     }
-  }, [advance, loadSessions, localInput, localSending, refreshLocalIntegrations, selectedIntegration, stage, updateLocalMessages]);
+  }, [
+    advance,
+    loadSessions,
+    localInput,
+    localSending,
+    refreshLocalIntegrations,
+    selectedConversation,
+    selectedIntegration,
+    setLocalInputForConversation,
+    setLocalSendingForConversation,
+    stage,
+    updateLocalMessages,
+  ]);
 
   const connectIntegration = useCallback(async (integrationId: string) => {
     setConnectBusyId(integrationId);
@@ -848,7 +959,7 @@ export function PanelRight() {
       const result = await connectLocalAgentIntegration(integrationId);
       setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, result.integration));
       await refreshLocalIntegrations();
-      setSelectedIntegrationId(integrationId);
+      setSelectedIntegration(integrationId);
       autoFocusedLocalAgentRef.current = true;
       setConnectNotice(
         result.notice
@@ -863,7 +974,7 @@ export function PanelRight() {
     } finally {
       setConnectBusyId(null);
     }
-  }, [refreshLocalIntegrations]);
+  }, [refreshLocalIntegrations, setSelectedIntegration]);
 
   const disconnectIntegration = useCallback(async (integrationId: string) => {
     setConnectError(null);
@@ -872,20 +983,19 @@ export function PanelRight() {
       await disconnectLocalAgentIntegration(integrationId);
       setIntegrations((prev) => markLocalAgentIntegrationDisconnected(prev, integrationId));
       autoFocusedLocalAgentRef.current = false;
-      setSelectedIntegrationId(integrationId);
+      setSelectedIntegration(integrationId, { preserveSession: selectedIntegrationId === integrationId });
       setConnectNotice('The local agent was disconnected from this node. Session history remains available here.');
       setMode('agents');
       await refreshLocalIntegrations();
     } catch (err: any) {
       setConnectError(err.message);
     }
-  }, [refreshLocalIntegrations]);
+  }, [refreshLocalIntegrations, selectedIntegrationId, setSelectedIntegration]);
 
-  const openSession = useCallback(async (session: LocalAgentSessionSummary) => {
-    setSelectedIntegrationId(session.integrationId);
+  const openSession = useCallback((session: LocalAgentSessionSummary) => {
+    setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
     setMode('agents');
-    await loadLocalHistory(session.integrationId);
-  }, [loadLocalHistory]);
+  }, [setSelectedIntegration]);
 
   return (
     <div className="v10-panel-right">
@@ -916,7 +1026,7 @@ export function PanelRight() {
           selectedIntegrationId={selectedIntegrationId}
           selectedIntegration={selectedIntegration}
           selectedHasConversation={selectedHasConversation}
-          onSelectIntegration={setSelectedIntegrationId}
+          onSelectIntegration={setSelectedIntegration}
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}
           onRefreshIntegrations={refreshLocalIntegrations}
@@ -927,7 +1037,7 @@ export function PanelRight() {
           localHistoryLoaded={selectedLocalHistoryLoaded}
           localChatEndRef={localChatEndRef}
           localInput={localInput}
-          onLocalInputChange={setLocalInput}
+          onLocalInputChange={(value) => setLocalInputForConversation(selectedConversationKey, value)}
           onSendLocalMessage={sendLocalMessage}
           localSending={localSending}
         />

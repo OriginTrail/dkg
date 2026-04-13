@@ -268,6 +268,40 @@ export interface DkgConfigOverrides {
   portExplicit?: boolean;
 }
 
+function migrateLegacyOpenClawTransport(existing: Record<string, any>): void {
+  const legacyTransport = existing.openclawChannel;
+  if (!legacyTransport || typeof legacyTransport !== 'object') return;
+
+  const bridgeUrl = typeof legacyTransport.bridgeUrl === 'string' && legacyTransport.bridgeUrl.trim()
+    ? legacyTransport.bridgeUrl.trim()
+    : undefined;
+  const gatewayUrl = typeof legacyTransport.gatewayUrl === 'string' && legacyTransport.gatewayUrl.trim()
+    ? legacyTransport.gatewayUrl.trim()
+    : undefined;
+  if (!bridgeUrl && !gatewayUrl) return;
+
+  if (!existing.localAgentIntegrations || typeof existing.localAgentIntegrations !== 'object') {
+    existing.localAgentIntegrations = {};
+  }
+
+  const currentOpenClaw = existing.localAgentIntegrations.openclaw && typeof existing.localAgentIntegrations.openclaw === 'object'
+    ? existing.localAgentIntegrations.openclaw
+    : {};
+  const currentTransport = currentOpenClaw.transport && typeof currentOpenClaw.transport === 'object'
+    ? currentOpenClaw.transport
+    : {};
+
+  existing.localAgentIntegrations.openclaw = {
+    ...currentOpenClaw,
+    transport: {
+      kind: currentTransport.kind ?? 'openclaw-channel',
+      ...(bridgeUrl ? { bridgeUrl } : {}),
+      ...(gatewayUrl ? { gatewayUrl } : {}),
+      ...currentTransport,
+    },
+  };
+}
+
 export function writeDkgConfig(
   agentName: string,
   network: NetworkConfig,
@@ -289,6 +323,7 @@ export function writeDkgConfig(
       warn(`Could not parse existing ${configPath} — will overwrite`);
     }
   }
+  migrateLegacyOpenClawTransport(existing);
   delete existing.openclawAdapter;
   delete existing.openclawChannel;
 

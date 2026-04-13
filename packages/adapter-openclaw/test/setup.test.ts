@@ -165,6 +165,44 @@ describe('writeDkgConfig', () => {
       process.env.DKG_HOME = original;
     }
   });
+
+  it('migrates legacy OpenClaw transport hints into localAgentIntegrations before removing the old key', () => {
+    const dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
+      name: 'existing-node',
+      apiPort: 9300,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9301',
+        gatewayUrl: 'http://127.0.0.1:9300',
+      },
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+          },
+        },
+      },
+    }));
+
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+
+    try {
+      writeDkgConfig('existing-node', fakeNetwork, 9200);
+
+      const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
+      expect(config.openclawChannel).toBeUndefined();
+      expect(config.localAgentIntegrations.openclaw.transport).toMatchObject({
+        kind: 'openclaw-channel',
+        bridgeUrl: 'http://127.0.0.1:9301',
+        gatewayUrl: 'http://127.0.0.1:9300',
+      });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

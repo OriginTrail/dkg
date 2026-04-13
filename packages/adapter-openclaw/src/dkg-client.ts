@@ -59,6 +59,10 @@ export interface LocalAgentIntegrationPayload {
   runtime?: LocalAgentIntegrationRuntime;
 }
 
+export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayload {
+  status?: string;
+}
+
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -149,7 +153,12 @@ export class DkgDaemonClient {
     sessionId: string,
     userMessage: string,
     assistantReply: string,
-    opts?: { turnId?: string; toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }> },
+    opts?: {
+      turnId?: string;
+      toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+      persistenceState?: 'stored' | 'failed' | 'pending';
+      failureReason?: string | null;
+    },
   ): Promise<void> {
     await this.post('/api/openclaw-channel/persist-turn', {
       sessionId,
@@ -157,6 +166,8 @@ export class DkgDaemonClient {
       assistantReply,
       turnId: opts?.turnId,
       toolCalls: opts?.toolCalls,
+      persistenceState: opts?.persistenceState,
+      failureReason: opts?.failureReason,
     });
   }
 
@@ -186,6 +197,20 @@ export class DkgDaemonClient {
 
   async connectLocalAgentIntegration(payload: LocalAgentIntegrationPayload): Promise<Record<string, unknown>> {
     return this.post('/api/local-agent-integrations/connect', payload);
+  }
+
+  async getLocalAgentIntegration(id: string): Promise<LocalAgentIntegrationRecord | null> {
+    try {
+      const response = await this.get<{ integration?: LocalAgentIntegrationRecord }>(
+        `/api/local-agent-integrations/${encodeURIComponent(id)}`,
+      );
+      return response.integration ?? null;
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('responded 404')) {
+        return null;
+      }
+      throw err;
+    }
   }
 
   async updateLocalAgentIntegration(

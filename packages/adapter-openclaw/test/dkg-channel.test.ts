@@ -603,7 +603,7 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
-  it('processInboundStream should not persist a partial reply when the consumer cancels early', async () => {
+  it('processInboundStream should persist a cancelled turn without storing the partial reply text', async () => {
     let resumeDispatch!: () => void;
     const mockRuntime = {
       channel: {
@@ -646,7 +646,16 @@ describe('DkgChannelPlugin', () => {
     resumeDispatch();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(storeSpy).not.toHaveBeenCalled();
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      '[OpenClaw reply cancelled before completion]',
+      {
+        turnId: 'corr-stream-cancel',
+        persistenceState: 'failed',
+        failureReason: 'cancelled',
+      },
+    );
   });
 
   it('processInboundStream should surface a real error when the agent returns no text', async () => {
@@ -679,7 +688,17 @@ describe('DkgChannelPlugin', () => {
 
     const stream = plugin.processInboundStream('Hello', 'corr-stream-empty', 'owner');
     await expect(stream.next()).rejects.toThrow('Agent returned no text response');
-    expect(storeSpy).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      '[OpenClaw reply failed before completion: Agent returned no text response]',
+      {
+        turnId: 'corr-stream-empty',
+        persistenceState: 'failed',
+        failureReason: 'Agent returned no text response',
+      },
+    );
   });
 
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {
@@ -757,5 +776,54 @@ describe('DkgChannelPlugin', () => {
 
     await plugin.stop();
     await plugin.stop();
+  });
+
+  it('stop should prevent a late persistence failure from scheduling retries after shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      let rejectPersist!: (err: Error) => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementationOnce(() =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPersist = reject;
+        }),
+      );
+      plugin.register(api);
+
+      await plugin.processInbound('Hello', 'corr-stop-retry', 'owner');
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await plugin.stop();
+      rejectPersist(new Error('late persistence failure'));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

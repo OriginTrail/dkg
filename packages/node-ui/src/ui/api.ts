@@ -516,9 +516,13 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
 
 export async function sendOpenClawLocalChat(
   text: string,
-  opts?: { correlationId?: string; signal?: AbortSignal },
+  opts?: { correlationId?: string; signal?: AbortSignal; identity?: string },
 ): Promise<{ text: string; correlationId: string }> {
-  const body = { text, correlationId: opts?.correlationId ?? crypto.randomUUID() };
+  const body = {
+    text,
+    correlationId: opts?.correlationId ?? crypto.randomUUID(),
+    ...(opts?.identity ? { identity: opts.identity } : {}),
+  };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -547,9 +551,14 @@ export async function streamOpenClawLocalChat(
     correlationId?: string;
     signal?: AbortSignal;
     onEvent?: (event: OpenClawStreamEvent) => void;
+    identity?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
-  const body = { text, correlationId: opts.correlationId ?? crypto.randomUUID() };
+  const body = {
+    text,
+    correlationId: opts.correlationId ?? crypto.randomUUID(),
+    ...(opts.identity ? { identity: opts.identity } : {}),
+  };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
     headers: {
@@ -719,6 +728,11 @@ export interface LocalAgentHistoryMessage {
 interface LocalAgentSurface {
   connectSupported: boolean;
   chatSupported: boolean;
+  defaultSessionId?: (integrationId: string) => string;
+  resolveChatContext?: (args: {
+    integrationId: string;
+    sessionId?: string;
+  }) => Record<string, unknown>;
   fetchHealth?: () => Promise<{
     ok: boolean;
     target?: 'bridge' | 'gateway';
@@ -731,38 +745,50 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   openclaw: {
     connectSupported: true,
     chatSupported: true,
+    defaultSessionId: (integrationId: string) => `${integrationId}:dkg-ui`,
+    resolveChatContext: ({ integrationId, sessionId }) => {
+      if (!sessionId) return {};
+      const prefix = `${integrationId}:dkg-ui:`;
+      if (!sessionId.startsWith(prefix)) return {};
+      const identity = sessionId.slice(prefix.length).trim();
+      return identity ? { identity } : {};
+    },
     fetchHealth: fetchOpenClawLocalHealth,
     streamChat: streamOpenClawLocalChat,
   },
 };
 
-function buildLocalAgentSessionUri(id: string): string {
-  return `urn:dkg:chat:session:${id}:dkg-ui`;
+export function getDefaultLocalAgentSessionId(integrationId: string): string | null {
+  const normalizedId = integrationId.trim().toLowerCase();
+  return LOCAL_AGENT_SURFACES[normalizedId]?.defaultSessionId?.(normalizedId) ?? null;
 }
 
-async function fetchNamedLocalAgentHistory(id: string, limit = 50): Promise<LocalAgentHistoryMessage[]> {
-  const sessionUri = buildLocalAgentSessionUri(id);
-  const sparql = `SELECT ?uri ?text ?author ?ts ?turnId WHERE {
-      ?uri a <http://schema.org/Message> ;
-           <http://schema.org/isPartOf> <${sessionUri}> ;
-           <http://schema.org/text> ?text ;
-           <http://schema.org/author> ?author ;
-           <http://schema.org/dateCreated> ?ts .
-      OPTIONAL { ?uri <http://dkg.io/ontology/turnId> ?turnId }
+function resolveLocalAgentHistorySessionId(integrationId: string, sessionId?: string): string | null {
+  if (sessionId?.trim()) return sessionId.trim();
+  return getDefaultLocalAgentSessionId(integrationId);
+}
+
+async function fetchLocalAgentHistoryBySessionId(
+  sessionId: string,
+  limit = 50,
+): Promise<LocalAgentHistoryMessage[]> {
+  try {
+    const session = await fetchMemorySession(sessionId);
+    return session.messages
+      .slice(-limit)
+      .map((message, index) => ({
+        uri: `urn:dkg:chat:session:${sessionId}:message:${index}`,
+        text: message.text,
+        author: message.author,
+        ts: message.ts,
+        turnId: message.turnId,
+      }));
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 404) {
+      return [];
     }
-    ORDER BY DESC(?ts)
-    LIMIT ${limit}`;
-  const res = await executeQuery(sparql, 'agent-memory', true);
-  const bindings: any[] = res?.result?.bindings ?? (res as any)?.results?.bindings ?? [];
-  const history = bindings.map((b: any) => ({
-    uri: bv(b.uri) ?? '',
-    text: bv(b.text) ?? '',
-    author: bv(b.author) ?? '',
-    ts: bv(b.ts) ?? '',
-    turnId: bv(b.turnId) ?? undefined,
-  }));
-  history.reverse();
-  return history;
+    throw err;
+  }
 }
 
 /**
@@ -770,7 +796,7 @@ async function fetchNamedLocalAgentHistory(id: string, limit = 50): Promise<Loca
  * Queries schema:Message items linked to the openclaw:dkg-ui session.
  */
 export async function fetchOpenClawLocalHistory(limit = 50): Promise<LocalAgentHistoryMessage[]> {
-  return fetchNamedLocalAgentHistory('openclaw', limit);
+  return fetchLocalAgentHistory('openclaw', limit);
 }
 
 export type LocalAgentStreamEvent = OpenClawStreamEvent;
@@ -924,8 +950,14 @@ export async function fetchLocalAgentHealth(id: string) {
   throw new Error(`${id} local health is not available yet.`);
 }
 
-export async function fetchLocalAgentHistory(id: string, limit = 50): Promise<LocalAgentHistoryMessage[]> {
-  return fetchNamedLocalAgentHistory(id, limit);
+export async function fetchLocalAgentHistory(
+  id: string,
+  limit = 50,
+  opts: { sessionId?: string } = {},
+): Promise<LocalAgentHistoryMessage[]> {
+  const sessionId = resolveLocalAgentHistorySessionId(id, opts.sessionId);
+  if (!sessionId) return [];
+  return fetchLocalAgentHistoryBySessionId(sessionId, limit);
 }
 
 export async function streamLocalAgentChat(
@@ -935,11 +967,19 @@ export async function streamLocalAgentChat(
     correlationId?: string;
     signal?: AbortSignal;
     onEvent?: (event: LocalAgentStreamEvent) => void;
+    sessionId?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
-  const surface = LOCAL_AGENT_SURFACES[id];
+  const normalizedId = id.trim().toLowerCase();
+  const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {
-    return surface.streamChat(text, opts);
+    return surface.streamChat(text, {
+      ...opts,
+      ...surface.resolveChatContext?.({
+        integrationId: normalizedId,
+        sessionId: opts.sessionId,
+      }),
+    });
   }
   throw new Error(`${id} local chat is not available yet.`);
 }
