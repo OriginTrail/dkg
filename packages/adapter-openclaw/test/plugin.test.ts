@@ -216,4 +216,58 @@ describe('DkgNodePlugin', () => {
     expect(fullToolNames).toContain('dkg_memory_search');
     expect(fullToolNames).toContain('dkg_memory_import');
   });
+
+  it('does not re-register the OpenClaw channel routes when the same plugin instance upgrades to full runtime', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    });
+    globalThis.fetch = fakeFetch;
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+      memory: { enabled: false },
+    });
+    const registerChannel = vi.fn();
+    const registerHttpRoute = vi.fn();
+
+    try {
+      const setupRuntimeApi = {
+        config: {},
+        registrationMode: 'setup-runtime',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerChannel,
+        registerHttpRoute,
+        on: () => {},
+        logger: {},
+      } as OpenClawPluginApi & {
+        registerChannel: typeof registerChannel;
+        registerHttpRoute: typeof registerHttpRoute;
+      };
+      plugin.register(setupRuntimeApi);
+
+      const fullRuntimeApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerChannel,
+        registerHttpRoute,
+        on: () => {},
+        logger: {},
+      } as OpenClawPluginApi & {
+        registerChannel: typeof registerChannel;
+        registerHttpRoute: typeof registerHttpRoute;
+      };
+      plugin.register(fullRuntimeApi);
+
+      expect(registerChannel).toHaveBeenCalledTimes(1);
+      expect(registerHttpRoute).toHaveBeenCalledTimes(2);
+    } finally {
+      await plugin.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

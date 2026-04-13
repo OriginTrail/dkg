@@ -1503,14 +1503,16 @@ export function updateLocalAgentIntegration(
   return getLocalAgentIntegration(config, normalizedId)!;
 }
 
-function hasEnabledLocalAgentChat(config: DkgConfig, id: string): boolean {
+export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): boolean {
   const integration = getLocalAgentIntegration(config, id);
   return integration?.enabled === true
-    && integration.capabilities.localChat === true
-    && integration.runtime.ready === true;
+    && integration.capabilities.localChat === true;
 }
 
 export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
+  const storedOpenClawIntegration = getStoredLocalAgentIntegrations(config).openclaw;
+  if (storedOpenClawIntegration?.enabled === false) return [];
+
   const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
   const openclawChannel = {
     bridgeUrl: openclawIntegration?.transport.bridgeUrl ?? config.openclawChannel?.bridgeUrl,
@@ -1787,7 +1789,7 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
-      hasOpenClawChannel: hasEnabledLocalAgentChat(config, 'openclaw'),
+      hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),

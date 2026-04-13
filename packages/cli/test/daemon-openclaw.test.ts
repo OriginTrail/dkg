@@ -5,6 +5,7 @@ import {
   connectLocalAgentIntegration,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
+  hasConfiguredLocalAgentChat,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
   parseRequiredSignatures,
@@ -93,6 +94,20 @@ describe('OpenClaw channel routing helpers', () => {
         healthUrl: 'http://gateway.local:4040/api/dkg-channel/health',
       },
     ]);
+  });
+
+  it('returns no OpenClaw channel targets when the registry explicitly disables the integration', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9301',
+        gatewayUrl: 'http://gateway.local:3030',
+      },
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: false,
+        },
+      },
+    }))).toEqual([]);
   });
 
   it('adds the bridge auth header only for standalone bridge requests', () => {
@@ -265,6 +280,18 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('configured');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
     expect(integration?.capabilities.localChat).toBe(true);
+  });
+
+  it('treats legacy OpenClaw bridge transports as configured even before runtime readiness is reported', () => {
+    const config = makeConfig({
+      openclawAdapter: true,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9301',
+      },
+    });
+
+    expect(hasConfiguredLocalAgentChat(config, 'openclaw')).toBe(true);
+    expect(getLocalAgentIntegration(config, 'openclaw')?.runtime.ready).toBeUndefined();
   });
 
   it('connects OpenClaw through the generic registry and backfills the legacy OpenClaw config', () => {

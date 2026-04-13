@@ -61,6 +61,8 @@ export class DkgChannelPlugin {
   private readonly pendingTurnPersistence = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> | null }>();
   private readonly port: number;
   private useGatewayRoute = false;
+  private channelRegistered = false;
+  private gatewayRoutesRegistered = false;
   private inFlight = 0;
   private readonly maxInFlight = 3;
 
@@ -107,15 +109,16 @@ export class DkgChannelPlugin {
     }
 
     // --- Register as a first-class channel ---
-    if (typeof api.registerChannel === 'function') {
+    if (!this.channelRegistered && typeof api.registerChannel === 'function') {
       api.registerChannel({
         plugin: this.buildRegisteredChannelPlugin(),
       });
+      this.channelRegistered = true;
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
 
     // --- Register an HTTP route on the gateway ---
-    if (typeof api.registerHttpRoute === 'function') {
+    if (!this.gatewayRoutesRegistered && typeof api.registerHttpRoute === 'function') {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
@@ -135,6 +138,7 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
