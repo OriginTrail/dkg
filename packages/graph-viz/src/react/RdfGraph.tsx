@@ -136,6 +136,11 @@ export function RdfGraph({
         viz.loadTriples(data);
       }
 
+      // Apply per-node color overrides (e.g. trust-level coloring)
+      if (options.style?.nodeColors) {
+        viz.styleEngine.setNodeColors(options.style.nodeColors);
+      }
+
       // Apply view config after loading data
       if (viewConfig) {
         viz.applyView(viewConfig);

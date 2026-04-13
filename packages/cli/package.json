@@ -24,12 +24,14 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "commander": "^13",
+    "better-sqlite3": "^11",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "n3": "^2.0.1",
     "typescript": "^5.7"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7",
     "@types/js-yaml": "^4.0.9",
     "@types/n3": "^1.26.1",
     "vitest": "^4.0.18"

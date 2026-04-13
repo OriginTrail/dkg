@@ -382,6 +382,11 @@ export class RdfGraphViz {
     return this._model;
   }
 
+  /** Get the style engine (for dynamic per-node color overrides) */
+  get styleEngine(): StyleEngine {
+    return this._styleEngine;
+  }
+
   /** Get the prefix manager (for compact/expand operations) */
   get prefixes(): PrefixManager {
     return this._prefixManager;

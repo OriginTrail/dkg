@@ -60,7 +60,7 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown } from './extraction/index.js';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
@@ -73,6 +73,7 @@ import {
 } from '../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from './extraction-status.js';
 import { FileStore } from './file-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from './vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 import { readFileSync } from 'node:fs';
@@ -957,6 +958,16 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
   const fileStore = new FileStore(join(dkgDir(), 'files'));
 
+  // --- Vector Store (optional, for tri-modal memory) ---
+  const vectorStore = new VectorStore(dkgDir());
+  let embeddingProvider: EmbeddingProvider | null = null;
+  if (config.llm?.apiKey) {
+    embeddingProvider = new OpenAIEmbeddingProvider({
+      apiKey: config.llm.apiKey,
+      baseURL: config.llm.baseURL,
+    });
+  }
+
   // In-memory extraction job status tracker. Synchronous extractions (the V10.0
   // default) populate this with a completed record on the same request; async
   // workflows can be layered later without changing the endpoint contract.
@@ -1091,6 +1102,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
         fileStore,
         extractionStatus,
         assertionImportLocks,
+        vectorStore,
+        embeddingProvider,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -2153,6 +2166,8 @@ async function handleRequest(
   fileStore: FileStore,
   extractionStatus: Map<string, ExtractionStatusRecord>,
   assertionImportLocks: Map<string, Promise<void>>,
+  vectorStore: VectorStore,
+  embeddingProvider: EmbeddingProvider | null,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const path = url.pathname;
@@ -4584,6 +4599,327 @@ async function handleRequest(
       }
       throw err;
     }
+  }
+
+  // POST /api/memory/turn — ingest a conversation turn as a tri-modal Knowledge Asset.
+  //
+  // Streamlined path for agent memory: accepts a markdown conversation turn,
+  // stores it in the file store, runs structural + optional semantic extraction,
+  // and writes the resulting triples to SWM (or WM if layer=wm).
+  //
+  // Spec: 21_TRI_MODAL_MEMORY.md §8
+  if (req.method === 'POST' && path === '/api/memory/turn') {
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+
+    const { markdown, contextGraphId, sessionUri, layer, subGraphName } = parsed;
+    if (!markdown || typeof markdown !== 'string') {
+      return jsonResponse(res, 400, { error: 'Missing or invalid "markdown" field (string)' });
+    }
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+
+    const targetLayer = layer === 'wm' ? 'wm' : 'swm';
+    const agentDid = `did:dkg:agent:${agent.peerId}`;
+    const now = new Date().toISOString();
+
+    // 1. Store markdown in the file store
+    const mdBytes = Buffer.from(markdown, 'utf-8');
+    let fileEntry;
+    try {
+      fileEntry = await fileStore.put(mdBytes, 'text/markdown');
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: `Failed to store turn markdown: ${err.message}` });
+    }
+    const fileUri = `urn:dkg:file:${fileEntry.keccak256}`;
+
+    // Derive turn URI from agent address + timestamp for collision avoidance
+    const turnUri = `did:dkg:context-graph:${contextGraphId}/turn/${agent.peerId}-${now}`;
+
+    // 2. Run structural extraction
+    let extractResult;
+    try {
+      extractResult = extractFromMarkdown({
+        markdown,
+        agentDid,
+        documentIri: turnUri,
+        sourceFileIri: fileUri,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: `Structural extraction failed: ${err.message}` });
+    }
+
+    // 3. Run semantic extraction (optional, best-effort)
+    let semanticTriples: Array<{ subject: string; predicate: string; object: string }> = [];
+    if (config.llm?.apiKey) {
+      try {
+        const llmResult = await extractWithLlm(
+          { markdown, agentDid, documentIri: turnUri },
+          config.llm,
+        );
+        semanticTriples = llmResult.triples;
+      } catch {
+        // Semantic extraction is best-effort — structural extraction alone is sufficient
+      }
+    }
+
+    // 4. Build quads for the target graph
+    const targetGraph = targetLayer === 'swm'
+      ? contextGraphSharedMemoryUri(contextGraphId, subGraphName)
+      : contextGraphAssertionUri(contextGraphId, agent.peerId, `turn-${now}`, subGraphName);
+
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+
+    // Content triples from structural extraction
+    for (const t of extractResult.triples) {
+      quads.push({ ...t, graph: targetGraph });
+    }
+    // Source-file linkage from extractor (rows 1 + 3)
+    for (const t of extractResult.sourceFileLinkage) {
+      quads.push({ ...t, graph: targetGraph });
+    }
+    // Semantic triples (if any)
+    for (const t of semanticTriples) {
+      quads.push({ ...t, graph: targetGraph });
+    }
+
+    // Ensure the turn is typed as a ConversationTurn
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      object: 'http://schema.org/ConversationTurn',
+      graph: targetGraph,
+    });
+    // Persist the markdown body so the UI can display turn content
+    // without fetching the source file separately
+    const truncatedBody = markdown.length > 2000 ? markdown.slice(0, 2000) + '…' : markdown;
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/description',
+      object: JSON.stringify(truncatedBody),
+      graph: targetGraph,
+    });
+    // Source content type
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://dkg.io/ontology/sourceContentType',
+      object: JSON.stringify('text/markdown'),
+      graph: targetGraph,
+    });
+    // Agent attribution
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/agent',
+      object: agentDid,
+      graph: targetGraph,
+    });
+    // Timestamp
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/dateCreated',
+      object: `"${now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
+      graph: targetGraph,
+    });
+
+    // Session linking (if session URI provided)
+    if (sessionUri && typeof sessionUri === 'string') {
+      quads.push({
+        subject: turnUri,
+        predicate: 'http://schema.org/isPartOf',
+        object: sessionUri,
+        graph: targetGraph,
+      });
+      quads.push({
+        subject: sessionUri,
+        predicate: 'http://schema.org/hasPart',
+        object: turnUri,
+        graph: targetGraph,
+      });
+    }
+
+    // 5. Write to target layer
+    try {
+      if (targetLayer === 'swm') {
+        // agent.share sets the graph field itself — pass quads with empty graph
+        const shareQuads = quads.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
+        const ctx = createOperationContext('share');
+        tracker.start(ctx, { contextGraphId, details: { tripleCount: shareQuads.length, source: 'memory-turn', subGraphName } });
+        try {
+          await tracker.trackPhase(ctx, 'store', () =>
+            agent.share(contextGraphId, shareQuads, { subGraphName, localOnly: false, operationCtx: ctx }),
+          );
+          tracker.complete(ctx, { tripleCount: shareQuads.length });
+        } catch (err: any) {
+          tracker.fail(ctx, err);
+          throw err;
+        }
+      } else {
+        await agent.store.insert(quads);
+      }
+    } catch (err: any) {
+      return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
+    }
+
+    // 6. Generate embedding (best-effort, non-blocking for response)
+    let embeddingId: string | null = null;
+    if (embeddingProvider) {
+      try {
+        const snippet = markdown.length > 500 ? markdown.slice(0, 500) + '...' : markdown;
+        const embedding = await embeddingProvider.embed(markdown);
+        embeddingId = await vectorStore.insert({
+          embedding,
+          sourceUri: fileUri,
+          entityUri: turnUri,
+          contextGraphId,
+          memoryLayer: targetLayer,
+          model: embeddingProvider.model,
+          snippet,
+          label: extractResult.subjectIri,
+        });
+      } catch {
+        // Embedding generation is best-effort
+      }
+    }
+
+    return jsonResponse(res, 200, {
+      turnUri,
+      fileHash: fileEntry.keccak256,
+      layer: targetLayer,
+      graph: targetGraph,
+      structuralTripleCount: extractResult.triples.length,
+      semanticTripleCount: semanticTriples.length,
+      totalQuads: quads.length,
+      embeddingId,
+      sessionUri: sessionUri ?? null,
+    });
+  }
+
+  // POST /api/memory/search — tri-modal search across text, graph, and vector stores.
+  //
+  // Fans out the query to SPARQL (triple store), text search (file store),
+  // and vector similarity (vector store), then merges and deduplicates results.
+  //
+  // Spec: 21_TRI_MODAL_MEMORY.md §7
+  if (req.method === 'POST' && path === '/api/memory/search') {
+    const body = await readBody(req);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+
+    const { query, contextGraphId, limit: rawLimit } = parsed;
+    if (!query || typeof query !== 'string') {
+      return jsonResponse(res, 400, { error: 'Missing or invalid "query" field (string)' });
+    }
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+
+    const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
+    const memoryLayers: Array<'swm' | 'vm'> = parsed.memoryLayers ?? ['swm', 'vm'];
+
+    const results: Array<{
+      entityUri: string;
+      label: string | null;
+      sources: string[];
+      similarity: number | null;
+      sourceFile: string | null;
+      snippet: string | null;
+      memoryLayer: string | null;
+    }> = [];
+    const seen = new Map<string, number>();
+
+    // Fan-out 1: Vector search
+    if (embeddingProvider) {
+      try {
+        const queryEmbedding = await embeddingProvider.embed(query);
+        const vectorResults = await vectorStore.search(queryEmbedding, {
+          contextGraphId,
+          memoryLayers,
+          limit: resultLimit,
+          minSimilarity: 0.3,
+        });
+        for (const vr of vectorResults) {
+          const idx = results.length;
+          seen.set(vr.entityUri, idx);
+          results.push({
+            entityUri: vr.entityUri,
+            label: vr.label,
+            sources: ['vector'],
+            similarity: Math.round(vr.similarity * 1000) / 1000,
+            sourceFile: vr.sourceUri,
+            snippet: vr.snippet,
+            memoryLayer: vr.memoryLayer,
+          });
+        }
+      } catch {
+        // Vector search failure is non-fatal
+      }
+    }
+
+    // Fan-out 2: SPARQL text search (scoped to the requested CG + layers)
+    const escapedQuery = query.replace(/"/g, '\\"').toLowerCase();
+    const cgUri = `did:dkg:context-graph:${contextGraphId}`;
+    const graphFilters = memoryLayers.map((l: string) => {
+      if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
+      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verified")`;
+      return `STRSTARTS(STR(?g), "${cgUri}/")`;
+    }).join(' || ');
+    try {
+      const sparqlResult = await agent.store.query(`
+        SELECT DISTINCT ?entity ?name ?desc WHERE {
+          GRAPH ?g {
+            ?entity <http://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
+            OPTIONAL { ?entity <http://schema.org/description> ?desc }
+          }
+          FILTER(${graphFilters})
+          FILTER(
+            CONTAINS(LCASE(STR(?name)), "${escapedQuery}")
+            || (BOUND(?desc) && CONTAINS(LCASE(STR(?desc)), "${escapedQuery}"))
+          )
+        }
+        LIMIT ${resultLimit}
+      `);
+      if (sparqlResult.type === 'bindings') {
+        for (const binding of sparqlResult.bindings) {
+          const uri = binding.entity;
+          const label = binding.name ?? null;
+          const snippet = binding.desc ?? null;
+          if (seen.has(uri)) {
+            const idx = seen.get(uri)!;
+            if (!results[idx].sources.includes('sparql')) {
+              results[idx].sources.push('sparql');
+            }
+          } else {
+            const idx = results.length;
+            seen.set(uri, idx);
+            results.push({
+              entityUri: uri,
+              label,
+              sources: ['sparql'],
+              similarity: null,
+              sourceFile: null,
+              snippet,
+              memoryLayer: null,
+            });
+          }
+        }
+      }
+    } catch {
+      // SPARQL search failure is non-fatal
+    }
+
+    // Sort: vector-matched results first (by similarity), then SPARQL-only
+    results.sort((a, b) => {
+      if (a.similarity !== null && b.similarity !== null) return b.similarity - a.similarity;
+      if (a.similarity !== null) return -1;
+      if (b.similarity !== null) return 1;
+      return 0;
+    });
+
+    return jsonResponse(res, 200, {
+      query,
+      contextGraphId,
+      resultCount: results.length,
+      results: results.slice(0, resultLimit),
+    });
   }
 
   jsonResponse(res, 404, { error: 'Not found' });
