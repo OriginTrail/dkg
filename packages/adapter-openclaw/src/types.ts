@@ -16,6 +16,7 @@
 export interface OpenClawPluginApi {
   config: Record<string, unknown>;
   pluginConfig?: Record<string, unknown>;
+  registrationMode?: 'full' | 'setup-only' | 'setup-runtime' | 'cli-metadata';
   registerTool(tool: OpenClawTool): void;
   registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
   on(event: string, handler: (...args: any[]) => void): void;
@@ -196,18 +197,5 @@ export interface DkgOpenClawConfig {
      * Default: 9201.
      */
     port?: number;
-  };
-
-  /** OriginTrail Game integration config. */
-  game?: {
-    enabled?: boolean;
-    /** Poll interval in ms for autopilot game loop. Default: 2000. */
-    pollIntervalMs?: number;
-    /** Timeout in ms for agent consultation per turn. Default: 15000. */
-    decisionTimeoutMs?: number;
-    /** Poll interval in ms for the swarm watcher (waiting for game start / lobby fill). Default: 5000. */
-    watchIntervalMs?: number;
-    /** Timeout in ms for swarm watcher — stop watching if game never starts. Default: 600000 (10 min). */
-    watchTimeoutMs?: number;
   };
 }

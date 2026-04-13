@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DkgNodePlugin } from './dist/index.js';
 
-/** Module-level singleton — prevents duplicate registration during gateway multi-phase init. */
+/** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
 
 export default function (api) {
@@ -29,7 +29,7 @@ export default function (api) {
       log.warn?.(`[dkg-entry] Failed to read config.json from ${workspaceDir}: ${err.message}`);
     }
   } else {
-    log.warn?.('[dkg-entry] No workspace directory found — using defaults only');
+    log.warn?.('[dkg-entry] No workspace directory found - using defaults only');
   }
 
   // Build config from workspace settings
@@ -51,26 +51,30 @@ export default function (api) {
   if (wsConfig.channel) {
     config.channel = { ...wsConfig.channel };
   }
-  if (wsConfig.game) {
-    config.game = { ...wsConfig.game };
-  }
 
   // Pass workspace directory to the API for auto-detection
   if (workspaceDir && !api.workspaceDir) {
     api.workspaceDir = workspaceDir;
   }
 
-  log.info?.(`[dkg-entry] config — daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, memory.enabled: ${config.memory?.enabled}, channel.enabled: ${config.channel?.enabled}, game.enabled: ${config.game?.enabled}`);
+  log.info?.(
+    `[dkg-entry] config - daemonUrl: ${config.daemonUrl ?? 'http://127.0.0.1:9200'}, `
+      + `memory.enabled: ${config.memory?.enabled}, `
+      + `channel.enabled: ${config.channel?.enabled}, `
+      + `registrationMode: ${api.registrationMode ?? 'full'}`,
+  );
 
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
   instance = dkg;
 
   // Reset singleton on gateway teardown so in-process restart re-registers fresh.
-  // Listen on multiple lifecycle events — whichever the gateway version supports.
+  // Listen on multiple lifecycle events - whichever the gateway version supports.
   if (typeof api.on === 'function') {
     const reset = () => {
-      if (instance) { instance.stop().catch(() => {}); }
+      if (instance) {
+        instance.stop().catch(() => {});
+      }
       instance = null;
     };
     for (const event of ['shutdown', 'close', 'restart', 'reload']) {

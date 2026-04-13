@@ -387,242 +387,6 @@ export const updateSavedQuery = (id: number, data: any) =>
 export const deleteSavedQuery = (id: number) =>
   del<{ ok: boolean }>(`/api/saved-queries/${id}`);
 
-// --- Chat assistant ---
-export interface ChatLlmDiagnostics {
-  message: string;
-  status?: number;
-  provider?: string;
-  model?: string;
-  compatibilityHint?: string;
-}
-
-export interface ChatAssistantTurnResponse {
-  reply: string;
-  data?: unknown;
-  sparql?: string;
-  sessionId?: string;
-  turnId?: string;
-  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
-  persistError?: string;
-  timings?: { llm_ms: number; store_ms: number; total_ms: number };
-  responseMode?: 'streaming' | 'blocking' | 'rule-based';
-  llmDiagnostics?: ChatLlmDiagnostics;
-}
-
-export type ChatAssistantStreamEvent =
-  | { type: 'meta'; sessionId: string }
-  | { type: 'text_delta'; delta: string }
-  | ({ type: 'final' } & ChatAssistantTurnResponse)
-  | { type: 'error'; error: string; llmDiagnostics?: ChatLlmDiagnostics };
-
-export interface ChatPersistenceStatusEvent {
-  type: 'persist_status';
-  turnId: string;
-  sessionId: string;
-  status: 'pending' | 'in_progress' | 'stored' | 'failed';
-  attempts: number;
-  maxAttempts: number;
-  queuedAt: number;
-  updatedAt: number;
-  nextAttemptAt?: number;
-  storeMs?: number;
-  error?: string;
-}
-
-export interface ChatPersistenceHealthEvent {
-  type: 'persist_health';
-  ts: number;
-  pending: number;
-  inProgress: number;
-  stored: number;
-  failed: number;
-  overduePending: number;
-  oldestPendingAgeMs: number | null;
-}
-
-export type ChatPersistenceStreamEvent = ChatPersistenceStatusEvent | ChatPersistenceHealthEvent;
-
-export const sendChatMessage = (message: string, sessionId?: string) =>
-  post<ChatAssistantTurnResponse>('/api/chat-assistant', { message, sessionId });
-
-export async function streamChatMessage(
-  message: string,
-  opts: {
-    sessionId?: string;
-    signal?: AbortSignal;
-    onEvent?: (event: ChatAssistantStreamEvent) => void;
-  } = {},
-): Promise<ChatAssistantTurnResponse> {
-  const res = await fetch(`${BASE}/api/chat-assistant`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
-      ...authHeaders(),
-    },
-    body: JSON.stringify({ message, sessionId: opts.sessionId, stream: true }),
-    signal: opts.signal,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-
-  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
-  if (!res.body || !contentType.includes('text/event-stream')) {
-    const data = await res.json() as ChatAssistantTurnResponse;
-    opts.onEvent?.({ type: 'final', ...data });
-    return data;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finalPayload: ChatAssistantTurnResponse | undefined;
-  let streamError: Error | undefined;
-
-  const handleEvent = (event: ChatAssistantStreamEvent): void => {
-    opts.onEvent?.(event);
-    if (event.type === 'error') {
-      streamError = new Error(event.error || 'Chat stream failed');
-      return;
-    }
-    if (event.type === 'final') {
-      const { type: _ignored, ...payload } = event;
-      finalPayload = payload;
-    }
-  };
-
-  const processBufferLines = (finalFlush: boolean): void => {
-    let lineEnd = buffer.indexOf('\n');
-    while (lineEnd !== -1) {
-      const line = buffer.slice(0, lineEnd).trim();
-      buffer = buffer.slice(lineEnd + 1);
-      lineEnd = buffer.indexOf('\n');
-      if (!line.startsWith('data:')) continue;
-      const dataLine = line.slice(5).trim();
-      if (!dataLine) continue;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
-        handleEvent(parsed);
-      } catch {
-        /* ignore malformed stream frames */
-      }
-      if (streamError) return;
-    }
-
-    if (finalFlush && buffer.trim().startsWith('data:')) {
-      const dataLine = buffer.trim().slice(5).trim();
-      if (!dataLine) return;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatAssistantStreamEvent;
-        handleEvent(parsed);
-      } catch {
-        /* ignore malformed stream frames */
-      }
-      buffer = '';
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    processBufferLines(false);
-    if (streamError) break;
-  }
-  buffer += decoder.decode();
-  processBufferLines(true);
-
-  if (streamError) throw streamError;
-  if (!finalPayload) throw new Error('Chat stream ended without final payload');
-  return finalPayload;
-}
-
-export const fetchChatPersistenceHealth = () =>
-  get<{
-    ts: number;
-    pending: number;
-    inProgress: number;
-    stored: number;
-    failed: number;
-    overduePending: number;
-    oldestPendingAgeMs: number | null;
-  }>('/api/chat-assistant/persistence/health');
-
-export async function streamChatPersistenceEvents(
-  opts: {
-    signal?: AbortSignal;
-    onEvent: (event: ChatPersistenceStreamEvent) => void;
-  },
-): Promise<void> {
-  const res = await fetch(`${BASE}/api/chat-assistant/persistence/events`, {
-    method: 'GET',
-    headers: {
-      'Accept': 'text/event-stream',
-      ...authHeaders(),
-    },
-    signal: opts.signal,
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-
-  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
-  if (!res.body || !contentType.includes('text/event-stream')) {
-    throw new Error('Persistence event endpoint did not return SSE stream');
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  const processBuffer = (finalFlush: boolean): void => {
-    let lineEnd = buffer.indexOf('\n');
-    while (lineEnd !== -1) {
-      const line = buffer.slice(0, lineEnd).trim();
-      buffer = buffer.slice(lineEnd + 1);
-      lineEnd = buffer.indexOf('\n');
-      if (!line.startsWith('data:')) continue;
-      const dataLine = line.slice(5).trim();
-      if (!dataLine) continue;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
-        opts.onEvent(parsed);
-      } catch {
-        /* ignore malformed frames */
-      }
-    }
-
-    if (finalFlush && buffer.trim().startsWith('data:')) {
-      const dataLine = buffer.trim().slice(5).trim();
-      if (!dataLine) return;
-      try {
-        const parsed = JSON.parse(dataLine) as ChatPersistenceStreamEvent;
-        opts.onEvent(parsed);
-      } catch {
-        /* ignore malformed frames */
-      }
-      buffer = '';
-    }
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    processBuffer(false);
-  }
-
-  buffer += decoder.decode();
-  processBuffer(true);
-}
-
 // --- Memory (private chat memories in DKG) ---
 export interface MemorySession {
   session: string;
@@ -877,19 +641,114 @@ export const fetchOpenClawLocalHealth = () =>
     '/api/openclaw-channel/health',
   );
 
-/**
- * Load chat history for the local OpenClaw agent from the DKG graph.
- * Queries schema:Message items linked to the openclaw:dkg-ui session.
- */
-export async function fetchOpenClawLocalHistory(limit = 50): Promise<
-  Array<{ uri: string; text: string; author: string; ts: string }>
-> {
-  const sparql = `SELECT ?uri ?text ?author ?ts WHERE {
+interface LocalAgentIntegrationRecord {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
+  capabilities?: {
+    localChat?: boolean;
+    connectFromUi?: boolean;
+    installNode?: boolean;
+    dkgPrimaryMemory?: boolean;
+    wmImportPipeline?: boolean;
+    nodeServedSkill?: boolean;
+  };
+  transport?: {
+    kind?: string;
+    bridgeUrl?: string;
+    gatewayUrl?: string;
+    healthUrl?: string;
+  };
+  runtime?: {
+    status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
+    ready?: boolean;
+    lastError?: string | null;
+    updatedAt?: string;
+  };
+  manifest?: {
+    packageName?: string;
+    version?: string;
+    setupEntry?: string;
+  };
+  metadata?: Record<string, unknown>;
+}
+
+export type LocalAgentIntegrationStatus =
+  | 'chat_ready'
+  | 'connecting'
+  | 'bridge_offline'
+  | 'available'
+  | 'coming_soon';
+
+export interface LocalAgentIntegration {
+  id: string;
+  name: string;
+  framework: string;
+  description: string;
+  chatSupported: boolean;
+  connectSupported: boolean;
+  configured: boolean;
+  detected: boolean;
+  persistentChat: boolean;
+  chatReady: boolean;
+  bridgeOnline: boolean;
+  bridgeStatusLabel: string;
+  status: LocalAgentIntegrationStatus;
+  statusLabel: string;
+  detail: string;
+  error?: string;
+  target?: 'bridge' | 'gateway';
+  source: 'live' | 'planned';
+}
+
+export interface LocalAgentConnectResult {
+  integration: LocalAgentIntegration;
+  notice?: string;
+}
+
+export interface LocalAgentHistoryMessage {
+  uri: string;
+  text: string;
+  author: string;
+  ts: string;
+  turnId?: string;
+}
+
+interface LocalAgentSurface {
+  connectSupported: boolean;
+  chatSupported: boolean;
+  fetchHealth?: () => Promise<{
+    ok: boolean;
+    target?: 'bridge' | 'gateway';
+    error?: string;
+  }>;
+  streamChat?: typeof streamOpenClawLocalChat;
+}
+
+const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
+  openclaw: {
+    connectSupported: true,
+    chatSupported: true,
+    fetchHealth: fetchOpenClawLocalHealth,
+    streamChat: streamOpenClawLocalChat,
+  },
+};
+
+function buildLocalAgentSessionUri(id: string): string {
+  return `urn:dkg:chat:session:${id}:dkg-ui`;
+}
+
+async function fetchNamedLocalAgentHistory(id: string, limit = 50): Promise<LocalAgentHistoryMessage[]> {
+  const sessionUri = buildLocalAgentSessionUri(id);
+  const sparql = `SELECT ?uri ?text ?author ?ts ?turnId WHERE {
       ?uri a <http://schema.org/Message> ;
-           <http://schema.org/isPartOf> <urn:dkg:chat:session:openclaw:dkg-ui> ;
+           <http://schema.org/isPartOf> <${sessionUri}> ;
            <http://schema.org/text> ?text ;
            <http://schema.org/author> ?author ;
            <http://schema.org/dateCreated> ?ts .
+      OPTIONAL { ?uri <http://dkg.io/ontology/turnId> ?turnId }
     }
     ORDER BY DESC(?ts)
     LIMIT ${limit}`;
@@ -900,9 +759,189 @@ export async function fetchOpenClawLocalHistory(limit = 50): Promise<
     text: bv(b.text) ?? '',
     author: bv(b.author) ?? '',
     ts: bv(b.ts) ?? '',
+    turnId: bv(b.turnId) ?? undefined,
   }));
   history.reverse();
   return history;
+}
+
+/**
+ * Load chat history for the local OpenClaw agent from the DKG graph.
+ * Queries schema:Message items linked to the openclaw:dkg-ui session.
+ */
+export async function fetchOpenClawLocalHistory(limit = 50): Promise<LocalAgentHistoryMessage[]> {
+  return fetchNamedLocalAgentHistory('openclaw', limit);
+}
+
+export type LocalAgentStreamEvent = OpenClawStreamEvent;
+
+function hasLocalAgentTransportHints(record: LocalAgentIntegrationRecord): boolean {
+  return Boolean(
+    record.transport?.bridgeUrl
+    || record.transport?.gatewayUrl
+    || record.transport?.healthUrl,
+  );
+}
+
+async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecord): Promise<LocalAgentIntegration> {
+  const id = String(record.id ?? '').toLowerCase();
+  const surface = LOCAL_AGENT_SURFACES[id];
+  const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
+  const connectSupported = record.capabilities?.connectFromUi === true && surface?.connectSupported === true;
+  const configured = record.enabled === true;
+  const runtimeStatus = record.runtime?.status;
+  const health = configured && hasChatBridge && surface?.fetchHealth
+    ? await surface.fetchHealth().catch(() => null)
+    : null;
+  const chatReady = health?.ok === true;
+  const bridgeOnline = chatReady;
+  const persistentChat = configured && hasChatBridge && (
+    chatReady
+    || runtimeStatus === 'connecting'
+    || record.runtime?.ready === true
+    || hasLocalAgentTransportHints(record)
+  );
+
+  let status: LocalAgentIntegrationStatus;
+  let statusLabel: string;
+  let detail: string;
+  if (bridgeOnline) {
+    status = 'chat_ready';
+    statusLabel = 'Chat ready';
+    detail = `${record.name} is connected to this node and ready for chat.`;
+  } else if (persistentChat && record.runtime?.status === 'connecting') {
+    status = 'connecting';
+    statusLabel = 'Connecting';
+    detail = record.runtime?.lastError
+      ?? `${record.name} is registered and still starting up.`;
+  } else if (persistentChat) {
+    status = 'bridge_offline';
+    statusLabel = 'Bridge offline';
+    detail = health?.error
+      ?? record.runtime?.lastError
+      ?? `${record.name} is attached to this node, but it is not responding right now.`;
+  } else if (surface) {
+    status = 'available';
+    statusLabel = connectSupported ? 'Ready to connect' : 'Awaiting chat bridge';
+    detail = configured
+      ? `${record.name} is registered, but this panel is waiting for the framework chat bridge.`
+      : (record.runtime?.lastError
+          ?? `Use the node-served skill plus ${record.name} onboarding to attach an existing local agent.`);
+  } else {
+    status = 'coming_soon';
+    statusLabel = configured ? 'Registered, panel pending' : 'Next integration';
+    detail = configured
+      ? `${record.name} is registered on the node, but the right-panel chat bridge is not wired yet.`
+      : 'The local-agent registry is in place so this framework can plug into the same side-panel flow next.';
+  }
+
+  const bridgeStatusLabel = bridgeOnline
+    ? 'Connected'
+    : status === 'connecting'
+      ? 'Connecting'
+      : persistentChat
+        ? 'Unavailable'
+        : connectSupported
+          ? 'Ready to connect'
+          : 'Coming next';
+
+  return {
+    id,
+    name: record.name,
+    framework: record.name,
+    description: record.description,
+    chatSupported: hasChatBridge,
+    connectSupported,
+    configured,
+    detected: configured || chatReady,
+    persistentChat,
+    chatReady,
+    bridgeOnline,
+    bridgeStatusLabel,
+    status,
+    statusLabel,
+    detail,
+    error: chatReady ? undefined : (health?.error ?? record.runtime?.lastError ?? undefined),
+    target: health?.target,
+    source: configured || surface ? 'live' : 'planned',
+  } satisfies LocalAgentIntegration;
+}
+
+export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
+  const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
+  const integrations = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
+
+  integrations.sort((a, b) => {
+    const aPriority = a.id === 'openclaw' ? 0 : 1;
+    const bPriority = b.id === 'openclaw' ? 0 : 1;
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    if (a.persistentChat !== b.persistentChat) return a.persistentChat ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return { integrations };
+}
+
+export async function connectLocalAgentIntegration(id: string): Promise<LocalAgentConnectResult> {
+  const normalizedId = id.trim().toLowerCase();
+  const surface = LOCAL_AGENT_SURFACES[normalizedId];
+  if (!surface?.connectSupported) {
+    throw new Error(`${id} local connect is not available yet.`);
+  }
+
+  const response = await post<{ ok: boolean; notice?: string; integration?: LocalAgentIntegrationRecord }>('/api/local-agent-integrations/connect', {
+    id: normalizedId,
+    metadata: {
+      source: 'node-ui',
+    },
+  });
+  const integration = response.integration
+    ? await mapLocalAgentIntegrationRecord(response.integration)
+    : (await fetchLocalAgentIntegrations()).integrations.find((item) => item.id === normalizedId);
+  if (!integration) {
+    throw new Error(`Missing local agent integration: ${normalizedId}`);
+  }
+  return {
+    integration,
+    notice: response.notice,
+  };
+}
+
+export async function disconnectLocalAgentIntegration(id: string): Promise<void> {
+  const normalizedId = id.trim().toLowerCase();
+  await put(`/api/local-agent-integrations/${encodeURIComponent(normalizedId)}`, {
+    enabled: false,
+    runtime: {
+      status: 'disconnected',
+      ready: false,
+      lastError: null,
+    },
+  });
+}
+
+export async function fetchLocalAgentHealth(id: string) {
+  if (id === 'openclaw') return fetchOpenClawLocalHealth();
+  throw new Error(`${id} local health is not available yet.`);
+}
+
+export async function fetchLocalAgentHistory(id: string, limit = 50): Promise<LocalAgentHistoryMessage[]> {
+  return fetchNamedLocalAgentHistory(id, limit);
+}
+
+export async function streamLocalAgentChat(
+  id: string,
+  text: string,
+  opts: {
+    correlationId?: string;
+    signal?: AbortSignal;
+    onEvent?: (event: LocalAgentStreamEvent) => void;
+  } = {},
+): Promise<{ text: string; correlationId: string }> {
+  const surface = LOCAL_AGENT_SURFACES[id];
+  if (surface?.streamChat) {
+    return surface.streamChat(text, opts);
+  }
+  throw new Error(`${id} local chat is not available yet.`);
 }
 
 /** Extract plain string from a SPARQL binding value (standard JSON or N-Triples). */

@@ -1,7 +1,7 @@
 {
   "name": "@origintrail-official/dkg-adapter-openclaw",
   "version": "0.0.1",
-  "description": "OpenClaw plugin adapter — turns any OpenClaw agent into a DKG V9 node",
+  "description": "OpenClaw plugin adapter for connecting a DKG V10 node and chat bridge to an OpenClaw agent",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,17 +13,17 @@
   },
   "files": [
     "dist",
-    "skills",
     "openclaw-entry.mjs",
+    "setup-entry.mjs",
     "openclaw.plugin.json",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "pnpm clean && tsc",
     "test": "vitest run --passWithNoTests",
     "test:coverage": "vitest run --coverage --passWithNoTests",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
   "bin": {
     "dkg-openclaw": "./dist/setup-cli.js"
@@ -35,7 +35,19 @@
   "openclaw": {
     "extensions": [
       "./openclaw-entry.mjs"
-    ]
+    ],
+    "setupEntry": "./setup-entry.mjs",
+    "channel": {
+      "id": "dkg-ui",
+      "label": "DKG UI",
+      "detailLabel": "DKG Node UI Bridge",
+      "blurb": "Connect the DKG node UI to a local OpenClaw agent.",
+      "selectionExtras": [
+        "DKG-backed chat persistence",
+        "Node-served skill discovery"
+      ],
+      "markdownCapable": true
+    }
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

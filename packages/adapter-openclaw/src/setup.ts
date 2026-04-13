@@ -9,14 +9,14 @@
  *  5. Fund wallets via testnet faucet
  *  6. Merge adapter plugin into ~/.openclaw/openclaw.json
  *  7. Write workspace config.json with feature flags
- *  8. Copy skill files into workspace
+ *  8. Copy the canonical DKG node skill into the OpenClaw workspace
  *  9. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +100,10 @@ function dkgDir(): string {
 
 function openclawDir(): string {
   return process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw');
+}
+
+function canonicalWorkspaceSkillPath(workspaceDir: string): string {
+  return join(workspaceDir, 'skills', 'dkg-node', 'SKILL.md');
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +240,27 @@ export function loadNetworkConfig(): NetworkConfig {
   );
 }
 
+function resolveCanonicalNodeSkillSourcePath(): string {
+  const localWorkspaceCandidate = resolve(adapterRoot(), '..', 'cli', 'skills', 'dkg-node', 'SKILL.md');
+  if (existsSync(localWorkspaceCandidate)) return localWorkspaceCandidate;
+
+  try {
+    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    const candidates = [
+      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
+      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+  } catch { /* fall through */ }
+
+  throw new Error(
+    'Could not find the canonical DKG node SKILL.md in the installed CLI package. ' +
+    'Ensure @origintrail-official/dkg is installed.',
+  );
+}
+
 export interface DkgConfigOverrides {
   /** True when the user explicitly passed --name. */
   nameExplicit?: boolean;
@@ -264,6 +289,8 @@ export function writeDkgConfig(
       warn(`Could not parse existing ${configPath} — will overwrite`);
     }
   }
+  delete existing.openclawAdapter;
+  delete existing.openclawChannel;
 
   // Explicit CLI overrides (--name, --port) take precedence over existing config.
   // Auto-detected values only fill in when no existing value is present.
@@ -272,10 +299,12 @@ export function writeDkgConfig(
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
     apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
-    contextGraphs: existing.contextGraphs ?? existing.paranets ?? network.defaultContextGraphs ?? network.defaultParanets,
+    contextGraphs: existing.contextGraphs
+      ?? existing.paranets
+      ?? network.defaultContextGraphs
+      ?? network.defaultParanets,
     chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
-    openclawAdapter: true,
   };
 
   // Preserve an existing relay override but never pin a new one — the daemon
@@ -469,6 +498,12 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   const pluginId = 'adapter-openclaw';
   // Normalize adapter path to forward slashes for cross-platform compatibility
   const normalizedPath = adapterPath.replace(/\\/g, '/');
+  const isAdapterLoadPath = (value: string): boolean => {
+    const normalized = value.replace(/\\/g, '/').toLowerCase();
+    return normalized.includes('/@origintrail-official/dkg-adapter-openclaw')
+      || normalized.endsWith('/packages/adapter-openclaw')
+      || normalized.includes('/packages/adapter-openclaw/');
+  };
 
   // Add to allow list (idempotent)
   if (!config.plugins.allow.includes(pluginId)) {
@@ -481,6 +516,14 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
   // Add to load paths (idempotent — check normalized versions)
   // Filter out non-string entries from legacy/malformed configs
   config.plugins.load.paths = config.plugins.load.paths.filter((p: unknown) => typeof p === 'string');
+  const retainedPaths = config.plugins.load.paths.filter((p: string) => !isAdapterLoadPath(p));
+  const removedLoadPathCount = config.plugins.load.paths.length - retainedPaths.length;
+  if (removedLoadPathCount > 0) {
+    config.plugins.load.paths = retainedPaths;
+    log(`Removed ${removedLoadPathCount} stale adapter-openclaw load path(s)`);
+  } else {
+    config.plugins.load.paths = retainedPaths;
+  }
   const existingPaths = config.plugins.load.paths.map((p: string) => p.replace(/\\/g, '/'));
   if (!existingPaths.includes(normalizedPath)) {
     config.plugins.load.paths.push(normalizedPath);
@@ -550,59 +593,36 @@ export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, port
   // Feature flags default to true on first run but are not overridden on re-runs
   // so that user-configured `false` values are respected.
   const dkgNode = existing['dkg-node'] ?? {};
-  existing['dkg-node'] = {
+  const nextDkgNode = {
     ...dkgNode,
     daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
     memory: { enabled: true, ...dkgNode.memory },
     channel: { enabled: true, ...dkgNode.channel },
-    game: { enabled: true, ...dkgNode.game },
   };
+  if (nextDkgNode.game !== undefined) {
+    delete nextDkgNode.game;
+    log('Removed legacy dkg-node.game config from workspace config');
+  }
+  existing['dkg-node'] = nextDkgNode;
 
   mkdirSync(workspaceDir, { recursive: true });
   writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
-  log(`Wrote workspace config (memory=on, channel=on, game=on)`);
+  log('Wrote workspace config (memory=on, channel=on)');
 }
 
 // ---------------------------------------------------------------------------
-// Step 9: Copy skill files
+// Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
 // ---------------------------------------------------------------------------
 
-export function copySkills(workspaceDir: string, rootOverride?: string): void {
-  const root = rootOverride ?? adapterRoot();
-  const skillsSource = join(root, 'skills');
-  if (!existsSync(skillsSource)) {
-    warn(`Skills directory not found at ${skillsSource}`);
-    return;
-  }
-
-  const skills = [
-    { dir: 'dkg-node', file: 'SKILL.md' },
-    { dir: 'origin-trail-game', file: 'SKILL.md' },
-  ];
-
-  for (const skill of skills) {
-    const src = join(skillsSource, skill.dir, skill.file);
-    const dest = join(workspaceDir, 'skills', skill.dir, skill.file);
-
-    if (!existsSync(src)) {
-      warn(`Skill file not found: ${src}`);
-      continue;
-    }
-
-    // Skip if already identical
-    if (existsSync(dest)) {
-      const srcContent = readFileSync(src, 'utf-8');
-      const destContent = readFileSync(dest, 'utf-8');
-      if (srcContent === destContent) {
-        log(`Skill ${skill.dir}/${skill.file} already up to date`);
-        continue;
-      }
-    }
-
-    mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
-    log(`Copied ${skill.dir}/${skill.file}`);
-  }
+export function installCanonicalNodeSkill(
+  workspaceDir: string,
+  sourcePath = resolveCanonicalNodeSkillSourcePath(),
+): string {
+  const targetPath = canonicalWorkspaceSkillPath(workspaceDir);
+  mkdirSync(dirname(targetPath), { recursive: true });
+  copyFileSync(sourcePath, targetPath);
+  log(`Installed canonical node skill from ${sourcePath} to ${targetPath}`);
+  return targetPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -763,15 +783,16 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would write workspace config.json');
   }
 
-  // Step 9: Copy skill files
+  // Step 9: Copy the canonical DKG node skill into the OpenClaw workspace
   if (!dryRun) {
-    copySkills(workspaceDir, resolvedAdapterPath);
+    installCanonicalNodeSkill(workspaceDir);
   } else {
-    log('[dry-run] Would copy skill files to workspace');
+    log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
   }
 
-  // Prompt to restart gateway
-  log('Restart the OpenClaw gateway to load the adapter');
+  // Prompt to reload gateway. Modern OpenClaw usually auto-restarts shortly
+  // after config changes, but manual restart remains the safe fallback.
+  log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
   // Step 10: Verify
   if (shouldVerify && !dryRun) {

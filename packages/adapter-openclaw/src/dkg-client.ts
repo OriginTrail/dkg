@@ -17,6 +17,48 @@ export interface DkgClientOptions {
   timeoutMs?: number;
 }
 
+export interface LocalAgentIntegrationCapabilities {
+  localChat?: boolean;
+  connectFromUi?: boolean;
+  installNode?: boolean;
+  dkgPrimaryMemory?: boolean;
+  wmImportPipeline?: boolean;
+  nodeServedSkill?: boolean;
+}
+
+export interface LocalAgentIntegrationTransport {
+  kind?: string;
+  bridgeUrl?: string;
+  gatewayUrl?: string;
+  healthUrl?: string;
+}
+
+export interface LocalAgentIntegrationManifest {
+  packageName?: string;
+  version?: string;
+  setupEntry?: string;
+}
+
+export interface LocalAgentIntegrationRuntime {
+  status?: 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
+  ready?: boolean;
+  lastError?: string | null;
+  updatedAt?: string;
+}
+
+export interface LocalAgentIntegrationPayload {
+  id: string;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  transport?: LocalAgentIntegrationTransport;
+  capabilities?: LocalAgentIntegrationCapabilities;
+  manifest?: LocalAgentIntegrationManifest;
+  setupEntry?: string;
+  metadata?: Record<string, unknown>;
+  runtime?: LocalAgentIntegrationRuntime;
+}
+
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -135,11 +177,22 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Adapter registration
+  // Local agent integration registration
   // ---------------------------------------------------------------------------
 
   async registerAdapter(id: string): Promise<void> {
-    await this.post('/api/register-adapter', { id });
+    await this.connectLocalAgentIntegration({ id });
+  }
+
+  async connectLocalAgentIntegration(payload: LocalAgentIntegrationPayload): Promise<Record<string, unknown>> {
+    return this.post('/api/local-agent-integrations/connect', payload);
+  }
+
+  async updateLocalAgentIntegration(
+    id: string,
+    payload: Omit<LocalAgentIntegrationPayload, 'id'>,
+  ): Promise<Record<string, unknown>> {
+    return this.put(`/api/local-agent-integrations/${encodeURIComponent(id)}`, payload);
   }
 
   // ---------------------------------------------------------------------------
@@ -281,6 +334,20 @@ export class DkgDaemonClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`DKG daemon ${path} responded ${res.status}: ${text}`);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  private async put<T>(path: string, body: unknown): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),

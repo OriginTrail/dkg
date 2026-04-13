@@ -141,7 +141,7 @@ describe('DkgChannelPlugin', () => {
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
     // Mock storeChatTurn to prevent actual HTTP call
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-1', 'owner');
@@ -189,7 +189,7 @@ describe('DkgChannelPlugin', () => {
         },
         reply: {
           resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI game-autopilot] decide'),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI background-worker] decide'),
           async dispatchReplyWithBufferedBlockDispatcher(params: any) {
             dispatched = params;
             await params.dispatcherOptions.deliver({ text: 'advance' });
@@ -202,15 +202,15 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     // Non-owner identity gets its own session key
-    const reply = await plugin.processInbound('decide', 'corr-game', 'game-autopilot');
+    const reply = await plugin.processInbound('decide', 'corr-game', 'background-worker');
     expect(reply.text).toBe('advance');
-    expect(dispatched.ctx.SessionKey).toBe('agent:agent-1:game-autopilot');
+    expect(dispatched.ctx.SessionKey).toBe('agent:agent-1:background-worker');
     expect(recordInboundSession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionKey: 'agent:agent-1:game-autopilot',
+      sessionKey: 'agent:agent-1:background-worker',
     }));
 
     // Owner identity keeps the default session key
@@ -247,7 +247,7 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-legacy', 'owner');
@@ -312,6 +312,54 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('processInbound should retry turn persistence after a transient DKG failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Retry me'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Recovered reply' });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockRejectedValueOnce(new Error('temporary store outage'))
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      await plugin.processInbound('Retry me', 'corr-retry', 'owner');
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(storeSpy).toHaveBeenLastCalledWith(
+        'openclaw:dkg-ui',
+        'Retry me',
+        'Recovered reply',
+        { turnId: 'corr-retry' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('persistTurn should use separate sessionId for non-owner identities', async () => {
     const mockRuntime = {
       channel: {
@@ -340,11 +388,11 @@ describe('DkgChannelPlugin', () => {
     const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
-    // game-autopilot identity → separate session
-    await plugin.processInbound('decide', 'corr-game', 'game-autopilot');
+    // background-worker identity → separate session
+    await plugin.processInbound('decide', 'corr-game', 'background-worker');
     await new Promise(r => setTimeout(r, 10));
     expect(storeSpy).toHaveBeenCalledWith(
-      'openclaw:dkg-ui:game-autopilot',
+      'openclaw:dkg-ui:background-worker',
       'decide',
       'reply',
       { turnId: 'corr-game' },
@@ -522,7 +570,7 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi() as any;
     api.runtime = mockRuntime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
     plugin.register(api);
 
     const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
@@ -547,6 +595,91 @@ describe('DkgChannelPlugin', () => {
       { type: 'text_delta', delta: 'reply' },
       { type: 'final', text: 'Streamed reply', correlationId: 'corr-stream-runtime' },
     ]);
+    expect(storeSpy).toHaveBeenCalledWith(
+      'openclaw:dkg-ui',
+      'Hello',
+      'Streamed reply',
+      { turnId: 'corr-stream-runtime' },
+    );
+  });
+
+  it('processInboundStream should not persist a partial reply when the consumer cancels early', async () => {
+    let resumeDispatch!: () => void;
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'Partial ' });
+            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            await params.dispatcherOptions.deliver({ text: 'reply' });
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-cancel', 'owner');
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text_delta', delta: 'Partial ' },
+    });
+    await expect(stream.return(undefined)).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+    resumeDispatch();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(storeSpy).not.toHaveBeenCalled();
+  });
+
+  it('processInboundStream should surface a real error when the agent returns no text', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn(),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher() {
+            // Complete without yielding any text chunks.
+          },
+        },
+      },
+    };
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = mockCfg;
+    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-empty', 'owner');
+    await expect(stream.next()).rejects.toThrow('Agent returned no text response');
+    expect(storeSpy).not.toHaveBeenCalled();
   });
 
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {

@@ -18,7 +18,8 @@ interface MemoryLayerViewProps {
 
 export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps) {
   const meta = LAYER_META[layer];
-  const [customQuery, setCustomQuery] = useState('');
+  const [draftQuery, setDraftQuery] = useState('');
+  const [activeQuery, setActiveQuery] = useState('');
 
   const defaultSparql = useMemo(() => {
     if (layer === 'wm') {
@@ -27,7 +28,7 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
     return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 50`;
   }, [layer]);
 
-  const sparql = customQuery || defaultSparql;
+  const sparql = activeQuery || defaultSparql;
 
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
@@ -37,6 +38,15 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
     [sparql, contextGraphId, layer],
     0
   );
+
+  const runQuery = useCallback(() => {
+    const next = draftQuery.trim();
+    if (next === activeQuery) {
+      refresh();
+      return;
+    }
+    setActiveQuery(next);
+  }, [activeQuery, draftQuery, refresh]);
 
   const results = data?.result?.bindings ?? data?.results?.bindings ?? [];
 
@@ -63,11 +73,11 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
           type="text"
           className="v10-mlv-query-input"
           placeholder="Custom SPARQL query..."
-          value={customQuery}
-          onChange={(e) => setCustomQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') refresh(); }}
+          value={draftQuery}
+          onChange={(e) => setDraftQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
         />
-        <button className="v10-mlv-run-btn" onClick={refresh}>
+        <button className="v10-mlv-run-btn" onClick={runQuery}>
           Run
         </button>
       </div>

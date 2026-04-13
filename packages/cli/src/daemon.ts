@@ -19,7 +19,6 @@ import {
   MetricsCollector,
   OperationTracker,
   handleNodeUIRequest,
-  ChatAssistant,
   ChatMemoryManager,
   LogPushWorker,
   type MetricsSource,
@@ -38,6 +37,12 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  type LocalAgentIntegrationCapabilities,
+  type LocalAgentIntegrationConfig,
+  type LocalAgentIntegrationManifest,
+  type LocalAgentIntegrationRuntime,
+  type LocalAgentIntegrationStatus,
+  type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
   resolveSharedMemoryTtlMs,
@@ -838,28 +843,20 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
     createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
-  const chatAssistant = new ChatAssistant(
-    dashDb,
-    async (sparql: string) => agent.query(sparql),
-    config.llm,
-    agentToolsContext,
-  );
   const memoryManager = new ChatMemoryManager(agentToolsContext, config.llm ?? { apiKey: '' });
   log('Memory manager ready');
-  if (config.llm) log('Chat assistant ready (LLM + DKG tools enabled)');
-  else log('Chat assistant ready');
+  if (config.llm) log('Memory enrichment LLM ready');
+  else log('Memory enrichment LLM not configured');
 
   const llmSettings = {
     getLlm: () => config.llm,
     setLlm: async (llm: { apiKey: string; model?: string; baseURL?: string } | null) => {
       if (llm) {
         config.llm = llm;
-        chatAssistant.updateLlmConfig(llm);
         memoryManager.updateConfig(llm);
         log('LLM config updated via settings');
       } else {
         delete config.llm;
-        chatAssistant.updateLlmConfig(undefined);
         memoryManager.updateConfig({ apiKey: '' });
         log('LLM config cleared via settings');
       }
@@ -999,7 +996,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
       // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
       const clientIp = req.socket.remoteAddress ?? 'unknown';
-      if (!rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
+      if (!shouldBypassRateLimitForLoopbackTraffic(clientIp, reqUrl.pathname)
+        && !rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
         res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
@@ -1049,7 +1047,7 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, chatAssistant, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
       if (handled) return;
 
       // Installable DKG apps (API handlers + static UI)
@@ -1173,9 +1171,79 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
 
 let _moduleCorsAllowed: CorsAllowlist = '*';
 
+export interface LocalAgentIntegrationDefinition {
+  id: string;
+  name: string;
+  description: string;
+  transportKind?: string;
+  capabilities: LocalAgentIntegrationCapabilities;
+  manifest?: LocalAgentIntegrationManifest;
+}
+
+export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationConfig {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  transport: LocalAgentIntegrationTransport;
+  capabilities: LocalAgentIntegrationCapabilities;
+  runtime: LocalAgentIntegrationRuntime;
+  status: LocalAgentIntegrationStatus;
+  manifest?: LocalAgentIntegrationManifest;
+}
+
+const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationDefinition> = {
+  openclaw: {
+    id: 'openclaw',
+    name: 'OpenClaw',
+    description: 'Connect a local OpenClaw agent through the DKG node.',
+    transportKind: 'openclaw-channel',
+    capabilities: {
+      localChat: true,
+      connectFromUi: true,
+      installNode: true,
+      dkgPrimaryMemory: true,
+      wmImportPipeline: true,
+      nodeServedSkill: true,
+    },
+    manifest: {
+      packageName: '@origintrail-official/dkg-adapter-openclaw',
+      setupEntry: './setup-entry.mjs',
+    },
+  },
+  hermes: {
+    id: 'hermes',
+    name: 'Hermes',
+    description: 'Connect a local Hermes agent through the DKG node.',
+    capabilities: {
+      connectFromUi: true,
+      installNode: true,
+      dkgPrimaryMemory: true,
+      wmImportPipeline: true,
+      nodeServedSkill: true,
+    },
+  },
+};
+
 // OpenClaw bridge health cache — avoids hammering the bridge on every /send
 let bridgeHealthCache: { ok: boolean; ts: number } | null = null;
-const HEALTH_CACHE_TTL = 10_000; // 10 seconds
+const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
+const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
+const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
+const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
+const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+type PendingOpenClawUiAttachJob = {
+  job: Promise<void>;
+  controller: AbortController;
+  cancelled: boolean;
+};
+const pendingOpenClawUiAttachJobs = new Map<string, PendingOpenClawUiAttachJob>();
+
+function isOpenClawBridgeHealthCacheValid(cache: { ok: boolean; ts: number } | null): boolean {
+  if (!cache) return false;
+  const ttl = cache.ok ? BRIDGE_HEALTH_CACHE_OK_TTL_MS : BRIDGE_HEALTH_CACHE_ERROR_TTL_MS;
+  return Date.now() - cache.ts < ttl;
+}
 
 export interface OpenClawChannelTarget {
   name: 'bridge' | 'gateway';
@@ -1208,13 +1276,258 @@ async function loadBridgeAuthToken(): Promise<string | undefined> {
   }
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeIntegrationId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrationTransport | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const transport: LocalAgentIntegrationTransport = {};
+  if (typeof input.kind === 'string' && input.kind.trim()) transport.kind = input.kind.trim();
+  if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
+  if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
+  if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
+  return Object.keys(transport).length > 0 ? transport : undefined;
+}
+
+function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationCapabilities | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const capabilities: LocalAgentIntegrationCapabilities = {};
+  const keys: (keyof LocalAgentIntegrationCapabilities)[] = [
+    'localChat',
+    'connectFromUi',
+    'installNode',
+    'dkgPrimaryMemory',
+    'wmImportPipeline',
+    'nodeServedSkill',
+  ];
+  for (const key of keys) {
+    if (typeof input[key] === 'boolean') capabilities[key] = input[key];
+  }
+  return Object.keys(capabilities).length > 0 ? capabilities : undefined;
+}
+
+function normalizeLocalAgentManifest(input: unknown): LocalAgentIntegrationManifest | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const manifest: LocalAgentIntegrationManifest = {};
+  if (typeof input.packageName === 'string' && input.packageName.trim()) manifest.packageName = input.packageName.trim();
+  if (typeof input.version === 'string' && input.version.trim()) manifest.version = input.version.trim();
+  if (typeof input.setupEntry === 'string' && input.setupEntry.trim()) manifest.setupEntry = input.setupEntry.trim();
+  return Object.keys(manifest).length > 0 ? manifest : undefined;
+}
+
+function normalizeLocalAgentRuntime(input: unknown): LocalAgentIntegrationRuntime | undefined {
+  if (!isPlainRecord(input)) return undefined;
+  const runtime: LocalAgentIntegrationRuntime = {};
+  const validStatuses = new Set<LocalAgentIntegrationStatus>([
+    'disconnected',
+    'configured',
+    'connecting',
+    'ready',
+    'degraded',
+    'error',
+  ]);
+  if (typeof input.status === 'string' && validStatuses.has(input.status as LocalAgentIntegrationStatus)) {
+    runtime.status = input.status as LocalAgentIntegrationStatus;
+  }
+  if (typeof input.ready === 'boolean') runtime.ready = input.ready;
+  if (input.lastError === null || typeof input.lastError === 'string') runtime.lastError = input.lastError;
+  if (typeof input.updatedAt === 'string' && input.updatedAt.trim()) runtime.updatedAt = input.updatedAt.trim();
+  return Object.keys(runtime).length > 0 ? runtime : undefined;
+}
+
+function mergeLocalAgentIntegrationConfig(
+  base: LocalAgentIntegrationConfig | undefined,
+  patch: LocalAgentIntegrationConfig,
+): LocalAgentIntegrationConfig {
+  return {
+    ...(base ?? {}),
+    ...patch,
+    transport: patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined),
+    capabilities: {
+      ...(base?.capabilities ?? {}),
+      ...(patch.capabilities ?? {}),
+    },
+    manifest: {
+      ...(base?.manifest ?? {}),
+      ...(patch.manifest ?? {}),
+    },
+    runtime: {
+      ...(base?.runtime ?? {}),
+      ...(patch.runtime ?? {}),
+    },
+    metadata: {
+      ...(base?.metadata ?? {}),
+      ...(patch.metadata ?? {}),
+    },
+  };
+}
+
+function getStoredLocalAgentIntegrations(config: DkgConfig): Record<string, LocalAgentIntegrationConfig> {
+  return config.localAgentIntegrations ?? {};
+}
+
+function computeLocalAgentIntegrationStatus(record: LocalAgentIntegrationConfig): LocalAgentIntegrationStatus {
+  if (record.runtime?.status) return record.runtime.status;
+  if (record.runtime?.ready === true) return 'ready';
+  if (record.enabled) return 'configured';
+  return 'disconnected';
+}
+
+function buildLocalAgentIntegrationRecord(
+  id: string,
+  definition: LocalAgentIntegrationDefinition | undefined,
+  stored: LocalAgentIntegrationConfig | undefined,
+): LocalAgentIntegrationRecord {
+  const merged = mergeLocalAgentIntegrationConfig(
+    definition
+      ? {
+          id,
+          name: definition.name,
+          description: definition.description,
+          capabilities: definition.capabilities,
+          manifest: definition.manifest,
+          transport: definition.transportKind ? { kind: definition.transportKind } : undefined,
+        }
+      : { id },
+    stored ?? { id },
+  );
+  const status = computeLocalAgentIntegrationStatus(merged);
+  return {
+    ...merged,
+    id,
+    name: merged.name?.trim() || definition?.name || id,
+    description: merged.description?.trim() || definition?.description || `${id} local agent integration`,
+    enabled: merged.enabled === true,
+    transport: merged.transport ?? {},
+    capabilities: merged.capabilities ?? {},
+    runtime: merged.runtime ?? {},
+    status,
+  };
+}
+
+export function listLocalAgentIntegrations(config: DkgConfig): LocalAgentIntegrationRecord[] {
+  const ids = new Set<string>([
+    ...Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS),
+    ...Object.keys(getStoredLocalAgentIntegrations(config)),
+  ]);
+  return [...ids]
+    .map((id) => buildLocalAgentIntegrationRecord(id, LOCAL_AGENT_INTEGRATION_DEFINITIONS[id], getStoredLocalAgentIntegrations(config)[id]))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function getLocalAgentIntegration(config: DkgConfig, id: string): LocalAgentIntegrationRecord | null {
+  const normalizedId = normalizeIntegrationId(id);
+  return listLocalAgentIntegrations(config).find((integration) => integration.id === normalizedId) ?? null;
+}
+
+function pruneLegacyOpenClawConfig(config: DkgConfig): void {
+  const mutable = config as DkgConfig & {
+    openclawAdapter?: boolean;
+    openclawChannel?: { bridgeUrl?: string; gatewayUrl?: string };
+  };
+  delete mutable.openclawAdapter;
+  delete mutable.openclawChannel;
+}
+
+function extractLocalAgentIntegrationPatch(body: Record<string, unknown>): LocalAgentIntegrationConfig {
+  const patch: LocalAgentIntegrationConfig = {};
+  if (typeof body.name === 'string' && body.name.trim()) patch.name = body.name.trim();
+  if (typeof body.description === 'string' && body.description.trim()) patch.description = body.description.trim();
+  if (typeof body.enabled === 'boolean') patch.enabled = body.enabled;
+
+  const transport = normalizeLocalAgentTransport(body.transport);
+  const topLevelTransport = normalizeLocalAgentTransport({
+    kind: typeof body.transportKind === 'string' ? body.transportKind : undefined,
+    bridgeUrl: body.bridgeUrl,
+    gatewayUrl: body.gatewayUrl,
+    healthUrl: body.healthUrl,
+  });
+  patch.transport = transport || topLevelTransport;
+  patch.capabilities = normalizeLocalAgentCapabilities(body.capabilities);
+  patch.manifest = normalizeLocalAgentManifest(body.manifest);
+  patch.runtime = normalizeLocalAgentRuntime(body.runtime);
+  if (typeof body.setupEntry === 'string' && body.setupEntry.trim()) patch.setupEntry = body.setupEntry.trim();
+  if (isPlainRecord(body.metadata)) patch.metadata = body.metadata;
+  return patch;
+}
+
+export function connectLocalAgentIntegration(
+  config: DkgConfig,
+  body: Record<string, unknown>,
+  now = new Date(),
+): LocalAgentIntegrationRecord {
+  const rawId = typeof body.id === 'string' ? body.id : '';
+  const id = normalizeIntegrationId(rawId);
+  if (!id) throw new Error('Missing "id"');
+  const existing = getStoredLocalAgentIntegrations(config)[id];
+  const patch = extractLocalAgentIntegrationPatch(body);
+  const base: LocalAgentIntegrationConfig = {
+    id,
+    enabled: patch.enabled ?? true,
+    connectedAt: existing?.connectedAt ?? now.toISOString(),
+    updatedAt: now.toISOString(),
+    runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
+  };
+  const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
+  config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
+  if (id === 'openclaw') pruneLegacyOpenClawConfig(config);
+  return getLocalAgentIntegration(config, id)!;
+}
+
+export function updateLocalAgentIntegration(
+  config: DkgConfig,
+  id: string,
+  body: Record<string, unknown>,
+  now = new Date(),
+): LocalAgentIntegrationRecord {
+  const normalizedId = normalizeIntegrationId(id);
+  if (!normalizedId) throw new Error('Missing integration id');
+  const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
+  const patch = extractLocalAgentIntegrationPatch(body);
+  const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  next.id = normalizedId;
+  next.updatedAt = now.toISOString();
+  next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
+  if (!next.runtime.status) next.runtime.status = next.enabled === true ? 'configured' : 'disconnected';
+  config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [normalizedId]: next };
+  if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(config);
+  return getLocalAgentIntegration(config, normalizedId)!;
+}
+
+export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): boolean {
+  const integration = getLocalAgentIntegration(config, id);
+  return integration?.enabled === true
+    && integration.capabilities.localChat === true;
+}
+
+function hasLocalAgentTransportConfig(
+  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime' | 'enabled'> | null | undefined,
+): boolean {
+  if (!integration || integration.enabled !== true) return false;
+  return Boolean(
+    integration.transport?.bridgeUrl
+    || integration.transport?.gatewayUrl
+    || integration.transport?.healthUrl
+    || integration.runtime?.ready === true,
+  );
+}
+
 export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
-  const openclawChannel = config.openclawChannel ?? {};
-  const explicitBridgeBase = openclawChannel.bridgeUrl
-    ? trimTrailingSlashes(openclawChannel.bridgeUrl)
+  const storedOpenClawIntegration = getStoredLocalAgentIntegrations(config).openclaw;
+  if (storedOpenClawIntegration?.enabled === false) return [];
+
+  const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
+  const explicitBridgeBase = openclawIntegration?.transport.bridgeUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.bridgeUrl)
     : undefined;
-  const explicitGatewayBase = openclawChannel.gatewayUrl
-    ? trimTrailingSlashes(openclawChannel.gatewayUrl)
+  const explicitGatewayBase = openclawIntegration?.transport.gatewayUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.gatewayUrl)
     : undefined;
   const bridgeLooksLikeGateway = explicitBridgeBase?.endsWith('/api/dkg-channel') ?? false;
   const standaloneBridgeBase = explicitBridgeBase
@@ -1251,6 +1564,431 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   return targets;
 }
 
+type OpenClawBridgeHealthState = Record<string, unknown> & {
+  ok: boolean;
+  channel?: string;
+  cached?: boolean;
+  error?: string;
+};
+
+type OpenClawGatewayHealthState = Record<string, unknown> & {
+  ok: boolean;
+  channel?: string;
+  error?: string;
+};
+
+export interface OpenClawChannelHealthReport {
+  ok: boolean;
+  target?: 'bridge' | 'gateway';
+  bridge?: OpenClawBridgeHealthState;
+  gateway?: OpenClawGatewayHealthState;
+  error?: string;
+}
+
+function transportPatchFromOpenClawTarget(
+  config: DkgConfig,
+  targetName: 'bridge' | 'gateway' | undefined,
+): LocalAgentIntegrationTransport | undefined {
+  if (!targetName) return undefined;
+  const target = getOpenClawChannelTargets(config).find((item) => item.name === targetName);
+  if (!target) return undefined;
+
+  if (target.name === 'bridge') {
+    const bridgeBase = target.inboundUrl.endsWith('/inbound')
+      ? target.inboundUrl.slice(0, -'/inbound'.length)
+      : target.inboundUrl;
+    return {
+      kind: 'openclaw-channel',
+      bridgeUrl: bridgeBase,
+      ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+    };
+  }
+
+  const gatewayBase = target.inboundUrl.endsWith('/inbound')
+    ? target.inboundUrl.slice(0, -'/inbound'.length)
+    : target.inboundUrl;
+  const gatewayUrl = gatewayBase.endsWith('/api/dkg-channel')
+    ? gatewayBase.slice(0, -'/api/dkg-channel'.length)
+    : gatewayBase;
+  return {
+    kind: 'openclaw-channel',
+    gatewayUrl,
+    ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+  };
+}
+
+export async function probeOpenClawChannelHealth(
+  config: DkgConfig,
+  bridgeAuthToken: string | undefined,
+  opts: { ignoreBridgeCache?: boolean; timeoutMs?: number } = {},
+): Promise<OpenClawChannelHealthReport> {
+  const targets = getOpenClawChannelTargets(config);
+  let bridge: OpenClawBridgeHealthState | undefined;
+  let gateway: OpenClawGatewayHealthState | undefined;
+  let lastError = 'No OpenClaw channel health endpoint configured';
+  const timeoutMs = opts.timeoutMs ?? 5_000;
+
+  for (const target of targets) {
+    if (!target.healthUrl) continue;
+
+    if (target.name === 'bridge') {
+      if (!bridgeAuthToken) {
+        bridge = { ok: false, error: 'Bridge auth token unavailable' };
+        lastError = 'Bridge auth token unavailable';
+        continue;
+      }
+
+      const cachedBridgeHealth = bridgeHealthCache;
+      const cacheValid = !opts.ignoreBridgeCache
+        && isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
+      if (cacheValid && cachedBridgeHealth) {
+        bridge = { ok: cachedBridgeHealth.ok, cached: true };
+        if (cachedBridgeHealth.ok) {
+          return { ok: true, target: 'bridge', bridge };
+        }
+        continue;
+      }
+    }
+
+    try {
+      const healthRes = await fetch(target.healthUrl, {
+        headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await healthRes.text().catch(() => '');
+      let parsed: Record<string, unknown> = {};
+      if (body) {
+        try {
+          parsed = JSON.parse(body) as Record<string, unknown>;
+        } catch {
+          parsed = { body };
+        }
+      }
+      const result: Record<string, unknown> & { ok: boolean } = { ok: healthRes.ok, ...parsed };
+      if (target.name === 'bridge') {
+        bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
+        bridge = result;
+      } else {
+        gateway = result;
+      }
+      if (healthRes.ok) {
+        return {
+          ok: true,
+          target: target.name,
+          bridge,
+          gateway,
+        };
+      }
+      lastError = typeof result.error === 'string'
+        ? result.error
+        : `Health endpoint responded ${healthRes.status}`;
+    } catch (err: any) {
+      const result = { ok: false, error: err.message };
+      if (target.name === 'bridge') {
+        bridgeHealthCache = { ok: false, ts: Date.now() };
+        bridge = result;
+      } else {
+        gateway = result;
+      }
+      lastError = err.message;
+    }
+  }
+
+  return { ok: false, bridge, gateway, error: lastError };
+}
+
+type OpenClawUiSetupCommand = {
+  command: string;
+  args: string[];
+  source: 'workspace' | 'npx';
+};
+
+export function getOpenClawUiSetupCommand(
+  packageName: string,
+  runtimeModuleUrl = import.meta.url,
+  fileExists: (path: string) => boolean = existsSync,
+): OpenClawUiSetupCommand {
+  const setupArgs = ['setup', '--no-fund', '--no-start', '--no-verify'];
+
+  if (packageName === '@origintrail-official/dkg-adapter-openclaw') {
+    const localSetupCliPath = fileURLToPath(new URL('../../adapter-openclaw/dist/setup-cli.js', runtimeModuleUrl));
+    if (fileExists(localSetupCliPath)) {
+      return {
+        command: process.execPath,
+        args: [localSetupCliPath, ...setupArgs],
+        source: 'workspace',
+      };
+    }
+  }
+
+  return {
+    command: 'npx',
+    args: ['--yes', packageName, ...setupArgs],
+    source: 'npx',
+  };
+}
+
+async function runOpenClawUiSetup(packageName: string, signal?: AbortSignal): Promise<void> {
+  const setupCommand = getOpenClawUiSetupCommand(packageName);
+  await execFileAsync(setupCommand.command, setupCommand.args, {
+    shell: setupCommand.source === 'npx' && process.platform === 'win32',
+    signal,
+    timeout: 120_000,
+  });
+}
+
+async function restartOpenClawGateway(signal?: AbortSignal): Promise<void> {
+  await execFileAsync('openclaw', ['gateway', 'restart'], {
+    shell: process.platform === 'win32',
+    signal,
+    timeout: 120_000,
+  });
+}
+
+async function waitForOpenClawChatReady(
+  config: DkgConfig,
+  bridgeAuthToken: string | undefined,
+  signal?: AbortSignal,
+): Promise<OpenClawChannelHealthReport> {
+  const throwIfCancelled = () => {
+    if (signal?.aborted) {
+      throw new Error('OpenClaw attach cancelled');
+    }
+  };
+  const waitForPoll = async () => new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, OPENCLAW_UI_CONNECT_POLL_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('OpenClaw attach cancelled'));
+    };
+    if (!signal) return;
+    if (signal.aborted) {
+      clearTimeout(timer);
+      reject(new Error('OpenClaw attach cancelled'));
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  const deadline = Date.now() + OPENCLAW_UI_CONNECT_TIMEOUT_MS;
+  throwIfCancelled();
+  let latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  while (!latest.ok && Date.now() < deadline) {
+    await waitForPoll();
+    throwIfCancelled();
+    latest = await probeOpenClawChannelHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  }
+  return latest;
+}
+
+type OpenClawUiAttachDeps = {
+  runSetup?: (packageName: string, signal?: AbortSignal) => Promise<void>;
+  restartGateway?: (signal?: AbortSignal) => Promise<void>;
+  waitForReady?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    signal?: AbortSignal,
+  ) => Promise<OpenClawChannelHealthReport>;
+  probeHealth?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
+  ) => Promise<OpenClawChannelHealthReport>;
+  saveConfig?: (config: DkgConfig) => Promise<void>;
+  onAttachScheduled?: (id: string, job: Promise<void>) => void;
+};
+
+function formatOpenClawUiAttachFailure(err: any): string {
+  return err?.stderr?.trim?.()
+    || err?.stdout?.trim?.()
+    || err?.message
+    || 'OpenClaw attach failed';
+}
+
+function scheduleOpenClawUiAttachJob(
+  integrationId: string,
+  task: (job: PendingOpenClawUiAttachJob) => Promise<void>,
+  onAttachScheduled?: (id: string, job: Promise<void>) => void,
+): { started: boolean; job: Promise<void>; controller: AbortController } {
+  const existing = pendingOpenClawUiAttachJobs.get(integrationId);
+  if (existing) {
+    onAttachScheduled?.(integrationId, existing.job);
+    return { started: false, job: existing.job, controller: existing.controller };
+  }
+
+  const controller = new AbortController();
+  const jobState: PendingOpenClawUiAttachJob = {
+    controller,
+    cancelled: false,
+    job: Promise.resolve().then(() => task(jobState)).finally(() => {
+      const current = pendingOpenClawUiAttachJobs.get(integrationId);
+      if (current === jobState) {
+        pendingOpenClawUiAttachJobs.delete(integrationId);
+      }
+    }),
+  };
+  pendingOpenClawUiAttachJobs.set(integrationId, jobState);
+  onAttachScheduled?.(integrationId, jobState.job);
+  return { started: true, job: jobState.job, controller };
+}
+
+export function cancelPendingLocalAgentAttachJob(integrationId: string): void {
+  const job = pendingOpenClawUiAttachJobs.get(integrationId);
+  if (!job) return;
+  job.cancelled = true;
+  job.controller.abort();
+  pendingOpenClawUiAttachJobs.delete(integrationId);
+}
+
+function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
+  return job.cancelled || job.controller.signal.aborted;
+}
+
+export async function connectLocalAgentIntegrationFromUi(
+  config: DkgConfig,
+  body: Record<string, unknown>,
+  bridgeAuthToken: string | undefined,
+  deps: OpenClawUiAttachDeps = {},
+): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
+  const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
+  const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
+  const hadAttachedBridgeBeforeConnect = hasLocalAgentTransportConfig(existingBeforeConnect);
+  const requested = connectLocalAgentIntegration(config, {
+    ...body,
+    runtime: {
+      status: 'connecting',
+      ready: false,
+      lastError: null,
+    },
+  });
+  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requested.id];
+  if (requested.id !== 'openclaw') {
+    return {
+      integration: requested,
+      notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
+    };
+  }
+
+  const probeHealth = deps.probeHealth ?? probeOpenClawChannelHealth;
+  const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
+  const runSetup = deps.runSetup ?? runOpenClawUiSetup;
+  const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+  const saveConfigState = deps.saveConfig;
+
+  let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
+  if (health.ok) {
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      transport: transportPatchFromOpenClawTarget(config, health.target),
+      runtime: {
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      },
+    });
+    return {
+      integration,
+      notice: `${integration.name} is connected and chat-ready.`,
+    };
+  }
+
+  const packageName = definition?.manifest?.packageName;
+  if (!packageName) {
+    return {
+      integration: requested,
+      notice: `${requested.name} was registered, but this node does not yet know how to attach it automatically.`,
+    };
+  }
+
+  const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+    const current = getLocalAgentIntegration(config, requested.id);
+    if (current?.enabled === false && patch.enabled !== false) {
+      return null;
+    }
+    const integration = updateLocalAgentIntegration(config, requested.id, patch);
+    if (saveConfigState) {
+      await saveConfigState(config);
+    }
+    return integration;
+  };
+
+  const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
+    try {
+      bridgeHealthCache = null;
+      await runSetup(packageName, attachJob.controller.signal);
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+      bridgeHealthCache = null;
+
+      let latest = await probeHealth(config, bridgeAuthToken, {
+        ignoreBridgeCache: true,
+        timeoutMs: 3_000,
+      });
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+      if (!latest.ok) {
+        await restartGateway(attachJob.controller.signal);
+        if (isOpenClawUiAttachCancelled(attachJob)) return;
+        bridgeHealthCache = null;
+        latest = await waitForReady(config, bridgeAuthToken, attachJob.controller.signal);
+      }
+      if (isOpenClawUiAttachCancelled(attachJob)) return;
+
+      if (latest.ok) {
+        await persistIntegrationState({
+          transport: transportPatchFromOpenClawTarget(config, latest.target),
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        });
+        return;
+      }
+
+      await persistIntegrationState({
+        transport: transportPatchFromOpenClawTarget(config, latest.target),
+        runtime: {
+          status: 'connecting',
+          ready: false,
+          lastError: latest.error ?? null,
+        },
+      });
+    } catch (err: any) {
+      if (isOpenClawUiAttachCancelled(attachJob)) {
+        return;
+      }
+      await persistIntegrationState({
+        enabled: hadAttachedBridgeBeforeConnect ? true : false,
+        ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport
+          ? { transport: existingBeforeConnect.transport }
+          : {}),
+        runtime: {
+          status: 'error',
+          ready: false,
+          lastError: formatOpenClawUiAttachFailure(err),
+        },
+      });
+    } finally {
+      bridgeHealthCache = null;
+    }
+  }, deps.onAttachScheduled);
+
+  const integration = updateLocalAgentIntegration(config, requested.id, {
+    runtime: {
+      status: 'connecting',
+      ready: false,
+      lastError: null,
+    },
+  });
+  return {
+    integration,
+    notice: started
+      ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
+      : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
+  };
+}
+
 function shouldTryNextOpenClawTarget(status: number): boolean {
   return status === 404 || status === 405 || status === 501 || status === 503;
 }
@@ -1274,8 +2012,8 @@ async function ensureOpenClawBridgeAvailable(
   }
 
   const cachedBridgeHealth = bridgeHealthCache;
-  const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
-  if (cacheValid) {
+  const cacheValid = isOpenClawBridgeHealthCacheValid(cachedBridgeHealth);
+  if (cacheValid && cachedBridgeHealth) {
     return cachedBridgeHealth.ok
       ? { ok: true }
       : { ok: false, details: 'Bridge health check cached as unavailable', offline: true };
@@ -1463,6 +2201,7 @@ async function handleRequest(
     const chainConf = config.chain ?? network?.chain;
     const blockExplorerUrl = config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
+    const localAgentIntegrations = listLocalAgentIntegrations(config);
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -1480,7 +2219,9 @@ async function handleRequest(
       blockExplorerUrl,
       identityId: String(identityId),
       hasIdentity: identityId > 0n,
-      hasOpenClawChannel: config.openclawAdapter === true || !!(config.openclawChannel?.bridgeUrl || config.openclawChannel?.gatewayUrl),
+      hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
+      localAgentIntegrations,
+      connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
       updateAvailable: lastUpdateCheck.checkedAt > 0 ? !lastUpdateCheck.upToDate : null,
       latestCommit: lastUpdateCheck.latestCommit || null,
@@ -1662,7 +2403,7 @@ async function handleRequest(
       peer = (await resolveNameToPeerId(agent, peerFilter)) ?? undefined;
     }
     const rows = dashDb.getChatMessages({ peer, since: since || undefined, limit });
-    const msgs = rows.map(r => ({
+    const msgs = rows.map((r: any) => ({
       ts: r.ts,
       direction: r.direction,
       peer: r.peer,
@@ -1786,7 +2527,7 @@ async function handleRequest(
             { 'Content-Type': 'application/json' },
           ),
           body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
@@ -1860,7 +2601,7 @@ async function handleRequest(
             },
           ),
           body: JSON.stringify({ text, correlationId: corrId, identity: identity ?? 'owner' }),
-          signal: AbortSignal.timeout(120_000),
+          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {
@@ -1934,7 +2675,7 @@ async function handleRequest(
 
   // POST /api/openclaw-channel/persist-turn  { sessionId, userMessage, assistantReply, ... }
   // Called by the adapter to persist an OpenClaw turn into the DKG agent-memory graph
-  // using the same ChatMemoryManager pathway as built-in Agent Hub chat.
+  // using the same ChatMemoryManager pathway as the node-owned local-agent chat flow.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;
@@ -1964,77 +2705,7 @@ async function handleRequest(
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable
   if (req.method === 'GET' && path === '/api/openclaw-channel/health') {
-    const targets = getOpenClawChannelTargets(config);
-    let bridge: Record<string, unknown> | undefined;
-    let gateway: Record<string, unknown> | undefined;
-    let lastError = 'No OpenClaw channel health endpoint configured';
-
-    for (const target of targets) {
-      if (!target.healthUrl) continue;
-
-      if (target.name === 'bridge') {
-        if (!bridgeAuthToken) {
-          bridge = { ok: false, error: 'Bridge auth token unavailable' };
-          lastError = 'Bridge auth token unavailable';
-          continue;
-        }
-
-        const cachedBridgeHealth = bridgeHealthCache;
-        const cacheValid = cachedBridgeHealth !== null && (Date.now() - cachedBridgeHealth.ts < HEALTH_CACHE_TTL);
-        if (cacheValid) {
-          bridge = { ok: cachedBridgeHealth.ok, cached: true };
-          if (cachedBridgeHealth.ok) {
-            return jsonResponse(res, 200, { ok: true, target: 'bridge', bridge });
-          }
-          continue;
-        }
-      }
-
-      try {
-        const healthRes = await fetch(target.healthUrl, {
-          headers: buildOpenClawChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
-          signal: AbortSignal.timeout(5_000),
-        });
-        const body = await healthRes.text().catch(() => '');
-        let parsed: Record<string, unknown> = {};
-        if (body) {
-          try {
-            parsed = JSON.parse(body) as Record<string, unknown>;
-          } catch {
-            parsed = { body };
-          }
-        }
-        const result: Record<string, unknown> & { ok: boolean } = { ok: healthRes.ok, ...parsed };
-        if (target.name === 'bridge') {
-          bridgeHealthCache = { ok: healthRes.ok, ts: Date.now() };
-          bridge = result;
-        } else {
-          gateway = result;
-        }
-        if (healthRes.ok) {
-          return jsonResponse(res, 200, {
-            ok: true,
-            target: target.name,
-            bridge,
-            gateway,
-          });
-        }
-        lastError = typeof result.error === 'string'
-          ? result.error
-          : `Health endpoint responded ${healthRes.status}`;
-      } catch (err: any) {
-        const result = { ok: false, error: err.message };
-        if (target.name === 'bridge') {
-          bridgeHealthCache = { ok: false, ts: Date.now() };
-          bridge = result;
-        } else {
-          gateway = result;
-        }
-        lastError = err.message;
-      }
-    }
-
-    return jsonResponse(res, 200, { ok: false, bridge, gateway, error: lastError });
+    return jsonResponse(res, 200, await probeOpenClawChannelHealth(config, bridgeAuthToken));
   }
 
   // POST /api/connect  { multiaddr: "..." }
@@ -2173,7 +2844,7 @@ async function handleRequest(
       return jsonResponse(res, httpStatus, {
         kcId: String(result.kcId),
         status: result.status,
-        kas: result.kaManifest.map(ka => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
+        kas: result.kaManifest.map((ka: any) => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
         ...(publishContextGraphId != null ? { publishContextGraphId: String(publishContextGraphId) } : {}),
         ...(result.contextGraphError ? { contextGraphError: result.contextGraphError } : {}),
@@ -3508,30 +4179,106 @@ async function handleRequest(
     });
   }
 
-  // GET /api/integrations — aggregated view for Integrations panel (adapters, skills, context graphs)
-  if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
-    const adapters = [
-      { id: 'elizaos', name: 'ElizaOS', enabled: true, description: 'Connect to ElizaOS agents' },
-      { id: 'openclaw', name: 'OpenClaw', enabled: true, description: 'OpenClaw framework adapter' },
-    ];
-    return jsonResponse(res, 200, { adapters, skills, paranets });
+  // GET /api/local-agent-integrations — generic local agent registry/status surface
+  if (req.method === 'GET' && path === '/api/local-agent-integrations') {
+    return jsonResponse(res, 200, {
+      integrations: listLocalAgentIntegrations(config),
+    });
   }
 
-  // POST /api/register-adapter — adapter self-registers so UI can detect it
+  // GET /api/local-agent-integrations/:id — single local agent integration status
+  if (req.method === 'GET' && path.startsWith('/api/local-agent-integrations/')) {
+    const id = path.slice('/api/local-agent-integrations/'.length);
+    if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    const integration = getLocalAgentIntegration(config, id);
+    if (!integration) return jsonResponse(res, 404, { error: `Unknown integration: ${id}` });
+    return jsonResponse(res, 200, { integration });
+  }
+
+  // POST /api/local-agent-integrations/connect — upsert/connect an integration
+  if (req.method === 'POST' && path === '/api/local-agent-integrations/connect') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    try {
+      const source = isPlainRecord(parsed.metadata) && typeof parsed.metadata.source === 'string'
+        ? parsed.metadata.source
+        : undefined;
+      const result = source === 'node-ui'
+        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
+        : { integration: connectLocalAgentIntegration(config, parsed) };
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
+    } catch (err: any) {
+      try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
+    }
+  }
+
+  // PUT /api/local-agent-integrations/:id — partial update for stored integration state
+  if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
+    const id = path.slice('/api/local-agent-integrations/'.length);
+    if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: Record<string, unknown>;
+    try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+    try {
+      const normalizedId = normalizeIntegrationId(id);
+      const disconnectRequested = parsed.enabled === false
+        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
+      if (disconnectRequested && normalizedId) {
+        cancelPendingLocalAgentAttachJob(normalizedId);
+      }
+      const integration = updateLocalAgentIntegration(config, id, parsed);
+      await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
+    }
+  }
+
+  // GET /api/integrations — aggregated view for Integrations panel
+  if (req.method === 'GET' && path === '/api/integrations') {
+    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
+    const localAgentIntegrations = listLocalAgentIntegrations(config);
+    const adapters = localAgentIntegrations.map((integration) => ({
+      id: integration.id,
+      name: integration.name,
+      enabled: integration.enabled,
+      description: integration.description,
+      status: integration.status,
+      capabilities: integration.capabilities,
+    }));
+    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, paranets });
+  }
+
+  // POST /api/register-adapter — legacy OpenClaw alias for /api/local-agent-integrations/connect
   if (req.method === 'POST' && path === '/api/register-adapter') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
-    const { id } = parsed;
-    if (typeof id !== 'string' || id !== 'openclaw') {
-      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(id)}` });
+    if (parsed.id !== undefined && parsed.id !== 'openclaw') {
+      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id)}` });
     }
-    if (!config.openclawAdapter) {
-      config.openclawAdapter = true;
+    try {
+      const integration = connectLocalAgentIntegration(config, {
+        ...parsed,
+        id: parsed.id ?? 'openclaw',
+        capabilities: {
+          localChat: true,
+          connectFromUi: true,
+          installNode: true,
+          dkgPrimaryMemory: true,
+          wmImportPipeline: true,
+          nodeServedSkill: true,
+          ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
+        },
+      });
       await saveConfig(config);
+      return jsonResponse(res, 200, { ok: true, integration });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? 'Invalid JSON body' });
     }
-    return jsonResponse(res, 200, { ok: true });
   }
 
   // GET /api/context-graph/exists (V10) or /api/paranet/exists (legacy)
@@ -4232,6 +4979,26 @@ class HttpRateLimiter {
     clearInterval(this._timer);
     this._hits.clear();
   }
+}
+
+export function isLoopbackClientIp(ip: string): boolean {
+  const normalized = ip.trim().toLowerCase();
+  if (normalized === '::1') return true;
+  if (normalized.startsWith('::ffff:')) {
+    return normalized.slice('::ffff:'.length).startsWith('127.');
+  }
+  return normalized.startsWith('127.');
+}
+
+function isLoopbackRateLimitExemptPath(pathname: string): boolean {
+  return pathname === '/ui'
+    || pathname.startsWith('/ui/')
+    || pathname.startsWith('/api/')
+    || pathname === '/.well-known/skill.md';
+}
+
+export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: string): boolean {
+  return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
 }
 
 function isValidContextGraphId(id: string): boolean {

@@ -2,7 +2,6 @@ export { DkgNodePlugin } from './DkgNodePlugin.js';
 export { DkgDaemonClient, type DkgClientOptions } from './dkg-client.js';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
-export { DkgGamePlugin, parseActionResponse, type ConsultAgentFn } from './DkgGamePlugin.js';
 export { WriteCapture } from './write-capture.js';
 export type {
   ChannelInboundMessage,

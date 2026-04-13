@@ -2,6 +2,7 @@ import * as realApi from './api.js';
 import { mockApi } from './mocks/provider.js';
 
 let useMocks: boolean | null = null;
+let detectMockModePromise: Promise<boolean> | null = null;
 
 function authHeaders(): Record<string, string> {
   if (typeof window === 'undefined') return {};
@@ -12,22 +13,30 @@ function authHeaders(): Record<string, string> {
 
 async function detectMockMode(): Promise<boolean> {
   if (useMocks !== null) return useMocks;
-  try {
-    const resp = await fetch('/api/status', {
-      headers: authHeaders(),
-      signal: AbortSignal.timeout(2000),
-    });
-    if (resp.ok) {
-      useMocks = false;
-    } else if (resp.status === 401) {
-      useMocks = false;
-    } else {
+  if (detectMockModePromise) return detectMockModePromise;
+  detectMockModePromise = (async () => {
+    try {
+      const resp = await fetch('/api/status', {
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (resp.ok) {
+        useMocks = false;
+      } else if (resp.status === 401) {
+        useMocks = false;
+      } else {
+        useMocks = true;
+      }
+    } catch {
       useMocks = true;
     }
-  } catch {
-    useMocks = true;
+    return useMocks;
+  })();
+  try {
+    return await detectMockModePromise;
+  } finally {
+    detectMockModePromise = null;
   }
-  return useMocks;
 }
 
 async function withFallback<T>(realFn: () => Promise<T>, mockFn: () => Promise<T>): Promise<T> {
@@ -47,6 +56,5 @@ export const api = {
   fetchNodeLog: (p?: any) => withFallback(() => realApi.fetchNodeLog(p), mockApi.fetchNodeLog),
   fetchMemorySessions: (n?: number) => withFallback(() => realApi.fetchMemorySessions(n), mockApi.fetchMemorySessions),
   markNotificationsRead: realApi.markNotificationsRead,
-  streamChatMessage: realApi.streamChatMessage,
   executeQuery: realApi.executeQuery,
 };

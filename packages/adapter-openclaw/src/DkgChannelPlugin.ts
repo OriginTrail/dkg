@@ -31,10 +31,20 @@ import type { DkgDaemonClient } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function finalizeAgentReplyText(text: string): string {
+  if (text.trim().length === 0) {
+    throw new Error(NO_TEXT_RESPONSE_ERROR);
+  }
+  return text;
 }
 const moduleRequire = createRequire(import.meta.url);
 
@@ -57,8 +67,11 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly pendingTurnPersistence = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> | null }>();
   private readonly port: number;
   private useGatewayRoute = false;
+  private channelRegistered = false;
+  private gatewayRoutesRegistered = false;
   private inFlight = 0;
   private readonly maxInFlight = 3;
 
@@ -105,15 +118,16 @@ export class DkgChannelPlugin {
     }
 
     // --- Register as a first-class channel ---
-    if (typeof api.registerChannel === 'function') {
+    if (!this.channelRegistered && typeof api.registerChannel === 'function') {
       api.registerChannel({
         plugin: this.buildRegisteredChannelPlugin(),
       });
+      this.channelRegistered = true;
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
 
     // --- Register an HTTP route on the gateway ---
-    if (typeof api.registerHttpRoute === 'function') {
+    if (!this.gatewayRoutesRegistered && typeof api.registerHttpRoute === 'function') {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
@@ -133,6 +147,7 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
@@ -189,6 +204,11 @@ export class DkgChannelPlugin {
       clearTimeout(pending.timer);
       pending.reject(new Error('Channel shutting down'));
       this.pendingRequests.delete(id);
+    }
+
+    for (const [id, job] of this.pendingTurnPersistence) {
+      if (job.timer) clearTimeout(job.timer);
+      this.pendingTurnPersistence.delete(id);
     }
 
     if (this.serverStart) {
@@ -265,7 +285,7 @@ export class DkgChannelPlugin {
         id: CHANNEL_NAME,
         label: 'DKG UI',
         selectionLabel: 'DKG UI',
-        blurb: 'Local DKG Agent Hub bridge',
+        blurb: 'Local DKG UI bridge',
         displayName: 'DKG UI',
       },
       capabilities: {
@@ -332,9 +352,7 @@ export class DkgChannelPlugin {
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
-          api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-        });
+        this.queueTurnPersistence(text, reply.text, correlationId, identity);
         return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
@@ -353,9 +371,7 @@ export class DkgChannelPlugin {
         text,
         correlationId,
       });
-      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
-        api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner');
       return reply;
     }
 
@@ -390,7 +406,7 @@ export class DkgChannelPlugin {
       });
       // Clone to avoid mutating the runtime's cached route object
       route = { ...resolved };
-      // Give non-owner identities (e.g. game-autopilot) their own session
+      // Give non-owner identities (e.g. background workers) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
         route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -463,7 +479,7 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -491,7 +507,7 @@ export class DkgChannelPlugin {
         },
       }).then(() => {
         clearTimeout(timer);
-        const replyText = replyChunks.join('\n') || '(no response)';
+        const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
         resolve({ text: replyText, correlationId });
       }).catch((err: any) => {
@@ -513,7 +529,7 @@ export class DkgChannelPlugin {
     const log = this.api!.logger;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -540,7 +556,7 @@ export class DkgChannelPlugin {
         ))
         .then(() => {
           clearTimeout(timer);
-          const replyText = replyChunks.join('\n') || '(no response)';
+          const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
           resolve({ text: replyText, correlationId });
         })
@@ -586,7 +602,7 @@ export class DkgChannelPlugin {
     });
     // Clone to avoid mutating the runtime's cached route object
     const route = { ...resolved };
-    // Give non-owner identities (e.g. game-autopilot) their own session
+    // Give non-owner identities (e.g. background workers) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -622,7 +638,7 @@ export class DkgChannelPlugin {
       if (resolve) { const r = resolve; resolve = null; r(); }
     };
 
-    const TIMEOUT_MS = 120_000;
+    const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
     const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
 
     let replyText = '';
@@ -682,17 +698,12 @@ export class DkgChannelPlugin {
     } finally {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
-
-      // Persist turn even if the consumer cancelled early — use accumulated text
-      const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
-        log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
     }
 
     // Only yield final if the stream completed normally (not cancelled)
     if (completed) {
-      const finalText = replyText || '(no response)';
+      const finalText = finalizeAgentReplyText(replyText);
+      this.queueTurnPersistence(text, finalText, correlationId, identity);
       yield { type: 'final', text: finalText, correlationId };
     }
   }
@@ -827,7 +838,7 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
   ): Promise<void> {
-    // Non-owner identities (e.g. game-autopilot) get their own session
+    // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
@@ -839,6 +850,46 @@ export class DkgChannelPlugin {
       { turnId: correlationId },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private queueTurnPersistence(
+    userMessage: string,
+    assistantReply: string,
+    correlationId: string,
+    identity: string,
+  ): void {
+    if (this.pendingTurnPersistence.has(correlationId)) return;
+
+    const attemptPersist = (attempt: number): void => {
+      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
+      void this.persistTurn(userMessage, assistantReply, correlationId, identity)
+        .then(() => {
+          this.pendingTurnPersistence.delete(correlationId);
+        })
+        .catch((err: any) => {
+          const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+          if (retryDelayMs == null) {
+            this.pendingTurnPersistence.delete(correlationId);
+            this.api?.logger.warn?.(
+              `[dkg-channel] Turn persistence failed permanently after ${attempt} attempt(s): ${err.message}`,
+            );
+            return;
+          }
+
+          this.api?.logger.warn?.(
+            `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
+          );
+          const timer = setTimeout(() => {
+            const job = this.pendingTurnPersistence.get(correlationId);
+            if (!job) return;
+            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null });
+            attemptPersist(attempt + 1);
+          }, retryDelayMs);
+          this.pendingTurnPersistence.set(correlationId, { attempt, timer });
+        });
+    };
+
+    attemptPersist(1);
   }
 
   // ---------------------------------------------------------------------------
@@ -1034,6 +1085,10 @@ export class DkgChannelPlugin {
   get bridgePort(): number {
     const address = this.server?.address();
     return typeof address === 'object' && address ? address.port : this.port;
+  }
+
+  get isListening(): boolean {
+    return this.server?.listening === true;
   }
 
   get isUsingGatewayRoute(): boolean {

@@ -4,10 +4,8 @@ import { createReadStream, existsSync } from 'node:fs';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { PayloadTooLargeError } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
-import type { ChatAssistant, ChatLlmDiagnostics, ChatResponse } from './chat-assistant.js';
 import { type ChatMemoryManager, IMPORT_SOURCES } from './chat-memory.js';
 import type { MetricsCollector } from './metrics-collector.js';
-import { ChatPersistenceQueue, type TurnPersistenceJobInput } from './chat-persistence-queue.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html',
@@ -26,7 +24,6 @@ const MIME: Record<string, string> = {
  * global state races in concurrent async handlers and long-lived SSE streams.
  */
 
-const chatPersistenceQueues = new WeakMap<DashboardDB, ChatPersistenceQueue>();
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const PERIOD_UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
@@ -50,15 +47,6 @@ function autoBucketMs(periodMs: number): number {
   if (periodMs <= 24 * 3_600_000) return 3_600_000;     // <=24h    → 1-hour buckets
   if (periodMs <= 7 * 86_400_000) return 6 * 3_600_000; // <=7d     → 6-hour buckets
   return 86_400_000;                                     // >7d      → daily buckets
-}
-
-function getChatPersistenceQueue(db: DashboardDB, memoryManager: ChatMemoryManager): ChatPersistenceQueue {
-  let queue = chatPersistenceQueues.get(db);
-  if (!queue) {
-    queue = new ChatPersistenceQueue(db, memoryManager);
-    chatPersistenceQueues.set(db, queue);
-  }
-  return queue;
 }
 
 function normalizeSessionId(raw: unknown): string | null {
@@ -92,7 +80,7 @@ export async function handleNodeUIRequest(
   url: URL,
   db: DashboardDB,
   staticDir: string,
-  chatAssistant?: ChatAssistant,
+  _legacyRemovedArg?: unknown,
   metricsCollector?: MetricsCollector,
   authToken?: string,
   memoryManager?: ChatMemoryManager,
@@ -334,11 +322,12 @@ export async function handleNodeUIRequest(
   // --- LLM settings ---
 
   if (req.method === 'GET' && path === '/api/settings/llm') {
-    if (chatAssistant) {
-      const info = chatAssistant.getLlmConfig();
-      return json(res, 200, info);
-    }
-    return json(res, 200, { configured: false });
+    const llm = llmSettings?.getLlm();
+    return json(res, 200, {
+      configured: !!llm?.apiKey,
+      model: llm?.model,
+      baseURL: llm?.baseURL,
+    });
   }
 
   if (req.method === 'PUT' && path === '/api/settings/llm' && llmSettings) {
@@ -380,162 +369,14 @@ export async function handleNodeUIRequest(
     }
     try {
       await llmSettings.setLlm(llm);
-      const info = chatAssistant?.getLlmConfig() ?? { configured: !!llm };
-      return json(res, 200, { ok: true, ...info });
+      return json(res, 200, {
+        ok: true,
+        configured: !!llm?.apiKey,
+        model: llm?.model,
+        baseURL: llm?.baseURL,
+      });
     } catch (err: any) {
       return json(res, 500, { error: err.message ?? 'Failed to save LLM config' });
-    }
-  }
-
-  // --- Chat assistant ---
-
-  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/events' && memoryManager) {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    beginSse(res);
-    const now = Date.now();
-    sendSse(res, {
-      type: 'persist_health',
-      ts: now,
-      ...queue.getHealthSnapshot(now),
-    });
-
-    const unsubscribe = queue.subscribe((event) => {
-      sendSse(res, event);
-    });
-
-    const keepAlive = setInterval(() => {
-      if (res.writableEnded || res.destroyed) return;
-      res.write(': ping\n\n');
-    }, 15_000);
-
-    const cleanup = () => {
-      clearInterval(keepAlive);
-      unsubscribe();
-      if (!res.writableEnded) {
-        res.end();
-      }
-    };
-
-    req.on('close', cleanup);
-    req.on('error', cleanup);
-    return true;
-  }
-
-  if (req.method === 'GET' && path === '/api/chat-assistant/persistence/health' && memoryManager) {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    const now = Date.now();
-    return json(res, 200, {
-      ts: now,
-      ...queue.getHealthSnapshot(now),
-    });
-  }
-
-  if (req.method === 'POST' && path === '/api/chat-assistant' && chatAssistant) {
-    const body = await readBody(req);
-    let payload: { message?: unknown; sessionId?: unknown; stream?: unknown };
-    try {
-      payload = JSON.parse(body ?? '{}');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON payload' });
-    }
-    const message = typeof payload.message === 'string' ? payload.message.trim() : '';
-    const rawSessionId = payload.sessionId;
-    const acceptHeader = Array.isArray(req.headers.accept) ? req.headers.accept.join(', ') : (req.headers.accept ?? '');
-    const streamRequested = payload.stream === true || acceptHeader.includes('text/event-stream');
-    if (!message) return json(res, 400, { error: 'Missing "message"' });
-    const providedSessionId = rawSessionId === undefined ? null : normalizeSessionId(rawSessionId);
-    if (rawSessionId !== undefined && !providedSessionId) {
-      return json(res, 400, { error: 'Invalid "sessionId" format' });
-    }
-    const sessionId = providedSessionId ?? crypto.randomUUID();
-    const turnId = crypto.randomUUID();
-
-    if (streamRequested) {
-      beginSse(res);
-      sendSse(res, { type: 'meta', sessionId });
-      const startedAt = Date.now();
-      const llmStartedAt = Date.now();
-      let finalReply: ChatResponse | undefined;
-      try {
-        for await (const event of chatAssistant.answerStream({ message })) {
-          if (event.type === 'text_delta') {
-            sendSse(res, event);
-            continue;
-          }
-          if (event.type === 'final') {
-            finalReply = event.response;
-          }
-        }
-        if (!finalReply) throw new Error('Chat stream ended without a final response');
-
-        const llmMs = Date.now() - llmStartedAt;
-        const persisted = enqueueTurnPersistence(db, memoryManager, {
-          turnId,
-          sessionId,
-          userMessage: message,
-          assistantReply: finalReply.reply,
-          toolCalls: finalReply.toolCalls,
-        });
-        const totalMs = Date.now() - startedAt;
-        const responseMode = finalReply.responseMode ?? 'rule-based';
-        sendSse(res, {
-          type: 'final',
-          ...finalReply,
-          responseMode,
-          sessionId,
-          turnId,
-          persistStatus: persisted.persistStatus,
-          persistError: persisted.persistError,
-          timings: {
-            llm_ms: llmMs,
-            store_ms: persisted.storeMs,
-            total_ms: totalMs,
-          },
-        });
-      } catch (err: unknown) {
-        const messageText = err instanceof Error ? err.message : String(err);
-        const diagnostics: ChatLlmDiagnostics | undefined = finalReply?.llmDiagnostics;
-        console.error('[chat-assistant] Streaming error:', messageText);
-        sendSse(res, {
-          type: 'error',
-          error: messageText,
-          llmDiagnostics: diagnostics,
-        });
-      } finally {
-        res.end();
-      }
-      return true;
-    }
-
-    try {
-      const startedAt = Date.now();
-      const llmStartedAt = Date.now();
-      const reply = await chatAssistant.answer({ message });
-      const llmMs = Date.now() - llmStartedAt;
-      const persisted = enqueueTurnPersistence(db, memoryManager, {
-        turnId,
-        sessionId,
-        userMessage: message,
-        assistantReply: reply.reply,
-        toolCalls: reply.toolCalls,
-      });
-      const totalMs = Date.now() - startedAt;
-      const responseMode = reply.responseMode ?? 'rule-based';
-      return json(res, 200, {
-        ...reply,
-        responseMode,
-        sessionId,
-        turnId,
-        persistStatus: persisted.persistStatus,
-        persistError: persisted.persistError,
-        timings: {
-          llm_ms: llmMs,
-          store_ms: persisted.storeMs,
-          total_ms: totalMs,
-        },
-      });
-    } catch (err: any) {
-      return json(res, 500, { error: err.message });
     }
   }
 
@@ -705,53 +546,6 @@ export async function handleNodeUIRequest(
   }
 
   return false;
-}
-
-function enqueueTurnPersistence(
-  db: DashboardDB,
-  memoryManager: ChatMemoryManager | undefined,
-  job: TurnPersistenceJobInput,
-): {
-  persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
-  persistError?: string;
-  storeMs: number;
-} {
-  if (!memoryManager) {
-    return { persistStatus: 'skipped', storeMs: 0 };
-  }
-  try {
-    const queue = getChatPersistenceQueue(db, memoryManager);
-    const snapshot = queue.enqueue(job);
-    return {
-      persistStatus: snapshot.status,
-      persistError: snapshot.error,
-      storeMs: snapshot.storeMs ?? 0,
-    };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[chat-persistence] enqueue failed:', message);
-    return { persistStatus: 'failed', persistError: message, storeMs: 0 };
-  }
-}
-
-function beginSse(res: ServerResponse): void {
-  const origin = (res as any).__corsOrigin as string | null ?? null;
-  const headers: Record<string, string> = {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  };
-  if (origin) {
-    headers['Access-Control-Allow-Origin'] = origin;
-    if (origin !== '*') headers['Vary'] = 'Origin';
-  }
-  res.writeHead(200, headers);
-}
-
-function sendSse(res: ServerResponse, data: unknown): void {
-  if (res.writableEnded || res.destroyed) return;
-  res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
