@@ -289,6 +289,8 @@ export function writeDkgConfig(
       warn(`Could not parse existing ${configPath} — will overwrite`);
     }
   }
+  delete existing.openclawAdapter;
+  delete existing.openclawChannel;
 
   // Explicit CLI overrides (--name, --port) take precedence over existing config.
   // Auto-detected values only fill in when no existing value is present.
@@ -297,10 +299,12 @@ export function writeDkgConfig(
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
     apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
-    contextGraphs: existing.contextGraphs ?? existing.paranets ?? network.defaultContextGraphs ?? network.defaultParanets,
+    contextGraphs: existing.contextGraphs
+      ?? existing.paranets
+      ?? network.defaultContextGraphs
+      ?? network.defaultParanets,
     chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
-    openclawAdapter: true,
   };
 
   // Preserve an existing relay override but never pin a new one — the daemon

@@ -149,13 +149,6 @@ export interface DkgConfig {
    * status/capabilities here instead of relying on one-off config flags.
    */
   localAgentIntegrations?: Record<string, LocalAgentIntegrationConfig>;
-  /** Set to true when this node is used with the OpenClaw adapter. Retained as a legacy compatibility flag. */
-  openclawAdapter?: boolean;
-  /** Optional OpenClaw bridge/gateway routing hints for the local channel transport. */
-  openclawChannel?: {
-    bridgeUrl?: string;
-    gatewayUrl?: string;
-  };
   /**
    * API authentication. When enabled, all non-public endpoints require
    * a Bearer token in the Authorization header. A token is auto-generated

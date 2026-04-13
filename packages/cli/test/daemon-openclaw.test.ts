@@ -43,7 +43,15 @@ describe('OpenClaw channel routing helpers', () => {
 
   it('uses only the gateway route when gatewayUrl is configured without an explicit bridgeUrl', () => {
     expect(getOpenClawChannelTargets(makeConfig({
-      openclawChannel: { gatewayUrl: 'http://gateway.local:3030' },
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            gatewayUrl: 'http://gateway.local:3030',
+          },
+        },
+      },
     }))).toEqual([
       {
         name: 'gateway',
@@ -55,9 +63,15 @@ describe('OpenClaw channel routing helpers', () => {
 
   it('keeps both transports when bridgeUrl and gatewayUrl are both configured', () => {
     expect(getOpenClawChannelTargets(makeConfig({
-      openclawChannel: {
-        bridgeUrl: 'http://127.0.0.1:9301',
-        gatewayUrl: 'http://gateway.local:3030',
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9301',
+            gatewayUrl: 'http://gateway.local:3030',
+          },
+        },
       },
     }))).toEqual([
       {
@@ -103,10 +117,6 @@ describe('OpenClaw channel routing helpers', () => {
 
   it('returns no OpenClaw channel targets when the registry explicitly disables the integration', () => {
     expect(getOpenClawChannelTargets(makeConfig({
-      openclawChannel: {
-        bridgeUrl: 'http://127.0.0.1:9301',
-        gatewayUrl: 'http://gateway.local:3030',
-      },
       localAgentIntegrations: {
         openclaw: {
           enabled: false,
@@ -328,34 +338,21 @@ describe('local agent integration registry helpers', () => {
     expect(integrations.every((integration) => integration.status === 'disconnected')).toBe(true);
   });
 
-  it('merges legacy OpenClaw config into the registry view', () => {
-    const integration = getLocalAgentIntegration(makeConfig({
-      openclawAdapter: true,
-      openclawChannel: {
-        bridgeUrl: 'http://127.0.0.1:9301',
-      },
-    }), 'openclaw');
+  it('ignores stale legacy OpenClaw config flags when no local-agent registry record exists', () => {
+    const config = makeConfig() as DkgConfig & {
+      openclawAdapter?: boolean;
+      openclawChannel?: { bridgeUrl?: string };
+    };
+    config.openclawAdapter = true;
+    config.openclawChannel = {
+      bridgeUrl: 'http://127.0.0.1:9301',
+    };
 
-    expect(integration).not.toBeNull();
-    expect(integration?.enabled).toBe(true);
-    expect(integration?.status).toBe('configured');
-    expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
-    expect(integration?.capabilities.localChat).toBe(true);
+    expect(hasConfiguredLocalAgentChat(config, 'openclaw')).toBe(false);
+    expect(getLocalAgentIntegration(config, 'openclaw')?.enabled).toBe(false);
   });
 
-  it('treats legacy OpenClaw bridge transports as configured even before runtime readiness is reported', () => {
-    const config = makeConfig({
-      openclawAdapter: true,
-      openclawChannel: {
-        bridgeUrl: 'http://127.0.0.1:9301',
-      },
-    });
-
-    expect(hasConfiguredLocalAgentChat(config, 'openclaw')).toBe(true);
-    expect(getLocalAgentIntegration(config, 'openclaw')?.runtime.ready).toBeUndefined();
-  });
-
-  it('connects OpenClaw through the generic registry and backfills the legacy OpenClaw config', () => {
+  it('connects OpenClaw through the generic registry without backfilling legacy top-level config', () => {
     const config = makeConfig();
 
     const integration = connectLocalAgentIntegration(config, {
@@ -382,10 +379,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration.enabled).toBe(true);
     expect(integration.status).toBe('ready');
     expect(integration.manifest?.version).toBe('2026.4.12');
-    expect(config.openclawAdapter).toBe(true);
-    expect(config.openclawChannel).toEqual({
-      gatewayUrl: 'http://gateway.local:3030',
-    });
+    expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
+    expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
   });
 
   it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy', async () => {
@@ -444,11 +439,16 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.runtime.lastError).toBe('setup failed');
   });
 
-  it('keeps an already attached legacy OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
+  it('keeps an already attached OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
     const config = makeConfig({
-      openclawAdapter: true,
-      openclawChannel: {
-        bridgeUrl: 'http://127.0.0.1:9201',
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
       },
     });
     const runSetup = vi.fn().mockRejectedValue(new Error('setup failed'));
@@ -630,11 +630,14 @@ describe('local agent integration registry helpers', () => {
           },
         },
       },
-      openclawAdapter: true,
-      openclawChannel: {
-        gatewayUrl: 'http://gateway.local:3030',
-      },
-    });
+    }) as DkgConfig & {
+      openclawAdapter?: boolean;
+      openclawChannel?: { gatewayUrl?: string };
+    };
+    config.openclawAdapter = true;
+    config.openclawChannel = {
+      gatewayUrl: 'http://gateway.local:3030',
+    };
 
     const integration = updateLocalAgentIntegration(config, 'openclaw', {
       transport: {
@@ -650,9 +653,8 @@ describe('local agent integration registry helpers', () => {
 
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9301');
     expect(integration.transport.gatewayUrl).toBeUndefined();
-    expect(config.openclawChannel).toEqual({
-      bridgeUrl: 'http://127.0.0.1:9301',
-    });
+    expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
+    expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
   });
 });
 

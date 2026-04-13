@@ -101,7 +101,6 @@ describe('writeDkgConfig', () => {
       expect(config.nodeRole).toBe('edge');
       expect(config.contextGraphs).toEqual(['testing']);
       expect(config.chain.rpcUrl).toBe('https://rpc.test');
-      expect(config.openclawAdapter).toBe(true);
       expect(config.relay).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
@@ -134,8 +133,34 @@ describe('writeDkgConfig', () => {
       expect(config.contextGraphs).toEqual(['custom']);
       expect(config.relay).toBe('/ip4/5.6.7.8/tcp/9090/p2p/existing');
       expect(config.chain.rpcUrl).toBe('https://custom.rpc');
-      // But openclawAdapter is always set
-      expect(config.openclawAdapter).toBe(true);
+      expect(config.openclawAdapter).toBeUndefined();
+      expect(config.openclawChannel).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('removes stale legacy OpenClaw flags from an existing DKG config', () => {
+    const dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
+      name: 'existing-node',
+      apiPort: 9300,
+      openclawAdapter: true,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9201',
+      },
+    }));
+
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+
+    try {
+      writeDkgConfig('existing-node', fakeNetwork, 9200);
+
+      const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
+      expect(config.openclawAdapter).toBeUndefined();
+      expect(config.openclawChannel).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
     }

@@ -1364,21 +1364,6 @@ function getStoredLocalAgentIntegrations(config: DkgConfig): Record<string, Loca
   return config.localAgentIntegrations ?? {};
 }
 
-function getLegacyOpenClawIntegration(config: DkgConfig): LocalAgentIntegrationConfig | null {
-  const hasBridgeHints = !!config.openclawChannel?.bridgeUrl || !!config.openclawChannel?.gatewayUrl;
-  const hasLegacyHints = config.openclawAdapter === true || hasBridgeHints;
-  if (!hasLegacyHints) return null;
-  return {
-    id: 'openclaw',
-    enabled: config.openclawAdapter === true || hasBridgeHints,
-    transport: {
-      kind: 'openclaw-channel',
-      ...(config.openclawChannel?.bridgeUrl ? { bridgeUrl: trimTrailingSlashes(config.openclawChannel.bridgeUrl) } : {}),
-      ...(config.openclawChannel?.gatewayUrl ? { gatewayUrl: trimTrailingSlashes(config.openclawChannel.gatewayUrl) } : {}),
-    },
-  };
-}
-
 function computeLocalAgentIntegrationStatus(record: LocalAgentIntegrationConfig): LocalAgentIntegrationStatus {
   if (record.runtime?.status) return record.runtime.status;
   if (record.runtime?.ready === true) return 'ready';
@@ -1419,17 +1404,12 @@ function buildLocalAgentIntegrationRecord(
 }
 
 export function listLocalAgentIntegrations(config: DkgConfig): LocalAgentIntegrationRecord[] {
-  const legacyOpenClaw = getLegacyOpenClawIntegration(config);
-  const mergedStored: Record<string, LocalAgentIntegrationConfig> = { ...getStoredLocalAgentIntegrations(config) };
-  if (legacyOpenClaw) {
-    mergedStored.openclaw = mergeLocalAgentIntegrationConfig(legacyOpenClaw, mergedStored.openclaw ?? {});
-  }
   const ids = new Set<string>([
     ...Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS),
-    ...Object.keys(mergedStored),
+    ...Object.keys(getStoredLocalAgentIntegrations(config)),
   ]);
   return [...ids]
-    .map((id) => buildLocalAgentIntegrationRecord(id, LOCAL_AGENT_INTEGRATION_DEFINITIONS[id], mergedStored[id]))
+    .map((id) => buildLocalAgentIntegrationRecord(id, LOCAL_AGENT_INTEGRATION_DEFINITIONS[id], getStoredLocalAgentIntegrations(config)[id]))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -1438,16 +1418,13 @@ export function getLocalAgentIntegration(config: DkgConfig, id: string): LocalAg
   return listLocalAgentIntegrations(config).find((integration) => integration.id === normalizedId) ?? null;
 }
 
-function syncLegacyOpenClawConfig(config: DkgConfig, integration: LocalAgentIntegrationConfig | undefined): void {
-  if (!integration) return;
-  config.openclawAdapter = integration.enabled === true;
-  const transport = integration.transport ?? {};
-  const nextChannel = {
-    ...(transport.bridgeUrl ? { bridgeUrl: transport.bridgeUrl } : {}),
-    ...(transport.gatewayUrl ? { gatewayUrl: transport.gatewayUrl } : {}),
+function pruneLegacyOpenClawConfig(config: DkgConfig): void {
+  const mutable = config as DkgConfig & {
+    openclawAdapter?: boolean;
+    openclawChannel?: { bridgeUrl?: string; gatewayUrl?: string };
   };
-  if (Object.keys(nextChannel).length > 0) config.openclawChannel = nextChannel;
-  else delete config.openclawChannel;
+  delete mutable.openclawAdapter;
+  delete mutable.openclawChannel;
 }
 
 function extractLocalAgentIntegrationPatch(body: Record<string, unknown>): LocalAgentIntegrationConfig {
@@ -1492,7 +1469,7 @@ export function connectLocalAgentIntegration(
   const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
-  if (id === 'openclaw') syncLegacyOpenClawConfig(config, next);
+  if (id === 'openclaw') pruneLegacyOpenClawConfig(config);
   return getLocalAgentIntegration(config, id)!;
 }
 
@@ -1504,9 +1481,7 @@ export function updateLocalAgentIntegration(
 ): LocalAgentIntegrationRecord {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) throw new Error('Missing integration id');
-  const existing = getStoredLocalAgentIntegrations(config)[normalizedId]
-    ?? (normalizedId === 'openclaw' ? getLegacyOpenClawIntegration(config) : null)
-    ?? { id: normalizedId };
+  const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
   const next = mergeLocalAgentIntegrationConfig(existing, patch);
   next.id = normalizedId;
@@ -1514,7 +1489,7 @@ export function updateLocalAgentIntegration(
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
   if (!next.runtime.status) next.runtime.status = next.enabled === true ? 'configured' : 'disconnected';
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [normalizedId]: next };
-  if (normalizedId === 'openclaw') syncLegacyOpenClawConfig(config, next);
+  if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(config);
   return getLocalAgentIntegration(config, normalizedId)!;
 }
 
@@ -1541,15 +1516,11 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   if (storedOpenClawIntegration?.enabled === false) return [];
 
   const openclawIntegration = getLocalAgentIntegration(config, 'openclaw');
-  const openclawChannel = {
-    bridgeUrl: openclawIntegration?.transport.bridgeUrl ?? config.openclawChannel?.bridgeUrl,
-    gatewayUrl: openclawIntegration?.transport.gatewayUrl ?? config.openclawChannel?.gatewayUrl,
-  };
-  const explicitBridgeBase = openclawChannel.bridgeUrl
-    ? trimTrailingSlashes(openclawChannel.bridgeUrl)
+  const explicitBridgeBase = openclawIntegration?.transport.bridgeUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.bridgeUrl)
     : undefined;
-  const explicitGatewayBase = openclawChannel.gatewayUrl
-    ? trimTrailingSlashes(openclawChannel.gatewayUrl)
+  const explicitGatewayBase = openclawIntegration?.transport.gatewayUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.gatewayUrl)
     : undefined;
   const bridgeLooksLikeGateway = explicitBridgeBase?.endsWith('/api/dkg-channel') ?? false;
   const standaloneBridgeBase = explicitBridgeBase
