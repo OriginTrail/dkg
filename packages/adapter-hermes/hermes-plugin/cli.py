@@ -108,35 +108,18 @@ def register_cli(cli_group):
         for item in queued:
             try:
                 if item.get("type") == "turn":
-                    client.store_turn(
+                    result = client.store_turn(
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
                     )
-                    synced += 1
+                    if result.get("success") is False:
+                        click.echo(f"  Turn sync failed: {result.get('error', 'unknown')}")
+                        failed.append(item)
+                    else:
+                        synced += 1
                 elif item.get("type") == "memory":
-                    action = item.get("action", "add")
-                    target = item.get("target", "memory")
-                    content = item.get("content", "")
-                    old_text = item.get("old_text", "")
-                    entries = list(cache.get(target, []))
-
-                    if action == "add":
-                        entries.append({"target": target, "content": content})
-                    elif action == "replace":
-                        replaced = False
-                        for i, e in enumerate(entries):
-                            if old_text and old_text in e.get("content", ""):
-                                entries[i] = {"target": target, "content": content}
-                                replaced = True
-                                break
-                        if not replaced:
-                            entries.append({"target": target, "content": content})
-                    elif action == "remove":
-                        entries = [e for e in entries if content not in e.get("content", "")]
-
-                    cache[target] = entries
-                    dirty_targets.add(target)
+                    dirty_targets.add(item.get("target", "memory"))
                     synced += 1
                 else:
                     synced += 1
@@ -145,6 +128,7 @@ def register_cli(cli_group):
                 failed.append(item)
 
         write_failures = 0
+        failed_targets: set = set()
         for target in dirty_targets:
             entries = cache.get(target, [])
             quads = [{
@@ -153,10 +137,19 @@ def register_cli(cli_group):
                 "object": f"[{e.get('target', target)}]\n{e['content']}",
             } for e in entries]
             try:
-                client.write_assertion(assertion_name, context_graph, quads)
+                result = client.write_assertion(assertion_name, context_graph, quads)
+                if result.get("success") is False:
+                    raise RuntimeError(result.get("error", "unknown"))
             except Exception as e:
                 click.echo(f"  Failed to write {target} assertion: {e}")
                 write_failures += 1
+                failed_targets.add(target)
+
+        if failed_targets:
+            failed.extend(
+                item for item in queued
+                if item.get("type") == "memory" and item.get("target", "memory") in failed_targets
+            )
 
         cache["queued_writes"] = failed
         _save_cache(cache, agent_name)

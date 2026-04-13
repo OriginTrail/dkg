@@ -21,9 +21,8 @@ const PREVIEWABLE_TYPES: Record<string, 'pdf' | 'image' | 'text' | 'markdown'> =
 };
 
 function previewKind(ct: string): 'pdf' | 'image' | 'text' | 'binary' {
-  if (PREVIEWABLE_TYPES[ct]) return PREVIEWABLE_TYPES[ct] === 'markdown' ? 'text' : PREVIEWABLE_TYPES[ct];
-  if (ct.startsWith('text/')) return 'text';
-  if (ct.startsWith('image/')) return 'image';
+  const mapped = PREVIEWABLE_TYPES[ct];
+  if (mapped) return mapped === 'markdown' ? 'text' : mapped;
   return 'binary';
 }
 
