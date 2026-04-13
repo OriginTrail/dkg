@@ -31,11 +31,73 @@ jobs:
         id: matrix
         shell: bash
         run: |
-          MATRIX="$(node -e "const fs = require('fs'); const targets = JSON.parse(fs.readFileSync('packages/cli/markitdown-targets.json', 'utf8')); const include = targets.map(({ runner, assetName }) => ({ runner, asset_name: assetName })); process.stdout.write(JSON.stringify({ include }));")"
+          MATRIX="$(node --input-type=module -e "import { SUPPORTED_TARGETS } from './packages/cli/scripts/bundle-markitdown-binaries.mjs'; const include = SUPPORTED_TARGETS.map(({ runner, assetName }, index) => { if (typeof runner !== 'string' || runner.length === 0) throw new Error(\`SUPPORTED_TARGETS[\${index}] is missing runner\`); if (typeof assetName !== 'string' || assetName.length === 0) throw new Error(\`SUPPORTED_TARGETS[\${index}] is missing assetName\`); return { runner, asset_name: assetName }; }); process.stdout.write(JSON.stringify({ include }));")"
           echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
 
+  release-preflight:
+    name: Validate release candidate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      is_prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag format
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' does not match semver format v*.*.*"
+            exit 1
+          fi
+
+      - name: Set version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: pnpm setup
+        uses: pnpm/action-setup@v4
+
+      - name: Node setup
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Validate CLI package version matches tag
+        run: |
+          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
+          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::packages/cli/package.json version ${PKG_VERSION} does not match pushed tag version ${TAG_VERSION}"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Run tests
+        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
+
   markitdown-assets:
-    needs: markitdown-target-matrix
+    needs:
+      - markitdown-target-matrix
+      - release-preflight
     name: Build MarkItDown binary (${{ matrix.asset_name }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -169,7 +231,9 @@ jobs:
 
   release:
     name: Build, test, and create release
-    needs: markitdown-assets
+    needs:
+      - markitdown-assets
+      - release-preflight
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -178,55 +242,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Validate tag format
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Tag '$TAG' does not match semver format v*.*.*"
-            exit 1
-          fi
-
-      - name: Set version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Detect pre-release
-        id: prerelease
-        run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          if [[ "$VERSION" == *-* ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
-          else
-            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: pnpm setup
-        uses: pnpm/action-setup@v4
-
-      - name: Node setup
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      - name: Validate CLI package version matches tag
-        run: |
-          TAG_VERSION="${{ steps.version.outputs.VERSION }}"
-          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::packages/cli/package.json version ${PKG_VERSION} does not match pushed tag version ${TAG_VERSION}"
-            exit 1
-          fi
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm build
-
-      - name: Run tests
-        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
 
       - name: Download MarkItDown release assets
         uses: actions/download-artifact@v4
@@ -238,7 +253,7 @@ jobs:
       - name: Extract release notes
         id: notes
         run: |
-          V="${{ steps.version.outputs.VERSION }}"
+          V="${{ needs.release-preflight.outputs.version }}"
           if [ -f CHANGELOG.md ]; then
             sed -n "/^## \[$V\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
           fi
@@ -251,10 +266,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: v${{ steps.version.outputs.VERSION }}
+          name: v${{ needs.release-preflight.outputs.version }}
           body_path: release_notes.md
           draft: false
-          prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
+          prerelease: ${{ needs.release-preflight.outputs.is_prerelease }}
           generate_release_notes: true
           files: |
             release-assets/*
