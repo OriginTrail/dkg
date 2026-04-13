@@ -8,9 +8,12 @@ export type BundledMarkItDownMetadata = {
   buildFingerprint?: string;
 };
 
-type BundledMarkItDownBuildConfig = {
+type MarkItDownBuildInfo = {
   markItDownUpstreamVersion: string;
   pyInstallerVersion: string;
+};
+
+type BundledMarkItDownBuildConfig = MarkItDownBuildInfo & {
   bundlerScriptBytes: Buffer;
 };
 
@@ -30,12 +33,17 @@ export function readCliPackageVersion(cliDir: string): string | null {
 function readBundledMarkItDownBuildConfig(cliDir: string): BundledMarkItDownBuildConfig | null {
   try {
     const resolvedCliDir = resolve(cliDir);
+    const buildInfo = JSON.parse(readFileSync(join(resolvedCliDir, 'markitdown-build-info.json'), 'utf-8')) as MarkItDownBuildInfo;
     const bundlerScriptBytes = readFileSync(join(resolvedCliDir, 'scripts', 'bundle-markitdown-binaries.mjs'));
-    const bundlerScriptText = bundlerScriptBytes.toString('utf-8');
-    const markItDownUpstreamVersion = bundlerScriptText.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)';/)?.[1];
-    const pyInstallerVersion = bundlerScriptText.match(/export const PYINSTALLER_VERSION = '([^']+)';/)?.[1];
-    if (!markItDownUpstreamVersion || !pyInstallerVersion) return null;
-    return { markItDownUpstreamVersion, pyInstallerVersion, bundlerScriptBytes };
+    if (
+      typeof buildInfo.markItDownUpstreamVersion !== 'string'
+      || buildInfo.markItDownUpstreamVersion.length === 0
+      || typeof buildInfo.pyInstallerVersion !== 'string'
+      || buildInfo.pyInstallerVersion.length === 0
+    ) {
+      return null;
+    }
+    return { ...buildInfo, bundlerScriptBytes };
   } catch {
     return null;
   }

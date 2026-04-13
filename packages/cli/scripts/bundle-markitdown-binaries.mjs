@@ -10,8 +10,17 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCb);
 
-export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';
-export const PYINSTALLER_VERSION = '6.19.0';
+const MARKITDOWN_BUILD_INFO = JSON.parse(readFileSync(new URL('../markitdown-build-info.json', import.meta.url), 'utf-8'));
+if (
+  typeof MARKITDOWN_BUILD_INFO.markItDownUpstreamVersion !== 'string'
+  || MARKITDOWN_BUILD_INFO.markItDownUpstreamVersion.length === 0
+  || typeof MARKITDOWN_BUILD_INFO.pyInstallerVersion !== 'string'
+  || MARKITDOWN_BUILD_INFO.pyInstallerVersion.length === 0
+) {
+  throw new Error('markitdown-build-info.json must define non-empty markItDownUpstreamVersion and pyInstallerVersion strings');
+}
+export const MARKITDOWN_UPSTREAM_VERSION = MARKITDOWN_BUILD_INFO.markItDownUpstreamVersion;
+export const PYINSTALLER_VERSION = MARKITDOWN_BUILD_INFO.pyInstallerVersion;
 export const DEFAULT_RELEASE_REPO = 'OriginTrail/dkg-v9';
 export const RELEASE_BINARY_FETCH_TIMEOUT_MS = 15_000;
 export const RELEASE_CHECKSUM_FETCH_TIMEOUT_MS = 5_000;
@@ -172,7 +181,13 @@ function buildFingerprintForPackage(packageDir = DEFAULT_PACKAGE_DIR) {
 function metadataMatchesExpected(actualMetadata, expectedMetadata) {
   if (!expectedMetadata) return true;
   if (!actualMetadata || typeof actualMetadata !== 'object') return false;
-  return Object.entries(expectedMetadata).every(([key, value]) => actualMetadata[key] === value);
+  if (expectedMetadata.buildFingerprint) {
+    if (actualMetadata.buildFingerprint) return actualMetadata.buildFingerprint === expectedMetadata.buildFingerprint;
+    if (expectedMetadata.cliVersion) return actualMetadata.cliVersion === expectedMetadata.cliVersion;
+    return false;
+  }
+  if (expectedMetadata.cliVersion) return actualMetadata.cliVersion === expectedMetadata.cliVersion;
+  return true;
 }
 
 function parseMetadataText(text) {

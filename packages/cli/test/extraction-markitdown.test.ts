@@ -11,12 +11,15 @@ let isMarkItDownAvailable: typeof import('../src/extraction/markitdown-converter
 let MARKITDOWN_CONTENT_TYPES: typeof import('../src/extraction/markitdown-converter.js').MARKITDOWN_CONTENT_TYPES;
 
 const CLI_VERSION = JSON.parse(nativeReadFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
+const BUILD_INFO = JSON.parse(nativeReadFileSync(new URL('../markitdown-build-info.json', import.meta.url), 'utf-8')) as {
+  markItDownUpstreamVersion: string;
+  pyInstallerVersion: string;
+};
 const BUNDLER_SCRIPT_BYTES = nativeReadFileSync(new URL('../scripts/bundle-markitdown-binaries.mjs', import.meta.url));
-const BUNDLER_SCRIPT_TEXT = BUNDLER_SCRIPT_BYTES.toString('utf-8');
-const MARKITDOWN_UPSTREAM_VERSION = BUNDLER_SCRIPT_TEXT.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)';/)?.[1];
-const PYINSTALLER_VERSION = BUNDLER_SCRIPT_TEXT.match(/export const PYINSTALLER_VERSION = '([^']+)';/)?.[1];
+const MARKITDOWN_UPSTREAM_VERSION = BUILD_INFO.markItDownUpstreamVersion;
+const PYINSTALLER_VERSION = BUILD_INFO.pyInstallerVersion;
 if (!MARKITDOWN_UPSTREAM_VERSION || !PYINSTALLER_VERSION) {
-  throw new Error('Unable to parse MarkItDown build versions from bundle-markitdown-binaries.mjs');
+  throw new Error('Unable to read MarkItDown build versions from markitdown-build-info.json');
 }
 const MARKITDOWN_BUILD_FINGERPRINT = createHash('sha256').update([
   MARKITDOWN_UPSTREAM_VERSION,
@@ -223,7 +226,52 @@ describe('isMarkItDownAvailable', () => {
             return `${binaryHash}  ${assetName}\n`;
           }
           if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
-            return JSON.stringify({ source: 'release', cliVersion: CLI_VERSION.version });
+            return JSON.stringify({
+              source: 'release',
+              cliVersion: CLI_VERSION.version,
+              buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
+            });
+          }
+          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+          return actual.readFileSync(path as any);
+        }),
+      };
+    });
+    vi.doMock('node:child_process', () => ({
+      execFileSync: vi.fn(() => { throw new Error('path fallback should not be used'); }),
+      execFile: vi.fn(),
+    }));
+
+    const mod = await import('../src/extraction/markitdown-converter.js');
+    expect(mod.isMarkItDownAvailable()).toBe(true);
+  });
+
+  it('accepts a bundled binary when the build fingerprint matches across CLI version changes', async () => {
+    const binaryBytes = Buffer.from('verified markitdown binary', 'utf-8');
+    const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return {
+        ...actual,
+        existsSync: vi.fn((path: unknown) => {
+          const normalized = String(path).replace(/\\/g, '/');
+          if (normalized.includes('/bin/markitdown-')) return true;
+          return actual.existsSync(path as any);
+        }),
+        readFileSync: vi.fn((path: unknown) => {
+          const normalized = String(path).replace(/\\/g, '/');
+          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+            return `${binaryHash}  ${assetName}\n`;
+          }
+          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+            return JSON.stringify({
+              source: 'release',
+              cliVersion: '0.0.0-test',
+              buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
+            });
           }
           if (normalized.includes('/bin/markitdown-')) return binaryBytes;
           return actual.readFileSync(path as any);

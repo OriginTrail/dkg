@@ -486,6 +486,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(pkg.scripts?.postinstall).toContain('bundle-markitdown-binaries.mjs');
     expect(pkg.scripts?.postinstall).toContain('--current-platform');
     expect(pkg.scripts?.postinstall).toContain('--best-effort');
+    expect(pkg.files).toContain('markitdown-build-info.json');
     expect(pkg.files).toContain('markitdown-targets.json');
     expect(pkg.files).toContain('scripts');
   });
@@ -496,7 +497,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(targets.map((target) => target.assetName)).toEqual(SUPPORTED_TARGETS.map((target) => target.assetName));
 
     const workflowRaw = await readFile(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf-8');
-    expect(workflowRaw).toContain('markitdown-targets.json');
+    expect(workflowRaw).toContain("import { SUPPORTED_TARGETS } from './packages/cli/scripts/bundle-markitdown-binaries.mjs'");
     expect(workflowRaw).toContain('fromJSON(needs.markitdown-target-matrix.outputs.matrix)');
     expect(workflowRaw).toContain('Smoke test bundled MarkItDown binary');
     expect(workflowRaw).toContain('markitdown-smoke.html');

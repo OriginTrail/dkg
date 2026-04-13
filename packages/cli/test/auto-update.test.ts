@@ -8,6 +8,10 @@ const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe', runner: 'windows-latest' },
 ]);
 const CLI_VERSION = '9.0.0-beta.6';
+const MARKITDOWN_BUILD_INFO_JSON = JSON.stringify({
+  markItDownUpstreamVersion: '0.1.5',
+  pyInstallerVersion: '6.19.0',
+});
 const MOCK_MARKITDOWN_ENTRY_SCRIPT = '# mock markitdown entry script\n';
 const MOCK_BUNDLER_SCRIPT = [
   "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
@@ -28,6 +32,7 @@ function buildFingerprintForTest(): string {
 function mockReadFileSyncValue(path: unknown): string {
   const normalized = String(path).replace(/\\/g, '/');
   if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
+  if (normalized.endsWith('/markitdown-build-info.json')) return MARKITDOWN_BUILD_INFO_JSON;
   if (normalized.endsWith('/scripts/markitdown-entry.py')) return MOCK_MARKITDOWN_ENTRY_SCRIPT;
   if (normalized.endsWith('/scripts/bundle-markitdown-binaries.mjs')) return MOCK_BUNDLER_SCRIPT;
   if (normalized.includes('/node_modules/@origintrail-official/dkg/package.json')) {
@@ -1032,6 +1037,41 @@ describe('performNpmUpdate', () => {
       expect.stringContaining('.current-version'),
       '9.0.0-beta.6',
     );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
+  });
+
+  it('reuses a fingerprint-compatible active-slot MarkItDown binary across CLI version bumps', async () => {
+    mockInstalledPackageVersion = '9.0.0-beta.6';
+    const sourceBytes = Buffer.from('active-slot-markitdown', 'utf-8');
+    const sourceHash = sha256HexForTest(sourceBytes);
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'release',
+          cliVersion: '9.0.0-beta.5',
+          buildFingerprint: buildFingerprintForTest(),
+        }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sourceHash}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return sourceBytes as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.6', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 

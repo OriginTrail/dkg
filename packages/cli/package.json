@@ -40,6 +40,7 @@
   "files": [
     "dist",
     "network",
+    "markitdown-build-info.json",
     "markitdown-targets.json",
     "scripts",
     "skills",

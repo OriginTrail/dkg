@@ -214,7 +214,13 @@ function bundledMarkItDownMetadataMatchesExpected(
 ): boolean {
   if (!expected) return true;
   if (!actual || typeof actual !== 'object') return false;
-  return Object.entries(expected).every(([key, value]) => actual[key as keyof BundledMarkItDownMetadata] === value);
+  if (expected.buildFingerprint) {
+    if (actual.buildFingerprint) return actual.buildFingerprint === expected.buildFingerprint;
+    if (expected.cliVersion) return actual.cliVersion === expected.cliVersion;
+    return false;
+  }
+  if (expected.cliVersion) return actual.cliVersion === expected.cliVersion;
+  return true;
 }
 
 async function readBundledMarkItDownMetadata(binaryPath: string): Promise<BundledMarkItDownMetadata | null> {
@@ -4620,7 +4626,7 @@ async function _performNpmUpdateInner(
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
-    const expectedMetadata: BundledMarkItDownMetadata = { source: 'release', cliVersion: resolvedVersion };
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(npmPkgDir) ?? { cliVersion: resolvedVersion };
     if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [

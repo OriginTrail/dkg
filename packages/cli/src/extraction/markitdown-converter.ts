@@ -50,12 +50,10 @@ function readBundledMetadata(candidate: string): BundledMarkItDownMetadata | nul
 
 function bundledMetadataMatchesCurrentPackage(metadata: BundledMarkItDownMetadata | null): boolean {
   if (!metadata || typeof metadata !== 'object') return false;
-  const cliVersion = readCliPackageVersion(CLI_DIR);
-  if (!cliVersion || metadata.cliVersion !== cliVersion) return false;
-  if (metadata.source === 'release') return true;
-  if (metadata.source !== 'build') return false;
   const buildFingerprint = bundledMarkItDownBuildFingerprint(CLI_DIR);
-  return !!buildFingerprint && metadata.buildFingerprint === buildFingerprint;
+  if (buildFingerprint && metadata.buildFingerprint) return metadata.buildFingerprint === buildFingerprint;
+  const cliVersion = readCliPackageVersion(CLI_DIR);
+  return !!cliVersion && metadata.cliVersion === cliVersion;
 }
 
 function bundledBinaryValidationFailure(candidate: string): 'checksum' | 'metadata' | null {
