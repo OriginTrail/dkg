@@ -190,8 +190,18 @@ function currentBundledMarkItDownAssetName(): string | null {
   ))?.assetName ?? null;
 }
 
+type BundledMarkItDownMetadata = {
+  source?: string;
+  cliVersion?: string;
+  buildFingerprint?: string;
+};
+
 function markItDownChecksumPath(binaryPath: string): string {
   return `${binaryPath}.sha256`;
+}
+
+function markItDownMetadataPath(binaryPath: string): string {
+  return `${binaryPath}.meta.json`;
 }
 
 function parseSha256Sidecar(text: string): string | null {
@@ -199,7 +209,63 @@ function parseSha256Sidecar(text: string): string | null {
   return hash ? hash.toLowerCase() : null;
 }
 
-async function hasVerifiedBundledMarkItDownBinary(binaryPath: string): Promise<boolean> {
+function bundledMarkItDownMetadataMatchesExpected(
+  actual: BundledMarkItDownMetadata | null,
+  expected: BundledMarkItDownMetadata | null,
+): boolean {
+  if (!expected) return true;
+  if (!actual || typeof actual !== 'object') return false;
+  return Object.entries(expected).every(([key, value]) => actual[key as keyof BundledMarkItDownMetadata] === value);
+}
+
+async function readBundledMarkItDownMetadata(binaryPath: string): Promise<BundledMarkItDownMetadata | null> {
+  const metadataPath = markItDownMetadataPath(binaryPath);
+  if (!existsSync(metadataPath)) return null;
+  try {
+    return JSON.parse(await readFile(metadataPath, 'utf-8')) as BundledMarkItDownMetadata;
+  } catch {
+    return null;
+  }
+}
+
+function bundledMarkItDownBuildFingerprint(cliDir: string): string | null {
+  try {
+    const entryScript = readFileSync(join(cliDir, 'scripts', 'markitdown-entry.py'));
+    const bundlerScript = readFileSync(join(cliDir, 'scripts', 'bundle-markitdown-binaries.mjs'), 'utf-8');
+    const upstreamVersion = bundlerScript.match(/export const MARKITDOWN_UPSTREAM_VERSION = '([^']+)'/)?.[1];
+    const pyInstallerVersion = bundlerScript.match(/export const PYINSTALLER_VERSION = '([^']+)'/)?.[1];
+    if (!upstreamVersion || !pyInstallerVersion) return null;
+    return createHash('sha256').update([
+      upstreamVersion,
+      pyInstallerVersion,
+      createHash('sha256').update(entryScript).digest('hex'),
+      createHash('sha256').update(bundlerScript).digest('hex'),
+    ].join('\n')).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function readCliPackageVersion(cliDir: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(cliDir, 'package.json'), 'utf-8')) as { version?: unknown };
+    return typeof pkg.version === 'string' && pkg.version.trim().length > 0 ? pkg.version.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function expectedBundledMarkItDownBuildMetadata(cliDir: string): BundledMarkItDownMetadata | null {
+  const cliVersion = readCliPackageVersion(cliDir);
+  const buildFingerprint = bundledMarkItDownBuildFingerprint(cliDir);
+  if (!cliVersion || !buildFingerprint) return null;
+  return { source: 'build', cliVersion, buildFingerprint };
+}
+
+async function hasVerifiedBundledMarkItDownBinary(
+  binaryPath: string,
+  expectedMetadata: BundledMarkItDownMetadata | null = null,
+): Promise<boolean> {
   const checksumPath = markItDownChecksumPath(binaryPath);
   if (!existsSync(binaryPath) || !existsSync(checksumPath)) return false;
   try {
@@ -207,7 +273,9 @@ async function hasVerifiedBundledMarkItDownBinary(binaryPath: string): Promise<b
     const expectedHash = parseSha256Sidecar(checksumText);
     if (!expectedHash) return false;
     const actualHash = createHash('sha256').update(await readFile(binaryPath)).digest('hex');
-    return actualHash === expectedHash;
+    if (actualHash !== expectedHash) return false;
+    const metadata = await readBundledMarkItDownMetadata(binaryPath);
+    return bundledMarkItDownMetadataMatchesExpected(metadata, expectedMetadata);
   } catch {
     return false;
   }
@@ -218,6 +286,7 @@ async function carryForwardBundledMarkItDownBinary(opts: {
   targetBinaryPath: string;
   log: (msg: string) => void;
   context: string;
+  expectedMetadata: BundledMarkItDownMetadata | null;
 }): Promise<boolean> {
   for (const sourceBinaryPath of opts.sourceCandidates) {
     if (!existsSync(sourceBinaryPath)) continue;
@@ -225,30 +294,41 @@ async function carryForwardBundledMarkItDownBinary(opts: {
       opts.log(`${opts.context}: skipping active-slot bundled MarkItDown binary without a valid checksum sidecar (${sourceBinaryPath}).`);
       continue;
     }
+    if (!(await hasVerifiedBundledMarkItDownBinary(sourceBinaryPath, opts.expectedMetadata))) {
+      opts.log(`${opts.context}: skipping active-slot bundled MarkItDown binary with incompatible metadata (${sourceBinaryPath}).`);
+      continue;
+    }
     await mkdir(dirname(opts.targetBinaryPath), { recursive: true });
 
     const sourceChecksumPath = markItDownChecksumPath(sourceBinaryPath);
+    const sourceMetadataPath = markItDownMetadataPath(sourceBinaryPath);
     const targetChecksumPath = markItDownChecksumPath(opts.targetBinaryPath);
+    const targetMetadataPath = markItDownMetadataPath(opts.targetBinaryPath);
     const tempSuffix = `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const tempTargetBinaryPath = `${opts.targetBinaryPath}${tempSuffix}`;
     const tempTargetChecksumPath = `${targetChecksumPath}${tempSuffix}`;
+    const tempTargetMetadataPath = `${targetMetadataPath}${tempSuffix}`;
     try {
       await copyFile(sourceBinaryPath, tempTargetBinaryPath);
       await copyFile(sourceChecksumPath, tempTargetChecksumPath);
+      await copyFile(sourceMetadataPath, tempTargetMetadataPath);
       const sourceMode = (await stat(sourceBinaryPath)).mode & 0o777;
       await chmod(tempTargetBinaryPath, sourceMode || 0o755);
       await Promise.all([
         rm(opts.targetBinaryPath, { force: true }),
         rm(targetChecksumPath, { force: true }),
+        rm(targetMetadataPath, { force: true }),
       ]);
       await rename(tempTargetBinaryPath, opts.targetBinaryPath);
       await rename(tempTargetChecksumPath, targetChecksumPath);
+      await rename(tempTargetMetadataPath, targetMetadataPath);
       opts.log(`${opts.context}: reused bundled MarkItDown binary from the active slot (${sourceBinaryPath}).`);
       return true;
     } catch (err: any) {
       await Promise.all([
         rm(tempTargetBinaryPath, { force: true }),
         rm(tempTargetChecksumPath, { force: true }),
+        rm(tempTargetMetadataPath, { force: true }),
       ]);
       opts.log(`${opts.context}: failed to reuse bundled MarkItDown binary from the active slot (${sourceBinaryPath}) - ${err?.message ?? String(err)}.`);
     }
@@ -4570,7 +4650,8 @@ async function _performNpmUpdateInner(
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(npmPkgDir, 'bin', bundledMarkItDownAsset);
-    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath))) {
+    const expectedMetadata: BundledMarkItDownMetadata = { source: 'release', cliVersion: targetVersion };
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
           join(activeDir, 'node_modules', '@origintrail-official', 'dkg', 'bin', bundledMarkItDownAsset),
@@ -4579,6 +4660,7 @@ async function _performNpmUpdateInner(
         targetBinaryPath: bundledMarkItDownPath,
         log,
         context: 'Auto-update (npm)',
+        expectedMetadata,
       });
       if (!reused) {
         log(`Auto-update (npm): bundled MarkItDown binary missing after install (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);
@@ -4987,7 +5069,8 @@ async function _performUpdateInner(
   const bundledMarkItDownAsset = currentBundledMarkItDownAssetName();
   if (bundledMarkItDownAsset) {
     const bundledMarkItDownPath = join(targetDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset);
-    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath))) {
+    const expectedMetadata = expectedBundledMarkItDownBuildMetadata(join(targetDir, 'packages', 'cli'));
+    if (!(await hasVerifiedBundledMarkItDownBinary(bundledMarkItDownPath, expectedMetadata))) {
       const reused = await carryForwardBundledMarkItDownBinary({
         sourceCandidates: [
           join(activeDir, 'packages', 'cli', 'bin', bundledMarkItDownAsset),
@@ -4996,6 +5079,7 @@ async function _performUpdateInner(
         targetBinaryPath: bundledMarkItDownPath,
         log,
         context: 'Auto-update',
+        expectedMetadata,
       });
       if (!reused) {
         log(`Auto-update: bundled MarkItDown binary missing (${bundledMarkItDownPath}). Continuing without document conversion on this node.`);

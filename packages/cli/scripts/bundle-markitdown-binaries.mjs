@@ -297,19 +297,26 @@ export async function downloadBinaryAsset({
   const tempDestination = `${destination}${tempSuffix}`;
   const tempChecksumPath = `${destinationChecksumPath}${tempSuffix}`;
   const tempMetadataPath = `${destinationMetadataPath}${tempSuffix}`;
+  const backupSuffix = `.bak-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const backupDestination = existsSync(destination) ? `${destination}${backupSuffix}` : null;
+  const backupChecksumPath = existsSync(destinationChecksumPath) ? `${destinationChecksumPath}${backupSuffix}` : null;
+  const backupMetadataPath = existsSync(destinationMetadataPath) ? `${destinationMetadataPath}${backupSuffix}` : null;
   try {
     await writeFile(tempDestination, bytes);
     ensureExecutable(tempDestination);
     await writeFile(tempChecksumPath, `${expectedHash}  ${assetName}\n`, 'utf-8');
     await writeFile(tempMetadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`, 'utf-8');
-    await Promise.all([
-      removeIfExists(destination),
-      removeIfExists(destinationChecksumPath),
-      removeIfExists(destinationMetadataPath),
-    ]);
+    if (backupDestination) await rename(destination, backupDestination);
+    if (backupChecksumPath) await rename(destinationChecksumPath, backupChecksumPath);
+    if (backupMetadataPath) await rename(destinationMetadataPath, backupMetadataPath);
     await rename(tempDestination, destination);
     await rename(tempChecksumPath, destinationChecksumPath);
     await rename(tempMetadataPath, destinationMetadataPath);
+    await Promise.all([
+      backupDestination ? removeIfExists(backupDestination) : Promise.resolve(),
+      backupChecksumPath ? removeIfExists(backupChecksumPath) : Promise.resolve(),
+      backupMetadataPath ? removeIfExists(backupMetadataPath) : Promise.resolve(),
+    ]);
   } catch (err) {
     await Promise.all([
       removeIfExists(tempDestination),
@@ -319,6 +326,9 @@ export async function downloadBinaryAsset({
       removeIfExists(destinationChecksumPath),
       removeIfExists(destinationMetadataPath),
     ]);
+    if (backupDestination && existsSync(backupDestination)) await rename(backupDestination, destination);
+    if (backupChecksumPath && existsSync(backupChecksumPath)) await rename(backupChecksumPath, destinationChecksumPath);
+    if (backupMetadataPath && existsSync(backupMetadataPath)) await rename(backupMetadataPath, destinationMetadataPath);
     throw err;
   }
   return { status: 'downloaded', binaryPath: destination, hash: actualHash };

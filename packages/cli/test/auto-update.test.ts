@@ -7,12 +7,29 @@ const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'darwin', arch: 'arm64', assetName: 'markitdown-darwin-arm64', runner: 'macos-14' },
   { platform: 'win32', arch: 'x64', assetName: 'markitdown-win32-x64.exe', runner: 'windows-latest' },
 ]);
+const CLI_VERSION = '9.0.0-beta.6';
+const MOCK_MARKITDOWN_ENTRY_SCRIPT = '# mock markitdown entry script\n';
+const MOCK_BUNDLER_SCRIPT = [
+  "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
+  "export const PYINSTALLER_VERSION = '6.19.0';",
+].join('\n');
+
+function buildFingerprintForTest(): string {
+  return sha256HexForTest([
+    '0.1.5',
+    '6.19.0',
+    sha256HexForTest(MOCK_MARKITDOWN_ENTRY_SCRIPT),
+    sha256HexForTest(MOCK_BUNDLER_SCRIPT),
+  ].join('\n'));
+}
 
 function mockReadFileSyncValue(path: unknown): string {
   const normalized = String(path).replace(/\\/g, '/');
   if (normalized.endsWith('/markitdown-targets.json')) return MARKITDOWN_TARGETS_JSON;
-  if (normalized.endsWith('/package.json')) return JSON.stringify({ version: '9.0.0-beta.6' });
-  return `${process.pid}:${Date.now()}:testtoken`;
+  if (normalized.endsWith('/scripts/markitdown-entry.py')) return MOCK_MARKITDOWN_ENTRY_SCRIPT;
+  if (normalized.endsWith('/scripts/bundle-markitdown-binaries.mjs')) return MOCK_BUNDLER_SCRIPT;
+  if (normalized.endsWith('/package.json')) return JSON.stringify({ version: CLI_VERSION });
+  return 'testtoken';
 }
 
 vi.mock('node:child_process', () => ({
@@ -417,6 +434,9 @@ describe('blue-green checkForUpdate', () => {
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.current-commit')) return 'aaa111' as any;
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() }) as any;
+      }
       if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
         const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
         return `${sourceHash}  ${assetName}\n` as any;
@@ -447,6 +467,9 @@ describe('blue-green checkForUpdate', () => {
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.current-commit')) return 'aaa111' as any;
+      if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'build', cliVersion: CLI_VERSION, buildFingerprint: buildFingerprintForTest() }) as any;
+      }
       if (normalized.includes('/releases/a/packages/cli/bin/markitdown-') && normalized.endsWith('.sha256')) {
         const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
         return `${sourceHash}  ${assetName}\n` as any;
@@ -838,6 +861,9 @@ describe('performNpmUpdate', () => {
     mockedReadFile.mockImplementation(async (path: any) => {
       const normalized = normalizePathString(path);
       if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.5' }) as any;
+      }
       if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
         const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
         return `${sourceHash}  ${assetName}\n` as any;
@@ -859,6 +885,38 @@ describe('performNpmUpdate', () => {
     expect(mockedCopyFile).toHaveBeenCalled();
     expect(mockedChmod).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
+  });
+
+  it('skips active-slot MarkItDown reuse when metadata targets a different npm version', async () => {
+    mockedReadFile.mockImplementation(async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '9.0.0-beta.4' }) as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${sha256HexForTest(Buffer.from('active-slot-markitdown', 'utf-8'))}  ${assetName}\n` as any;
+      }
+      if (normalized.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) {
+        return Buffer.from('active-slot-markitdown', 'utf-8') as any;
+      }
+      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.4-dev.100.abc1234' }) as any;
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    });
+    mockedExistsSync.mockImplementation((p: any) => {
+      const path = normalizePathString(p);
+      if (path.includes('/releases/a/node_modules/@origintrail-official/dkg/bin/markitdown-')) return true;
+      if (path.includes('/releases/b/node_modules/@origintrail-official/dkg/bin/markitdown-')) return false;
+      return true;
+    });
+
+    const log = vi.fn();
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+    expect(result).toBe('updated');
+    expect(mockedCopyFile).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('incompatible metadata'));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Continuing without document conversion'));
   });
 
   it('skips active-slot MarkItDown reuse when the checksum sidecar is missing', async () => {
