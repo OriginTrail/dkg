@@ -287,7 +287,7 @@ export interface AssertionInfo {
 /** Discover assertions in WM by querying named graphs that match the assertion pattern. */
 export async function listAssertions(contextGraphId: string): Promise<AssertionInfo[]> {
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
-  const data = await post<{ result: any }>('/api/query', { sparql, contextGraphId, view: 'working-memory' });
+  const data = await executeQuery(sparql, contextGraphId);
   const bindings: any[] = data?.result?.bindings ?? [];
   const prefix = `did:dkg:context-graph:${contextGraphId}/assertion/`;
   const result: AssertionInfo[] = [];
@@ -369,7 +369,7 @@ export interface PublishResult {
 /** Publish SWM content on-chain (SWM -> VM). Pass rootEntities to selectively publish, or omit for all. */
 export const publishSharedMemory = (contextGraphId: string, rootEntities?: string[]) =>
   post<PublishResult>('/api/shared-memory/publish', {
-    paranetId: contextGraphId,
+    contextGraphId,
     selection: rootEntities ?? 'all',
     clearAfter: !rootEntities,
   });

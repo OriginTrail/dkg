@@ -3290,8 +3290,8 @@ async function handleRequest(
     if (!bytes) return jsonResponse(res, 404, { error: `File not found: ${hash}` });
     const SAFE_PREVIEW_TYPES = new Set([
       'application/pdf', 'application/json',
-      'text/plain', 'text/csv', 'text/markdown', 'text/html',
-      'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml',
+      'text/plain', 'text/csv', 'text/markdown',
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
     ]);
     const rawCt = url.searchParams.get('contentType') ?? 'application/octet-stream';
     const ct = SAFE_PREVIEW_TYPES.has(rawCt) ? rawCt : 'application/octet-stream';

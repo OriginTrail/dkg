@@ -52,7 +52,6 @@ export function DashboardView() {
   const { setActiveProject } = useProjectsStore();
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showImportFiles, setShowImportFiles] = useState(false);
-  const { activeProjectId, contextGraphs } = useProjectsStore();
 
   const totalKCs = metrics?.total_kcs ?? metrics?.totalKnowledgeCollections ?? 0;
   const peers = status?.connectedPeers ?? status?.peerCount ?? 0;
@@ -89,7 +88,8 @@ export function DashboardView() {
           <div className="v10-quick-actions">
             <QuickAction icon="+" label="Create Project" onClick={() => setShowCreateProject(true)} />
             <QuickAction icon="↑" label="Import Memories" onClick={() => {
-              if (activeProjectId || contextGraphs.length > 0) {
+              const cgs = cgData?.contextGraphs ?? [];
+              if (cgs.length > 0) {
                 setShowImportFiles(true);
               } else {
                 setShowCreateProject(true);
@@ -153,12 +153,8 @@ export function DashboardView() {
       <ImportFilesModal
         open={showImportFiles}
         onClose={() => setShowImportFiles(false)}
-        contextGraphId={activeProjectId ?? contextGraphs[0]?.id ?? ''}
-        contextGraphName={
-          activeProjectId
-            ? contextGraphs.find((cg) => cg.id === activeProjectId)?.name
-            : contextGraphs[0]?.name
-        }
+        contextGraphId={(cgData?.contextGraphs ?? [])[0]?.id ?? ''}
+        contextGraphName={(cgData?.contextGraphs ?? [])[0]?.name}
       />
     </div>
   );

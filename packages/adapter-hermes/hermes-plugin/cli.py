@@ -85,27 +85,56 @@ def register_cli(cli_group):
             click.echo("Error: DKG daemon is not reachable.", err=True)
             sys.exit(1)
 
-        from plugins.memory.dkg import DKGMemoryProvider
-
-        provider = DKGMemoryProvider()
-        provider.initialize("cli-sync", agent_identity=agent_name)
-
-        if provider._offline:
-            click.echo("Error: DKG daemon is not reachable (provider is offline).", err=True)
-            sys.exit(1)
-
-        cache = provider._cache
+        cache = _load_cache(agent_name)
         queued = cache.get("queued_writes", [])
         if not queued:
             click.echo("Nothing to sync — no queued writes.")
-            provider.shutdown()
+            client.close()
             return
 
         click.echo(f"Syncing {len(queued)} queued writes...")
-        pre_count = len(queued)
-        provider._flush_queued_writes()
-        post_count = len(provider._cache.get("queued_writes", []))
-        synced = pre_count - post_count
+        synced = 0
+        failed = []
+        for item in queued:
+            try:
+                if item.get("type") == "turn":
+                    result = client.store_turn(
+                        item["session_id"],
+                        item.get("user", ""),
+                        item.get("assistant", ""),
+                    )
+                    if result.get("success") is not False:
+                        synced += 1
+                    else:
+                        failed.append(item)
+                        click.echo(f"  Failed (turn): {result.get('error', 'unknown')}")
+                elif item.get("type") == "memory":
+                    action = item.get("action", "add")
+                    target = item.get("target", "memory")
+                    content = item.get("content", "")
+                    context_graph = config.get("context_graph", "hermes-memory")
+                    assertion_name = agent_name or "hermes"
+                    quads = [{
+                        "subject": f"urn:hermes:{assertion_name}:{target}",
+                        "predicate": "urn:hermes:content",
+                        "object": f"[{target}]\n{content}",
+                    }]
+                    if action == "remove":
+                        synced += 1
+                        continue
+                    result = client.write_assertion(assertion_name, context_graph, quads)
+                    if result.get("success") is not False:
+                        synced += 1
+                    else:
+                        failed.append(item)
+                        click.echo(f"  Failed (memory/{action}): {result.get('error', 'unknown')}")
+                else:
+                    synced += 1
+            except Exception as e:
+                click.echo(f"  Failed: {e}")
+                failed.append(item)
 
-        click.echo(f"Synced {synced}/{pre_count} writes. {post_count} remaining.")
-        provider.shutdown()
+        cache["queued_writes"] = failed
+        _save_cache(cache, agent_name)
+        click.echo(f"Synced {synced}/{len(queued)} writes. {len(failed)} remaining.")
+        client.close()
