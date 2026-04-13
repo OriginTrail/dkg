@@ -7,12 +7,7 @@ import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
-import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
-import {KnowledgeAssetsStorageLike} from "./interfaces/KnowledgeAssetsStorageLike.sol";
-import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
  * @title ContextGraphs
@@ -24,24 +19,12 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _VERSION = "1.0.0";
 
     ContextGraphStorage public contextGraphStorage;
-    IdentityStorage public identityStorage;
-    KnowledgeAssetsStorageLike public knowledgeAssetsStorage;
-    KnowledgeCollectionStorage public knowledgeCollectionStorage;
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
     function initialize() public onlyHub {
         contextGraphStorage = ContextGraphStorage(
             hub.getAssetStorageAddress("ContextGraphStorage")
-        );
-        identityStorage = IdentityStorage(
-            hub.getContractAddress("IdentityStorage")
-        );
-        knowledgeAssetsStorage = KnowledgeAssetsStorageLike(
-            hub.getAssetStorageAddress("KnowledgeAssetsStorage")
-        );
-        knowledgeCollectionStorage = KnowledgeCollectionStorage(
-            hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
     }
 
@@ -144,80 +127,12 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         return publisher == authority;
     }
 
-    // --- Batch attestation ---
-
-    function addBatchToContextGraph(
-        uint256 contextGraphId,
-        uint256 batchId,
-        bytes32 merkleRoot,
-        uint72[] calldata signerIdentityIds,
-        bytes32[] calldata signatureRs,
-        bytes32[] calldata signatureVss
-    ) external {
-        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) {
-            revert KnowledgeAssetsLib.ContextGraphNotActive(contextGraphId);
-        }
-        (uint8 policy, address authority) = contextGraphStorage.getPublishPolicy(contextGraphId);
-        if (policy == 0) {
-            require(msg.sender == authority, "Unauthorized: curated CG");
-        }
-        require(contextGraphStorage.getAttestedRoot(contextGraphId, batchId) == bytes32(0), "Batch already registered");
-        _verifyParticipantSignatures(contextGraphId, merkleRoot, signerIdentityIds, signatureRs, signatureVss);
-        // Check V9 storage first (KnowledgeAssetsStorage), then V10 (KnowledgeCollectionStorage)
-        bytes32 onChainRoot = knowledgeAssetsStorage.getBatchMerkleRoot(batchId);
-        if (onChainRoot == bytes32(0) && address(knowledgeCollectionStorage) != address(0)) {
-            onChainRoot = knowledgeCollectionStorage.getLatestMerkleRoot(batchId);
-        }
-        require(onChainRoot != bytes32(0), "Batch does not exist");
-        require(onChainRoot == merkleRoot, "MerkleRoot does not match batch");
-        contextGraphStorage.setAttestedRoot(contextGraphId, batchId, merkleRoot);
-        contextGraphStorage.addBatchToContextGraph(contextGraphId, batchId);
-    }
+    // --- Attested root getter (read-only) ---
 
     function getAttestedMerkleRoot(
         uint256 contextGraphId,
         uint256 batchId
     ) external view returns (bytes32) {
         return contextGraphStorage.getAttestedRoot(contextGraphId, batchId);
-    }
-
-    // --- Internal ---
-
-    function _verifyParticipantSignatures(
-        uint256 contextGraphId,
-        bytes32 merkleRoot,
-        uint72[] calldata signerIdentityIds,
-        bytes32[] calldata signatureRs,
-        bytes32[] calldata signatureVss
-    ) internal view {
-        uint8 required = contextGraphStorage.getContextGraphRequiredSignatures(contextGraphId);
-        require(
-            signerIdentityIds.length >= required,
-            "Not enough signatures"
-        );
-        require(
-            signerIdentityIds.length == signatureRs.length &&
-            signerIdentityIds.length == signatureVss.length,
-            "Array length mismatch"
-        );
-
-        bytes32 digest = keccak256(abi.encodePacked(contextGraphId, merkleRoot));
-
-        uint72 prevId = 0;
-        for (uint256 i; i < signerIdentityIds.length; i++) {
-            require(signerIdentityIds[i] > prevId, "Duplicate or unsorted signer");
-            prevId = signerIdentityIds[i];
-
-            require(
-                contextGraphStorage.isParticipant(contextGraphId, signerIdentityIds[i]),
-                "Signer not a participant"
-            );
-
-            bytes32 ethHash = MessageHashUtils.toEthSignedMessageHash(digest);
-            address recovered = ECDSA.recover(ethHash, signatureRs[i], signatureVss[i]);
-
-            uint72 recoveredId = identityStorage.getIdentityId(recovered);
-            require(recoveredId == signerIdentityIds[i], "Invalid signature");
-        }
     }
 }

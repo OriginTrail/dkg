@@ -7,10 +7,8 @@ import hre from 'hardhat';
 import {
   ContextGraphs,
   ContextGraphStorage,
-  IdentityStorage,
-  KnowledgeAssetsStorage,
-  Profile,
   Hub,
+  Profile,
 } from '../../typechain';
 import { createProfile } from '../helpers/profile-helpers';
 
@@ -18,25 +16,19 @@ type ContextGraphFixture = {
   accounts: SignerWithAddress[];
   ContextGraphs: ContextGraphs;
   ContextGraphStorage: ContextGraphStorage;
-  IdentityStorage: IdentityStorage;
-  KnowledgeAssetsStorage: KnowledgeAssetsStorage;
   Profile: Profile;
-  Hub: Hub;
 };
 
 describe('@unit ContextGraphs', () => {
   let accounts: SignerWithAddress[];
   let ContextGraphsContract: ContextGraphs;
   let ContextGraphStorageContract: ContextGraphStorage;
-  let KnowledgeAssetsStorageContract: KnowledgeAssetsStorage;
   let ProfileContract: Profile;
-  let HubContract: Hub;
 
   async function deployContextGraphFixture(): Promise<ContextGraphFixture> {
     await hre.deployments.fixture([
       'ContextGraphs',
       'ContextGraphStorage',
-      'KnowledgeAssetsStorage',
       'Profile',
       'Identity',
     ]);
@@ -44,21 +36,13 @@ describe('@unit ContextGraphs', () => {
     const signers = await hre.ethers.getSigners();
     const ContextGraphs = await hre.ethers.getContract<ContextGraphs>('ContextGraphs');
     const ContextGraphStorage = await hre.ethers.getContract<ContextGraphStorage>('ContextGraphStorage');
-    const IdentityStorage = await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
-    const KnowledgeAssetsStorage = await hre.ethers.getContract<KnowledgeAssetsStorage>('KnowledgeAssetsStorage');
     const Profile = await hre.ethers.getContract<Profile>('Profile');
     const Hub = await hre.ethers.getContract<Hub>('Hub');
 
+    // TestBatchHelper owns the onlyContracts-gated deactivate path used below.
     await Hub.setContractAddress('TestBatchHelper', signers[19].address);
 
-    return { accounts: signers, ContextGraphs, ContextGraphStorage, IdentityStorage, KnowledgeAssetsStorage, Profile, Hub };
-  }
-
-  async function createBatchWithRoot(merkleRoot: string, publisher: string): Promise<bigint> {
-    await KnowledgeAssetsStorageContract.connect(accounts[19]).createKnowledgeBatch(
-      publisher, merkleRoot, 1000, 10, 1, 10, 1, 100, 0, false,
-    );
-    return KnowledgeAssetsStorageContract.getLatestBatchId();
+    return { accounts: signers, ContextGraphs, ContextGraphStorage, Profile };
   }
 
   beforeEach(async () => {
@@ -66,9 +50,7 @@ describe('@unit ContextGraphs', () => {
     accounts = f.accounts;
     ContextGraphsContract = f.ContextGraphs;
     ContextGraphStorageContract = f.ContextGraphStorage;
-    KnowledgeAssetsStorageContract = f.KnowledgeAssetsStorage;
     ProfileContract = f.Profile;
-    HubContract = f.Hub;
   });
 
   describe('createContextGraph (ERC-721)', () => {
@@ -411,134 +393,6 @@ describe('@unit ContextGraphs', () => {
     });
   });
 
-  describe('addBatchToContextGraph', () => {
-    it('adds a batch with valid M/N signatures', async () => {
-      const signer = accounts[3];
-      const admin = accounts[4];
-      const node = { operational: signer, admin };
-      const { identityId } = await createProfile(ProfileContract, node);
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [identityId], 1, 0, 1, ethers.ZeroAddress,
-      );
-      const contextGraphId = 1n;
-      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-root'));
-      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
-
-      const digest = ethers.solidityPackedKeccak256(
-        ['uint256', 'bytes32'],
-        [contextGraphId, merkleRoot],
-      );
-
-      const signerSigner = await hre.ethers.getSigner(signer.address);
-      const rawSig = await signerSigner.signMessage(ethers.getBytes(digest));
-      const sig = ethers.Signature.from(rawSig);
-
-      await expect(
-        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
-          contextGraphId, batchId, merkleRoot,
-          [identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.emit(ContextGraphStorageContract, 'ContextGraphExpanded')
-        .withArgs(contextGraphId, batchId);
-
-      const batches = await ContextGraphStorageContract.getContextGraphBatches(contextGraphId);
-      expect(batches).to.deep.equal([batchId]);
-    });
-
-    it('reverts with not enough signatures', async () => {
-      const node1 = { operational: accounts[3], admin: accounts[4] };
-      const node2 = { operational: accounts[5], admin: accounts[6] };
-      const p1 = await createProfile(ProfileContract, node1);
-      const p2 = await createProfile(ProfileContract, node2);
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [p1.identityId, p2.identityId], 2, 0, 1, ethers.ZeroAddress,
-      );
-
-      const contextGraphId = 1n;
-      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-root'));
-      const digest = ethers.solidityPackedKeccak256(
-        ['uint256', 'bytes32'],
-        [contextGraphId, merkleRoot],
-      );
-
-      const rawSig = await (await hre.ethers.getSigner(accounts[3].address)).signMessage(ethers.getBytes(digest));
-      const sig = ethers.Signature.from(rawSig);
-
-      await expect(
-        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
-          contextGraphId, 42n, merkleRoot,
-          [p1.identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.be.revertedWith('Not enough signatures');
-    });
-
-    it('rejects duplicate batch registration', async () => {
-      const signer = accounts[3];
-      const node = { operational: signer, admin: accounts[4] };
-      const { identityId } = await createProfile(ProfileContract, node);
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [identityId], 1, 0, 1, ethers.ZeroAddress,
-      );
-      const contextGraphId = await ContextGraphStorageContract.getLatestContextGraphId();
-      const merkleRoot = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('replay-root'));
-      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
-
-      const digest = ethers.solidityPackedKeccak256(
-        ['uint256', 'bytes32'],
-        [contextGraphId, merkleRoot],
-      );
-      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
-
-      await ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
-        contextGraphId, batchId, merkleRoot,
-        [identityId], [sig.r], [sig.yParityAndS],
-      );
-
-      await expect(
-        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
-          contextGraphId, batchId, merkleRoot,
-          [identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.be.revertedWith('Batch already registered');
-    });
-  });
-
-  describe('deactivation', () => {
-    it('rejects addBatch to deactivated context graph', async () => {
-      const signer = accounts[3];
-      const node = { operational: signer, admin: accounts[4] };
-      const { identityId } = await createProfile(ProfileContract, node);
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [identityId], 1, 0, 1, ethers.ZeroAddress,
-      );
-      const contextGraphId = 1n;
-
-      expect(await ContextGraphStorageContract.isContextGraphActive(contextGraphId)).to.be.true;
-
-      await ContextGraphStorageContract.connect(accounts[19]).deactivateContextGraph(contextGraphId);
-      expect(await ContextGraphStorageContract.isContextGraphActive(contextGraphId)).to.be.false;
-
-      const merkleRoot = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('deact-root'));
-      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
-      const digest = hre.ethers.solidityPackedKeccak256(
-        ['uint256', 'bytes32'],
-        [contextGraphId, merkleRoot],
-      );
-      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
-
-      await expect(
-        ContextGraphsContract.connect(accounts[0]).addBatchToContextGraph(
-          contextGraphId, batchId, merkleRoot,
-          [identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.be.revertedWithCustomError(ContextGraphsContract, 'ContextGraphNotActive');
-    });
-  });
-
   describe('regression: isAuthorizedPublisher rejects deactivated CGs', () => {
     it('returns false for a deactivated CG (even if policy is open)', async () => {
       const node = { operational: accounts[1], admin: accounts[2] };
@@ -551,53 +405,6 @@ describe('@unit ContextGraphs', () => {
 
       await ContextGraphStorageContract.connect(accounts[19]).deactivateContextGraph(1);
       expect(await ContextGraphsContract.isAuthorizedPublisher(1, accounts[9].address)).to.be.false;
-    });
-  });
-
-  describe('regression: addBatchToContextGraph enforces publishPolicy', () => {
-    it('rejects batch from non-authority on curated CG', async () => {
-      const signer = accounts[3];
-      const node = { operational: signer, admin: accounts[4] };
-      const { identityId } = await createProfile(ProfileContract, node);
-      const curator = accounts[5].address;
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [identityId], 1, 0, 0, curator,
-      );
-      const cgId = 1n;
-      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('curated-root'));
-      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
-      const digest = ethers.solidityPackedKeccak256(['uint256', 'bytes32'], [cgId, merkleRoot]);
-      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
-
-      // Non-curator caller should be rejected
-      await expect(
-        ContextGraphsContract.connect(accounts[9]).addBatchToContextGraph(
-          cgId, batchId, merkleRoot, [identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.be.revertedWith('Unauthorized: curated CG');
-    });
-
-    it('allows batch from authority on curated CG', async () => {
-      const signer = accounts[3];
-      const node = { operational: signer, admin: accounts[4] };
-      const { identityId } = await createProfile(ProfileContract, node);
-      const curator = accounts[5];
-
-      await ContextGraphsContract.connect(accounts[0]).createContextGraph(
-        [identityId], 1, 0, 0, curator.address,
-      );
-      const cgId = 1n;
-      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('curated-ok'));
-      const batchId = await createBatchWithRoot(merkleRoot, accounts[0].address);
-      const digest = ethers.solidityPackedKeccak256(['uint256', 'bytes32'], [cgId, merkleRoot]);
-      const sig = ethers.Signature.from(await signer.signMessage(ethers.getBytes(digest)));
-
-      await expect(
-        ContextGraphsContract.connect(curator).addBatchToContextGraph(
-          cgId, batchId, merkleRoot, [identityId], [sig.r], [sig.yParityAndS],
-        ),
-      ).to.emit(ContextGraphStorageContract, 'ContextGraphExpanded');
     });
   });
 

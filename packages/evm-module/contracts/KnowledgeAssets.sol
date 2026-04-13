@@ -13,7 +13,6 @@ import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
 import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
 import {ParanetsRegistry} from "./storage/paranets/ParanetsRegistry.sol";
-import {ContextGraphs} from "./ContextGraphs.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {TokenLib} from "./libraries/TokenLib.sol";
 import {IdentityLib} from "./libraries/IdentityLib.sol";
@@ -50,7 +49,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
-    ContextGraphs public contextGraphs;
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -73,7 +71,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
-        contextGraphs = ContextGraphs(hub.getContractAddress("ContextGraphs"));
     }
 
     function name() public pure virtual returns (string memory) {
@@ -156,64 +153,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         params.vs = vs;
 
         batchId = _mintBatch(params);
-    }
-
-    // ========================================================================
-    // Atomic Publish + Context Graph Registration
-    // ========================================================================
-
-    /**
-     * @notice Publish Knowledge Assets AND register the batch to a context graph atomically.
-     * Combines publishKnowledgeAssets + addBatchToContextGraph in a single transaction.
-     *
-     * Receiver signatures attest storage (over merkleRoot + publicByteSize).
-     * Participant signatures attest governance (over contextGraphId + merkleRoot).
-     */
-    function publishToContextGraph(
-        uint32 kaCount,
-        uint72 publisherNodeIdentityId,
-        bytes32 merkleRoot,
-        uint64 publicByteSize,
-        uint40 epochs,
-        uint96 tokenAmount,
-        address paymaster,
-        bytes32 publisherNodeR,
-        bytes32 publisherNodeVS,
-        uint72[] calldata identityIds,
-        bytes32[] calldata r,
-        bytes32[] calldata vs,
-        uint256 contextGraphId,
-        uint72[] calldata participantIdentityIds,
-        bytes32[] calldata participantRs,
-        bytes32[] calldata participantVSs
-    ) external returns (uint256 batchId, uint64 startKAId, uint64 endKAId) {
-        (startKAId, endKAId) = knowledgeAssetsStorage.reserveUALRange(msg.sender, kaCount);
-
-        KnowledgeAssetsLib.PublishParams memory params;
-        params.publisherNodeIdentityId = publisherNodeIdentityId;
-        params.merkleRoot = merkleRoot;
-        params.startKAId = startKAId;
-        params.endKAId = endKAId;
-        params.publicByteSize = publicByteSize;
-        params.epochs = epochs;
-        params.tokenAmount = tokenAmount;
-        params.paymaster = paymaster;
-        params.publisherNodeR = publisherNodeR;
-        params.publisherNodeVS = publisherNodeVS;
-        params.identityIds = identityIds;
-        params.r = r;
-        params.vs = vs;
-
-        batchId = _mintBatch(params);
-
-        contextGraphs.addBatchToContextGraph(
-            contextGraphId,
-            batchId,
-            merkleRoot,
-            participantIdentityIds,
-            participantRs,
-            participantVSs
-        );
     }
 
     // ========================================================================
