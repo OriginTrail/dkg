@@ -276,6 +276,102 @@ export const publishTriples = async (contextGraphId: string, quads: any[]) => {
   return post<any>('/api/shared-memory/publish', { paranetId: contextGraphId, selection: 'all', clearAfter: true });
 };
 
+// --- Assertions (WM objects) ---
+
+export interface AssertionInfo {
+  name: string;
+  graphUri: string;
+  tripleCount?: number;
+}
+
+/** Discover assertions in WM by querying named graphs that match the assertion pattern. */
+export async function listAssertions(contextGraphId: string): Promise<AssertionInfo[]> {
+  const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
+  const data = await executeQuery(sparql, contextGraphId);
+  const bindings: any[] = data?.result?.bindings ?? [];
+  const prefix = `did:dkg:context-graph:${contextGraphId}/assertion/`;
+  const result: AssertionInfo[] = [];
+  for (const b of bindings) {
+    const g = typeof b.g === 'string' ? b.g : b.g?.value;
+    if (!g || !g.startsWith(prefix)) continue;
+    const tail = g.slice(prefix.length);
+    const slash = tail.indexOf('/');
+    const name = slash >= 0 ? tail.slice(slash + 1) : tail;
+    const cnt = typeof b.cnt === 'string' ? parseInt(b.cnt, 10) : (b.cnt?.value ? parseInt(b.cnt.value, 10) : undefined);
+    result.push({ name, graphUri: g, tripleCount: Number.isFinite(cnt) ? cnt : undefined });
+  }
+  return result;
+}
+
+/** Promote an assertion from WM to SWM. */
+export const promoteAssertion = (contextGraphId: string, assertionName: string, entities: string | string[] = 'all') =>
+  post<{ promotedCount: number }>(`/api/assertion/${encodeURIComponent(assertionName)}/promote`, { contextGraphId, entities });
+
+// --- File preview ---
+
+export interface ExtractionStatus {
+  assertionUri: string;
+  status: string;
+  fileHash: string;
+  detectedContentType: string;
+  pipelineUsed: string | null;
+  tripleCount: number;
+  mdIntermediateHash?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+/** Fetch extraction status for an assertion (includes fileHash + contentType). */
+export const fetchExtractionStatus = (assertionName: string, contextGraphId: string) =>
+  get<ExtractionStatus>(`/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+
+/** Build a URL to serve a stored file by its hash. */
+export function fileUrl(hash: string, contentType?: string): string {
+  const h = hash.startsWith('sha256:') ? hash.slice('sha256:'.length) : hash;
+  const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
+  return `${BASE}/api/file/sha256:${h}${params}`;
+}
+
+export interface SwmRootEntity {
+  uri: string;
+  label: string;
+  tripleCount: number;
+}
+
+/** List root entities in SWM with their triple counts. */
+export async function listSwmEntities(contextGraphId: string): Promise<SwmRootEntity[]> {
+  const sparql = `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s ORDER BY DESC(?cnt)`;
+  const data = await executeQuery(sparql, contextGraphId, true, '_shared_memory');
+  const bindings: any[] = data?.result?.bindings ?? [];
+  return bindings.map((b) => {
+    const uri = typeof b.s === 'string' ? b.s : b.s?.value ?? '';
+    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value ?? '0';
+    const m = cntRaw.match(/^"?(\d+)/);
+    const tripleCount = m ? parseInt(m[1], 10) : 0;
+    const hash = uri.lastIndexOf('#');
+    const slash = uri.lastIndexOf('/');
+    const cut = Math.max(hash, slash);
+    const label = cut >= 0 ? uri.slice(cut + 1) : uri;
+    return { uri, label, tripleCount };
+  });
+}
+
+export interface PublishResult {
+  kcId: string;
+  status: string;
+  kas: { tokenId: string; rootEntity: string }[];
+  txHash?: string;
+  blockNumber?: number;
+}
+
+/** Publish SWM content on-chain (SWM -> VM). Pass rootEntities to selectively publish, or omit for all. */
+export const publishSharedMemory = (contextGraphId: string, rootEntities?: string[]) =>
+  post<PublishResult>('/api/shared-memory/publish', {
+    paranetId: contextGraphId,
+    selection: rootEntities ?? 'all',
+    clearAfter: !rootEntities,
+  });
+
 // --- Query history ---
 export const fetchQueryHistory = (limit = 50, offset = 0) =>
   get<{ history: any[] }>(`/api/query-history?limit=${limit}&offset=${offset}`);

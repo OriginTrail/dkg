@@ -2502,6 +2502,22 @@ async function handleRequest(
     }
   }
 
+  // GET /api/file/:hash  — serve a stored file by its sha256 hash
+  if (req.method === 'GET' && path.startsWith('/api/file/')) {
+    const hash = safeDecodeURIComponent(path.slice('/api/file/'.length), res);
+    if (hash === null) return;
+    const buf = await fileStore.get(hash.startsWith('sha256:') ? hash : `sha256:${hash}`);
+    if (!buf) return jsonResponse(res, 404, { error: 'File not found' });
+    const ct = (reqUrl.searchParams.get('contentType') || 'application/octet-stream');
+    res.writeHead(200, {
+      'Content-Type': ct,
+      'Content-Length': String(buf.length),
+      'Cache-Control': 'public, max-age=86400, immutable',
+    });
+    res.end(buf);
+    return;
+  }
+
   // POST /api/assertion/:name/import-file  (multipart/form-data)
   //   file (required):           the uploaded document bytes
   //   contextGraphId (required): target context graph
