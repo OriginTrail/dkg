@@ -160,10 +160,12 @@ export function sha256Hex(bytes) {
 function buildFingerprintForPackage(packageDir = DEFAULT_PACKAGE_DIR) {
   const resolvedPackageDir = resolvePackageDir(packageDir);
   const entryScript = readFileSync(join(resolvedPackageDir, 'scripts', 'markitdown-entry.py'));
+  const bundlerScript = readFileSync(__filename);
   return sha256Hex([
     MARKITDOWN_UPSTREAM_VERSION,
     PYINSTALLER_VERSION,
     sha256Hex(entryScript),
+    sha256Hex(bundlerScript),
   ].join('\n'));
 }
 
@@ -313,6 +315,9 @@ export async function downloadBinaryAsset({
       removeIfExists(tempDestination),
       removeIfExists(tempChecksumPath),
       removeIfExists(tempMetadataPath),
+      removeIfExists(destination),
+      removeIfExists(destinationChecksumPath),
+      removeIfExists(destinationMetadataPath),
     ]);
     throw err;
   }

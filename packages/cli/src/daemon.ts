@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -9,7 +9,6 @@ const execFileAsync = promisify(execFile);
 import { join, dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { stat } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -236,6 +235,8 @@ async function carryForwardBundledMarkItDownBinary(opts: {
     try {
       await copyFile(sourceBinaryPath, tempTargetBinaryPath);
       await copyFile(sourceChecksumPath, tempTargetChecksumPath);
+      const sourceMode = (await stat(sourceBinaryPath)).mode & 0o777;
+      await chmod(tempTargetBinaryPath, sourceMode || 0o755);
       await Promise.all([
         rm(opts.targetBinaryPath, { force: true }),
         rm(targetChecksumPath, { force: true }),

@@ -25,8 +25,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    chmod: vi.fn(),
     copyFile: vi.fn(),
     readFile: vi.fn(),
+    stat: vi.fn(),
     writeFile: vi.fn(),
     mkdir: vi.fn(),
     rm: vi.fn(),
@@ -66,14 +68,16 @@ vi.mock('../src/config.js', async (importOriginal) => {
   };
 });
 
-import { copyFile, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { chmod, copyFile, readFile, stat, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync, openSync, closeSync, writeFileSync as fsWriteFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { exec, execFile } from 'node:child_process';
 import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
 import { swapSlot } from '../src/config.js';
 
+const mockedChmod = vi.mocked(chmod);
 const mockedCopyFile = vi.mocked(copyFile);
 const mockedReadFile = vi.mocked(readFile);
+const mockedStat = vi.mocked(stat);
 const mockedWriteFile = vi.mocked(writeFile);
 const mockedMkdir = vi.mocked(mkdir);
 const mockedRm = vi.mocked(rm);
@@ -130,7 +134,9 @@ describe('blue-green checkForUpdate', () => {
     vi.resetAllMocks();
     mockActiveSlot = 'a';
     mockedExistsSync.mockReturnValue(true);
+    mockedChmod.mockResolvedValue(undefined as any);
     mockedCopyFile.mockResolvedValue(undefined as any);
+    mockedStat.mockResolvedValue({ mode: 0o755 } as any);
     mockedMkdir.mockResolvedValue(undefined as any);
     mockedRm.mockResolvedValue(undefined as any);
     mockedOpenSync.mockReturnValue(99 as any);
@@ -431,6 +437,7 @@ describe('blue-green checkForUpdate', () => {
     const result = await performUpdate(AU, log);
     expect(result).toBe(true);
     expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedChmod).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
@@ -850,6 +857,7 @@ describe('performNpmUpdate', () => {
     const result = await performNpmUpdate('9.0.0-beta.5', log);
     expect(result).toBe('updated');
     expect(mockedCopyFile).toHaveBeenCalled();
+    expect(mockedChmod).toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('reused bundled MarkItDown binary from the active slot'));
   });
 
