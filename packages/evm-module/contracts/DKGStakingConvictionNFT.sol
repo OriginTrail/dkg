@@ -42,7 +42,6 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // --- Events ---
 
     event PositionCreated(uint256 indexed positionId, address indexed owner, uint72 identityId, uint96 amount, uint40 lockEpochs);
-    event PositionIncreased(uint256 indexed positionId, uint96 addedAmount, uint96 newTotal);
     event PositionUnstaked(uint256 indexed positionId, uint96 amount);
 
     // --- Errors ---
@@ -52,7 +51,6 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     error InvalidAmount();
     error InvalidLockEpochs();
     error LockNotExpired(uint256 positionId, uint40 expiresAtEpoch);
-    error PositionExpired(uint256 positionId, uint40 expiresAtEpoch);
     error InsufficientStake(uint256 positionId, uint96 requested, uint96 available);
 
     constructor(address hubAddress) ContractStatus(hubAddress) ERC721("DKG Staking Conviction", "DKGSC") {}
@@ -115,29 +113,6 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         }
 
         emit PositionCreated(positionId, msg.sender, identityId, amount, lockEpochs);
-    }
-
-    /**
-     * @notice Add more TRAC to an existing position.
-     */
-    function increaseStake(uint256 positionId, uint96 addedAmount) external {
-        _requireOwner(positionId);
-        if (addedAmount == 0) revert InvalidAmount();
-
-        Position storage pos = positions[positionId];
-        uint40 currentEpoch = _getCurrentEpoch();
-        uint40 expiresAt = pos.createdAtEpoch + pos.lockEpochs;
-        if (currentEpoch >= expiresAt) {
-            revert PositionExpired(positionId, expiresAt);
-        }
-
-        pos.stakedAmount += addedAmount;
-
-        if (!tokenContract.transferFrom(msg.sender, address(this), addedAmount)) {
-            revert InvalidAmount();
-        }
-
-        emit PositionIncreased(positionId, addedAmount, positions[positionId].stakedAmount);
     }
 
     /**
