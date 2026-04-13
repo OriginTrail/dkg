@@ -132,22 +132,7 @@ export function Header() {
               {notifications.length === 0 ? (
                 <div className="v10-header-notif-empty">No notifications</div>
               ) : notifications.slice(0, 8).map((n, i) => (
-                <div
-                  key={i}
-                  className={`v10-header-notif-item ${n.peer ? 'clickable' : ''}`}
-                  role={n.peer ? 'button' : undefined}
-                  tabIndex={n.peer ? 0 : undefined}
-                  onClick={() => {
-                    if (n.peer) {
-                      setShowNotifs(false);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (n.peer && (e.key === 'Enter' || e.key === ' ')) {
-                      setShowNotifs(false);
-                    }
-                  }}
-                >
+                <div key={i} className="v10-header-notif-item">
                   <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
                   {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
                 </div>

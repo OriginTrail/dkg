@@ -10,16 +10,14 @@ interface FilePreviewModalProps {
 
 const PREVIEWABLE_TYPES: Record<string, 'pdf' | 'image' | 'text' | 'markdown'> = {
   'application/pdf': 'pdf',
+  'application/json': 'text',
+  'text/plain': 'text',
+  'text/csv': 'text',
+  'text/markdown': 'markdown',
   'image/png': 'image',
   'image/jpeg': 'image',
   'image/gif': 'image',
   'image/webp': 'image',
-  'image/svg+xml': 'image',
-  'text/plain': 'text',
-  'text/markdown': 'markdown',
-  'text/csv': 'text',
-  'text/html': 'text',
-  'application/json': 'text',
 };
 
 function previewKind(ct: string): 'pdf' | 'image' | 'text' | 'binary' {

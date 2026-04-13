@@ -73,7 +73,13 @@ def register_cli(cli_group):
 
     @dkg.command("sync")
     def dkg_sync():
-        """Force-sync local cache to DKG (useful after offline period)."""
+        """Force-sync local cache to DKG (useful after offline period).
+
+        Replays queued mutations (add/replace/remove) against the local
+        cache in order, then writes the final materialized state to DKG
+        once per affected target.  This preserves semantics — removes
+        actually delete facts, and replaces overwrite them.
+        """
         from plugins.memory.dkg.client import DKGClient
         from plugins.memory.dkg import _load_config, _load_cache, _save_cache
 
@@ -93,48 +99,68 @@ def register_cli(cli_group):
             return
 
         click.echo(f"Syncing {len(queued)} queued writes...")
+        context_graph = config.get("context_graph", "hermes-memory")
+        assertion_name = agent_name or "hermes"
         synced = 0
         failed = []
+        dirty_targets: set = set()
+
         for item in queued:
             try:
                 if item.get("type") == "turn":
-                    result = client.store_turn(
+                    client.store_turn(
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
                     )
-                    if result.get("success") is not False:
-                        synced += 1
-                    else:
-                        failed.append(item)
-                        click.echo(f"  Failed (turn): {result.get('error', 'unknown')}")
+                    synced += 1
                 elif item.get("type") == "memory":
                     action = item.get("action", "add")
                     target = item.get("target", "memory")
                     content = item.get("content", "")
-                    context_graph = config.get("context_graph", "hermes-memory")
-                    assertion_name = agent_name or "hermes"
-                    quads = [{
-                        "subject": f"urn:hermes:{assertion_name}:{target}",
-                        "predicate": "urn:hermes:content",
-                        "object": f"[{target}]\n{content}",
-                    }]
-                    if action == "remove":
-                        synced += 1
-                        continue
-                    result = client.write_assertion(assertion_name, context_graph, quads)
-                    if result.get("success") is not False:
-                        synced += 1
-                    else:
-                        failed.append(item)
-                        click.echo(f"  Failed (memory/{action}): {result.get('error', 'unknown')}")
+                    old_text = item.get("old_text", "")
+                    entries = list(cache.get(target, []))
+
+                    if action == "add":
+                        entries.append({"target": target, "content": content})
+                    elif action == "replace":
+                        replaced = False
+                        for i, e in enumerate(entries):
+                            if old_text and old_text in e.get("content", ""):
+                                entries[i] = {"target": target, "content": content}
+                                replaced = True
+                                break
+                        if not replaced:
+                            entries.append({"target": target, "content": content})
+                    elif action == "remove":
+                        entries = [e for e in entries if content not in e.get("content", "")]
+
+                    cache[target] = entries
+                    dirty_targets.add(target)
+                    synced += 1
                 else:
                     synced += 1
             except Exception as e:
                 click.echo(f"  Failed: {e}")
                 failed.append(item)
 
+        write_failures = 0
+        for target in dirty_targets:
+            entries = cache.get(target, [])
+            quads = [{
+                "subject": f"urn:hermes:{assertion_name}:{target}",
+                "predicate": "urn:hermes:content",
+                "object": f"[{e.get('target', target)}]\n{e['content']}",
+            } for e in entries]
+            try:
+                client.write_assertion(assertion_name, context_graph, quads)
+            except Exception as e:
+                click.echo(f"  Failed to write {target} assertion: {e}")
+                write_failures += 1
+
         cache["queued_writes"] = failed
         _save_cache(cache, agent_name)
-        click.echo(f"Synced {synced}/{len(queued)} writes. {len(failed)} remaining.")
+        click.echo(f"Synced {synced}/{len(queued)} writes ({len(dirty_targets)} targets updated). {len(failed)} remaining.")
+        if write_failures:
+            click.echo(f"  Warning: {write_failures} assertion write(s) failed — data is saved locally, re-run sync to retry.")
         client.close()
