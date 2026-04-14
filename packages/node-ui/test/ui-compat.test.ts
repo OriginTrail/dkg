@@ -652,7 +652,7 @@ describe('fileUrl hash handling', () => {
   });
 
   it('defaults bare hashes to sha256: prefix', () => {
-    expect(api).toContain('`${BASE}/api/file/sha256:${hash}');
+    expect(api).toContain('`${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`');
   });
 });
 

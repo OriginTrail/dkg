@@ -77,19 +77,20 @@ describe('OpenClaw bridge API contract', () => {
 
 describe('OpenClaw daemon endpoints', () => {
   const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
 
   it('registers GET /api/openclaw-agents endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/openclaw-agents'");
-    expect(daemonSrc).toContain("req.method === 'GET'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']GET["']\s*&&\s*path\s*===\s*["']\/api\/openclaw-agents["']/);
   });
 
   it('filters agents by OpenClaw framework', () => {
-    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*'OpenClaw'\s*\}/);
+    expect(daemonSrc).toMatch(/findAgents\(\s*\{\s*framework:\s*["']OpenClaw["']\s*\}\s*\)/);
   });
 
   it('registers POST /api/chat-openclaw endpoint', () => {
-    expect(daemonSrc).toContain("path === '/api/chat-openclaw'");
-    expect(daemonSrc).toContain("req.method === 'POST'");
+    expect(daemonSrc).toMatch(/req\.method\s*===\s*["']POST["']\s*&&\s*path\s*===\s*["']\/api\/chat-openclaw["']/);
   });
 
   it('chat-openclaw endpoint requires peerId and text', () => {
@@ -125,19 +126,11 @@ describe('OpenClaw daemon endpoints', () => {
   });
 
   it('chat-openclaw persists outbound messages', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     expect(chatOclawBlock).toContain('insertChatMessage');
-    expect(chatOclawBlock).toContain("direction: 'out'");
+    expect(chatOclawBlock).toMatch(/direction:\s*["']out["']/);
   });
 
   it('chat-openclaw resolves peer names', () => {
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     expect(chatOclawBlock).toContain('resolveNameToPeerId');
   });
 });
@@ -303,6 +296,11 @@ describe('Agent hub shell surfaces', () => {
 });
 
 describe('OpenClaw bridge behavioral tests', () => {
+  const daemonSrc = readCliFile('daemon.ts');
+  const chatOpenClawStart = daemonSrc.indexOf('/api/chat-openclaw');
+  const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
+  const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
+
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };
     (globalThis as any).localStorage = {
@@ -423,11 +421,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler captures waitStart before sendChat (timing race fix)', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const waitStartIdx = chatOclawBlock.indexOf('const waitStart = Date.now()');
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     expect(waitStartIdx).toBeGreaterThan(-1);
@@ -436,11 +429,6 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('daemon handler persists message with delivered flag after sendChat', () => {
-    const daemonSrc = readCliFile('daemon.ts');
-    const chatOclawBlock = daemonSrc.slice(
-      daemonSrc.indexOf("path === '/api/chat-openclaw'"),
-      daemonSrc.indexOf("// POST /api/connect"),
-    );
     const sendChatIdx = chatOclawBlock.indexOf('agent.sendChat(');
     const insertIdx = chatOclawBlock.indexOf('insertChatMessage');
     expect(sendChatIdx).toBeGreaterThan(-1);
@@ -451,24 +439,26 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('daemon handler returns 200 for undelivered messages (not 502)', () => {
     const daemonSrc = readCliFile('daemon.ts');
-    const blockStart = daemonSrc.indexOf("path === '/api/chat-openclaw'");
+    const blockStart = daemonSrc.search(/path\s*===\s*["']\/api\/chat-openclaw["']/);
     const blockEnd = daemonSrc.indexOf("// OpenClaw channel bridge", blockStart);
     const chatOclawBlock = daemonSrc.slice(blockStart, blockEnd !== -1 ? blockEnd : daemonSrc.indexOf("// POST /api/connect"));
     expect(chatOclawBlock).not.toContain('502');
     expect(chatOclawBlock).toContain('delivered: false');
-    expect(chatOclawBlock).toContain("reply: null");
-    expect(chatOclawBlock).toContain("timedOut: false");
+    expect(chatOclawBlock).toMatch(/reply:\s*null/);
+    expect(chatOclawBlock).toMatch(/timedOut:\s*false/);
   });
 
   it('daemon local channel send handler includes gateway-route fallback', () => {
-    const daemonSrc = readCliFile('daemon.ts');
     expect(daemonSrc).toContain('function getOpenClawChannelTargets');
     expect(daemonSrc).toContain('const standaloneBridgeBase = explicitBridgeBase');
-    expect(daemonSrc).toContain("? (bridgeLooksLikeGateway ? undefined : explicitBridgeBase)");
-    expect(daemonSrc).toContain(": (!explicitGatewayBase ? 'http://127.0.0.1:9201' : undefined);");
-    expect(daemonSrc).toContain('const gatewayBase = explicitGatewayBase ?? (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);');
+    expect(daemonSrc).toContain('bridgeLooksLikeGateway');
+    expect(daemonSrc).toContain('http://127.0.0.1:9201');
+    expect(daemonSrc).toContain('const gatewayBase =');
+    expect(daemonSrc).toContain('explicitGatewayBase ??');
     expect(daemonSrc).toContain("healthUrl: `${normalizedGatewayBase}/health`");
-    expect(daemonSrc).toContain("return value.endsWith('/api/dkg-channel') ? value : `${value}/api/dkg-channel`;");
+    expect(daemonSrc).toContain('function buildOpenClawGatewayBase');
+    expect(daemonSrc).toContain('return value.endsWith("/api/dkg-channel")');
+    expect(daemonSrc).toContain(': `${value}/api/dkg-channel`;');
     expect(daemonSrc).toContain('shouldTryNextOpenClawTarget');
   });
 

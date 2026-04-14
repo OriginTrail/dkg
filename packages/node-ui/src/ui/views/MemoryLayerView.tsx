@@ -78,23 +78,54 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
   const [viewMode, setViewMode] = useState<ViewMode>('graph');
   const [draftQuery, setDraftQuery] = useState('');
   const [activeQuery, setActiveQuery] = useState('');
+  const [draftSearch, setDraftSearch] = useState('');
+  const [draftField, setDraftField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
+  const [draftLimit, setDraftLimit] = useState(50);
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [appliedField, setAppliedField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
+  const [appliedLimit, setAppliedLimit] = useState(50);
+  const [showAdvancedQuery, setShowAdvancedQuery] = useState(layer !== 'vm');
+
+  const prevLayerRef = React.useRef(layer);
+  React.useEffect(() => {
+    if (prevLayerRef.current !== layer) {
+      prevLayerRef.current = layer;
+      setShowAdvancedQuery(layer !== 'vm');
+      setDraftQuery('');
+      setActiveQuery('');
+      setDraftSearch('');
+      setDraftField('any');
+      setDraftLimit(50);
+      setAppliedSearch('');
+      setAppliedField('any');
+      setAppliedLimit(50);
+    }
+  }, [layer]);
 
   const defaultSparql = useMemo(() => {
     if (layer === 'wm') {
       const cgUri = `did:dkg:context-graph:${contextGraphId}`;
       return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1000`;
     }
+    if (layer === 'vm') {
+      return buildVerifiedMemorySearchQuery({
+        query: appliedSearch,
+        field: appliedField,
+        limit: appliedLimit,
+      });
+    }
     return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
-  }, [layer, contextGraphId]);
+  }, [contextGraphId, layer, appliedField, appliedLimit, appliedSearch]);
 
   const sparql = activeQuery || defaultSparql;
 
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
+  const queryView = layer === 'vm' ? 'verified-memory' as const : undefined;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix),
-    [sparql, contextGraphId, layer],
+    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView],
     0
   );
 
@@ -106,6 +137,23 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
     }
     setActiveQuery(next);
   }, [activeQuery, draftQuery, refresh]);
+
+  const runVerifiedSearch = useCallback(() => {
+    const changed =
+      draftSearch !== appliedSearch ||
+      draftField !== appliedField ||
+      draftLimit !== appliedLimit;
+    if (changed) {
+      setAppliedSearch(draftSearch);
+      setAppliedField(draftField);
+      setAppliedLimit(draftLimit);
+    }
+    if (activeQuery) {
+      setActiveQuery('');
+      return;
+    }
+    if (!changed) refresh();
+  }, [activeQuery, appliedField, appliedLimit, appliedSearch, draftField, draftLimit, draftSearch, refresh]);
 
   const results = data?.result?.bindings ?? data?.results?.bindings ?? [];
 
@@ -142,44 +190,100 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
         <PublishPanel contextGraphId={contextGraphId} onPublished={refresh} />
       )}
 
-      <div className="v10-mlv-query-bar">
-        <input
-          type="text"
-          className="v10-mlv-query-input"
-          placeholder="Custom SPARQL query..."
-          value={draftQuery}
-          onChange={(e) => setDraftQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
-        />
-        <button className="v10-mlv-run-btn" onClick={runQuery}>
-          Run
-        </button>
-        {activeQuery && (
-          <button
-            className="v10-mlv-clear-btn"
-            onClick={() => setActiveQuery('')}
-            title="Reset to full layer overview"
-          >
-            Reset
-          </button>
-        )}
-        <div className="v10-mlv-view-toggle">
-          <button
-            className={`v10-mlv-toggle-btn ${viewMode === 'table' ? 'active' : ''}`}
-            onClick={() => setViewMode('table')}
-            title="Table view"
-          >
-            {TABLE_ICON}
-          </button>
-          <button
-            className={`v10-mlv-toggle-btn ${viewMode === 'graph' ? 'active' : ''}`}
-            onClick={() => setViewMode('graph')}
-            title="Graph view"
-          >
-            {GRAPH_ICON}
-          </button>
+      {layer === 'vm' && (
+        <div className="v10-vm-search-panel">
+          <div className="v10-vm-search-header">
+            <div>
+              <div className="v10-vm-search-title">Search Verified Memory</div>
+              <div className="v10-vm-search-desc">
+                Search published triples by subject, predicate, object, or across all fields.
+              </div>
+            </div>
+            <button
+              className="v10-vm-search-toggle"
+              type="button"
+              onClick={() => setShowAdvancedQuery((prev) => !prev)}
+            >
+              {showAdvancedQuery ? 'Hide SPARQL' : 'Advanced SPARQL'}
+            </button>
+          </div>
+
+          <div className="v10-vm-search-controls">
+            <input
+              type="text"
+              className="v10-mlv-query-input"
+              placeholder="Search verified memory..."
+              value={draftSearch}
+              onChange={(e) => setDraftSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
+            />
+            <select
+              className="v10-vm-search-select"
+              value={draftField}
+              onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
+            >
+              <option value="any">Any field</option>
+              <option value="subject">Subject</option>
+              <option value="predicate">Predicate</option>
+              <option value="object">Object</option>
+            </select>
+            <select
+              className="v10-vm-search-select"
+              value={String(draftLimit)}
+              onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
+            >
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="200">200 rows</option>
+            </select>
+            <button className="v10-mlv-run-btn" onClick={runVerifiedSearch}>
+              Search
+            </button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {(layer !== 'vm' || showAdvancedQuery) && (
+        <div className="v10-mlv-query-bar">
+          <input
+            type="text"
+            className="v10-mlv-query-input"
+            placeholder="Custom SPARQL query..."
+            value={draftQuery}
+            onChange={(e) => setDraftQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
+          />
+          <button className="v10-mlv-run-btn" onClick={runQuery}>
+            Run
+          </button>
+          {activeQuery && (
+            <button
+              className="v10-mlv-clear-btn"
+              onClick={() => setActiveQuery('')}
+              title="Reset to full layer overview"
+            >
+              Reset
+            </button>
+          )}
+          <div className="v10-mlv-view-toggle">
+            <button
+              className={`v10-mlv-toggle-btn ${viewMode === 'table' ? 'active' : ''}`}
+              onClick={() => setViewMode('table')}
+              title="Table view"
+            >
+              {TABLE_ICON}
+            </button>
+            <button
+              className={`v10-mlv-toggle-btn ${viewMode === 'graph' ? 'active' : ''}`}
+              onClick={() => setViewMode('graph')}
+              title="Graph view"
+            >
+              {GRAPH_ICON}
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading && <p className="v10-mlv-status">Loading...</p>}
       {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
@@ -545,4 +649,34 @@ function shorten(uri?: string): string {
   const slash = uri.lastIndexOf('/');
   const cut = Math.max(hash, slash);
   return cut >= 0 ? uri.slice(cut + 1) : uri;
+}
+
+function buildVerifiedMemorySearchQuery(opts: {
+  query: string;
+  field: 'any' | 'subject' | 'predicate' | 'object';
+  limit: number;
+}): string {
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 50;
+  const trimmed = opts.query.trim();
+  if (!trimmed) {
+    return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT ${limit}`;
+  }
+  const needle = escapeSparqlString(trimmed.toLowerCase());
+  const filters = {
+    subject: `CONTAINS(LCASE(STR(?s)), "${needle}")`,
+    predicate: `CONTAINS(LCASE(STR(?p)), "${needle}")`,
+    object: `CONTAINS(LCASE(STR(?o)), "${needle}")`,
+  };
+  const filter = opts.field === 'any'
+    ? `(${filters.subject} || ${filters.predicate} || ${filters.object})`
+    : filters[opts.field];
+  return `SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(${filter}) } LIMIT ${limit}`;
+}
+
+function escapeSparqlString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }

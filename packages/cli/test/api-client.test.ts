@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
 
 const PORT = 8899;
@@ -23,13 +26,16 @@ function mockFetchError(status: number, body: unknown) {
 describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
+  let tempDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-test-'));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
   });
 
   describe('GET endpoints', () => {
@@ -231,6 +237,36 @@ describe('ApiClient', () => {
         json: () => Promise.reject(new Error('no json')),
       });
       await expect(client.status()).rejects.toThrow('Internal Server Error');
+    });
+
+    it('prefers extraction.error for multipart import failures and preserves the parsed body', async () => {
+      const filePath = join(tempDir, 'sample.pdf');
+      await writeFile(filePath, Buffer.from('%PDF-1.4\n', 'utf-8'));
+      globalThis.fetch = mockFetchError(400, {
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
+
+      let thrown: unknown;
+      try {
+        await client.importAssertionFile('paper', { filePath, contextGraphId: 'research' });
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('PDF converter crashed');
+      expect((thrown as Error & { httpStatus: number }).httpStatus).toBe(400);
+      expect((thrown as Error & { responseBody?: unknown }).responseBody).toEqual({
+        assertionUri: 'did:dkg:context-graph:research/assertion/0xAgent/paper',
+        extraction: {
+          status: 'failed',
+          error: 'PDF converter crashed',
+        },
+      });
     });
   });
 

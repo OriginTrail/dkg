@@ -1415,6 +1415,48 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-mlv-icon { font-size: 20px; }
 .v10-mlv-title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-bottom: 2px; }
 .v10-mlv-desc { font-size: 12px; color: var(--text-secondary); }
+.v10-vm-search-panel {
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+.v10-vm-search-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.v10-vm-search-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-vm-search-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
+.v10-vm-search-toggle {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.v10-vm-search-toggle:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.v10-vm-search-controls {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  gap: 8px;
+}
+.v10-vm-search-select {
+  min-width: 108px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.v10-vm-search-select:focus { outline: none; border-color: var(--border-strong); }
 .v10-mlv-query-bar { display: flex; gap: 8px; margin-bottom: 16px; }
 .v10-mlv-query-input {
   flex: 1;
@@ -1466,6 +1508,11 @@ button:focus:not(:focus-visible) { outline: none; }
   white-space: nowrap;
 }
 .v10-mlv-table tr:hover td { background: var(--bg-hover); }
+@media (max-width: 900px) {
+  .v10-vm-search-header { flex-direction: column; align-items: stretch; }
+  .v10-vm-search-controls,
+  .v10-mlv-query-bar { grid-template-columns: 1fr; display: flex; flex-direction: column; }
+}
 
 /* ── Assertion List (WM → SWM) ── */
 .v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); border-radius: 8px; overflow: hidden; }
