@@ -9,6 +9,7 @@ import {IStaking} from "./interfaces/IStaking.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Ask} from "./Ask.sol";
 import {ShardingTable} from "./ShardingTable.sol";
+import {StakingV10} from "./StakingV10.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
@@ -31,22 +32,32 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  * transfer model — the new owner inherits both the raw stake and any
  * unclaimed rewards; see `_update` below).
  *
- * @dev V10 two-layer staking wire: this contract orchestrates the
- *      user-facing API (`createConviction`, `relock`, `redelegate`,
- *      `requestWithdrawal`, `processWithdrawal`, `claimRewards`,
- *      `convertToNFT`) and delegates authoritative storage writes to:
- *        - `Staking._recordStake` for the NFT-mint stake path (Phase 4),
- *        - `StakingStorage` direct calls for redelegate / withdrawal teardown,
- *        - `ConvictionStakingStorage` for position bookkeeping + effective
- *          stake diff accounting.
- *      TRAC never sits in this contract: at `createConviction` it flows
- *      user → StakingStorage in one hop; at `processWithdrawal` it flows
- *      StakingStorage → user via `StakingStorage.transferStake`.
+ * @dev V10 split-contract architecture. This contract is a dumb ERC-721
+ *      ownership receipt: it mints/burns tokens, validates ownership on
+ *      mutating calls, and forwards every business action to `StakingV10`.
+ *      All stake/withdrawal/reward/migration logic lives in `StakingV10`,
+ *      gated by `onlyConvictionNFT` so only this wrapper can invoke it.
+ *      TRAC never touches this contract: users approve `StakingV10`
+ *      directly and `StakingV10.stake` pulls TRAC via
+ *      `token.transferFrom(staker, stakingStorage, amount)`. This wrapper
+ *      never calls `StakingStorage.*` or `ConvictionStakingStorage.*`
+ *      directly for mutations — the only storage read we do is a one-shot
+ *      `convictionStakingStorage.getPosition(tokenId)` in `redelegate` (to
+ *      capture the pre-call identity for the mirror event) and in
+ *      `finalizeWithdrawal` (to detect a fully-drained position so the NFT
+ *      can be burned).
  *
- *      Phase 5 scaffold: constructor, initialize, Hub wiring, tier table,
- *      and `_update` override are live; the seven external entry points
- *      are stubbed as `revert("NotImplemented")` and will be filled in
- *      by S2–S7.
+ *      The eight user-facing entry points are:
+ *        - `createConviction` / `convertToNFT` (mint paths — forward to
+ *          `StakingV10.stake` / `StakingV10.convertToNFT`)
+ *        - `relock` / `redelegate`
+ *        - `createWithdrawal` / `cancelWithdrawal` / `finalizeWithdrawal`
+ *        - `claim`
+ *
+ *      Phase 5 scaffold: `StakingV10` is currently stubbed and every
+ *      downstream forward reverts `"NotImplemented"`. That is expected —
+ *      downstream subagents will fill in the `StakingV10` bodies in later
+ *      rounds.
  */
 contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
     string private constant _NAME = "DKGStakingConvictionNFT";
@@ -72,6 +83,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // ========================================================================
 
     IStaking public stakingContract;
+    StakingV10 public stakingV10;
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStakingStorage;
     DelegatorsInfo public delegatorsInfo;
@@ -99,11 +111,14 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // ========================================================================
 
     /// @notice Emitted by `createConviction` and `convertToNFT` after the
-    ///         position is fully registered in `ConvictionStakingStorage`
-    ///         and `Staking._recordStake` has run.
+    ///         NFT is minted. The authoritative position-created event (with
+    ///         raw / expiryEpoch / multiplier18) is emitted by
+    ///         `ConvictionStakingStorage.createPosition` via `StakingV10.stake`;
+    ///         this wrapper-layer event is kept so off-chain indexers that
+    ///         watch the NFT contract alone still see the mint.
     event PositionCreated(
-        uint256 indexed tokenId,
         address indexed owner,
+        uint256 indexed tokenId,
         uint72 indexed identityId,
         uint96 amount,
         uint8 lockEpochs
@@ -121,17 +136,24 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint72 indexed newIdentityId
     );
 
-    /// @notice Emitted by `requestWithdrawal` when the 15-day delay timer
-    ///         starts. `releaseAt` is a Unix timestamp.
-    event WithdrawalRequested(uint256 indexed tokenId, uint256 releaseAt);
+    /// @notice Emitted by `createWithdrawal` when the 15-day delay timer
+    ///         starts. The authoritative event (with `releaseAt`) is emitted
+    ///         by `StakingV10.createWithdrawal`; this wrapper-layer event is
+    ///         kept so off-chain indexers watching the NFT contract still see
+    ///         withdrawal intents.
+    event WithdrawalCreated(uint256 indexed tokenId, uint96 amount);
 
-    /// @notice Emitted by `processWithdrawal` after the NFT is burned and
-    ///         TRAC is released back to the owner.
-    event WithdrawalProcessed(uint256 indexed tokenId, uint96 amount);
+    /// @notice Emitted by `cancelWithdrawal` when a pending withdrawal is
+    ///         cleared before finalization.
+    event WithdrawalCancelled(uint256 indexed tokenId);
 
-    /// @notice Emitted by `claimRewards`. Phase 5 only accrues bookkeeping;
-    ///         Phase 11 wires the actual TRAC transfer.
-    event RewardsAccrued(uint256 indexed tokenId, uint96 amount);
+    /// @notice Emitted by `finalizeWithdrawal` after the delay elapses and
+    ///         TRAC is released back to the owner. The authoritative event
+    ///         (with `rawDraw` / `rewardsDraw`) is emitted by
+    ///         `StakingV10.finalizeWithdrawal`; this wrapper-layer event is
+    ///         kept so off-chain indexers watching the NFT contract still see
+    ///         the finalize step.
+    event WithdrawalFinalized(uint256 indexed tokenId);
 
     /// @notice Emitted by `convertToNFT` when a V8 address-keyed delegation
     ///         is migrated into a V10 NFT-backed position.
@@ -139,26 +161,23 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         address indexed delegator,
         uint256 indexed tokenId,
         uint72 indexed identityId,
-        uint96 amount
+        uint8 lockEpochs
     );
 
     // ========================================================================
     // Errors
     // ========================================================================
 
+    // Only errors thrown at the NFT wrapper layer are declared here. Every
+    // position-lifecycle check (lock expiry, withdrawal state, same-identity,
+    // profile existence, max-stake, rewards/raw sufficiency, etc.) is the
+    // responsibility of `StakingV10` and reverts with the matching error
+    // declared there. Keeping the NFT layer's error surface minimal avoids
+    // dead code at the wrapper and prevents the wrapper layer from drifting
+    // into business-rule decisions.
     error InvalidLockEpochs();
-    error LockNotExpired();
-    error LockStillActive();
-    error WithdrawalNotRequested();
-    error WithdrawalAlreadyRequested();
-    error WithdrawalDelayPending();
-    error V8StakeNotFullyClaimed();
     error NotPositionOwner();
-    error PositionNotFound();
     error ZeroAmount();
-    error ProfileDoesNotExist();
-    error SameIdentity();
-    error MaxStakeExceeded();
 
     // ========================================================================
     // Constructor + initialize
@@ -171,6 +190,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
 
     function initialize() public onlyHub {
         stakingContract = IStaking(hub.getContractAddress("Staking"));
+        stakingV10 = StakingV10(hub.getContractAddress("StakingV10"));
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
         delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
@@ -237,80 +257,150 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     }
 
     // ========================================================================
-    // Entry points (Phase 5 stubs — S2..S7 fill in)
+    // Entry points — thin wrappers that forward to `StakingV10`
     // ========================================================================
     //
-    // These stubs revert `"NotImplemented"` so the Phase 5 S1 scaffold
-    // compiles cleanly and deploys green without committing to a
-    // partial behavior. Each is owned by a downstream subagent:
+    // The NFT contract is a dumb ownership receipt. All position business
+    // logic (stake bookkeeping, conviction math, reward accrual, withdrawal
+    // state machine, V8 migration) lives in `StakingV10`, which is gated by
+    // `onlyConvictionNFT` so only this contract can invoke it. Each wrapper:
     //
-    //   S2 — createConviction (Flow A atomic)
-    //   S3 — relock
-    //   S4 — redelegate
-    //   S5 — requestWithdrawal / processWithdrawal
-    //   S6 — claimRewards (stubbed TRAC transfer, Phase 11 finishes it)
-    //   S7 — convertToNFT (V8 → V10 migration, 7-step atomic)
+    //   1. Validates ownership (`ownerOf == msg.sender`) on mutating calls.
+    //   2. For mint paths, fails fast on `lockEpochs` via `_convictionMultiplier`.
+    //   3. Mints / burns the ERC-721 token as needed.
+    //   4. Forwards to the matching `StakingV10` method with `msg.sender`
+    //      passed explicitly as the `staker` argument (StakingV10 never
+    //      trusts `tx.origin`).
+    //   5. Emits a wrapper-layer mirror event for NFT-contract watchers —
+    //      the authoritative event for off-chain accounting comes from the
+    //      `StakingV10` / `ConvictionStakingStorage` layer.
     //
-    // Do NOT add partial logic here — subagents assume a clean revert
-    // surface as their starting point.
+    // TRAC never touches this contract: at `createConviction` the user has
+    // approved `StakingV10` directly, and `StakingV10.stake` pulls TRAC via
+    // `token.transferFrom(staker, stakingStorage, amount)`. The NFT layer
+    // only mints/burns ERC-721 tokens.
+    //
+    // `StakingV10` is currently scaffolded — all its entry points revert
+    // `"NotImplemented"`. That is expected and the runtime behavior of
+    // every wrapper here is "forwards, then reverts" until downstream
+    // subagents fill the StakingV10 bodies.
 
-    /// @notice S2 — Mint a fresh NFT-backed staking position on `identityId`
-    ///         with `amount` TRAC locked for `lockEpochs` epochs.
-    /// @dev `pure` stub modifier silences "can be restricted to pure" warning;
-    ///      S2 will drop the modifier when wiring up state mutations.
+    /// @notice Mint a fresh NFT-backed staking position on `identityId` with
+    ///         `amount` TRAC locked for `lockEpochs` epochs.
     function createConviction(
-        uint72 /* identityId */,
-        uint96 /* amount */,
-        uint8 /* lockEpochs */
-    ) external pure returns (uint256 /* tokenId */) {
-        revert("NotImplemented");
+        uint72 identityId,
+        uint96 amount,
+        uint8 lockEpochs
+    ) external returns (uint256 tokenId) {
+        if (amount == 0) revert ZeroAmount();
+        // Fail-fast on invalid tier: `_convictionMultiplier` reverts
+        // `InvalidLockEpochs()` for any value outside {0,1,3,6,12}. Note
+        // that `StakingV10.stake` is expected to additionally reject
+        // `lockEpochs == 0` once its body is filled in (createConviction
+        // must never mint at the rest-state tier).
+        _convictionMultiplier(lockEpochs);
+
+        tokenId = nextTokenId++;
+        _mint(msg.sender, tokenId);
+        stakingV10.stake(msg.sender, tokenId, identityId, amount, lockEpochs);
+
+        emit PositionCreated(msg.sender, tokenId, identityId, amount, lockEpochs);
     }
 
-    /// @notice S3 — Post-expiry re-commit of an existing position to a new
-    ///         lock tier. Raw stake unchanged; multiplier + expiry shift.
-    /// @dev `pure` stub modifier — S3 drops it when adding state reads.
-    function relock(uint256 /* tokenId */, uint8 /* newLockEpochs */) external pure {
-        revert("NotImplemented");
+    /// @notice Post-expiry re-commit of an existing position to a new lock
+    ///         tier. Raw stake unchanged; multiplier + expiry shift.
+    function relock(uint256 tokenId, uint8 newLockEpochs) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        // Fail-fast on invalid tier. Same note as createConviction: the
+        // `lockEpochs == 0` policy check lives in `StakingV10.relock`.
+        _convictionMultiplier(newLockEpochs);
+        stakingV10.relock(msg.sender, tokenId, newLockEpochs);
+        emit PositionRelocked(tokenId, newLockEpochs);
     }
 
-    /// @notice S4 — Move a position from its current node to `newIdentityId`.
+    /// @notice Move a position from its current node to `newIdentityId`.
     ///         Per-node effective stake moves; global totals invariant.
-    /// @dev `pure` stub modifier — S4 drops it when adding state reads.
-    function redelegate(uint256 /* tokenId */, uint72 /* newIdentityId */) external pure {
-        revert("NotImplemented");
+    function redelegate(uint256 tokenId, uint72 newIdentityId) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        // Capture the pre-call `identityId` so the wrapper-layer
+        // `PositionRedelegated` event can surface both endpoints. Cheap
+        // (one SLOAD via `getPosition`) and keeps the event's shape aligned
+        // with the storage-layer authoritative event.
+        uint72 oldIdentityId = convictionStakingStorage.getPosition(tokenId).identityId;
+        stakingV10.redelegate(msg.sender, tokenId, newIdentityId);
+        emit PositionRedelegated(tokenId, oldIdentityId, newIdentityId);
     }
 
-    /// @notice S5 — Start the 15-day withdrawal timer for a post-expiry
-    ///         position. Caller must own the NFT.
-    /// @dev `pure` stub modifier — S5 drops it when adding state reads.
-    function requestWithdrawal(uint256 /* tokenId */) external pure {
-        revert("NotImplemented");
+    /// @notice Start the 15-day withdrawal timer for a partial or full
+    ///         withdrawal. Caller must own the NFT.
+    function createWithdrawal(uint256 tokenId, uint96 amount) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        if (amount == 0) revert ZeroAmount();
+        stakingV10.createWithdrawal(msg.sender, tokenId, amount);
+        emit WithdrawalCreated(tokenId, amount);
     }
 
-    /// @notice S5 — After `WITHDRAWAL_DELAY` has elapsed, refund TRAC to
-    ///         the owner and burn the NFT.
-    /// @dev `pure` stub modifier — S5 drops it when adding state reads.
-    function processWithdrawal(uint256 /* tokenId */) external pure {
-        revert("NotImplemented");
+    /// @notice Cancel a pending withdrawal before the delay elapses. Returns
+    ///         the position to its pre-`createWithdrawal` state.
+    function cancelWithdrawal(uint256 tokenId) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        stakingV10.cancelWithdrawal(msg.sender, tokenId);
+        emit WithdrawalCancelled(tokenId);
     }
 
-    /// @notice S6 — Walk unclaimed epochs, accumulate reward, update
-    ///         `lastClaimedEpoch`. Phase 5 accrues bookkeeping only;
-    ///         Phase 11 wires the actual TRAC transfer.
-    /// @dev `pure` stub modifier — S6 drops it when adding state reads.
-    function claimRewards(uint256 /* tokenId */) external pure returns (uint96 /* amount */) {
-        revert("NotImplemented");
+    /// @notice After `WITHDRAWAL_DELAY` has elapsed, drain the withdrawable
+    ///         amount from the position and transfer TRAC back to the owner.
+    ///         Burns the NFT if the position is fully drained (both raw and
+    ///         rewards buckets at zero).
+    function finalizeWithdrawal(uint256 tokenId) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        stakingV10.finalizeWithdrawal(msg.sender, tokenId);
+
+        // Burn-on-drain check. `StakingV10.finalizeWithdrawal` is responsible
+        // for calling `ConvictionStakingStorage.deletePosition(tokenId)` when
+        // the final drain happens, but we defensively read the position back
+        // here: if both buckets are zero, the NFT's only remaining job is to
+        // stop existing. We check `positions[tokenId]` directly via the
+        // getter rather than tracking a "fully drained" return value from
+        // StakingV10 — keeps the storage-layer read local to the NFT and
+        // tolerates a StakingV10 that has already deleted the position
+        // (`getPosition` returns a zero-value Position struct after delete,
+        // which still satisfies the raw==0 && rewards==0 check).
+        ConvictionStakingStorage.Position memory pos = convictionStakingStorage.getPosition(tokenId);
+        if (pos.raw == 0 && pos.rewards == 0) {
+            _burn(tokenId);
+        }
+
+        emit WithdrawalFinalized(tokenId);
     }
 
-    /// @notice S7 — Atomic V8 → V10 migration: burn the caller's V8
-    ///         address-keyed delegation on `identityId` and mint a fresh
-    ///         V10 NFT-backed position at the specified `lockEpochs` tier.
-    /// @dev `pure` stub modifier — S7 drops it when adding state mutations.
+    /// @notice Walk unclaimed epochs for the position, accumulate reward,
+    ///         and bank it into the `ConvictionStakingStorage` rewards
+    ///         bucket. Updates `lastClaimedEpoch`.
+    function claim(uint256 tokenId) external {
+        if (ownerOf(tokenId) != msg.sender) revert NotPositionOwner();
+        stakingV10.claim(msg.sender, tokenId);
+        // No wrapper-layer event — `StakingV10.claim` emits `RewardsClaimed`
+        // with the amount already. The NFT layer does not duplicate reward
+        // accounting events.
+    }
+
+    /// @notice Atomic V8 → V10 migration. Burns the caller's V8 address-keyed
+    ///         delegation on `identityId` and mints a fresh V10 NFT-backed
+    ///         position at the specified `lockEpochs` tier.
     function convertToNFT(
-        uint72 /* identityId */,
-        uint8 /* lockEpochs */
-    ) external pure returns (uint256 /* tokenId */) {
-        revert("NotImplemented");
+        uint72 identityId,
+        uint8 lockEpochs
+    ) external returns (uint256 tokenId) {
+        // Fail-fast on invalid tier. Same note as createConviction: the
+        // `lockEpochs == 0` policy check lives in `StakingV10.convertToNFT`.
+        _convictionMultiplier(lockEpochs);
+
+        tokenId = nextTokenId++;
+        _mint(msg.sender, tokenId);
+        stakingV10.convertToNFT(msg.sender, tokenId, identityId, lockEpochs);
+
+        emit ConvertedFromV8(msg.sender, tokenId, identityId, lockEpochs);
     }
 
     // ========================================================================
