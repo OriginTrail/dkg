@@ -623,14 +623,15 @@ describe('@unit KnowledgeAssetsV10', () => {
         };
 
         await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
-        // The contract computes the CORRECT digest, recovers a different
-        // signer address from the wrong-order signature, and reverts with
-        // `SignerIsNotNodeOperator` (the recovered address is not a key of
-        // the publisher identity) — OR `InvalidSignature` if the recovered
-        // address is zero. We accept either branch.
+        // The contract computes the CORRECT publisher digest and recovers a
+        // different (valid but mismatched) signer from the wrong-order
+        // signature, which fails `identityStorage.keyHasPurpose` and reverts
+        // `SignerIsNotNodeOperator`. Pin the specific revert so future
+        // changes to the publisher-sig path can't drift this test into a
+        // silent false-positive.
         await expect(
           KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
-        ).to.be.reverted;
+        ).to.be.revertedWithCustomError(KAV10, 'SignerIsNotNodeOperator');
       });
     });
 
@@ -722,9 +723,14 @@ describe('@unit KnowledgeAssetsV10', () => {
         };
 
         await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+        // Same rationale as T1.5: the wrong ACK field set produces a valid
+        // signature over a different message, the contract recovers a
+        // mismatched signer (publisher sig OR first receiver sig, whichever
+        // the contract checks first), and `keyHasPurpose` rejects it. Pin
+        // the specific error to keep the regression honest.
         await expect(
           KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
-        ).to.be.reverted;
+        ).to.be.revertedWithCustomError(KAV10, 'SignerIsNotNodeOperator');
       });
     });
 
@@ -789,11 +795,14 @@ describe('@unit KnowledgeAssetsV10', () => {
         };
 
         await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
-        // Signature recovery yields a wrong signer — either `SignerIsNotNodeOperator`
-        // or `InvalidSignature`.
+        // Wrong-chain digest recovers a valid-but-mismatched signer; the
+        // contract verifies against chainid 31337, fails `keyHasPurpose`,
+        // and reverts `SignerIsNotNodeOperator`. Pin the specific error so
+        // a future drift to `InvalidSignature` (recovered address zero)
+        // makes the test noisy instead of silently passing.
         await expect(
           KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
-        ).to.be.reverted;
+        ).to.be.revertedWithCustomError(KAV10, 'SignerIsNotNodeOperator');
       });
     });
 

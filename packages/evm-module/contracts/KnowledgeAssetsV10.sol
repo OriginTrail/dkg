@@ -348,8 +348,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         );
 
         // ACK digest. H5 chain/contract prefix mirrors the publisher digest.
-        // Field set per spec `03_PROTOCOL_CORE.md:2104` and decision #25 Option B
-        // (`V10_CONTRACTS_REDESIGN_v2.md:549`):
+        // Field set per PRD (V10 protocol core §9 "Publish Flow — Contract
+        // Verification") and decision #25 Option B:
         //   (chainid, address(this), contextGraphId, merkleRoot,
         //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount)
         // The publisher node identity is NOT part of the ACK digest — it lives
@@ -805,9 +805,11 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // exact version they're attesting.
         uint256 preUpdateMerkleRootCount = merkleRoots.length;
         // Same field-set rule as publish: NO `publisherNodeIdentityId` in the
-        // ACK digest. The publishing node is verified separately above. Spec
-        // ref: `03_PROTOCOL_CORE.md:2104` (publish ACK shape — update mirrors
-        // the same separation).
+        // ACK digest. The publishing node is verified separately above. The
+        // publish ACK shape is defined by the PRD (see `_executePublishCore`
+        // comment); the update ACK mirrors the same separation and adds the
+        // update-specific fields (`id`, pre-update merkle-root count, mint
+        // amount, burn list hash).
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
                 block.chainid,

@@ -19,9 +19,9 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  * Publisher digest (N26 field order — publish AND update):
  *   (publisherNodeIdentityId, contextGraphId, merkleRoot_or_newMerkleRoot)
  *
- * ACK digest (publish) — spec `03_PROTOCOL_CORE.md:2104`, decision #25 Option B
- * (`V10_CONTRACTS_REDESIGN_v2.md:549`). NOTE: the ACK digest does NOT include
- * `publisherNodeIdentityId` — that field is in the publisher digest only:
+ * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B.
+ * NOTE: the ACK digest does NOT include `publisherNodeIdentityId` — that
+ * field is in the publisher digest only:
  *   contextGraphId || merkleRoot || knowledgeAssetsAmount
  *   || uint256(byteSize) || uint256(epochs) || uint256(tokenAmount)
  *
@@ -72,9 +72,9 @@ export function buildPublisherDigest(
 /**
  * Build publish ACK digest. See contract `_executePublishCore`.
  *
- * Field set per spec `03_PROTOCOL_CORE.md:2104` and decision #25 Option B
- * (`V10_CONTRACTS_REDESIGN_v2.md:549`). Does NOT include
- * `publisherNodeIdentityId` — that field is in the publisher digest only.
+ * Field set per PRD V10 "Publish Flow" + decision #25 Option B. Does NOT
+ * include `publisherNodeIdentityId` — that field is in the publisher
+ * digest only (T1.5b locks this shape by negative regression).
  */
 export function buildPublishAckDigest(
   chainId: bigint,
