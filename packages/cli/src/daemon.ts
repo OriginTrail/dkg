@@ -3366,9 +3366,10 @@ async function handleRequest(
     return jsonResponse(res, 200, { cleared: count, status });
   }
 
-  // POST /api/context-graph/create — on-chain context graph creation (V10)
-  // When the body has `participantIdentityIds`, this is the on-chain multisig creation.
-  // Otherwise, fall through to the context-graph-style create handler below.
+  // POST /api/context-graph/create — free, P2P context graph creation.
+  // When the body has `participantIdentityIds`, this is the on-chain multisig
+  // creation (calls registerContextGraphOnChain directly).
+  // Otherwise, creates a free local + gossip CG (no chain).
   if (req.method === 'POST' && path === '/api/context-graph/create') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
@@ -3415,12 +3416,11 @@ async function handleRequest(
         return jsonResponse(res, 500, { error: err.message });
       }
     }
-    // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description } = parsed;
+    const { id, name, description, allowedPeers, register } = parsed;
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
-      await agent.createContextGraph({ id, name, description });
+      await agent.createContextGraph({ id, name, description, allowedPeers });
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('already exists') || msg.includes('duplicate') || msg.includes('conflict')) {
@@ -3428,7 +3428,78 @@ async function handleRequest(
       }
       throw err;
     }
+    // Backward compatibility: auto-register on-chain when a real chain is
+    // configured, unless the caller explicitly opts out with register: false.
+    // New callers that want local-only creation pass register: false and
+    // later use POST /api/context-graph/register.
+    const chainConf = config.chain ?? network?.chain;
+    const hasRealChain = chainConf && chainConf.chainId && chainConf.chainId !== 'none';
+    const shouldRegister = register === true || (register !== false && hasRealChain);
+    if (shouldRegister) {
+      try {
+        const regResult = await agent.registerContextGraph(id);
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: true,
+          onChainId: regResult.onChainId,
+        });
+      } catch (regErr: any) {
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: false,
+          registerError: regErr?.message ?? 'Registration failed',
+          hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
+        });
+      }
+    }
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+  }
+
+  // POST /api/context-graph/register — on-chain registration (upgrade from free CG)
+  if (req.method === 'POST' && path === '/api/context-graph/register') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { id, revealOnChain, accessPolicy } = JSON.parse(body);
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    try {
+      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });
+      return jsonResponse(res, 200, {
+        registered: id,
+        onChainId: result.onChainId,
+        hint: 'Context graph registered on-chain. You can now publish SWM to Verified Memory.',
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('already registered')) {
+        return jsonResponse(res, 409, { error: msg });
+      }
+      if (msg.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/invite — invite a peer to a context graph
+  if (req.method === 'POST' && path === '/api/context-graph/invite') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { contextGraphId, peerId: targetPeerId } = JSON.parse(body);
+    if (!contextGraphId || !targetPeerId) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "peerId"' });
+    }
+    if (!isValidContextGraphId(contextGraphId)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    try {
+      await agent.inviteToContextGraph(contextGraphId, targetPeerId);
+      return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
   }
 
   // POST /api/sub-graph/create  { contextGraphId, subGraphName }

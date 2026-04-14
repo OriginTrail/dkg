@@ -215,6 +215,18 @@ done
 
 #------------------------------------------------------------
 echo ""
+echo "--- Registering default CG on-chain (required for VM publish tests) ---"
+REG_DEFAULT=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" -d "{\"id\":\"$CONTEXT_GRAPH\"}")
+REG_DEF_ID=$(json_get "$REG_DEFAULT" registered)
+REG_DEF_OC=$(json_get "$REG_DEFAULT" onChainId)
+if [[ "$REG_DEF_ID" == "$CONTEXT_GRAPH" ]]; then
+  ok "Default CG '$CONTEXT_GRAPH' registered on-chain ($REG_DEF_OC)"
+else
+  warn "Default CG registration: $REG_DEFAULT (tests requiring VM publish may fail)"
+fi
+
+#------------------------------------------------------------
+echo ""
 echo "=== SECTION 2: Shared Memory Writes (free operations) ==="
 echo ""
 
@@ -1863,6 +1875,150 @@ else: print('0')
 " 2>/dev/null)
   [[ "$GOS_CT" -ge 1 ]] && ok "Node $p has $GOS_CT conversation turns via gossip" || warn "Node $p has $GOS_CT turns (gossip pending?)"
 done
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 27: Free CG Creation & Registration ==="
+echo ""
+
+FREE_CG_ID="free-cg-test-$(date +%s)"
+FREE_CG_NAME="Free CG Test"
+
+echo "--- 27a: Create a free CG (no chain tx) ---"
+FREE_CG_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
+  \"id\":\"$FREE_CG_ID\",
+  \"name\":\"$FREE_CG_NAME\",
+  \"description\":\"Test CG created for free (no chain)\"
+}")
+FREE_CG_CREATED=$(json_get "$FREE_CG_RESP" created)
+FREE_CG_URI=$(json_get "$FREE_CG_RESP" uri)
+if [[ "$FREE_CG_CREATED" == "$FREE_CG_ID" ]]; then
+  ok "Free CG created: id=$FREE_CG_CREATED uri=$FREE_CG_URI"
+else
+  fail "Free CG creation failed: $FREE_CG_RESP"
+fi
+
+echo "--- 27b: Verify free CG appears in list ---"
+LIST_RESP=$(c "http://127.0.0.1:9201/api/context-graph/list")
+LIST_HAS_CG=$(echo "$LIST_RESP" | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  cgs=d.get('contextGraphs',[])
+  found=any(c.get('id')=='$FREE_CG_ID' for c in cgs)
+  print('true' if found else 'false')
+except: print('false')
+" 2>/dev/null)
+[[ "$LIST_HAS_CG" == "true" ]] && ok "Free CG found in context-graph list" || fail "Free CG not in list"
+
+echo "--- 27c: Write to SWM on free CG (should work without chain) ---"
+SWM_FREE_RESP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$FREE_CG_ID\",
+  \"quads\":[
+    $(ql "http://example.org/entity/free-test-1" "http://schema.org/name" "FreeCGEntity"),
+    $(q  "http://example.org/entity/free-test-1" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://schema.org/Thing")
+  ]
+}")
+SWM_FREE_OK=$(json_get "$SWM_FREE_RESP" triplesWritten)
+if [[ "$SWM_FREE_OK" != "__NONE__" && "$SWM_FREE_OK" != "0" && "$SWM_FREE_OK" != "__ERR__" ]]; then
+  ok "SWM write to free CG succeeded ($SWM_FREE_OK triples)"
+else
+  fail "SWM write to free CG failed: $SWM_FREE_RESP"
+fi
+
+echo "--- 27d: Query SWM on free CG ---"
+sleep "$LOCAL_SETTLE_S"
+SWM_FREE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { ?s <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$FREE_CG_ID\",
+  \"view\":\"shared-working-memory\"
+}")
+SWM_FREE_QC=$(safe_bindings_count "$SWM_FREE_Q")
+if [[ "$SWM_FREE_QC" == "PARSE_ERR" ]]; then
+  fail "SWM query on free CG returned unparseable response"
+elif [[ "$SWM_FREE_QC" -ge 1 ]]; then
+  ok "SWM query on free CG returns $SWM_FREE_QC binding(s)"
+else
+  fail "SWM query on free CG returns 0 bindings"
+fi
+
+echo "--- 27e: VM publish on unregistered CG should fail ---"
+http_post_capture "http://127.0.0.1:9201/api/shared-memory/publish" \
+  "{\"contextGraphId\":\"$FREE_CG_ID\"}" \
+  VM_GUARD_BODY VM_GUARD_CODE
+if [[ "$VM_GUARD_CODE" == "500" ]] && echo "$VM_GUARD_BODY" | grep -qi "not registered"; then
+  ok "VM publish blocked on unregistered CG (HTTP $VM_GUARD_CODE)"
+elif [[ "$VM_GUARD_CODE" =~ ^[45] ]]; then
+  ok "VM publish blocked on unregistered CG (HTTP $VM_GUARD_CODE)"
+else
+  fail "VM publish should be blocked on unregistered CG (HTTP $VM_GUARD_CODE): ${VM_GUARD_BODY:0:200}"
+fi
+
+echo "--- 27f: Register CG on-chain ---"
+REG_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" -d "{
+  \"id\":\"$FREE_CG_ID\"
+}")
+REG_ONCHAIN=$(json_get "$REG_RESP" onChainId)
+REG_ID=$(json_get "$REG_RESP" registered)
+if [[ "$REG_ID" == "$FREE_CG_ID" && "$REG_ONCHAIN" != "__NONE__" && "$REG_ONCHAIN" != "__ERR__" ]]; then
+  ok "CG registered on-chain: onChainId=$REG_ONCHAIN"
+else
+  fail "CG registration failed: $REG_RESP"
+fi
+
+echo "--- 27g: Double-register should return 409 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/register" \
+  "{\"id\":\"$FREE_CG_ID\"}" \
+  DOUBLE_REG_BODY DOUBLE_REG_CODE
+if [[ "$DOUBLE_REG_CODE" == "409" ]]; then
+  ok "Double-register returns 409 Conflict"
+else
+  warn "Double-register returned HTTP $DOUBLE_REG_CODE (expected 409): ${DOUBLE_REG_BODY:0:200}"
+fi
+
+echo "--- 27h: VM publish after registration should work ---"
+PUB_RESP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
+  \"contextGraphId\":\"$FREE_CG_ID\"
+}")
+PUB_ST=$(json_get "$PUB_RESP" status)
+if [[ "$PUB_ST" == "confirmed" || "$PUB_ST" == "finalized" || "$PUB_ST" == "tentative" ]]; then
+  ok "VM publish after registration succeeded (status=$PUB_ST)"
+else
+  fail "VM publish after registration failed (status=$PUB_ST): ${PUB_RESP:0:300}"
+fi
+
+echo "--- 27i: Create curated CG with allowedPeers ---"
+# Fetch real peer IDs from the running devnet nodes
+NODE1_PEER=$(json_get "$(c "http://127.0.0.1:9201/api/info")" peerId)
+NODE2_PEER=$(json_get "$(c "http://127.0.0.1:9202/api/info")" peerId)
+CURATED_CG_ID="curated-cg-test-$(date +%s)"
+CURATED_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
+  \"id\":\"$CURATED_CG_ID\",
+  \"name\":\"Curated Test CG\",
+  \"allowedPeers\":[\"$NODE1_PEER\",\"$NODE2_PEER\"]
+}")
+CURATED_OK=$(json_get "$CURATED_RESP" created)
+[[ "$CURATED_OK" == "$CURATED_CG_ID" ]] && ok "Curated CG created with allowedPeers" || fail "Curated CG creation: $CURATED_RESP"
+
+echo "--- 27j: Invite peer to context graph ---"
+INVITE_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/invite" -d "{
+  \"contextGraphId\":\"$CURATED_CG_ID\",
+  \"peerId\":\"$NODE2_PEER\"
+}")
+INVITE_OK=$(json_get "$INVITE_RESP" invited)
+[[ "$INVITE_OK" == "$NODE2_PEER" ]] && ok "Peer invited to curated CG" || fail "Peer invite: $INVITE_RESP"
+
+echo "--- 27k: Register non-existent CG should return 404 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/register" \
+  "{\"id\":\"does-not-exist-$(date +%s)\"}" \
+  REG404_BODY REG404_CODE
+[[ "$REG404_CODE" == "404" ]] && ok "Register non-existent CG returns 404" || warn "Register non-existent CG returned HTTP $REG404_CODE (expected 404)"
+
+echo "--- 27l: Create duplicate CG should return 409 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/create" \
+  "{\"id\":\"$FREE_CG_ID\",\"name\":\"duplicate\"}" \
+  DUP_BODY DUP_CODE
+[[ "$DUP_CODE" == "409" ]] && ok "Duplicate CG creation returns 409" || warn "Duplicate CG returned HTTP $DUP_CODE (expected 409): ${DUP_BODY:0:200}"
 
 #------------------------------------------------------------
 echo ""

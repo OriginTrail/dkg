@@ -297,11 +297,26 @@ export class ApiClient {
     return this.post('/api/connect', { multiaddr });
   }
 
-  async createContextGraph(id: string, name: string, description?: string): Promise<{
+  async createContextGraph(id: string, name: string, description?: string, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.post('/api/context-graph/create', { id, name, description });
+    return this.post('/api/context-graph/create', { id, name, description, allowedPeers });
+  }
+
+  async registerContextGraph(id: string, opts?: { revealOnChain?: boolean; accessPolicy?: number }): Promise<{
+    registered: string;
+    onChainId: string;
+    hint?: string;
+  }> {
+    return this.post('/api/context-graph/register', { id, ...opts });
+  }
+
+  async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<{
+    invited: string;
+    contextGraphId: string;
+  }> {
+    return this.post('/api/context-graph/invite', { contextGraphId, peerId });
   }
 
   /** @deprecated Use createContextGraph */

@@ -1097,19 +1097,24 @@ const contextGraphCmd = program
 
 contextGraphCmd
   .command('create <id>')
-  .description('Create a new context graph (publishes definition to the system ontology)')
+  .description('Create a new context graph (free, P2P — no chain transaction)')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
   .option('-d, --description <desc>', 'Description of the context graph')
+  .option('--invite <peer...>', 'Invite peers (allowlist for curated CGs)')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createContextGraph(id, opts.name ?? id, opts.description);
-      console.log(`Context graph created:`);
+      const result = await client.createContextGraph(id, opts.name ?? id, opts.description, opts.invite);
+      console.log(`Context graph created (free, P2P):`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
       console.log(`  Auto-subscribed to GossipSub topic.`);
+      if (opts.invite?.length) {
+        console.log(`  Invited ${opts.invite.length} peer(s) via allowlist.`);
+      }
+      console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verified Memory).`);
 
       if (opts.save) {
         const config = await loadConfig();
@@ -1120,6 +1125,41 @@ contextGraphCmd
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('register <id>')
+  .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
+  .option('--reveal', 'Reveal cleartext name and description on-chain')
+  .action(async (id: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.registerContextGraph(id, { revealOnChain: opts.reveal });
+      console.log(`Context graph registered on-chain:`);
+      console.log(`  ID:         ${id}`);
+      console.log(`  On-chain:   ${result.onChainId}`);
+      console.log(`  ${result.hint ?? 'You can now publish SWM to Verified Memory.'}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('invite <contextGraphId>')
+  .description('Invite a peer to join a context graph (adds to allowlist)')
+  .requiredOption('--peer <peerId>', 'Peer ID to invite')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.inviteToContextGraph(contextGraphId, opts.peer);
+      console.log(`Peer invited:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Peer:          ${opts.peer}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
