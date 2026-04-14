@@ -5,8 +5,8 @@ pragma solidity ^0.8.20;
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
+import {IStaking} from "./interfaces/IStaking.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
-import {Staking} from "./Staking.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
@@ -244,7 +244,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint96 amount,
         uint40 lockEpochs
     ) internal {
-        Staking(hub.getContractAddress("Staking"))._recordStake(
+        IStaking(hub.getContractAddress("Staking"))._recordStake(
             tokenId,
             identityId,
             amount,
