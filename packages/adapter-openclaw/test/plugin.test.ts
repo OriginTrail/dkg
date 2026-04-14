@@ -1014,6 +1014,9 @@ describe('DkgNodePlugin', () => {
       registrationMode: 'full',
       registerTool: (tool) => fullRuntimeTools.push(tool),
       registerHook: () => {},
+      // Modern gateway: memory slot is available. Without this, B7 would
+      // register the legacy compat dkg_memory_search tool here.
+      registerMemoryCapability: () => {},
       on: () => {},
       logger: {},
       workspaceDir: 'C:/tmp/openclaw-upgrade-test',

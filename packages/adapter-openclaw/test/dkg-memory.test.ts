@@ -82,7 +82,10 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
-  it('registers dkg_memory_import as a conventional tool (not dkg_memory_search)', () => {
+  it('registers dkg_memory_import as a conventional tool (not dkg_memory_search) on a modern gateway', () => {
+    // On a modern gateway the memory slot routes reads, so
+    // `dkg_memory_search` MUST NOT be registered — it would compete with
+    // the slot router. See B7: legacy fallback only.
     const api = makeApi();
     plugin.register(api);
 
@@ -90,6 +93,63 @@ describe('DkgMemoryPlugin.register', () => {
     const toolNames = calls.map((c: any) => c[0].name);
     expect(toolNames).toContain('dkg_memory_import');
     expect(toolNames).not.toContain('dkg_memory_search');
+  });
+
+  it('also registers dkg_memory_search as a compat tool when api.registerMemoryCapability is missing', () => {
+    // Bug B7: older gateways do not implement the memory-slot contract,
+    // so reads cannot route through `api.registerMemoryCapability`. Without
+    // a fallback, the adapter would leave such installs with no recall
+    // path at all. Register a compat `dkg_memory_search` tool in that
+    // case so the agent can still query WM directly.
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+
+    const toolNames = legacyApi.registerTool.mock.calls.map((c: any) => c[0].name);
+    expect(toolNames).toContain('dkg_memory_import');
+    expect(toolNames).toContain('dkg_memory_search');
+  });
+
+  it('dkg_memory_search compat tool delegates to DkgMemorySearchManager.search', async () => {
+    // The compat tool must hit the same search path the slot uses, so
+    // results are consistent across gateway generations. Verify the
+    // tool triggers at least one /api/query call against agent-context.
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValue({
+      result: {
+        bindings: [
+          { uri: { value: 'urn:m:1' }, text: { value: 'alpha beta memory hit' } },
+        ],
+      },
+    });
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    const result = await searchTool.execute('call-1', { query: 'alpha beta', maxResults: 5 });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('ok');
+    expect(Array.isArray(payload.results)).toBe(true);
+    expect(querySpy).toHaveBeenCalled();
+    const opts = querySpy.mock.calls[0][1]!;
+    expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
+    expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
+    expect(opts.view).toBe('working-memory');
+  });
+
+  it('dkg_memory_search compat tool rejects an empty query with a tool-level error', async () => {
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+    const result = await searchTool.execute('call-1', { query: '   ' });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toMatch(/query/);
   });
 
   it('dkg_memory_import returns needs_clarification when no contextGraphId is supplied', async () => {

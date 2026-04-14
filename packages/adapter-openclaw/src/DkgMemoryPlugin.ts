@@ -312,12 +312,15 @@ export class DkgMemoryPlugin {
 
   register(api: OpenClawPluginApi): void {
     this.api = api;
-    this.registerCapability(api);
-    this.registerTools(api);
+    const slotRegistered = this.registerCapability(api);
+    this.registerTools(api, { includeLegacySearchTool: !slotRegistered });
   }
 
   /** Re-register tools into a new registry without recreating state. */
-  registerTools(api: OpenClawPluginApi): void {
+  registerTools(
+    api: OpenClawPluginApi,
+    options?: { includeLegacySearchTool?: boolean },
+  ): void {
     api.registerTool({
       name: 'dkg_memory_import',
       description:
@@ -344,15 +347,54 @@ export class DkgMemoryPlugin {
       },
       execute: async (_toolCallId, params) => this.handleImport(params),
     });
+
+    // Legacy-gateway compatibility: when the host does not implement
+    // `api.registerMemoryCapability`, upstream can't route reads through
+    // the memory slot. Register a plain `dkg_memory_search` tool so the
+    // agent still has a recall path. On modern gateways the slot handles
+    // reads and this tool is intentionally omitted to avoid competing
+    // with the slot router.
+    if (options?.includeLegacySearchTool) {
+      api.registerTool({
+        name: 'dkg_memory_search',
+        description:
+          'Search DKG Working Memory for relevant prior context. ' +
+          'Queries both the agent-context chat-turns assertion and (when resolvable) ' +
+          'the selected project memory assertion, returning ranked snippets. ' +
+          'Registered only on legacy gateways that do not implement the memory-slot contract.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search terms.' },
+            maxResults: {
+              type: 'number',
+              description: 'Maximum number of results to return (default 10).',
+            },
+            minScore: {
+              type: 'number',
+              description: 'Minimum keyword-overlap score for returned results.',
+            },
+          },
+          required: ['query'],
+        },
+        execute: async (_toolCallId, params) => this.handleLegacySearch(params),
+      });
+    }
   }
 
-  private registerCapability(api: OpenClawPluginApi): void {
+  /**
+   * Registers the memory-slot capability when the gateway supports it.
+   * Returns `true` when `api.registerMemoryCapability` was called,
+   * `false` when the gateway is legacy (caller falls back to the compat
+   * `dkg_memory_search` tool registration in `registerTools`).
+   */
+  private registerCapability(api: OpenClawPluginApi): boolean {
     if (typeof api.registerMemoryCapability !== 'function') {
       api.logger.warn?.(
         '[dkg-memory] api.registerMemoryCapability is not available — gateway may be older than the memory-slot contract. ' +
-        'The dkg_memory_import write tool is still registered, but slot-backed recall will not route through the DKG adapter.',
+        'Registering the compatibility dkg_memory_search tool so recall still works on this gateway.',
       );
-      return;
+      return false;
     }
 
     const capability: MemoryPluginCapability = {
@@ -360,6 +402,28 @@ export class DkgMemoryPlugin {
     };
     api.registerMemoryCapability(capability);
     api.logger.info?.('[dkg-memory] registerMemoryCapability called');
+    return true;
+  }
+
+  private async handleLegacySearch(params: Record<string, unknown>): Promise<OpenClawToolResult> {
+    const query = typeof params.query === 'string' ? params.query.trim() : '';
+    if (!query) {
+      return toolError('Missing required parameter "query"');
+    }
+    const maxResults = typeof params.maxResults === 'number' ? params.maxResults : undefined;
+    const minScore = typeof params.minScore === 'number' ? params.minScore : undefined;
+
+    const manager = new DkgMemorySearchManager({
+      client: this.client,
+      resolver: this.resolver,
+      logger: this.api?.logger,
+    });
+    try {
+      const results = await manager.search(query, { maxResults, minScore });
+      return toolJson({ status: 'ok', results });
+    } catch (err) {
+      return toolError(`Memory search failed: ${errorMessage(err)}`);
+    }
   }
 
   private async handleImport(params: Record<string, unknown>): Promise<OpenClawToolResult> {
