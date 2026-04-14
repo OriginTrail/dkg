@@ -33,4 +33,8 @@ library StakingLib {
     error MaximumStakeExceeded(uint256 amount);
     error WithdrawalExceedsStake(uint96 stake, uint96 amount);
     error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
+
+    // V10 two-layer staking wire: `_recordStake` is gated so that only the
+    // DKGStakingConvictionNFT contract (per Hub registration) can invoke it.
+    error OnlyConvictionNFT();
 }
