@@ -1135,6 +1135,19 @@ export class EVMChainAdapter implements ChainAdapter {
   // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
   // =====================================================================
 
+  async getKnowledgeAssetsV10Address(): Promise<string> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed on this chain.');
+    }
+    return await this.contracts.knowledgeAssetsV10.getAddress();
+  }
+
+  async getEvmChainId(): Promise<bigint> {
+    const network = await this.provider.getNetwork();
+    return network.chainId;
+  }
+
   async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
     await this.init();
 
@@ -1144,38 +1157,42 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const txSigner = this.nextSigner();
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
+    const kaAddress = await ka.getAddress();
 
-    if (this.contracts.token && params.convictionAccountId === 0n) {
+    // publishDirect pulls TRAC from msg.sender when paymaster is zero.
+    // Approve the adapter's signer → KAV10 for the required amount.
+    // When a paymaster is set, the paymaster handles the token flow — the
+    // adapter does not approve on the caller's behalf.
+    if (this.contracts.token && params.paymaster === ethers.ZeroAddress) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
-      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, await ka.getAddress());
+      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
-        const approveTx = await tokenWithSigner.approve(await ka.getAddress(), params.tokenAmount);
+        const approveTx = await tokenWithSigner.approve(kaAddress, params.tokenAmount);
         await approveTx.wait();
       }
     }
 
-    const identityIds = params.ackSignatures.map((s) => s.identityId);
-    const rValues = params.ackSignatures.map((s) => ethers.hexlify(s.r));
-    const vsValues = params.ackSignatures.map((s) => ethers.hexlify(s.vs));
+    // Build the on-chain PublishParams struct as a plain JS object matching
+    // the field order + types in KnowledgeAssetsV10.sol:99-114. ethers.js
+    // encodes object literals to solidity structs positionally by field name.
+    const publishParamsStruct = {
+      publishOperationId: params.publishOperationId,
+      contextGraphId: params.contextGraphId,
+      merkleRoot: ethers.hexlify(params.merkleRoot),
+      knowledgeAssetsAmount: params.knowledgeAssetsAmount,
+      byteSize: params.byteSize,
+      epochs: params.epochs,
+      tokenAmount: params.tokenAmount,
+      isImmutable: params.isImmutable,
+      publisherNodeIdentityId: params.publisherNodeIdentityId,
+      publisherNodeR: ethers.hexlify(params.publisherSignature.r),
+      publisherNodeVS: ethers.hexlify(params.publisherSignature.vs),
+      identityIds: params.ackSignatures.map((s) => s.identityId),
+      r: params.ackSignatures.map((s) => ethers.hexlify(s.r)),
+      vs: params.ackSignatures.map((s) => ethers.hexlify(s.vs)),
+    };
 
-    const tx = await ka.createKnowledgeAssets(
-      params.publishOperationId,
-      params.contextGraphId,
-      ethers.hexlify(params.merkleRoot),
-      params.knowledgeAssetsAmount,
-      params.byteSize,
-      params.epochs,
-      params.tokenAmount,
-      params.isImmutable,
-      params.paymaster,
-      params.convictionAccountId,
-      params.publisherNodeIdentityId,
-      ethers.hexlify(params.publisherSignature.r),
-      ethers.hexlify(params.publisherSignature.vs),
-      identityIds,
-      rValues,
-      vsValues,
-    );
+    const tx = await ka.publishDirect(publishParamsStruct, params.paymaster);
 
     const receipt = await tx.wait();
     if (!receipt) throw new Error('Transaction receipt is null');

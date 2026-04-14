@@ -762,6 +762,17 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
+  async getKnowledgeAssetsV10Address(): Promise<string> {
+    // 20 valid hex bytes — callers use this solely to build publish digests,
+    // never to send a real transaction, so any stable address works. Picked
+    // to be visually distinct from `0x0...0` so log-diffing is easier.
+    return '0x000000000000000000000000000000000000c10a';
+  }
+
+  async getEvmChainId(): Promise<bigint> {
+    return 31337n;
+  }
+
   async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');

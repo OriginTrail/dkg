@@ -371,6 +371,21 @@ export interface ChainAdapter {
   /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
   isV10Ready?(): boolean;
 
+  /**
+   * Returns the deployed address of `KnowledgeAssetsV10` on this chain.
+   * Used by the publisher to build the H5-prefixed publish digests.
+   * Throws if the contract is not deployed.
+   */
+  getKnowledgeAssetsV10Address?(): Promise<string>;
+
+  /**
+   * Returns the numeric EVM chain id (e.g. 31337n for hardhat).
+   * Distinct from `chainId` above, which is namespaced (`evm:31337`,
+   * `mock:31337`) and not directly parseable with `BigInt()`.
+   * Used by the publisher to build the H5-prefixed publish digests.
+   */
+  getEvmChainId?(): Promise<bigint>;
+
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
