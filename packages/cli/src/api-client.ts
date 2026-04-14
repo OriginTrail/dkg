@@ -140,6 +140,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
+    options?: { subGraphName?: string },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -147,7 +148,12 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.post('/api/shared-memory/publish', { contextGraphId, selection, clearAfter });
+    return this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      selection,
+      clearAfter,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+    });
   }
 
   /** @deprecated Use publishFromSharedMemory */
@@ -155,6 +161,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
+    options?: { subGraphName?: string },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -162,7 +169,7 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter);
+    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter, options);
   }
 
   async publisherEnqueue(request: {

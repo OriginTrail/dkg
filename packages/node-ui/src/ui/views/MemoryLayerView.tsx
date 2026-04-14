@@ -121,10 +121,11 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
 
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
+  const queryView = layer === 'vm' ? 'verified-memory' as const : undefined;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix),
-    [sparql, contextGraphId, layer],
+    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView],
     0
   );
 

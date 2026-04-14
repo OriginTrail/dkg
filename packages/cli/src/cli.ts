@@ -1352,7 +1352,7 @@ assertionCmd
       if (Array.isArray(result.rootEntities) && result.rootEntities.length > 0) {
         console.log(`  Root entities:  ${result.rootEntities.join(', ')}`);
       }
-      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph}`);
+      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1805,6 +1805,7 @@ sharedMemoryCmd
   .description('Publish from shared memory to a context graph')
   .option('--keep', 'Keep shared memory triples after publishing')
   .option('--root <entity...>', 'Publish only specific root entities')
+  .option('--sub-graph-name <name>', 'Publish from a specific shared-memory sub-graph')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const targetContextGraph = contextGraph ?? 'dev-coordination';
@@ -1812,11 +1813,16 @@ sharedMemoryCmd
       const selection = opts.root?.length
         ? { rootEntities: opts.root as string[] }
         : 'all';
-      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep);
+      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep, {
+        subGraphName: opts.subGraphName,
+      });
       console.log(`Published from shared memory to "${targetContextGraph}":`);
       console.log(`  Status: ${result.status}`);
       console.log(`  KC ID:  ${result.kcId}`);
       console.log(`  KAs:    ${result.kas.length}`);
+      if (opts.subGraphName) {
+        console.log(`  Sub-graph: ${opts.subGraphName}`);
+      }
       if (result.txHash) {
         console.log(`  TX:     ${result.txHash}`);
       }

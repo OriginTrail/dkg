@@ -267,8 +267,14 @@ export async function importFile(
 }
 
 // --- Query ---
-export const executeQuery = (sparql: string, contextGraphId?: string, includeSharedMemory?: boolean, graphSuffix?: '_shared_memory') =>
-  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix });
+export const executeQuery = (
+  sparql: string,
+  contextGraphId?: string,
+  includeSharedMemory?: boolean,
+  graphSuffix?: '_shared_memory',
+  view?: 'verified-memory' | 'shared-working-memory',
+) =>
+  post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
 
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
