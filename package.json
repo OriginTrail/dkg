@@ -21,7 +21,8 @@
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",
     "mcp": "node packages/mcp-server/dist/index.js",
-    "index": "node packages/cli/dist/cli.js index"
+    "index": "node packages/cli/dist/cli.js index",
+    "test:evm-integration": "./scripts/test-evm-integration.sh"
   },
   "devDependencies": {
     "@types/node": "^22",
