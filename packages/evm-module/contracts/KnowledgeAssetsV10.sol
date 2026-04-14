@@ -96,6 +96,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
+    StakingStorage public stakingStorage;
     ContextGraphs public contextGraphs;
     ContextGraphValueStorage public contextGraphValueStorage;
     IDKGPublishingConvictionNFT public publishingConvictionNFT;
@@ -110,6 +111,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
+    error ZeroEpochs();
 
     constructor(address hubAddress) ContractStatus(hubAddress) {}
 
@@ -131,6 +133,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
+        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
 
         // V10 new dependencies — fail-fast. Each MUST be Hub-registered at
         // KAV10 initialize() time. The Phase 7 transitional try/catch tolerance
@@ -180,19 +183,17 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      * @return kcId Newly created knowledge collection id.
      */
     function publish(PublishParams calldata p) external returns (uint256 kcId) {
-        uint40 currentEpoch;
-        (currentEpoch, kcId) = _executePublishCore(p);
+        // `currentEpoch` from the core is unused on this path — TRAC was
+        // already written into `EpochStorage.addTokensToEpochRange` at
+        // `createAccount` time, so no per-epoch distribution runs here
+        // (double-count prevention).
+        (, kcId) = _executePublishCore(p);
 
         // Spend publisher allowance. NFT reverts NoConvictionAccount(msg.sender)
         // if caller is not registered as an agent on any active account.
         // Discounted amount is discarded here — the NFT emits `CostCovered`
         // with full detail for off-chain accounting.
         publishingConvictionNFT.coverPublishingCost(msg.sender, p.tokenAmount);
-
-        // Per-node produced value for scoring. Uses BASE `tokenAmount`, not
-        // `discountedCost`: a node's produced-value score reflects the data
-        // value the publisher declared, not the cheaper effective spend.
-        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
 
         return kcId;
     }
@@ -213,16 +214,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         PublishParams calldata p,
         address paymaster
     ) external returns (uint256 kcId) {
-        (uint40 currentEpoch, uint256 coreKcId) = _executePublishCore(p);
+        uint40 currentEpoch;
+        (currentEpoch, kcId) = _executePublishCore(p);
 
         // Pull funds + distribute to the reward pool across the epoch range.
         _addTokens(p.tokenAmount, paymaster);
         _distributeTokens(p.tokenAmount, p.epochs, currentEpoch);
 
-        // Per-node produced value. BASE amount — same rationale as `publish`.
-        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
-
-        return coreKcId;
+        return kcId;
     }
 
     // ========================================================================
@@ -254,7 +253,16 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             )
         );
         bytes32 publisherEthDigest = ECDSA.toEthSignedMessageHash(publisherDigest);
-        _verifySignature(p.publisherNodeIdentityId, publisherEthDigest, p.publisherNodeR, p.publisherNodeVS);
+        // `_verifySignature` returns the recovered wallet, so we avoid a
+        // second `ECDSA.recover` of the same digest. The returned address
+        // is the one that actually signed the merkle root — KCS stores it
+        // as the merkle-root author, NOT the paying agent.
+        address publisherWallet = _verifySignature(
+            p.publisherNodeIdentityId,
+            publisherEthDigest,
+            p.publisherNodeR,
+            p.publisherNodeVS
+        );
 
         // ACK digest (H5: same chain/contract prefix as publisher digest).
         bytes32 ackDigest = keccak256(
@@ -272,22 +280,28 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         );
         _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
 
-        // Recover publisher wallet from the (already verified) signature.
-        // This is the address that actually signed the merkle root — KCS
-        // stores it as the merkle-root author, NOT the paying agent.
-        address publisherWallet = ECDSA.recover(publisherEthDigest, p.publisherNodeR, p.publisherNodeVS);
-
         // --- 2. CG existence + validation (revert before any state mutation) ---
 
         // Decision #3: contextGraphId == 0 is forbidden. No legacy path.
         if (p.contextGraphId == 0) revert ZeroContextGraphId();
 
+        // Same-contract input validation — without this, epochs == 0 would
+        // flow through `_validateTokenAmount` (which computes 0), through
+        // KCS create, and only revert downstream in
+        // `ContextGraphValueStorage.addCGValueForEpochRange` with
+        // `ZeroLifetime`. That downstream error hides the real cause from
+        // the caller. Fail fast here with a KAV10-local diagnostic.
+        if (p.epochs == 0) revert ZeroEpochs();
+
         // H7: SafeCast guards the uint96 cast in _validateTokenAmount.
         _validateTokenAmount(p.byteSize, p.epochs, p.tokenAmount, false);
 
         // N17: pass the PAYING PRINCIPAL (msg.sender of this tx — the
-        // publishing agent), NOT the recovered node signer. This is the
-        // fix for the V9 bug at KAV10.sol:188 that passed publisherWallet.
+        // publishing agent) to `isAuthorizedPublisher`, NOT the recovered
+        // node signer. The pre-rewrite implementation authorized against
+        // the wrong principal — a paying agent could be rejected if their
+        // node ran the signing, and a non-authorized agent could be
+        // approved if a node it didn't control signed off.
         if (!contextGraphs.isAuthorizedPublisher(p.contextGraphId, msg.sender)) {
             revert KnowledgeAssetsLib.UnauthorizedPublisher(p.contextGraphId, msg.sender);
         }
@@ -325,6 +339,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             uint256(p.epochs),
             uint256(p.tokenAmount)
         );
+
+        // Per-node produced value for scoring. Shared by both public entry
+        // points — uses BASE `tokenAmount`, NOT any discounted effective
+        // spend, so a node's produced-value score reflects the data value
+        // the publisher declared.
+        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
     }
 
     // ========================================================================
@@ -409,8 +429,13 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
     }
 
-    function _verifySignature(uint72 identityId, bytes32 messageHash, bytes32 _r, bytes32 _vs) internal view {
-        address signer = ECDSA.tryRecover(messageHash, _r, _vs);
+    function _verifySignature(
+        uint72 identityId,
+        bytes32 messageHash,
+        bytes32 _r,
+        bytes32 _vs
+    ) internal view returns (address signer) {
+        signer = ECDSA.tryRecover(messageHash, _r, _vs);
 
         if (signer == address(0)) {
             revert KnowledgeCollectionLib.InvalidSignature(identityId, messageHash, _r, _vs);
@@ -423,8 +448,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
 
         // Core nodes must be staked (spec §9.0)
-        StakingStorage ss = StakingStorage(hub.getContractAddress("StakingStorage"));
-        require(ss.getNodeStake(identityId) > 0, "ACK signer has no stake");
+        require(stakingStorage.getNodeStake(identityId) > 0, "ACK signer has no stake");
     }
 
     // ========================================================================
@@ -478,7 +502,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 revert TokenLib.TooLowBalance(address(token), token.balanceOf(msg.sender), tokenAmount);
             }
 
-            if (!token.transferFrom(msg.sender, address(hub.getContractAddress("StakingStorage")), tokenAmount)) {
+            if (!token.transferFrom(msg.sender, address(stakingStorage), tokenAmount)) {
                 revert TokenLib.TransferFailed();
             }
         }
@@ -555,7 +579,11 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     // ========================================================================
 
     function _distributeTokens(uint96 tokenAmount, uint256 epochs, uint40 currentEpoch) internal {
-        require(epochs > 0, "epochs must be > 0");
+        // `epochs > 0` is guaranteed by the `ZeroEpochs` guard in
+        // `_executePublishCore`. No defensive re-check needed — the only
+        // caller is `publishDirect`, which runs through the core helper
+        // first. `extendKnowledgeCollectionLifetime` does NOT call this
+        // helper (it hits `addTokensToEpochRange` directly).
 
         uint256 epochLengthInSeconds = chronos.epochLength();
         uint256 timeRemainingInCurrentEpoch = chronos.timeUntilNextEpoch();
