@@ -232,6 +232,11 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
+  it('dedupes selected files per target project instead of globally per conversation', () => {
+    expect(panelRight).toContain('`${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`');
+    expect(panelRight).toContain('`${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`');
+  });
+
   it('only enables attachment-only sends when at least one draft is sendable', () => {
     expect(panelRight).toContain('selectedAttachmentDrafts.some(isSendableAttachmentDraft)');
     expect(panelRight).toContain('const hasSendableDrafts = drafts.some(isSendableAttachmentDraft);');

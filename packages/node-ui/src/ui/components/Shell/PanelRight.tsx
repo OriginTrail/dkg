@@ -1083,10 +1083,10 @@ export function PanelRight() {
 
     const existingKeys = new Set(
       (attachmentDraftsByConversation[conversationKey] ?? []).map((draft) =>
-        `${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`),
+        `${draft.contextGraphId}:${draft.file.name}:${draft.file.size}:${draft.file.lastModified}`),
     );
     const uniqueFiles = incoming.filter((file) => {
-      const key = `${file.name}:${file.size}:${file.lastModified}`;
+      const key = `${contextGraphId}:${file.name}:${file.size}:${file.lastModified}`;
       if (existingKeys.has(key)) return false;
       existingKeys.add(key);
       return true;
