@@ -22,11 +22,6 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ConvictionAccountNotConfigured",
-    "type": "error"
-  },
-  {
     "inputs": [
       {
         "internalType": "uint72",
@@ -119,6 +114,22 @@
       }
     ],
     "name": "NotBatchPublisher",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
     "type": "error"
   },
   {
@@ -233,8 +244,24 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      }
+    ],
+    "name": "ZeroAddressDependency",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroContextGraphId",
     "type": "error"
   },
   {
@@ -265,10 +292,10 @@
   },
   {
     "inputs": [],
-    "name": "contextGraphs",
+    "name": "contextGraphValueStorage",
     "outputs": [
       {
-        "internalType": "contract ContextGraphs",
+        "internalType": "contract ContextGraphValueStorage",
         "name": "",
         "type": "address"
       }
@@ -278,109 +305,15 @@
   },
   {
     "inputs": [],
-    "name": "convictionAccount",
+    "name": "contextGraphs",
     "outputs": [
       {
-        "internalType": "contract PublishingConvictionAccount",
+        "internalType": "contract ContextGraphs",
         "name": "",
         "type": "address"
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "publishOperationId",
-        "type": "string"
-      },
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "knowledgeAssetsAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint88",
-        "name": "byteSize",
-        "type": "uint88"
-      },
-      {
-        "internalType": "uint40",
-        "name": "epochs",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint96",
-        "name": "tokenAmount",
-        "type": "uint96"
-      },
-      {
-        "internalType": "bool",
-        "name": "isImmutable",
-        "type": "bool"
-      },
-      {
-        "internalType": "address",
-        "name": "paymaster",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "convictionAccountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "publisherNodeIdentityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "publisherNodeR",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "publisherNodeVS",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "identityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "r",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "vs",
-        "type": "bytes32[]"
-      }
-    ],
-    "name": "createKnowledgeAssets",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -570,6 +503,206 @@
   {
     "inputs": [
       {
+        "components": [
+          {
+            "internalType": "string",
+            "name": "publishOperationId",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "contextGraphId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "merkleRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "knowledgeAssetsAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint88",
+            "name": "byteSize",
+            "type": "uint88"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epochs",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint96",
+            "name": "tokenAmount",
+            "type": "uint96"
+          },
+          {
+            "internalType": "bool",
+            "name": "isImmutable",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint72",
+            "name": "publisherNodeIdentityId",
+            "type": "uint72"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "publisherNodeR",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "publisherNodeVS",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint72[]",
+            "name": "identityIds",
+            "type": "uint72[]"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "r",
+            "type": "bytes32[]"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "vs",
+            "type": "bytes32[]"
+          }
+        ],
+        "internalType": "struct KnowledgeAssetsV10.PublishParams",
+        "name": "p",
+        "type": "tuple"
+      }
+    ],
+    "name": "publish",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "kcId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "string",
+            "name": "publishOperationId",
+            "type": "string"
+          },
+          {
+            "internalType": "uint256",
+            "name": "contextGraphId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "merkleRoot",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "knowledgeAssetsAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint88",
+            "name": "byteSize",
+            "type": "uint88"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epochs",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint96",
+            "name": "tokenAmount",
+            "type": "uint96"
+          },
+          {
+            "internalType": "bool",
+            "name": "isImmutable",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint72",
+            "name": "publisherNodeIdentityId",
+            "type": "uint72"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "publisherNodeR",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "publisherNodeVS",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint72[]",
+            "name": "identityIds",
+            "type": "uint72[]"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "r",
+            "type": "bytes32[]"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "vs",
+            "type": "bytes32[]"
+          }
+        ],
+        "internalType": "struct KnowledgeAssetsV10.PublishParams",
+        "name": "p",
+        "type": "tuple"
+      },
+      {
+        "internalType": "address",
+        "name": "paymaster",
+        "type": "address"
+      }
+    ],
+    "name": "publishDirect",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "kcId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "publishingConvictionNFT",
+    "outputs": [
+      {
+        "internalType": "contract IDKGPublishingConvictionNFT",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "_status",
         "type": "bool"
@@ -578,19 +711,6 @@
     "name": "setStatus",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "shardingTableStorage",
-    "outputs": [
-      {
-        "internalType": "contract ShardingTableStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
