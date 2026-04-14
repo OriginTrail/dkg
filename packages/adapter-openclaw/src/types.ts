@@ -149,20 +149,14 @@ export interface OpenClawChannelAdapter {
 /** Discriminator for where a `MemorySearchResult` originated. */
 export type MemorySource = 'memory' | 'sessions';
 
-/** Minimal citation metadata attached to a search hit. Shape intentionally loose. */
-export interface MemoryCitation {
-  kind?: string;
-  ref?: string;
-  label?: string;
-  [key: string]: unknown;
-}
-
 /**
  * Upstream search result shape. `path` is an opaque identifier (file path or
  * graph-backed synthetic URI). `startLine`/`endLine` are `1` for graph-backed
  * backends that have no natural line concept. `snippet` is the matched text,
  * typically truncated. `source` distinguishes per-project memory hits from
- * session-history hits.
+ * session-history hits. `citation` is a free-form string per upstream
+ * `packages/memory-host-sdk/src/host/types.ts:3-10` — do not promote to a
+ * structured object without checking upstream first.
  */
 export interface MemorySearchResult {
   path: string;
@@ -171,7 +165,7 @@ export interface MemorySearchResult {
   score: number;
   snippet: string;
   source: MemorySource;
-  citation?: MemoryCitation;
+  citation?: string;
 }
 
 /** Search opts the memory slot passes through. */
@@ -233,13 +227,22 @@ export interface MemoryEmbeddingProbeResult {
  * expects from a plugin's memory runtime. The DKG provider implements this
  * against real V10 primitives (assertion-scoped WM SPARQL queries) rather
  * than the file-backed pattern `memory-core` / `memory-lancedb` use.
+ *
+ * NOTE on the probe return-type asymmetry: upstream declares
+ * `probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult>` but
+ * `probeVectorAvailability(): Promise<boolean>`. Do not "normalize" the
+ * shapes — a bare boolean `false` from `probeVectorAvailability` is
+ * mandatory because upstream evaluates the result with `if (available) …`
+ * and a `{ok:false,error:…}` object is truthy, which would silently claim
+ * a vector backend is available when it is not. FAIL #2 from
+ * openclaw-runtime's audit catches exactly this.
  */
 export interface MemorySearchManager {
   search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]>;
   readFile(request: MemoryReadFileRequest): Promise<MemoryReadFileResult>;
   status(): MemoryProviderStatus;
   probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult>;
-  probeVectorAvailability(): Promise<MemoryEmbeddingProbeResult>;
+  probeVectorAvailability(): Promise<boolean>;
   sync?(): Promise<void>;
   close?(): Promise<void>;
 }
@@ -252,16 +255,33 @@ export interface MemoryRuntimeRequest {
   purpose?: string;
 }
 
-/** Factory result — a search manager plus optional non-fatal error. */
+/**
+ * Factory result — a search manager plus optional non-fatal error.
+ *
+ * `manager` is nullable: when the plugin cannot build a manager for a
+ * given request (daemon down, session resolution failure, transient
+ * dependency unavailable), upstream accepts `{ manager: null, error:
+ * "..." }` and routes the caller through a fallback instead of crashing.
+ * FAIL #3 from openclaw-runtime's audit: the type was previously
+ * non-nullable, which would have forced a construction throw in those
+ * paths rather than the documented graceful-decline contract.
+ *
+ * Upstream internally wraps `MemorySearchManager` as
+ * `RegisteredMemorySearchManager` — openclaw-runtime hasn't traced the
+ * wrapper fields yet, but the runtime contract accepts a bare
+ * `MemorySearchManager` because upstream's loader wraps it. Resync this
+ * type if a future audit finds the bare shape no longer satisfies the
+ * registration call.
+ */
 export interface MemoryRuntimeResult {
-  manager: MemorySearchManager;
+  manager: MemorySearchManager | null;
   error?: string;
 }
 
 /**
  * Upstream `MemoryPluginRuntime` shape. `getMemorySearchManager` is the
  * per-(cfg, agentId, sessionKey) factory; a slot-filling plugin is expected
- * to return a manager instance or an error-wrapped result.
+ * to return a manager instance or an error-wrapped null manager.
  */
 export interface MemoryPluginRuntime {
   getMemorySearchManager(request: MemoryRuntimeRequest): Promise<MemoryRuntimeResult>;

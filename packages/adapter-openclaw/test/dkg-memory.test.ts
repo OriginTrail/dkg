@@ -200,11 +200,19 @@ describe('DkgMemorySearchManager', () => {
       expect(result.error).toBeTypeOf('string');
     });
 
-    it('probeVectorAvailability returns ok:false with an explanation', async () => {
+    it('probeVectorAvailability returns a bare boolean false (not an object)', async () => {
+      // FAIL #2 from openclaw-runtime's contract audit: upstream declares
+      // this method Promise<boolean>, and upstream's `if (available) …`
+      // check would treat any object (even {ok:false}) as truthy and
+      // silently claim a vector backend is available. The DKG provider
+      // must return a bare `false` to opt out honestly.
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
       const result = await manager.probeVectorAvailability();
-      expect(result.ok).toBe(false);
-      expect(result.error).toBeTypeOf('string');
+      expect(result).toBe(false);
+      expect(typeof result).toBe('boolean');
+      // And the truthiness check must evaluate to false the way upstream
+      // uses it, not the way a {ok:false,...} object would (truthy).
+      expect(result ? 'upstream-would-use-vector' : 'upstream-skips-vector').toBe('upstream-skips-vector');
     });
   });
 
@@ -330,6 +338,28 @@ describe('buildDkgMemoryRuntime', () => {
     const result = await runtime.getMemorySearchManager(request);
     expect(result.manager).toBeInstanceOf(DkgMemorySearchManager);
     expect(result.error).toBeUndefined();
+  });
+
+  it('returns { manager: null, error } when DkgMemorySearchManager construction throws', async () => {
+    // FAIL #3 from openclaw-runtime's audit: MemoryRuntimeResult.manager
+    // must be nullable so the runtime can gracefully decline to build a
+    // manager rather than propagating a construction throw. Simulate a
+    // construction failure by spying on the class prototype.
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const runtime = buildDkgMemoryRuntime(client, makeResolver());
+
+    const buildStatusSpy = vi
+      .spyOn(DkgMemorySearchManager.prototype as any, 'buildStatus')
+      .mockImplementation(() => {
+        throw new Error('simulated construction failure');
+      });
+    try {
+      const result = await runtime.getMemorySearchManager({ sessionKey: 'test-session' });
+      expect(result.manager).toBeNull();
+      expect(result.error).toContain('simulated construction failure');
+    } finally {
+      buildStatusSpy.mockRestore();
+    }
   });
 
   it('resolveMemoryBackendConfig reports kind=dkg and the agent-context graph', () => {

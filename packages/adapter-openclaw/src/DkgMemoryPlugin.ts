@@ -212,11 +212,13 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     };
   }
 
-  async probeVectorAvailability(): Promise<MemoryEmbeddingProbeResult> {
-    return {
-      ok: false,
-      error: 'DKG memory provider uses lexical SPARQL match; no vector store in v1',
-    };
+  async probeVectorAvailability(): Promise<boolean> {
+    // MUST return a bare boolean — upstream evaluates the result with
+    // `if (available) { ... }`, and any object (even {ok:false,...}) would
+    // be truthy and falsely claim a vector backend is available. See
+    // FAIL #2 from openclaw-runtime's contract audit and the matching
+    // note on `MemorySearchManager.probeVectorAvailability` in types.ts.
+    return false;
   }
 
   async sync(): Promise<void> {
@@ -258,13 +260,24 @@ export function buildDkgMemoryRuntime(
 ): MemoryPluginRuntime {
   return {
     async getMemorySearchManager(request: MemoryRuntimeRequest): Promise<MemoryRuntimeResult> {
-      const manager = new DkgMemorySearchManager({
-        client,
-        resolver,
-        sessionKey: request.sessionKey,
-        logger,
-      });
-      return { manager };
+      // The runtime contract permits returning { manager: null, error } so
+      // upstream can route the caller through its documented fallback path
+      // rather than propagating a construction throw. See FAIL #3 from
+      // openclaw-runtime's contract audit. Any exception while constructing
+      // the DkgMemorySearchManager is surfaced as a non-fatal null result.
+      try {
+        const manager = new DkgMemorySearchManager({
+          client,
+          resolver,
+          sessionKey: request.sessionKey,
+          logger,
+        });
+        return { manager };
+      } catch (err: any) {
+        const message = typeof err?.message === 'string' ? err.message : String(err);
+        logger?.warn?.(`[dkg-memory] getMemorySearchManager failed: ${message}`);
+        return { manager: null, error: message };
+      }
     },
     resolveMemoryBackendConfig() {
       return {
