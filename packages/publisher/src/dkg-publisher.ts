@@ -557,6 +557,8 @@ export class DKGPublisher implements Publisher {
 
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
+    // Block when status is anything other than explicit "registered" (including
+    // missing status for CGs learned via gossip that haven't synced _meta).
     if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock')) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
@@ -564,7 +566,7 @@ export class DKGPublisher implements Publisher {
         `SELECT ?status WHERE { GRAPH <${cgMetaUri}> { <${cgDataUri}> <https://dkg.network/ontology#registrationStatus> ?status } } LIMIT 1`,
       );
       const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
-      if (regStatus === 'unregistered') {
+      if (regStatus !== 'registered') {
         throw new Error(
           `Context graph "${contextGraphId}" is not registered on-chain. ` +
           `Run 'dkg context-graph register ${contextGraphId}' first to enable Verified Memory publishing.`,

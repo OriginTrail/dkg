@@ -2043,9 +2043,10 @@ export class DKGAgent {
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast only ontology-graph quads (not private meta-graph data)
+      // Broadcast ontology quads + _meta quads (registration status, curator,
+      // allowlist) so remote nodes can enforce access control and VM guards.
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
+      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph || q.graph === cgMetaGraph);
       const nquads = broadcastQuads.map(q => {
         const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
         return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
@@ -2104,19 +2105,29 @@ export class DKGAgent {
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
 
-    // Read existing description from ontology
+    // Read existing description and access policy from ontology so we
+    // preserve locally-configured values on registration.
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } } LIMIT 1`,
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 
+    let resolvedAccessPolicy = opts?.accessPolicy;
+    if (resolvedAccessPolicy === undefined) {
+      const apResult = await this.store.query(
+        `SELECT ?ap WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } } LIMIT 1`,
+      );
+      const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
+      resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+    }
+
     let onChainId: string;
     try {
       const result = await this.chain.createContextGraph({
         name: id,
         description,
-        accessPolicy: opts?.accessPolicy ?? 0,
+        accessPolicy: resolvedAccessPolicy,
         revealOnChain: opts?.revealOnChain,
       });
       onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
@@ -2150,6 +2161,31 @@ export class DKGAgent {
       sub.onChainId = onChainId;
     }
 
+    // Gossip registration status update so peers update their VM guards
+    try {
+      const regNquads = [
+        `<${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "registered" <${cgMetaGraph}> .`,
+        `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`,
+      ].join('\n');
+      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const regMsg = encodePublishRequest({
+        ual: `did:dkg:context-graph:${id}`,
+        nquads: new TextEncoder().encode(regNquads),
+        paranetId: SYSTEM_PARANETS.ONTOLOGY,
+        kas: [],
+        publisherIdentity: this.wallet.keypair.publicKey,
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: '',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await this.gossip.publish(ontologyTopic, regMsg);
+    } catch {
+      // Peers may not be subscribed yet
+    }
+
     return { onChainId };
   }
 
@@ -2168,13 +2204,34 @@ export class DKGAgent {
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const paranetUri = paranetDataGraphUri(contextGraphId);
 
-    // Add peer to allowlist
     await this.store.insert([{
       subject: paranetUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
       object: `"${peerId}"`,
       graph: cgMetaGraph,
     }]);
+
+    // Gossip the invite so peers update their allowlists
+    try {
+      const inviteNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> "${peerId}" <${cgMetaGraph}> .`;
+      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const inviteMsg = encodePublishRequest({
+        ual: `did:dkg:context-graph:${contextGraphId}`,
+        nquads: new TextEncoder().encode(inviteNquad),
+        paranetId: SYSTEM_PARANETS.ONTOLOGY,
+        kas: [],
+        publisherIdentity: this.wallet.keypair.publicKey,
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: '',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await this.gossip.publish(ontologyTopic, inviteMsg);
+    } catch {
+      // Peers may not be subscribed yet
+    }
 
     this.log.info(ctx, `Invited peer ${peerId} to context graph "${contextGraphId}"`);
   }
@@ -2376,10 +2433,11 @@ export class DKGAgent {
     const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
+    // Don't claim creator — we may be subscribing to someone else's CG.
+    // Creator is resolved when the real owner's ontology quads arrive via sync.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
@@ -2406,7 +2464,6 @@ export class DKGAgent {
 
     this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
 
-    // Broadcast so peers learn about it
     const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
     const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
     const nquads = broadcastQuads.map(q => {
