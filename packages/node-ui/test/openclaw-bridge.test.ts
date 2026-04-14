@@ -100,6 +100,15 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/timedOut/);
   });
 
+  it('discarding an imported assertion evicts its cached extraction status', () => {
+    const discardBlock = daemonSrc.slice(
+      daemonSrc.indexOf("// POST /api/assertion/:name/discard"),
+      daemonSrc.indexOf("// POST /api/assertion/:name/import-file"),
+    );
+    expect(discardBlock).toContain('const assertionUri = contextGraphAssertionUri(');
+    expect(discardBlock).toContain('extractionStatus.delete(assertionUri);');
+  });
+
   it('chat-openclaw persists outbound messages', () => {
     const chatOclawBlock = daemonSrc.slice(
       daemonSrc.indexOf("path === '/api/chat-openclaw'"),
@@ -188,8 +197,25 @@ describe('PanelRight UI - connected agent flow', () => {
     expect(panelRight).toContain('Import target:');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain('Stored only');
-    expect(panelRight).toContain('selectedCompletedAttachments.length === 0');
+    expect(panelRight).toContain('Queued - imports on send');
+    expect(panelRight).toContain('selectedAttachmentDrafts.length === 0');
     expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
+  });
+
+  it('imports local-agent attachments on send instead of on selection', () => {
+    const addAttachmentsBlock = panelRight.slice(
+      panelRight.indexOf('const addAttachmentsForConversation'),
+      panelRight.indexOf('const prepareAttachmentDraftsForSend'),
+    );
+    const sendLocalMessageBlock = panelRight.slice(
+      panelRight.indexOf('const sendLocalMessage'),
+      panelRight.indexOf('const connectIntegration'),
+    );
+
+    expect(addAttachmentsBlock).not.toContain('await importFile(');
+    expect(sendLocalMessageBlock).toContain('const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);');
+    expect(sendLocalMessageBlock).toContain("if (!text && attachments.length === 0) {");
+    expect(panelRight).not.toContain('selectedCompletedAttachments');
   });
 
   it('merges reloaded local history with live messages', () => {

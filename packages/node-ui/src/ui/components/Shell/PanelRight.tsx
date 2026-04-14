@@ -512,9 +512,6 @@ function ConnectedAgentsTab(props: {
     onRemoveAttachment,
   } = props;
   const selectedAttachmentDrafts = attachments;
-  const selectedCompletedAttachments = attachments
-    .map((draft) => draftToAttachmentRef(draft))
-    .filter((item): item is LocalAgentChatAttachmentRef => item != null);
   const selectedProject = activeProjectId
     ? (availableProjects.find((project) => project.id === activeProjectId) ?? null)
     : null;
@@ -724,7 +721,7 @@ function ConnectedAgentsTab(props: {
                     {selectedAttachmentDrafts.map((attachment) => {
                       const triples = attachment.result?.extraction.tripleCount ?? attachment.result?.extraction.triplesWritten;
                       const statusLabel = attachment.status === 'queued'
-                        ? 'Queued'
+                        ? 'Queued - imports on send'
                         : attachment.status === 'uploading'
                           ? 'Importing'
                           : attachment.status === 'completed'
@@ -758,6 +755,7 @@ function ConnectedAgentsTab(props: {
                             className="v10-agents-refresh"
                             onClick={() => onRemoveAttachment(attachment.id)}
                             title="Remove attachment"
+                            disabled={localSending}
                             style={{ padding: '2px 8px' }}
                           >
                             Remove
@@ -842,7 +840,7 @@ function ConnectedAgentsTab(props: {
                   <button
                     className="v10-agent-send-btn"
                     onClick={onSendLocalMessage}
-                    disabled={inputDisabled || (!localInput.trim() && selectedCompletedAttachments.length === 0)}
+                    disabled={inputDisabled || (!localInput.trim() && selectedAttachmentDrafts.length === 0)}
                   >
                     Send
                   </button>
@@ -1012,9 +1010,6 @@ export function PanelRight() {
   const selectedAttachmentDrafts = selectedConversationKey
     ? (attachmentDraftsByConversation[selectedConversationKey] ?? [])
     : [];
-  const selectedCompletedAttachments = selectedAttachmentDrafts
-    .map((draft) => draftToAttachmentRef(draft))
-    .filter((item): item is LocalAgentChatAttachmentRef => item != null);
   const scrollLocalChatToBottom = useCallback(() => {
     localChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
@@ -1056,7 +1051,7 @@ export function PanelRight() {
     }));
   }, []);
 
-  const addAttachmentsForConversation = useCallback(async (
+  const addAttachmentsForConversation = useCallback((
     conversationKey: string,
     files: FileList | File[],
     contextGraphId: string,
@@ -1086,41 +1081,58 @@ export function PanelRight() {
     }));
 
     updateAttachmentDrafts(conversationKey, (prev) => [...prev, ...drafts]);
+  }, [attachmentDraftsByConversation, updateAttachmentDrafts]);
+
+  const prepareAttachmentDraftsForSend = useCallback(async (
+    conversationKey: string,
+    drafts: LocalAgentAttachmentDraft[],
+  ): Promise<LocalAgentAttachmentDraft[]> => {
+    const processed: LocalAgentAttachmentDraft[] = [];
 
     for (const draft of drafts) {
+      if (draft.status === 'completed' || draft.status === 'skipped') {
+        processed.push(draft);
+        continue;
+      }
+
       updateAttachmentDrafts(conversationKey, (prev) =>
-        prev.map((item) => (item.id === draft.id ? { ...item, status: 'uploading' } : item)),
+        prev.map((item) => (item.id === draft.id
+          ? { ...item, status: 'uploading', error: undefined }
+          : item)),
       );
+
       try {
-        const result = await importFile(draft.assertionName, contextGraphId, draft.file);
+        const result = await importFile(draft.assertionName, draft.contextGraphId, draft.file);
         const nextStatus: LocalAgentAttachmentStatus = result.extraction.status === 'completed'
           ? 'completed'
           : result.extraction.status === 'skipped'
             ? 'skipped'
             : 'error';
+        const nextDraft: LocalAgentAttachmentDraft = {
+          ...draft,
+          status: nextStatus,
+          result,
+          error: result.extraction.error,
+        };
+        processed.push(nextDraft);
         updateAttachmentDrafts(conversationKey, (prev) =>
-          prev.map((item) => (item.id === draft.id
-            ? {
-                ...item,
-                status: nextStatus,
-                result,
-                error: result.extraction.error,
-              }
-            : item)),
+          prev.map((item) => (item.id === draft.id ? nextDraft : item)),
         );
       } catch (err: any) {
+        const nextDraft: LocalAgentAttachmentDraft = {
+          ...draft,
+          status: 'error',
+          error: err?.message ?? 'Upload failed',
+        };
+        processed.push(nextDraft);
         updateAttachmentDrafts(conversationKey, (prev) =>
-          prev.map((item) => (item.id === draft.id
-            ? {
-                ...item,
-                status: 'error',
-                error: err?.message ?? 'Upload failed',
-              }
-            : item)),
+          prev.map((item) => (item.id === draft.id ? nextDraft : item)),
         );
       }
     }
-  }, [attachmentDraftsByConversation, updateAttachmentDrafts]);
+
+    return processed;
+  }, [updateAttachmentDrafts]);
 
   const removeAttachmentForConversation = useCallback((conversationKey: string, attachmentId: string) => {
     updateAttachmentDrafts(conversationKey, (prev) => prev.filter((draft) => draft.id !== attachmentId));
@@ -1284,33 +1296,46 @@ export function PanelRight() {
     const integration = selectedIntegration;
     const conversation = selectedConversation;
     const text = localInput.trim();
-    const attachments = selectedCompletedAttachments;
-    if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && attachments.length === 0)) return;
+    const drafts = selectedAttachmentDrafts;
+    if (!integration?.chatSupported || !integration.chatReady || localSending || !conversation || (!text && drafts.length === 0)) return;
     const integrationId = integration.id;
     const conversationKey = conversation.stateKey;
-    const correlationId = crypto.randomUUID();
-    const messageText = text || buildAttachmentSummary(attachments);
-    const attachmentIds = attachments.map((attachment) => attachment.id);
-
-    const userId = `local:${conversationKey}:${correlationId}:user`;
-    const assistantId = `local:${conversationKey}:${correlationId}:assistant`;
-    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    updateLocalMessages(conversationKey, (prev) => [
-      ...prev,
-      { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, attachments },
-      { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
-    ]);
-    setLocalInputForConversation(conversationKey, '');
     setLocalSendingForConversation(conversationKey, true);
     setConnectError(null);
-
-    const controller = new AbortController();
-    localAbortRef.current = controller;
+    let controller: AbortController | null = null;
+    let assistantId = '';
 
     try {
+      const processedDrafts = await prepareAttachmentDraftsForSend(conversationKey, drafts);
+      const attachments = processedDrafts
+        .map((draft) => draftToAttachmentRef(draft))
+        .filter((item): item is LocalAgentChatAttachmentRef => item != null);
+      if (!text && attachments.length === 0) {
+        return;
+      }
+
+      const correlationId = crypto.randomUUID();
+      const messageText = text || buildAttachmentSummary(attachments);
+      const attachmentIds = attachments
+        .map((attachment) => attachment.id)
+        .filter((attachmentId): attachmentId is string => typeof attachmentId === 'string' && attachmentId.length > 0);
+      const userId = `local:${conversationKey}:${correlationId}:user`;
+      assistantId = `local:${conversationKey}:${correlationId}:assistant`;
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      updateLocalMessages(conversationKey, (prev) => [
+        ...prev,
+        { id: userId, turnId: correlationId, role: 'user', content: messageText, ts: now, attachments },
+        { id: assistantId, turnId: correlationId, role: 'assistant', content: '', ts: now, streaming: true },
+      ]);
+      setLocalInputForConversation(conversationKey, '');
+
+      controller = new AbortController();
+      localAbortRef.current = controller;
+
       const result = await streamLocalAgentChat(integrationId, messageText, {
         correlationId,
-        signal: controller.signal,
+        signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
         attachments,
         onEvent: (event: LocalAgentStreamEvent) => {
@@ -1342,19 +1367,21 @@ export function PanelRight() {
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
-      updateLocalMessages(conversationKey, (prev) =>
-        prev.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                content: err?.name === 'AbortError'
-                  ? 'Request cancelled.'
-                  : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
-                streaming: false,
-              }
-            : message,
-        ),
-      );
+      if (assistantId) {
+        updateLocalMessages(conversationKey, (prev) =>
+          prev.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: err?.name === 'AbortError'
+                    ? 'Request cancelled.'
+                    : `Error: ${formatLocalAgentErrorMessage(integration, err)}`,
+                  streaming: false,
+                }
+              : message,
+          ),
+        );
+      }
       void refreshLocalIntegrations();
     } finally {
       setLocalSendingForConversation(conversationKey, false);
@@ -1365,7 +1392,8 @@ export function PanelRight() {
     loadSessions,
     localInput,
     localSending,
-    selectedCompletedAttachments,
+    prepareAttachmentDraftsForSend,
+    selectedAttachmentDrafts,
     refreshLocalIntegrations,
     selectedConversation,
     selectedIntegration,

@@ -691,6 +691,9 @@ describe('DkgChannelPlugin', () => {
     expect(dispatched).toMatchObject({
       ctx: expect.objectContaining({
         BodyForAgent: expect.stringContaining('Attached Working Memory items:'),
+        RawBody: 'Hello',
+        CommandBody: 'Hello',
+        BodyForCommands: 'Hello',
         AttachmentRefs: attachmentRefs,
         SessionKey: 'session-1',
       }),

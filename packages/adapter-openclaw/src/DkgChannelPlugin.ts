@@ -784,8 +784,8 @@ export class DkgChannelPlugin {
       timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
     });
     const ctxPayload = {
-      Body: formattedBody, BodyForAgent: agentBody, RawBody: agentBody,
-      CommandBody: agentBody, BodyForCommands: agentBody,
+      Body: formattedBody, BodyForAgent: agentBody, RawBody: text,
+      CommandBody: text, BodyForCommands: text,
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',

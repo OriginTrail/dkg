@@ -3513,6 +3513,13 @@ async function handleRequest(
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
     try {
       await agent.assertion.discard(contextGraphId, assertionName, subGraphName ? { subGraphName } : undefined);
+      const assertionUri = contextGraphAssertionUri(
+        contextGraphId,
+        agent.peerId,
+        assertionName,
+        subGraphName,
+      );
+      extractionStatus.delete(assertionUri);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (err.message?.includes('not found') || err.message?.includes('Invalid') || err.message?.includes('Unsafe')) {
