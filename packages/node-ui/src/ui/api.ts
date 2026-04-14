@@ -551,6 +551,15 @@ interface LocalAgentChatRequestOptions {
   identity?: string;
   attachments?: LocalAgentChatAttachmentRef[];
   contextEntries?: LocalAgentChatContextEntry[];
+  /**
+   * UI-selected project context graph for this turn. Forwarded to the
+   * adapter's channel bridge as `uiContextGraphId` on the envelope so the
+   * adapter's DKG memory slot can scope slot-backed recall to the user's
+   * current project. `DkgMemorySearchManager.search` reads it via the
+   * per-session resolver; `dkg_memory_import` uses it as the fallback CG
+   * when the agent does not supply one explicitly.
+   */
+  contextGraphId?: string;
 }
 
 export const sendOpenClawChat = (peerId: string, text: string) =>
@@ -571,6 +580,7 @@ export async function sendOpenClawLocalChat(
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts?.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -606,6 +616,7 @@ export async function streamOpenClawLocalChat(
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
     ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
+    ...(opts.contextGraphId ? { contextGraphId: opts.contextGraphId } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -1042,6 +1053,8 @@ export async function streamLocalAgentChat(
     sessionId?: string;
     attachments?: LocalAgentChatAttachmentRef[];
     contextEntries?: LocalAgentChatContextEntry[];
+    /** UI-selected project context graph for this turn (memory scope). */
+    contextGraphId?: string;
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();

@@ -1434,6 +1434,7 @@ export function PanelRight() {
         sessionId: conversation.sessionId ?? undefined,
         attachments,
         contextEntries,
+        contextGraphId: activeProjectId ?? undefined,
         onEvent: (event: LocalAgentStreamEvent) => {
           if (event.type === 'text_delta') {
             updateLocalMessages(conversationKey, (prev) =>

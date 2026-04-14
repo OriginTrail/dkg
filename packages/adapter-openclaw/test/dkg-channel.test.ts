@@ -1409,4 +1409,75 @@ describe('DkgChannelPlugin', () => {
       vi.useRealTimers();
     }
   });
+
+  it('processInbound stamps the UI-selected context graph onto the resolved sessionKey so slot-backed recall can resolve it', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-ui' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn().mockResolvedValue(undefined),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            // At this point the DkgChannelPlugin has already stashed the UI CG
+            // against the resolved sessionKey. The memory slot would fire here
+            // during dispatch and look it up via getSessionProjectContextGraphId.
+            await params.dispatcherOptions.deliver({ text: 'ok' });
+          },
+        },
+      },
+    };
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = { session: { dmScope: 'main' }, agents: {} };
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    // Before the turn, the session state is empty.
+    expect(plugin.getSessionProjectContextGraphId('session-ui')).toBeUndefined();
+
+    await plugin.processInbound('Hello', 'corr-stamp', 'owner', {
+      uiContextGraphId: 'research-x',
+    });
+
+    // After the turn, the stash is populated and readable by the resolver.
+    expect(plugin.getSessionProjectContextGraphId('session-ui')).toBe('research-x');
+  });
+
+  it('processInbound leaves the session-state map untouched when no UI context graph is provided', async () => {
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-no-ui' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn().mockResolvedValue(undefined),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'ok' });
+          },
+        },
+      },
+    };
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = { session: { dmScope: 'main' }, agents: {} };
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-none', 'owner');
+
+    expect(plugin.getSessionProjectContextGraphId('session-no-ui')).toBeUndefined();
+  });
 });

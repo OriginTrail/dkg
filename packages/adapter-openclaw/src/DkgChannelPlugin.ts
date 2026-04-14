@@ -214,7 +214,24 @@ interface PersistTurnOptions {
 interface InboundChatOptions {
   attachmentRefs?: OpenClawAttachmentRef[];
   contextEntries?: ChatContextEntry[];
+  /**
+   * UI-selected project context graph ID for this turn. The node UI stamps
+   * this onto the outbound `/api/openclaw-channel/send` payload; the
+   * adapter uses it to scope slot-backed memory recall and per-project
+   * memory imports to the user's current project. Optional — turns that
+   * arrive without it run in the documented degraded mode
+   * (single-graph agent-context only, or `needs_clarification` on write).
+   */
+  uiContextGraphId?: string;
 }
+
+/**
+ * Time a UI-selected context graph record sticks around in the channel
+ * session-state map after the owning turn finishes. Long enough for
+ * follow-up tool calls during the same dispatch to read it, short enough
+ * that a stale entry does not leak across user sessions. Five minutes.
+ */
+const SESSION_STATE_TTL_MS = 5 * 60 * 1_000;
 
 function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -257,6 +274,17 @@ export class DkgChannelPlugin {
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
   }>();
+  /**
+   * Per-session state populated when an inbound turn stamps the UI-selected
+   * project context graph onto the dispatch. Keyed by the runtime's
+   * `sessionKey` once resolved, read by `DkgMemorySearchManager.search`
+   * (via the `DkgMemorySessionResolver` the node plugin injects) during
+   * the same dispatch. Entries expire after SESSION_STATE_TTL_MS.
+   */
+  private readonly sessionState = new Map<string, {
+    projectContextGraphId: string;
+    expiresAt: number;
+  }>();
   private readonly port: number;
   private useGatewayRoute = false;
   private channelRegistered = false;
@@ -272,6 +300,47 @@ export class DkgChannelPlugin {
     private readonly client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  /**
+   * Read the UI-selected project context graph that was stamped on the
+   * dispatch for a given `sessionKey`. Used by `DkgMemorySessionResolver`
+   * inside `DkgNodePlugin` to scope slot-backed memory recall to the
+   * user's current project. Returns `undefined` when no state exists,
+   * the state has expired, or the caller passed an empty sessionKey.
+   */
+  getSessionProjectContextGraphId(sessionKey: string | undefined): string | undefined {
+    if (!sessionKey) return undefined;
+    const entry = this.sessionState.get(sessionKey);
+    if (!entry) return undefined;
+    if (entry.expiresAt < Date.now()) {
+      this.sessionState.delete(sessionKey);
+      return undefined;
+    }
+    return entry.projectContextGraphId;
+  }
+
+  /**
+   * Stash the UI-selected project context graph for a `sessionKey`. Called
+   * from `dispatchViaPluginSdk` once `route.sessionKey` is known and
+   * before dispatching the turn so that slot-backed tool calls during the
+   * same dispatch see it.
+   */
+  private setSessionProjectContextGraphId(sessionKey: string, projectContextGraphId: string): void {
+    this.sessionState.set(sessionKey, {
+      projectContextGraphId,
+      expiresAt: Date.now() + SESSION_STATE_TTL_MS,
+    });
+    this.sweepExpiredSessionState();
+  }
+
+  private sweepExpiredSessionState(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.sessionState) {
+      if (entry.expiresAt < now) {
+        this.sessionState.delete(key);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -610,6 +679,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -621,7 +693,7 @@ export class DkgChannelPlugin {
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
@@ -666,6 +738,7 @@ export class DkgChannelPlugin {
     identity: string,
     attachmentRefs?: OpenClawAttachmentRef[],
     contextEntries?: ChatContextEntry[],
+    uiContextGraphId?: string,
   ): Promise<ChannelOutboundReply> {
     const log = this.api!.logger;
     const runtime = this.runtime;
@@ -692,6 +765,14 @@ export class DkgChannelPlugin {
     } catch (err: any) {
       log.warn?.(`[dkg-channel] resolveAgentRoute failed: ${err.message}`);
       throw err;
+    }
+
+    // Stash the UI-selected project context graph on the resolved sessionKey
+    // BEFORE dispatch fires, so slot-backed tool calls (via
+    // DkgMemorySearchManager.search → DkgMemorySessionResolver.getSession)
+    // during this dispatch can resolve it.
+    if (uiContextGraphId && route?.sessionKey) {
+      this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
     }
 
     // 2. Resolve store path for session files
@@ -879,6 +960,9 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
+      ? opts.uiContextGraphId.trim()
+      : undefined;
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -887,7 +971,7 @@ export class DkgChannelPlugin {
     }
 
     if (!runtime?.channel || !cfg) {
-      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries });
+      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
       return;
     }
@@ -905,6 +989,12 @@ export class DkgChannelPlugin {
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
+    }
+    // Stash the UI-selected project context graph on the resolved sessionKey
+    // BEFORE dispatch fires so slot-backed tool calls during this stream
+    // dispatch can resolve it via DkgMemorySessionResolver.
+    if (uiContextGraphId && route?.sessionKey) {
+      this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
     }
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};
@@ -1358,7 +1448,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1386,13 +1476,16 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
           return;
         }
+        const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+          ? parsed.uiContextGraphId.trim()
+          : undefined;
         const { text, correlationId, identity } = parsed;
         if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
           return;
         }
-        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
@@ -1421,7 +1514,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; uiContextGraphId?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -1448,6 +1541,9 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
+      const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
+        ? parsed.uiContextGraphId.trim()
+        : undefined;
       const { text, correlationId, identity } = parsed;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1467,7 +1563,7 @@ export class DkgChannelPlugin {
       res.on('error', () => { clientDisconnected = true; });
 
       try {
-        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries })) {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId })) {
           if (clientDisconnected) break;
           const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
           if (!ok) await new Promise<void>((r) => res.once('drain', r));
@@ -1502,6 +1598,9 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
+      const uiContextGraphId = typeof body.uiContextGraphId === 'string' && body.uiContextGraphId.trim()
+        ? body.uiContextGraphId.trim()
+        : undefined;
       const { text, correlationId, identity } = body;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
@@ -1509,7 +1608,7 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
+      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {

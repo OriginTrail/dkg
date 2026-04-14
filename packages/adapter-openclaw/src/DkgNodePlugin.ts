@@ -58,19 +58,30 @@ export class DkgNodePlugin {
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private nodePeerId: string | undefined;
+  /**
+   * Resolver wired to the live channel-plugin session-state map + a cached
+   * list of subscribed context graphs for the write-path clarification
+   * response. The `getSession` lookup returns the UI-selected project CG
+   * that `DkgChannelPlugin.dispatchViaPluginSdk` stashed on the resolved
+   * `sessionKey` at the start of the current dispatch, or `undefined` for
+   * non-UI turns / expired entries. `DkgMemorySearchManager.search` uses
+   * the CG to fire a second `/api/query` against the project's `'memory'`
+   * WM assertion; `dkg_memory_import` uses it as the fallback target CG
+   * when the agent does not supply one explicitly.
+   */
   private readonly memorySessionResolver: DkgMemorySessionResolver = {
-    getSession: (_sessionKey: string | undefined): DkgMemorySession | undefined => {
-      // TODO(Slice 9): read the UI-selected project context graph from daemon
-      // state stamped on the turn envelope. For v1 of the slice series the
-      // resolver returns `undefined`, which causes `DkgMemorySearchManager.search`
-      // to run against `agent-context` / `chat-turns` only and the write path
-      // to return a structured `needs_clarification` response unless the agent
-      // supplies `contextGraphId` explicitly on the `dkg_memory_import` call.
-      return undefined;
+    getSession: (sessionKey: string | undefined): DkgMemorySession | undefined => {
+      const projectContextGraphId = this.channelPlugin?.getSessionProjectContextGraphId(sessionKey);
+      return {
+        projectContextGraphId,
+        agentAddress: this.nodePeerId,
+      };
     },
     getDefaultAgentAddress: () => this.nodePeerId,
-    listAvailableContextGraphs: () => [],
+    listAvailableContextGraphs: () => this.availableContextGraphCache,
   };
+  private availableContextGraphCache: string[] = [];
+  private availableContextGraphsRefreshing = false;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -158,6 +169,15 @@ export class DkgNodePlugin {
       }
       this.memoryPlugin.register(api);
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
+
+      // Best-effort: populate node peer ID + subscribed context-graph cache
+      // for the memory resolver. Both are non-blocking; failures just leave
+      // the resolver with empty state (single-graph fallback on reads,
+      // empty availableContextGraphs on the write-path clarification). Only
+      // runs when memory is enabled so tool-only test setups that stub
+      // `globalThis.fetch` for unrelated assertions are not polluted by a
+      // surprise `/api/status` probe.
+      void this.refreshMemoryResolverState(api);
     }
   }
 
@@ -401,6 +421,45 @@ export class DkgNodePlugin {
   getClient(): DkgDaemonClient {
     if (!this.client) throw new Error('DkgNodePlugin.getClient() called before register()');
     return this.client;
+  }
+
+  /**
+   * Populate the memory resolver's node-peer-ID + subscribed context-graph
+   * cache from the daemon. Non-blocking; failures warn and leave caches
+   * empty so the resolver falls back to single-graph reads and an empty
+   * needs_clarification list on writes.
+   */
+  private async refreshMemoryResolverState(api: OpenClawPluginApi): Promise<void> {
+    if (this.availableContextGraphsRefreshing) return;
+    this.availableContextGraphsRefreshing = true;
+    try {
+      try {
+        const status = await this.client.getStatus();
+        if (status.ok && status.peerId) {
+          this.nodePeerId = status.peerId;
+        }
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg-memory] Could not read daemon peer ID: ${err?.message ?? err}`);
+      }
+      try {
+        const result = await this.client.listContextGraphs();
+        const graphs = Array.isArray(result?.contextGraphs) ? result.contextGraphs : [];
+        const ids: string[] = [];
+        for (const entry of graphs) {
+          const id = typeof entry?.id === 'string'
+            ? entry.id
+            : typeof entry?.contextGraphId === 'string'
+              ? entry.contextGraphId
+              : undefined;
+          if (id && id !== 'agent-context') ids.push(id);
+        }
+        this.availableContextGraphCache = ids;
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg-memory] Could not refresh context-graph cache: ${err?.message ?? err}`);
+      }
+    } finally {
+      this.availableContextGraphsRefreshing = false;
+    }
   }
 
   // ---------------------------------------------------------------------------

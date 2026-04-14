@@ -1080,4 +1080,66 @@ describe('DkgNodePlugin', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it('memory resolver reads the UI-selected CG stashed on the channel plugin session state', async () => {
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 0 },
+    });
+
+    let registeredCapability: any = null;
+    const mockApi = {
+      config: {},
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerChannel: () => {},
+      registerHttpRoute: () => {},
+      registerMemoryCapability: (capability: any) => {
+        registeredCapability = capability;
+      },
+      on: () => {},
+      logger: { info: () => {}, warn: () => {}, debug: () => {} },
+    } as unknown as OpenClawPluginApi;
+
+    // Prevent real network calls during register() — the plugin fires
+    // getStatus() + listContextGraphs() best-effort to populate resolver
+    // state. Both can fail silently; we don't need them here.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('stubbed')) as any;
+
+    try {
+      plugin.register(mockApi);
+      expect(registeredCapability).not.toBeNull();
+
+      // Before any turn: resolver returns no projectContextGraphId for any sessionKey.
+      const runtime = registeredCapability.runtime;
+      const resultBefore = await runtime.getMemorySearchManager({ sessionKey: 'session-xyz' });
+      expect(resultBefore.manager).toBeDefined();
+
+      // Reach into the channel plugin (private but accessible for tests) and
+      // stash a UI-selected CG on the sessionKey the slot will pass back.
+      // This simulates what DkgChannelPlugin.dispatchViaPluginSdk does just
+      // before dispatch fires.
+      const channelPlugin = (plugin as any).channelPlugin as any;
+      expect(channelPlugin).toBeDefined();
+      // Use the public setter path by calling the private method via bracket
+      // access — the test is asserting the composition, not the privacy model.
+      channelPlugin.sessionState.set('session-xyz', {
+        projectContextGraphId: 'research-x',
+        expiresAt: Date.now() + 60_000,
+      });
+
+      expect(channelPlugin.getSessionProjectContextGraphId('session-xyz')).toBe('research-x');
+
+      // Now the resolver returns the stashed CG, and a manager constructed
+      // for this sessionKey will see it in its search resolver.
+      const session = (plugin as any).memorySessionResolver.getSession('session-xyz');
+      expect(session?.projectContextGraphId).toBe('research-x');
+    } finally {
+      await plugin.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

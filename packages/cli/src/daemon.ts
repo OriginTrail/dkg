@@ -2914,13 +2914,15 @@ async function handleRequest(
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs?, contextEntries? }
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs?, contextEntries?, contextGraphId? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
-  // returns the agent's reply.
+  // returns the agent's reply. `contextGraphId` carries the UI-selected
+  // project context graph so the adapter's memory slot can scope
+  // slot-backed recall to the user's current project.
   if (req.method === 'POST' && path === '/api/openclaw-channel/send') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; contextGraphId?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
@@ -2931,6 +2933,9 @@ async function handleRequest(
     if (payload.contextEntries != null && normalizedContextEntries === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
     }
+    const uiContextGraphId = typeof payload.contextGraphId === 'string' && payload.contextGraphId.trim()
+      ? payload.contextGraphId.trim()
+      : undefined;
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
       return jsonResponse(res, 400, { error: 'Missing "text"' });
@@ -2965,6 +2970,7 @@ async function handleRequest(
             identity: identity ?? 'owner',
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(normalizedContextEntries ? { contextEntries: normalizedContextEntries } : {}),
+            ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
@@ -3011,7 +3017,7 @@ async function handleRequest(
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === 'POST' && path === '/api/openclaw-channel/stream') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown; contextGraphId?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
@@ -3022,6 +3028,9 @@ async function handleRequest(
     if (payload.contextEntries != null && normalizedContextEntries === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
     }
+    const uiContextGraphId = typeof payload.contextGraphId === 'string' && payload.contextGraphId.trim()
+      ? payload.contextGraphId.trim()
+      : undefined;
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
       return jsonResponse(res, 400, { error: 'Missing "text"' });
@@ -3059,6 +3068,7 @@ async function handleRequest(
             identity: identity ?? 'owner',
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(normalizedContextEntries ? { contextEntries: normalizedContextEntries } : {}),
+            ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
