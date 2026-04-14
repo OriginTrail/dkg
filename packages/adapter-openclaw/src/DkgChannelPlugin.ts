@@ -334,6 +334,21 @@ export class DkgChannelPlugin {
     this.sweepExpiredSessionState();
   }
 
+  /**
+   * Clear any previously-stashed UI-selected project context graph for a
+   * `sessionKey`. Called at the start of every dispatch when the incoming
+   * turn has no `uiContextGraphId` on the envelope — either because the
+   * user deselected their project in the node UI, or because the turn
+   * arrived from a non-UI channel (Telegram, CLI, etc.) that never
+   * populated the field. Without this call, a previous project selection
+   * would persist for the full 5-minute TTL and recall would silently
+   * scope to a stale project.
+   */
+  private clearSessionProjectContextGraphId(sessionKey: string): void {
+    this.sessionState.delete(sessionKey);
+    this.sweepExpiredSessionState();
+  }
+
   private sweepExpiredSessionState(): void {
     const now = Date.now();
     for (const [key, entry] of this.sessionState) {
@@ -767,12 +782,20 @@ export class DkgChannelPlugin {
       throw err;
     }
 
-    // Stash the UI-selected project context graph on the resolved sessionKey
+    // Sync the UI-selected project context graph on the resolved sessionKey
     // BEFORE dispatch fires, so slot-backed tool calls (via
     // DkgMemorySearchManager.search → DkgMemorySessionResolver.getSession)
-    // during this dispatch can resolve it.
-    if (uiContextGraphId && route?.sessionKey) {
-      this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
+    // during this dispatch can resolve it. If the turn does not carry a
+    // UI-selected CG (user deselected in the node UI, or turn arrived from
+    // a non-UI channel), CLEAR any previously-stashed CG so recall does
+    // not silently scope to a stale project for the full TTL window.
+    // Codex Bug B4.
+    if (route?.sessionKey) {
+      if (uiContextGraphId) {
+        this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
+      } else {
+        this.clearSessionProjectContextGraphId(route.sessionKey);
+      }
     }
 
     // 2. Resolve store path for session files
@@ -990,11 +1013,19 @@ export class DkgChannelPlugin {
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
     }
-    // Stash the UI-selected project context graph on the resolved sessionKey
+    // Sync the UI-selected project context graph on the resolved sessionKey
     // BEFORE dispatch fires so slot-backed tool calls during this stream
-    // dispatch can resolve it via DkgMemorySessionResolver.
-    if (uiContextGraphId && route?.sessionKey) {
-      this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
+    // dispatch can resolve it via DkgMemorySessionResolver. If the turn
+    // does not carry a UI-selected CG (user deselected in the node UI,
+    // or turn arrived from a non-UI channel), CLEAR any previously-stashed
+    // CG so recall does not silently scope to a stale project for the full
+    // TTL window. Codex Bug B4 (streaming-branch variant).
+    if (route?.sessionKey) {
+      if (uiContextGraphId) {
+        this.setSessionProjectContextGraphId(route.sessionKey, uiContextGraphId);
+      } else {
+        this.clearSessionProjectContextGraphId(route.sessionKey);
+      }
     }
     const storePath = runtime.channel.session.resolveStorePath(undefined, { agentId: route.agentId });
     const envelopeOpts = runtime.channel.reply.resolveEnvelopeFormatOptions?.(cfg) ?? {};

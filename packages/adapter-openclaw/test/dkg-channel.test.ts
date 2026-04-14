@@ -1480,4 +1480,49 @@ describe('DkgChannelPlugin', () => {
 
     expect(plugin.getSessionProjectContextGraphId('session-no-ui')).toBeUndefined();
   });
+
+  it('processInbound CLEARS a previously-stashed UI CG when a later turn arrives without uiContextGraphId (Codex B4)', async () => {
+    // Bug B4 regression guard: if turn 1 stamps a project CG on the
+    // sessionKey and turn 2 arrives with no uiContextGraphId (user
+    // deselected the project in the node UI, or turn arrived from a
+    // non-UI channel), the previous stash MUST be cleared so recall
+    // does not silently scope to the stale project for the full TTL
+    // window. Before the fix, the second turn's stash was a no-op
+    // and the stale CG persisted for 5 minutes.
+    const mockRuntime = {
+      channel: {
+        routing: {
+          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-b4' }),
+        },
+        session: {
+          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+          recordInboundSession: vi.fn().mockResolvedValue(undefined),
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+            await params.dispatcherOptions.deliver({ text: 'ok' });
+          },
+        },
+      },
+    };
+    const api = makeApi() as any;
+    api.runtime = mockRuntime;
+    api.cfg = { session: { dmScope: 'main' }, agents: {} };
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    plugin.register(api);
+
+    // Turn 1: user has project research-x selected in the UI.
+    await plugin.processInbound('first turn', 'corr-b4-1', 'owner', {
+      uiContextGraphId: 'research-x',
+    });
+    expect(plugin.getSessionProjectContextGraphId('session-b4')).toBe('research-x');
+
+    // Turn 2: user deselects the project. The next turn arrives with
+    // NO uiContextGraphId on the envelope. The stash must be cleared.
+    await plugin.processInbound('second turn', 'corr-b4-2', 'owner');
+    expect(plugin.getSessionProjectContextGraphId('session-b4')).toBeUndefined();
+  });
 });
