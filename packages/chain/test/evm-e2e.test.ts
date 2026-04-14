@@ -6,6 +6,9 @@ import {
   killHardhat,
   makeAdapterConfig,
   mintTokens,
+  stakeAndSetAsk,
+  setMinimumRequiredSignatures,
+  getIdentityIdByAddress,
   signMerkleRoot,
   buildReceiverSignatures,
   HARDHAT_KEYS,
@@ -179,4 +182,100 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     expect(events[0].data.publisherAddress).toBeDefined();
     expect(events[0].data.merkleRoot).toBeDefined();
   }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // V10 Multi-validator ACK publish (minimumRequiredSignatures > 1)
+  // -------------------------------------------------------------------------
+
+  it('V10: publishes with 3 ACK signatures (multi-validator)', async (test) => {
+    if (!ctx) { test.skip(); return; }
+
+    // Raise minimumRequiredSignatures to 3
+    await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 3);
+
+    // Stake all 3 receivers so they are eligible ACK signers
+    for (const [opKey, receiverId] of [
+      [HARDHAT_KEYS.REC1_OP, ctx.receiverIds[0]] as const,
+      [HARDHAT_KEYS.REC2_OP, ctx.receiverIds[1]] as const,
+      [HARDHAT_KEYS.REC3_OP, ctx.receiverIds[2]] as const,
+    ]) {
+      await stakeAndSetAsk(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, opKey, receiverId);
+    }
+
+    const adapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
+    );
+    const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
+    await mintTokens(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('500000'));
+
+    // Build V10 publish parameters
+    const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('multi-ack-test')));
+    const contextGraphId = 0n;
+    const kaCount = 2;
+    const byteSize = 256n;
+    const epochs = 2;
+    const tokenAmount = await adapter.getRequiredPublishTokenAmount(byteSize, epochs);
+
+    const publisherIdentityId = BigInt(ctx.coreProfileId);
+
+    // Publisher signature: keccak256(abi.encodePacked(uint256 contextGraphId, uint72 identityId, bytes32 merkleRoot))
+    const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
+      ['uint256', 'uint72', 'bytes32'],
+      [contextGraphId, publisherIdentityId, ethers.hexlify(merkleRoot)],
+    ));
+    const pubSigRaw = await coreOp.signMessage(pubDigest);
+    const pubSig = ethers.Signature.from(pubSigRaw);
+
+    // ACK digest (6-field): keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
+    const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
+      [contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount],
+    ));
+
+    // Collect ACK signatures from 3 receivers
+    const ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [];
+    for (const opKey of [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP]) {
+      const receiverWallet = new Wallet(opKey, ctx.provider);
+      const receiverIdentityId = BigInt(
+        await getIdentityIdByAddress(ctx.provider, ctx.hubAddress, receiverWallet.address),
+      );
+
+      const ackSigRaw = await receiverWallet.signMessage(ackDigest);
+      const ackSig = ethers.Signature.from(ackSigRaw);
+
+      ackSignatures.push({
+        identityId: receiverIdentityId,
+        r: ethers.getBytes(ackSig.r),
+        vs: ethers.getBytes(ackSig.yParityAndS),
+      });
+    }
+
+    expect(ackSignatures.length).toBe(3);
+
+    const result = await adapter.createKnowledgeAssetsV10!({
+      publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
+      contextGraphId,
+      merkleRoot,
+      knowledgeAssetsAmount: kaCount,
+      byteSize,
+      epochs,
+      tokenAmount,
+      isImmutable: false,
+      paymaster: ethers.ZeroAddress,
+      convictionAccountId: 0n,
+      publisherNodeIdentityId: publisherIdentityId,
+      publisherSignature: {
+        r: ethers.getBytes(pubSig.r),
+        vs: ethers.getBytes(pubSig.yParityAndS),
+      },
+      ackSignatures,
+    });
+
+    expect(result.batchId).toBeGreaterThan(0n);
+    expect(result.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(result.blockNumber).toBeGreaterThan(0);
+
+    // Restore to 1 for subsequent tests
+    await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
+  }, 60_000);
 });

@@ -5,7 +5,8 @@ import {
   spawnHardhatEnv,
   killHardhat,
   mintTokens,
-  setMinimumRequiredSignatures,
+  createNodeProfile,
+  stakeAndSetAsk,
   HARDHAT_KEYS,
   type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
@@ -13,26 +14,45 @@ import {
 let ctx: HardhatContext | null = null;
 const agents: DKGAgent[] = [];
 
-function makeChainConfig(privateKey: string) {
+function makeChainConfig(operationalKey: string) {
   return {
     rpcUrl: ctx!.rpcUrl,
-    privateKey,
+    operationalKeys: [operationalKey],
     hubAddress: ctx!.hubAddress,
     chainId: `evm:31337`,
   };
 }
+
+let agentAIdentityId: number;
+let agentBIdentityId: number;
 
 describe('E2E: DKGAgent with real blockchain', () => {
   beforeAll(async () => {
     ctx = await spawnHardhatEnv(8547);
     if (!ctx) return;
 
-    // Fund agents with tokens for publishing
+    // Create on-chain profiles for agent keys so ensureProfile finds them
+    agentAIdentityId = await createNodeProfile(
+      ctx.provider, ctx.hubAddress,
+      HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3,
+      'AgentNodeA',
+    );
+    agentBIdentityId = await createNodeProfile(
+      ctx.provider, ctx.hubAddress,
+      HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.PUBLISHER2,
+      'AgentNodeB',
+    );
+
+    // Stake both agents so they can publish
+    await stakeAndSetAsk(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, HARDHAT_KEYS.EXTRA1, agentAIdentityId);
+    await stakeAndSetAsk(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, HARDHAT_KEYS.EXTRA2, agentBIdentityId);
+
+    // Fund agents with additional tokens for publishing fees
     const nodeA = new Wallet(HARDHAT_KEYS.EXTRA1, ctx.provider);
     const nodeB = new Wallet(HARDHAT_KEYS.EXTRA2, ctx.provider);
     await mintTokens(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, nodeA.address, ethers.parseEther('500000'));
     await mintTokens(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, nodeB.address, ethers.parseEther('500000'));
-  }, 90_000);
+  }, 120_000);
 
   afterAll(async () => {
     for (const agent of agents) {
@@ -85,8 +105,9 @@ describe('E2E: DKGAgent with real blockchain', () => {
   // -------------------------------------------------------------------------
 
   const CONTEXT_GRAPH_ID = 'test-chain-paranet';
+  let firstPublishBatchId: bigint;
 
-  it('publishes knowledge through agent (on-chain finality)', async (test) => {
+  it('publishes knowledge through agent with on-chain finality', async (test) => {
     if (!ctx) { test.skip(); return; }
 
     await agents[0].createContextGraph({
@@ -118,6 +139,12 @@ describe('E2E: DKGAgent with real blockchain', () => {
     expect(result).toBeDefined();
     expect(result.kaManifest).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
+    expect(result.ual).toContain('did:dkg:evm:31337/');
+    firstPublishBatchId = result.onChainResult!.batchId;
   }, 60_000);
 
   it('queries published knowledge', async (test) => {
@@ -150,14 +177,10 @@ describe('E2E: DKGAgent with real blockchain', () => {
   // Update published KC
   // -------------------------------------------------------------------------
 
-  it('updates published knowledge and queries updated data', async (test) => {
+  it('updates published knowledge on-chain and verifies new data', async (test) => {
     if (!ctx) { test.skip(); return; }
 
-    const firstResult = await agents[0].query(
-      `SELECT (COUNT(?s) AS ?count) WHERE { ?s ?p ?o }`,
-    );
-
-    const kcId = 1n;
+    const kcId = firstPublishBatchId;
     const updateQuads = [
       {
         subject: 'did:dkg:test:Alice',
@@ -167,15 +190,20 @@ describe('E2E: DKGAgent with real blockchain', () => {
       },
     ];
 
-    try {
-      const updateResult = await agents[0].update(kcId, CONTEXT_GRAPH_ID, updateQuads);
-      expect(updateResult).toBeDefined();
-      expect(updateResult.merkleRoot).toHaveLength(32);
-    } catch (err: any) {
-      // Update may fail due to contract changes (MintZeroQuantity) or
-      // because the agent's chain adapter is in no-chain/tentative mode.
-      // Either way, the error should be meaningful, not a crash.
-      expect(err.message.length).toBeGreaterThan(0);
+    const updateResult = await agents[0].update(kcId, CONTEXT_GRAPH_ID, updateQuads);
+    expect(updateResult).toBeDefined();
+    expect(updateResult.merkleRoot).toHaveLength(32);
+    expect(updateResult.status).toBe('confirmed');
+    expect(updateResult.onChainResult).toBeDefined();
+    expect(updateResult.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+
+    const queryResult = await agents[0].query(
+      `SELECT ?name WHERE { <did:dkg:test:Alice> <http://schema.org/name> ?name }`,
+    );
+    expect(queryResult).toBeDefined();
+    if (queryResult.type === 'bindings' && queryResult.bindings.length > 0) {
+      const names = queryResult.bindings.map((b: any) => b.name?.value ?? b.name);
+      expect(names.some((n: string) => n.includes('Alice Updated'))).toBe(true);
     }
   }, 60_000);
 
@@ -183,7 +211,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
   // Second context graph + publish
   // -------------------------------------------------------------------------
 
-  it('creates a second context graph and publishes to it', async (test) => {
+  it('creates a second context graph and publishes on-chain', async (test) => {
     if (!ctx) { test.skip(); return; }
 
     const secondCG = 'test-chain-paranet-2';
@@ -214,6 +242,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     const result = await agents[0].publish(secondCG, quads);
     expect(result).toBeDefined();
     expect(result.kaManifest.length).toBeGreaterThan(0);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
 
     const queryResult = await agents[0].query(
       `SELECT ?title WHERE { <did:dkg:test:Dave> <http://schema.org/jobTitle> ?title }`,
@@ -252,6 +282,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     const result = await agents[0].publish(CONTEXT_GRAPH_ID, quads);
     expect(result).toBeDefined();
     expect(result.kaManifest.length).toBe(3);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
 
     for (const entity of entities) {
       const queryResult = await agents[0].query(

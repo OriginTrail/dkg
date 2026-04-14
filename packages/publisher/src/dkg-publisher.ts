@@ -1360,6 +1360,7 @@ export class DKGPublisher implements Publisher {
           kcId,
           newMerkleRoot: kcMerkleRoot,
           newByteSize: updateByteSize,
+          mintAmount: manifestEntries.length,
           publisherAddress: this.publisherAddress,
           v10Origin: true,
         });

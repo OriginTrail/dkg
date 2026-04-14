@@ -122,10 +122,34 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   }, 30_000);
 
   // -------------------------------------------------------------------------
-  // V10 UPDATE
+  // V10 UPDATE — through DKGPublisher.update() (full pipeline)
   // -------------------------------------------------------------------------
 
-  it('V10 UPDATE: updates KC with same byte size succeeds', async (test) => {
+  it('V10 UPDATE: publisher.update() modifies KC on-chain', async (test) => {
+    if (!ctx || !firstPublishResult?.onChainResult) { test.skip(); return; }
+
+    const kcId = firstPublishResult.onChainResult!.batchId;
+
+    const updateResult = await publisher.update(kcId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [
+        q('urn:evm-e2e:Alice', 'http://schema.org/name', '"Alice Updated"'),
+        q('urn:evm-e2e:Alice', 'http://schema.org/knows', 'urn:evm-e2e:Charlie'),
+      ],
+    });
+
+    expect(updateResult.status).toBe('confirmed');
+    expect(updateResult.merkleRoot).toHaveLength(32);
+    expect(updateResult.onChainResult).toBeDefined();
+    expect(updateResult.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(updateResult.onChainResult!.batchId).toBe(kcId);
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // V10 UPDATE — adapter-level with explicit mintAmount / burnTokenIds
+  // -------------------------------------------------------------------------
+
+  it('V10 UPDATE: adapter.updateKnowledgeCollectionV10 with mint+burn params', async (test) => {
     if (!ctx || !firstPublishResult?.onChainResult) { test.skip(); return; }
 
     const adapter = new EVMChainAdapter(
@@ -133,9 +157,8 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     );
 
     const kcId = firstPublishResult.onChainResult!.batchId;
-    const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('updated-root-v10'));
+    const newMerkleRoot = ethers.keccak256(ethers.toUtf8Bytes('updated-root-v10-adapter'));
 
-    // V10 updateKnowledgeCollection with mintAmount=1 to satisfy the contract.
     const result = await adapter.updateKnowledgeCollectionV10!({
       kcId,
       newMerkleRoot: ethers.getBytes(newMerkleRoot),
@@ -220,6 +243,107 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const participants = await adapter.getContextGraphParticipants(result.contextGraphId);
     expect(participants).toBeDefined();
     expect(participants!.length).toBeGreaterThanOrEqual(1);
+  }, 30_000);
+
+  // -------------------------------------------------------------------------
+  // V10 Publish + Update round-trip: verify merkle root changes on-chain
+  // -------------------------------------------------------------------------
+
+  it('V10: publish then update then verify chain state changed', async (test) => {
+    if (!ctx) { test.skip(); return; }
+
+    const result1 = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:roundtrip', 'http://schema.org/version', '"v1"')],
+    });
+    expect(result1.status).toBe('confirmed');
+    const originalMerkle = result1.merkleRoot;
+
+    const result2 = await publisher.update(result1.onChainResult!.batchId, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:roundtrip', 'http://schema.org/version', '"v2"')],
+    });
+    expect(result2.status).toBe('confirmed');
+    expect(result2.onChainResult!.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+
+    expect(Buffer.from(result2.merkleRoot).toString('hex'))
+      .not.toBe(Buffer.from(originalMerkle).toString('hex'));
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // Publish lifecycle: phase callbacks fire in correct order
+  // -------------------------------------------------------------------------
+
+  it('V10 CREATE: phase callbacks fire in correct order during publish', async (test) => {
+    if (!ctx) { test.skip(); return; }
+
+    const phases: Array<{ phase: string; event: string }> = [];
+
+    await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:PhaseTest', 'http://schema.org/name', '"PhaseTest"')],
+      onPhase: (phase, event) => { phases.push({ phase, event }); },
+    });
+
+    const phaseNames = phases.map(p => `${p.phase}:${p.event}`);
+
+    // Verify all essential phases fire
+    expect(phaseNames).toContain('prepare:start');
+    expect(phaseNames).toContain('prepare:end');
+    expect(phaseNames).toContain('chain:start');
+    expect(phaseNames).toContain('chain:end');
+    expect(phaseNames).toContain('store:start');
+    expect(phaseNames).toContain('store:end');
+
+    // Verify ordering: prepare before chain
+    const prepareEnd = phaseNames.indexOf('prepare:end');
+    const chainStart = phaseNames.indexOf('chain:start');
+    expect(prepareEnd).toBeLessThan(chainStart);
+
+    // Sub-phases should be present
+    expect(phaseNames).toContain('prepare:partition:start');
+    expect(phaseNames).toContain('prepare:manifest:start');
+    expect(phaseNames).toContain('prepare:merkle:start');
+    expect(phaseNames).toContain('chain:submit:start');
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // Concurrent publishes don't interfere
+  // -------------------------------------------------------------------------
+
+  it('V10 CREATE: sequential publishes yield distinct batch IDs and UALs', async (test) => {
+    if (!ctx) { test.skip(); return; }
+
+    const r1 = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:SeqA', 'http://schema.org/name', '"SequentialA"')],
+    });
+    const r2 = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q('urn:evm-e2e:SeqB', 'http://schema.org/name', '"SequentialB"')],
+    });
+
+    expect(r1.status).toBe('confirmed');
+    expect(r2.status).toBe('confirmed');
+    expect(r1.onChainResult!.batchId).not.toBe(r2.onChainResult!.batchId);
+    expect(r1.ual).not.toBe(r2.ual);
+    expect(r1.onChainResult!.txHash).not.toBe(r2.onChainResult!.txHash);
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // Error path: invalid kcId for update returns meaningful error
+  // -------------------------------------------------------------------------
+
+  it('V10 UPDATE: updating non-existent KC throws descriptive error', async (test) => {
+    if (!ctx) { test.skip(); return; }
+
+    const bogusKcId = 999999n;
+    await expect(
+      publisher.update(bogusKcId, {
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [q('urn:evm-e2e:ghost', 'http://schema.org/name', '"Ghost"')],
+      }),
+    ).rejects.toThrow();
   }, 30_000);
 
   // -------------------------------------------------------------------------
