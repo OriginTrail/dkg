@@ -431,8 +431,25 @@ export interface MemorySessionGraphDelta {
 }
 export const fetchMemorySessions = (limit = 20) =>
   get<{ sessions: MemorySession[] }>(`/api/memory/sessions?limit=${limit}`);
-export const fetchMemorySession = (sessionId: string) =>
-  get<MemorySession>(`/api/memory/sessions/${encodeURIComponent(sessionId)}`);
+export const fetchMemorySession = (
+  sessionId: string,
+  opts: {
+    limit?: number;
+    order?: 'asc' | 'desc';
+  } = {},
+) => {
+  const params = new URLSearchParams();
+  if (opts.limit && Number.isInteger(opts.limit) && opts.limit > 0) {
+    params.set('limit', String(opts.limit));
+  }
+  if (opts.order === 'desc' || opts.order === 'asc') {
+    params.set('order', opts.order);
+  }
+  const query = params.toString();
+  return get<MemorySession>(
+    `/api/memory/sessions/${encodeURIComponent(sessionId)}${query ? `?${query}` : ''}`,
+  );
+};
 export const fetchMemorySessionGraphDelta = (
   sessionId: string,
   turnId: string,
@@ -773,9 +790,11 @@ async function fetchLocalAgentHistoryBySessionId(
   limit = 50,
 ): Promise<LocalAgentHistoryMessage[]> {
   try {
-    const session = await fetchMemorySession(sessionId);
+    const session = await fetchMemorySession(sessionId, {
+      limit,
+      order: 'desc',
+    });
     return session.messages
-      .slice(-limit)
       .map((message, index) => ({
         uri: `urn:dkg:chat:session:${sessionId}:message:${index}`,
         text: message.text,

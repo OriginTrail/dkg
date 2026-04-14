@@ -53,7 +53,8 @@ describe('OpenClaw bridge API contract', () => {
   it('exports fetchOpenClawLocalHistory', () => {
     expect(apiSrc).toContain('fetchOpenClawLocalHistory');
     expect(apiSrc).toContain('getDefaultLocalAgentSessionId');
-    expect(apiSrc).toContain('fetchMemorySession(sessionId)');
+    expect(apiSrc).toContain('fetchMemorySession(sessionId, {');
+    expect(apiSrc).toContain("order: 'desc'");
   });
 
   it('exports the future-friendly local agent integration contract', () => {
@@ -377,7 +378,7 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(panelRight).toContain('Connect OpenClaw');
   });
 
-  it('fetchOpenClawLocalHistory loads the default OpenClaw session from /api/memory/sessions/:sessionId', async () => {
+  it('fetchOpenClawLocalHistory requests the newest turns from /api/memory/sessions/:sessionId and returns chronological order', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -396,6 +397,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const history = await fetchOpenClawLocalHistory(3);
       const [url] = fakeFetch.mock.calls[0];
       expect(String(url)).toContain('/api/memory/sessions/openclaw%3Adkg-ui');
+      expect(String(url)).toContain('limit=3');
+      expect(String(url)).toContain('order=desc');
       expect(history.map((row: any) => row.text)).toEqual(['first', 'second', 'third']);
       expect(history[0].turnId).toBe('turn-1');
     } finally {
@@ -403,13 +406,14 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
-  it('fetchLocalAgentHistory uses the selected sessionId when reopening a non-default OpenClaw thread', async () => {
+  it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread', async () => {
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         session: 'openclaw:dkg-ui:worker-1',
         messages: [
           { text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
+          { text: 'worker reply', author: 'agent', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
         ],
       }),
     });
@@ -422,8 +426,11 @@ describe('OpenClaw bridge behavioral tests', () => {
       });
       const [url] = fakeFetch.mock.calls[0];
       expect(String(url)).toContain('/api/memory/sessions/openclaw%3Adkg-ui%3Aworker-1');
-      expect(history).toHaveLength(1);
+      expect(String(url)).toContain('limit=10');
+      expect(String(url)).toContain('order=desc');
+      expect(history).toHaveLength(2);
       expect(history[0].text).toBe('worker hello');
+      expect(history[1].text).toBe('worker reply');
     } finally {
       globalThis.fetch = original;
     }

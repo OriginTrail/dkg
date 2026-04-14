@@ -167,6 +167,25 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[1].author).toBe('agent');
   });
 
+  it('getSession can request the latest session window and returns it in chronological order', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ bindings: [] })
+      .mockResolvedValueOnce({
+        bindings: [
+          { author: 'urn:dkg:chat:actor:agent', text: '"Newest"', ts: '"2026-01-01T12:00:02Z"', turnId: '"turn-3"' },
+          { author: 'urn:dkg:chat:actor:user', text: '"Middle"', ts: '"2026-01-01T12:00:01Z"', turnId: '"turn-2"' },
+          { author: 'urn:dkg:chat:actor:user', text: '"Oldest"', ts: '"2026-01-01T12:00:00Z"', turnId: '"turn-1"' },
+        ],
+      });
+
+    const session = await manager.getSession('test-session-latest', { limit: 3, order: 'desc' });
+
+    expect(session).not.toBeNull();
+    expect(session!.messages.map((message) => message.text)).toEqual(['Oldest', 'Middle', 'Newest']);
+    const queryText = String(mockQuery.mock.calls[1][0]);
+    expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
+  });
+
   it('getSession returns null when session has no messages', async () => {
     mockQuery
       .mockResolvedValueOnce({ bindings: [] })

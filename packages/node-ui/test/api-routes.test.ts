@@ -188,6 +188,76 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
   });
 
+  it('passes session history limit and descending ordering through to memoryManager.getSession()', async () => {
+    const memoryManager = {
+      getSession: vi.fn().mockResolvedValue({
+        session: 'session-1',
+        messages: [
+          { author: 'user', text: 'latest', ts: '2026-04-14T08:00:00Z' },
+        ],
+      }),
+    } as any;
+
+    const { req, url } = createMockReq({
+      method: 'GET',
+      path: '/api/memory/sessions/session-1?limit=25&order=desc',
+    });
+    const { res, state } = createMockRes();
+
+    const handled = await handleNodeUIRequest(
+      req,
+      res,
+      url,
+      {} as any,
+      '.',
+      undefined,
+      undefined,
+      undefined,
+      memoryManager,
+      undefined,
+    );
+
+    expect(handled).toBe(true);
+    expect(state.statusCode).toBe(200);
+    expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
+    expect(parseJsonBody(state.body)).toMatchObject({ session: 'session-1' });
+  });
+
+  it('returns 400 for invalid session query parameters', async () => {
+    const memoryManager = {
+      getSession: vi.fn(),
+    } as any;
+
+    const invalidCases = [
+      '/api/memory/sessions/session-1?limit=0',
+      '/api/memory/sessions/session-1?limit=25xyz',
+      '/api/memory/sessions/session-1?order=sideways',
+    ];
+
+    for (const path of invalidCases) {
+      const { req, url } = createMockReq({ method: 'GET', path });
+      const { res, state } = createMockRes();
+
+      const handled = await handleNodeUIRequest(
+        req,
+        res,
+        url,
+        {} as any,
+        '.',
+        undefined,
+        undefined,
+        undefined,
+        memoryManager,
+        undefined,
+      );
+
+      expect(handled).toBe(true);
+      expect(state.statusCode).toBe(400);
+    }
+
+    expect(memoryManager.getSession).not.toHaveBeenCalled();
+  });
+
   it('returns publication status for a valid session id', async () => {
     const memoryManager = {
       getSessionPublicationStatus: vi.fn().mockResolvedValue({

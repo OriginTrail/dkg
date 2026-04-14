@@ -299,8 +299,11 @@ export class DkgNodePlugin {
       ? rawGateway as Record<string, unknown>
       : undefined;
     const rawPort = gateway?.port ?? process.env.OPENCLAW_GATEWAY_PORT;
-    const hasExplicitPort = rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '';
-    if (!hasExplicitPort && existingGatewayUrl?.trim()) {
+    const tls = gateway?.tls && typeof gateway.tls === 'object'
+      ? gateway.tls as Record<string, unknown>
+      : undefined;
+    const hasCurrentGatewayConfig = this.hasGatewayConfig(gateway, rawPort, tls);
+    if (!hasCurrentGatewayConfig && existingGatewayUrl?.trim()) {
       return existingGatewayUrl.trim();
     }
 
@@ -308,11 +311,31 @@ export class DkgNodePlugin {
     const rawCustomHost = typeof gateway?.customBindHost === 'string' ? gateway.customBindHost.trim() : '';
     const configuredHost = rawCustomHost || '127.0.0.1';
     const host = this.normalizeGatewayHost(configuredHost);
-    const tls = gateway?.tls && typeof gateway.tls === 'object'
-      ? gateway.tls as Record<string, unknown>
-      : undefined;
     const protocol = tls?.enabled === true ? 'https' : 'http';
-    return `${protocol}://${host}:${port}`;
+    return this.formatGatewayBaseUrl(protocol, host, port);
+  }
+
+  private hasGatewayConfig(
+    gateway: Record<string, unknown> | undefined,
+    rawPort: unknown,
+    tls: Record<string, unknown> | undefined,
+  ): boolean {
+    if (rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '') {
+      return true;
+    }
+    if (!gateway) return false;
+    const hasCustomBindHost = typeof gateway.customBindHost === 'string' && gateway.customBindHost.trim() !== '';
+    if (hasCustomBindHost) return true;
+    return Boolean(tls && Object.keys(tls).length > 0);
+  }
+
+  private formatGatewayBaseUrl(protocol: 'http' | 'https', host: string, port: number): string {
+    const formattedHost = host.includes(':') && !host.startsWith('[')
+      ? `[${host}]`
+      : host;
+    const url = new URL(`${protocol}://${formattedHost}`);
+    url.port = String(port);
+    return url.toString().replace(/\/$/, '');
   }
 
   private normalizePort(value: unknown): number | null {
@@ -330,6 +353,9 @@ export class DkgNodePlugin {
     const trimmed = value.trim();
     if (!trimmed || trimmed === '0.0.0.0' || trimmed === '::' || trimmed === '[::]') {
       return '127.0.0.1';
+    }
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      return trimmed.slice(1, -1);
     }
     return trimmed;
   }

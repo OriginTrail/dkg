@@ -616,6 +616,10 @@ export class ChatMemoryManager {
 
   async getSession(
     sessionId: string,
+    opts: {
+      limit?: number;
+      order?: 'asc' | 'desc';
+    } = {},
   ): Promise<{
     session: string;
     messages: Array<{
@@ -628,6 +632,13 @@ export class ChatMemoryManager {
   } | null> {
     await this.ensureInitialized();
     try {
+      const requestedLimit = typeof opts.limit === 'number' && Number.isInteger(opts.limit) && opts.limit > 0
+        ? opts.limit
+        : null;
+      const limit = requestedLimit != null
+        ? Math.min(requestedLimit, 500)
+        : 500;
+      const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
         `SELECT ?author ?text ?ts ?turnId ?persistenceState WHERE {
@@ -642,14 +653,15 @@ export class ChatMemoryManager {
             ?turn <${DKG_ONT}turnId> ?turnId .
             ?turn <${DKG_ONT}persistenceState> ?persistenceState .
           }
-        } ORDER BY ?ts LIMIT 500`,
+        } ORDER BY ${order}(?ts) LIMIT ${limit}`,
         { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
+      const orderedBindings = order === 'DESC' ? [...bindings].reverse() : bindings;
       return {
         session: sessionId,
-        messages: bindings.map((mb: any) => ({
+        messages: orderedBindings.map((mb: any) => ({
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),

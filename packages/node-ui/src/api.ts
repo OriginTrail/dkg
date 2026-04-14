@@ -425,8 +425,22 @@ export async function handleNodeUIRequest(
   ) {
     const sessionId = normalizeSessionId(decodeURIComponent(path.slice('/api/memory/sessions/'.length)));
     if (!sessionId) return json(res, 400, { error: 'Invalid session ID' });
+    const rawLimit = url.searchParams.get('limit');
+    const parsedLimit = rawLimit && /^\d+$/.test(rawLimit)
+      ? Number.parseInt(rawLimit, 10)
+      : undefined;
+    if (rawLimit && (!/^\d+$/.test(rawLimit) || (parsedLimit ?? 0) <= 0)) {
+      return json(res, 400, { error: 'Invalid "limit" query parameter' });
+    }
+    const rawOrder = (url.searchParams.get('order') ?? 'asc').toLowerCase();
+    if (rawOrder !== 'asc' && rawOrder !== 'desc') {
+      return json(res, 400, { error: 'Invalid "order" query parameter' });
+    }
     try {
-      const session = await memoryManager.getSession(sessionId);
+      const session = await memoryManager.getSession(sessionId, {
+        ...(parsedLimit != null ? { limit: parsedLimit } : {}),
+        order: rawOrder,
+      });
       if (!session) return json(res, 404, { error: 'Session not found' });
       return json(res, 200, session);
     } catch (err: any) {
