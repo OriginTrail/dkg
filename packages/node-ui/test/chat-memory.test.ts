@@ -153,8 +153,8 @@ describe('ChatMemoryManager', () => {
       .mockResolvedValueOnce({ bindings: [] })
       .mockResolvedValueOnce({
         bindings: [
-          { author: 'urn:dkg:chat:actor:user', text: '"What is DKG?"', ts: '"2026-01-01T12:00:00Z"' },
-          { author: 'urn:dkg:chat:actor:agent', text: '"DKG is the Decentralized Knowledge Graph"', ts: '"2026-01-01T12:00:01Z"' },
+          { m: 'urn:dkg:chat:msg:user-1', author: 'urn:dkg:chat:actor:user', text: '"What is DKG?"', ts: '"2026-01-01T12:00:00Z"' },
+          { m: 'urn:dkg:chat:msg:agent-1', author: 'urn:dkg:chat:actor:agent', text: '"DKG is the Decentralized Knowledge Graph"', ts: '"2026-01-01T12:00:01Z"' },
         ],
       });
 
@@ -162,6 +162,7 @@ describe('ChatMemoryManager', () => {
     expect(session).not.toBeNull();
     expect(session!.session).toBe('test-session-1');
     expect(session!.messages).toHaveLength(2);
+    expect(session!.messages[0].uri).toBe('urn:dkg:chat:msg:user-1');
     expect(session!.messages[0].author).toBe('user');
     expect(session!.messages[0].text).toBe('What is DKG?');
     expect(session!.messages[1].author).toBe('agent');
@@ -172,9 +173,9 @@ describe('ChatMemoryManager', () => {
       .mockResolvedValueOnce({ bindings: [] })
       .mockResolvedValueOnce({
         bindings: [
-          { author: 'urn:dkg:chat:actor:agent', text: '"Newest"', ts: '"2026-01-01T12:00:02Z"', turnId: '"turn-3"' },
-          { author: 'urn:dkg:chat:actor:user', text: '"Middle"', ts: '"2026-01-01T12:00:01Z"', turnId: '"turn-2"' },
-          { author: 'urn:dkg:chat:actor:user', text: '"Oldest"', ts: '"2026-01-01T12:00:00Z"', turnId: '"turn-1"' },
+          { m: 'urn:dkg:chat:msg:agent-3', author: 'urn:dkg:chat:actor:agent', text: '"Newest"', ts: '"2026-01-01T12:00:02Z"', turnId: '"turn-3"' },
+          { m: 'urn:dkg:chat:msg:user-2', author: 'urn:dkg:chat:actor:user', text: '"Middle"', ts: '"2026-01-01T12:00:01Z"', turnId: '"turn-2"' },
+          { m: 'urn:dkg:chat:msg:user-1', author: 'urn:dkg:chat:actor:user', text: '"Oldest"', ts: '"2026-01-01T12:00:00Z"', turnId: '"turn-1"' },
         ],
       });
 
@@ -182,7 +183,13 @@ describe('ChatMemoryManager', () => {
 
     expect(session).not.toBeNull();
     expect(session!.messages.map((message) => message.text)).toEqual(['Oldest', 'Middle', 'Newest']);
+    expect(session!.messages.map((message) => message.uri)).toEqual([
+      'urn:dkg:chat:msg:user-1',
+      'urn:dkg:chat:msg:user-2',
+      'urn:dkg:chat:msg:agent-3',
+    ]);
     const queryText = String(mockQuery.mock.calls[1][0]);
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 
@@ -200,6 +207,7 @@ describe('ChatMemoryManager', () => {
       .mockResolvedValueOnce({
         bindings: [
           {
+            m: 'urn:dkg:chat:msg:agent-1',
             author: 'urn:dkg:chat:actor:agent',
             text: '"Answer"',
             ts: '"2026-01-01T12:00:01Z"',
@@ -211,6 +219,7 @@ describe('ChatMemoryManager', () => {
 
     const session = await manager.getSession('test-session-2');
     expect(session).not.toBeNull();
+    expect(session!.messages[0].uri).toBe('urn:dkg:chat:msg:agent-1');
     expect(session!.messages[0].turnId).toBe('turn-1');
     expect(session!.messages[0].persistStatus).toBe('stored');
   });

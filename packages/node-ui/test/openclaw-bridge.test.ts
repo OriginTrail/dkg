@@ -387,9 +387,9 @@ describe('OpenClaw bridge behavioral tests', () => {
       json: async () => ({
         session: 'openclaw:dkg-ui',
         messages: [
-          { text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
-          { text: 'second', author: 'user', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
-          { text: 'third', author: 'agent', ts: '2026-03-11T10:02:00Z', turnId: 'turn-3' },
+          { uri: 'urn:dkg:chat:msg:user-1', text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
+          { uri: 'urn:dkg:chat:msg:user-2', text: 'second', author: 'user', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          { uri: 'urn:dkg:chat:msg:agent-3', text: 'third', author: 'agent', ts: '2026-03-11T10:02:00Z', turnId: 'turn-3' },
         ],
       }),
     });
@@ -415,8 +415,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       json: async () => ({
         session: 'openclaw:dkg-ui:worker-1',
         messages: [
-          { text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
-          { text: 'worker reply', author: 'agent', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
+          { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
+          { uri: 'urn:dkg:chat:msg:worker-agent-2', text: 'worker reply', author: 'agent', ts: '2026-03-11T10:01:00Z', turnId: 'turn-2' },
         ],
       }),
     });
@@ -434,6 +434,46 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(history).toHaveLength(2);
       expect(history[0].text).toBe('worker hello');
       expect(history[1].text).toBe('worker reply');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentHistory uses stable backend message URIs when the loaded history window shifts', async () => {
+    const firstWindow = {
+      session: 'openclaw:dkg-ui',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
+        { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+      ],
+    };
+    const shiftedWindow = {
+      session: 'openclaw:dkg-ui',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:user-older', text: 'older context', author: 'user', ts: '2026-03-11T09:59:00Z' },
+        { uri: 'urn:dkg:chat:msg:user-hello', text: 'hello there', author: 'user', ts: '2026-03-11T10:00:00Z' },
+        { uri: 'urn:dkg:chat:msg:agent-reply', text: 'reply here', author: 'agent', ts: '2026-03-11T10:01:00Z' },
+      ],
+    };
+    const fakeFetch = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => firstWindow,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => shiftedWindow,
+      });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { fetchLocalAgentHistory } = await import('../src/ui/api.js');
+      const firstHistory = await fetchLocalAgentHistory('openclaw', 2);
+      const secondHistory = await fetchLocalAgentHistory('openclaw', 3);
+      expect(firstHistory[0].uri).toBe('urn:dkg:chat:msg:user-hello');
+      expect(firstHistory[1].uri).toBe('urn:dkg:chat:msg:agent-reply');
+      expect(firstHistory[0].uri).toBe(secondHistory[1].uri);
+      expect(firstHistory[1].uri).toBe(secondHistory[2].uri);
     } finally {
       globalThis.fetch = original;
     }

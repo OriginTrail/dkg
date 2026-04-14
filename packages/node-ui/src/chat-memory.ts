@@ -623,6 +623,7 @@ export class ChatMemoryManager {
   ): Promise<{
     session: string;
     messages: Array<{
+      uri: string;
       author: string;
       text: string;
       ts: string;
@@ -641,7 +642,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?author ?text ?ts ?turnId ?persistenceState WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -662,6 +663,7 @@ export class ChatMemoryManager {
       return {
         session: sessionId,
         messages: orderedBindings.map((mb: any) => ({
+          uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),

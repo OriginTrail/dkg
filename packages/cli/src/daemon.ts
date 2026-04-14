@@ -1358,7 +1358,22 @@ function isLocalAgentExplicitlyUserDisabled(
 }
 
 function isExplicitLocalAgentDisconnectPatch(patch: Pick<LocalAgentIntegrationConfig, 'enabled' | 'runtime'>): boolean {
-  return patch.enabled === false || patch.runtime?.status === 'disconnected';
+  return patch.runtime?.status === 'disconnected';
+}
+
+export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, unknown>): Record<string, unknown> {
+  if (body.enabled !== false) return body;
+  const runtime = isPlainRecord(body.runtime) ? body.runtime : undefined;
+  if (runtime?.status === 'disconnected') return body;
+  return {
+    ...body,
+    runtime: {
+      ...(runtime ?? {}),
+      status: 'disconnected',
+      ready: typeof runtime?.ready === 'boolean' ? runtime.ready : false,
+      lastError: runtime?.lastError ?? null,
+    },
+  };
 }
 
 function mergeLocalAgentIntegrationConfig(
@@ -4326,13 +4341,14 @@ async function handleRequest(
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
+      const normalizedParsed = normalizeExplicitLocalAgentDisconnectBody(parsed);
       const normalizedId = normalizeIntegrationId(id);
-      const disconnectRequested = parsed.enabled === false
-        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
+      const disconnectRequested = normalizedParsed.enabled === false
+        || (isPlainRecord(normalizedParsed.runtime) && normalizedParsed.runtime.status === 'disconnected');
       if (disconnectRequested && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
-      const integration = updateLocalAgentIntegration(config, id, parsed);
+      const integration = updateLocalAgentIntegration(config, id, normalizedParsed);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {

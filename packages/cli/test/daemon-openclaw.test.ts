@@ -15,6 +15,7 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
@@ -357,6 +358,23 @@ describe('daemon loopback request handling', () => {
 });
 
 describe('local agent integration registry helpers', () => {
+  it('normalizes plain enabled:false local-agent updates into explicit disconnect patches', () => {
+    const normalized = normalizeExplicitLocalAgentDisconnectBody({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+    });
+
+    expect(normalized).toEqual({
+      enabled: false,
+      metadata: { source: 'node-ui' },
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+  });
+
   it('lists built-in local integrations even before they are connected', () => {
     const integrations = listLocalAgentIntegrations(makeConfig());
 
@@ -620,6 +638,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('error');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
+    expect(integration?.metadata?.userDisabled).not.toBe(true);
     expect(saveConfig).toHaveBeenCalled();
   });
 

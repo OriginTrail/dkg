@@ -193,7 +193,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
       getSession: vi.fn().mockResolvedValue({
         session: 'session-1',
         messages: [
-          { author: 'user', text: 'latest', ts: '2026-04-14T08:00:00Z' },
+          { uri: 'urn:dkg:chat:msg:user-1', author: 'user', text: 'latest', ts: '2026-04-14T08:00:00Z' },
         ],
       }),
     } as any;
@@ -220,7 +220,10 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(200);
     expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
-    expect(parseJsonBody(state.body)).toMatchObject({ session: 'session-1' });
+    expect(parseJsonBody(state.body)).toMatchObject({
+      session: 'session-1',
+      messages: [{ uri: 'urn:dkg:chat:msg:user-1' }],
+    });
   });
 
   it('returns 400 for invalid session query parameters', async () => {

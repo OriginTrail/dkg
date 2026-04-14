@@ -391,6 +391,7 @@ export const deleteSavedQuery = (id: number) =>
 export interface MemorySession {
   session: string;
   messages: Array<{
+    uri: string;
     author: string;
     text: string;
     ts: string;
@@ -789,14 +790,27 @@ async function fetchLocalAgentHistoryBySessionId(
   sessionId: string,
   limit = 50,
 ): Promise<LocalAgentHistoryMessage[]> {
+  const buildFallbackHistoryMessageUri = (message: Pick<MemorySession['messages'][number], 'author' | 'text' | 'ts' | 'turnId'>): string => {
+    if (message.turnId) {
+      return `urn:dkg:chat:turn:${encodeURIComponent(message.turnId)}:${encodeURIComponent(message.author)}`;
+    }
+    const source = `${sessionId}\n${message.author}\n${message.ts}\n${message.text}`;
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `urn:dkg:chat:session:${encodeURIComponent(sessionId)}:message:${(hash >>> 0).toString(16)}`;
+  };
+
   try {
     const session = await fetchMemorySession(sessionId, {
       limit,
       order: 'desc',
     });
     return session.messages
-      .map((message, index) => ({
-        uri: `urn:dkg:chat:session:${sessionId}:message:${index}`,
+      .map((message) => ({
+        uri: message.uri || buildFallbackHistoryMessageUri(message),
         text: message.text,
         author: message.author,
         ts: message.ts,
