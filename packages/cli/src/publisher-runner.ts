@@ -229,8 +229,13 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       const publishOptionsWithACKs = v10ACKProvider
         ? { ...publishOptions, v10ACKProvider }
         : publishOptions;
-      const chain = (publisher as unknown as { chain?: { createKnowledgeAssetsV10?: unknown } }).chain;
-      if (chain && typeof chain.createKnowledgeAssetsV10 === 'function' && !publishOptionsWithACKs.v10ACKProvider) {
+      // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
+      // signal) rather than probing for `createKnowledgeAssetsV10`. Since the
+      // interface made the method required, `NoChainAdapter` now implements
+      // it as a throwing stub, so a `typeof === 'function'` probe would
+      // mis-route no-chain mode into the V10 ACK-gated path and crash.
+      const chain = (publisher as unknown as { chain?: { isV10Ready?: () => boolean } }).chain;
+      if (chain?.isV10Ready?.() && !publishOptionsWithACKs.v10ACKProvider) {
         throw new Error(
           'Async publisher cannot publish to a V10 ACK-gated chain without a v10ACKProvider. ' +
           'Use the synchronous agent publish path or add ACK collection support to the async runtime.',
@@ -270,14 +275,16 @@ function createV10ACKProviderForPublisher(
   if (!transport) return undefined;
   const chain = (publisher as unknown as {
     chain?: {
-      createKnowledgeAssetsV10?: unknown;
+      isV10Ready?: () => boolean;
       verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
       getMinimumRequiredSignatures?: () => Promise<number>;
       getEvmChainId?: () => Promise<bigint>;
       getKnowledgeAssetsV10Address?: () => Promise<string>;
     };
   }).chain;
-  if (!chain || typeof chain.createKnowledgeAssetsV10 !== 'function') return undefined;
+  // `isV10Ready()` is the authoritative capability gate — rejects
+  // NoChainAdapter (returns false) and unresolved EVM adapters.
+  if (!chain?.isV10Ready?.()) return undefined;
   if (typeof chain.verifyACKIdentity !== 'function') return undefined;
   // The H5 prefix requires both a numeric chain id AND the deployed KAV10
   // address. Without them the collector cannot build a digest that matches

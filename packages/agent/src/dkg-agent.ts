@@ -3932,11 +3932,21 @@ export class DKGAgent {
    */
   private createV10ACKProvider(contextGraphId: string) {
     if (!this.router || !this.gossip) return undefined;
-    if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') return undefined;
-    if (typeof this.chain.isV10Ready === 'function' && !this.chain.isV10Ready()) return undefined;
+    // `isV10Ready()` is the authoritative V10 capability gate. Using it
+    // (instead of probing for `createKnowledgeAssetsV10`) keeps
+    // `NoChainAdapter` — whose stub methods throw — out of the V10 path.
+    if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) return undefined;
     // Require on-chain identity verification to prevent accepting unverified ACKs
     // that would fail on-chain and waste gas. Fall back to legacy path if unavailable.
     if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
+    // The H5 prefix requires a numeric chain id AND the deployed KAV10
+    // address. Without BOTH, the collector cannot build a digest that
+    // matches what core-node ACK handlers sign, so refuse to hand back a
+    // provider at all rather than crash on the first publish with
+    // `chain.getEvmChainId is not a function`. Mirrors the guard at
+    // `packages/cli/src/publisher-runner.ts:createV10ACKProviderForPublisher`.
+    if (typeof this.chain.getEvmChainId !== 'function') return undefined;
+    if (typeof this.chain.getKnowledgeAssetsV10Address !== 'function') return undefined;
 
     const collector = new ACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {

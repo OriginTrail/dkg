@@ -380,8 +380,18 @@ export interface ChainAdapter {
   /** V10 update (works with KnowledgeCollectionStorage). */
   updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
 
-  /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
-  isV10Ready?(): boolean;
+  /**
+   * Whether this adapter supports V10 publish paths. Required — this is
+   * the authoritative runtime capability gate for V10. Adapters that
+   * cannot publish (NoChainAdapter, offline adapters) MUST return false so
+   * callers never route into throwing stubs. EVM adapters return true only
+   * after `KnowledgeAssetsV10` is actually resolved on-chain.
+   *
+   * Runtime probes across the repo use `chain.isV10Ready?.()` (falsy =>
+   * not V10); making it required tightens the TypeScript side without
+   * breaking the defensive runtime optional-call style.
+   */
+  isV10Ready(): boolean;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

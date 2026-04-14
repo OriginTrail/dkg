@@ -1006,7 +1006,11 @@ export class DKGPublisher implements Publisher {
       ? undefined
       : new TextEncoder().encode(nquadsStr);
 
-    // Pre-compute tokenAmount and epochs so they can be included in the 6-field ACK digest.
+    // Pre-compute tokenAmount and epochs so they can be included in the
+    // H5-prefixed 8-field publish ACK digest (chainid, kav10Address, cgId,
+    // merkleRoot, kaCount, byteSize, epochs, tokenAmount) — matches
+    // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
+    // `KnowledgeAssetsV10.sol:362-373`.
     const publishEpochs = 1;
     let precomputedTokenAmount = 0n;
     if (this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
@@ -1024,7 +1028,7 @@ export class DKGPublisher implements Publisher {
     //   `options.publishContextGraphId` (optional) = the TARGET on-chain
     //     numeric CG id that the ACK digest + publishDirect tx use.
     //
-    // Remap flow: `publishFromSharedMemory("devnet-test", { subContextGraphId: "42" })`
+    // Remap flow: `publishFromSharedMemory("devnet-test", { publishContextGraphId: "42" })`
     //   → swmGraphId = "devnet-test", target CG id = 42. Peers read SWM at
     //   "devnet-test" and sign the ACK against on-chain id 42.
     //
@@ -1157,8 +1161,14 @@ export class DKGPublisher implements Publisher {
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
-        if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') {
-          throw new Error('Chain adapter does not support V10 publish (createKnowledgeAssetsV10 not available)');
+        if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
+          throw new Error(
+            'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
+            'Publish is routed through KnowledgeAssetsV10.publishDirect, which requires ' +
+            'the adapter to expose createKnowledgeAssetsV10, getEvmChainId, and ' +
+            'getKnowledgeAssetsV10Address — use an EVM adapter pointed at a chain where ' +
+            'KnowledgeAssetsV10 is deployed.',
+          );
         }
         if (v10ChainId === undefined || v10KavAddress === undefined) {
           throw new Error(
