@@ -196,12 +196,21 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     ) external onlyContracts {
         Position storage pos = positions[tokenId];
         require(pos.raw > 0, "No position");
-        // Phase 5: relock must carry an actual boost — lock 0 is the rest
-        // state (post-expiry 1x), not a valid re-commit target. Lock 1 is
-        // the 1-month 1.5x bootstrap tier and IS valid. Any lock outside
-        // the discrete set {1,3,6,12} will revert inside `expectedMultiplier18`
-        // with "Invalid lock" before `Tier mismatch` is ever checked.
-        require(newLockEpochs >= 1, "Lock too short");
+        // Phase 5 update: tier 0 (permanent rest state, 1x) is a valid
+        // post-expiry relock target per the roadmap
+        // (`04_TOKEN_ECONOMICS §4.1` — "no lockup / 1 / 3 / 6 / 12 months"
+        // is the full user-facing tier set). The original Phase 2 Hotfix
+        // rejected `newLockEpochs == 0` with a "Lock too short" guard; we
+        // drop it here because the discrete-set validation inside
+        // `expectedMultiplier18` is already the canonical source of valid
+        // lock values, and tier-0 relock is mathematically well-defined:
+        // `boost = raw * (SCALE18 - SCALE18) / SCALE18 == 0`, so both the
+        // `currentEpoch` and `newExpiry` diff writes below are zero-delta
+        // no-ops — the only observable mutation is the `pos.lockEpochs`,
+        // `pos.multiplier18`, `pos.expiryEpoch` writeback that drives the
+        // position back to the rest state, matching `createPosition`'s
+        // lock-0 branch. Any lock outside the discrete set {0,1,3,6,12}
+        // still reverts inside `expectedMultiplier18` with "Invalid lock".
         require(newMultiplier18 == expectedMultiplier18(newLockEpochs), "Tier mismatch");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();

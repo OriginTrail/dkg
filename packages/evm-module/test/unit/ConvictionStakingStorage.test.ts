@@ -364,13 +364,39 @@ describe('@unit ConvictionStakingStorage', () => {
       ).to.be.revertedWith('Invalid lock');
     });
 
-    it('Reverts on lock=0 (rest state is not a valid relock target)', async () => {
+    it('Allows lock=0 (rest state) as a valid post-expiry relock target', async () => {
+      // Phase 5: the original Phase 2 hotfix rejected `lock=0` with
+      // "Lock too short". Per the roadmap (`04_TOKEN_ECONOMICS §4.1` —
+      // "no lockup / 1 / 3 / 6 / 12 months"), tier 0 is an explicit valid
+      // relock target: a post-expiry holder can choose to remain at 1x
+      // rather than re-commit to another locked tier.
+      //
+      // Math: `boost = raw * (1e18 - 1e18) / 1e18 = 0`, so the diff writes
+      // at `currentEpoch` and `newExpiry` are both zero-delta no-ops —
+      // the only observable mutation is the Position struct rewrite.
       await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 3, TWO_X);
       await advanceEpochs(3);
-      // lock=0 is the rest state, not a meaningful re-commit
-      await expect(
-        ConvictionStakingStorage.updateOnRelock(1, 0, ONE_X),
-      ).to.be.revertedWith('Lock too short');
+      expect(await Chronos.getCurrentEpoch()).to.equal(4);
+
+      // Pre-relock: post-expiry permanent 1000 (raw * 1x).
+      expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(4)).to.equal(1000);
+
+      await ConvictionStakingStorage.updateOnRelock(1, 0, ONE_X);
+
+      const pos = await ConvictionStakingStorage.getPosition(1);
+      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.multiplier18).to.equal(ONE_X);
+      // `newExpiry = currentEpoch + 0 = currentEpoch` per the general
+      // `updateOnRelock` arithmetic. It differs from `createPosition`'s
+      // lock-0 branch (which pins `expiryEpoch = 0`) but that's fine:
+      // `currentEpoch >= pos.expiryEpoch` remains true for any future
+      // relock on this position, so the post-expiry check still passes.
+      expect(pos.expiryEpoch).to.equal(4);
+      expect(pos.raw).to.equal(1000);
+
+      // Effective stake stays at the post-expiry baseline — nothing lifts.
+      expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(4)).to.equal(1000);
+      expect(await ConvictionStakingStorage.getTotalEffectiveStakeAtEpoch(100)).to.equal(1000);
     });
 
     it('Reverts on non-existent position', async () => {
