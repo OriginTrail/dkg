@@ -943,6 +943,8 @@ describe('@unit RandomSampling', () => {
       await seedCGValue(cgId, 1_000n);
 
       const currentEpoch = await Chronos.getCurrentEpoch();
+      const chunkByteSize = await RandomSamplingStorage.CHUNK_BYTE_SIZE();
+      const expectedMaxChunk = TEST_KC_BYTE_SIZE / BigInt(chunkByteSize); // 4
 
       for (let i = 0; i < 10; i++) {
         const preview = await RandomSampling.previewChallengeForSeed(
@@ -951,8 +953,9 @@ describe('@unit RandomSampling', () => {
         );
         expect(preview.cgId).to.equal(cgId);
         expect(preview.kcId).to.equal(kcId);
-        // KC is smaller than the chunk size so chunkId collapses to 0.
-        expect(preview.chunkId).to.equal(0n);
+        // KC byte size (128) > chunk byte size (32), so chunkId is drawn from
+        // the rotated KC seed in [0, byteSize/chunkSize) = [0, 4).
+        expect(preview.chunkId).to.be.lessThan(expectedMaxChunk);
       }
     });
 
