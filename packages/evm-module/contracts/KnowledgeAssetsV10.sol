@@ -332,11 +332,15 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             )
         );
         bytes32 publisherEthDigest = ECDSA.toEthSignedMessageHash(publisherDigest);
-        // `_verifySignature` returns the recovered wallet, so we avoid a
-        // second `ECDSA.recover` of the same digest. The returned address
-        // is the one that actually signed the merkle root — KCS stores it
-        // as the merkle-root author, NOT the paying agent.
-        address publisherWallet = _verifySignature(
+        // The publisher-node signature only attests that a staked operator key of
+        // `publisherNodeIdentityId` signed the (chainid, contract, node, cgId, root)
+        // tuple — i.e. "this node is willing to host this data". The recovered
+        // wallet is NOT the publisher of record. The publisher of record is
+        // `msg.sender` (the paying agent), which is what KCS stores on the
+        // merkle-root entry and which receives the minted ERC-1155 KA tokens.
+        // We still need `_verifySignature` to validate the signature + key
+        // purpose + node stake; we discard the returned address.
+        _verifySignature(
             p.publisherNodeIdentityId,
             publisherEthDigest,
             p.publisherNodeR,
@@ -390,8 +394,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
         currentEpoch = uint40(chronos.getCurrentEpoch());
 
+        // Publisher of record + ERC-1155 KA token recipient = `msg.sender`
+        // (the paying agent). This is the principal that the N16 update
+        // auth gate (`balanceOf(msg.sender, kcRange) > 0`) checks against
+        // — passing the recovered node signer here would mint the KA
+        // tokens to the node operator wallet, breaking publish→update
+        // coherence on the conviction path.
         kcId = kcs.createKnowledgeCollection(
-            publisherWallet,
+            msg.sender,
             p.publishOperationId,
             p.merkleRoot,
             p.knowledgeAssetsAmount,
