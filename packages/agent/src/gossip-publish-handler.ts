@@ -133,8 +133,19 @@ export class GossipPublishHandler {
                 .filter(q => duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.PROV_GENERATED_BY)
                 .map(q => q.object),
             );
-            // Keep dkg:creator triples for duplicates — the real creator's value
-            // should overwrite any placeholder written by ensureContextGraphLocal().
+            // Extract incoming dkg:creator triples for duplicates so we can
+            // replace the placeholder written by ensureContextGraphLocal().
+            const incomingCreators = normalized.filter(q =>
+              duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.DKG_CREATOR,
+            );
+            // Delete existing placeholder creators before inserting the authoritative ones
+            for (const cq of incomingCreators) {
+              await this.store.deleteByPattern({
+                graph: cq.graph,
+                subject: cq.subject,
+                predicate: DKG_ONTOLOGY.DKG_CREATOR,
+              });
+            }
             normalized = normalized.filter(q =>
               (duplicateUris.has(q.subject) && q.predicate === DKG_ONTOLOGY.DKG_CREATOR)
               || (!duplicateUris.has(q.subject) && !activityUris.has(q.subject)),

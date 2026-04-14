@@ -3416,7 +3416,7 @@ async function handleRequest(
         return jsonResponse(res, 500, { error: err.message });
       }
     }
-    const { id, name, description, allowedPeers } = parsed;
+    const { id, name, description, allowedPeers, register } = parsed;
     if (!id || !name) return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
@@ -3427,6 +3427,28 @@ async function handleRequest(
         return jsonResponse(res, 409, { error: msg });
       }
       throw err;
+    }
+    // Backward compatibility: callers that expect create+register in one step
+    // can pass `register: true`. New callers should use the separate
+    // POST /api/context-graph/register endpoint.
+    if (register === true) {
+      try {
+        const regResult = await agent.registerContextGraph(id);
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: true,
+          onChainId: regResult.onChainId,
+        });
+      } catch (regErr: any) {
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: false,
+          registerError: regErr?.message ?? 'Registration failed',
+          hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
+        });
+      }
     }
     return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
   }

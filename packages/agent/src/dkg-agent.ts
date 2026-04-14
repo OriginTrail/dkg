@@ -2099,6 +2099,16 @@ export class DKGAgent {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
 
+    // Only the curator/creator can register a CG on-chain
+    const owner = await this.getContextGraphOwner(id);
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (owner && owner !== selfDid) {
+      throw new Error(
+        `Only the context graph creator can register it on-chain. ` +
+        `Creator=${owner}, current=${selfDid}`,
+      );
+    }
+
     // Check if already registered
     const cgMetaGraph = paranetMetaGraphUri(id);
     const paranetUri = paranetDataGraphUri(id);
@@ -2160,10 +2170,15 @@ export class DKGAgent {
       { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
     ]);
 
-    // Update in-memory subscription record
+    // Update in-memory subscription record and ensure we're subscribed
     const sub = this.subscribedContextGraphs.get(id);
     if (sub) {
       sub.onChainId = onChainId;
+      if (!sub.subscribed) {
+        sub.subscribed = true;
+        this.subscribeToContextGraph(id, { trackSyncScope: true });
+        this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
+      }
     }
 
     // Registration status is in _meta — it propagates to peers via sync, not
@@ -2211,6 +2226,16 @@ export class DKGAgent {
     const exists = await this.contextGraphExists(contextGraphId);
     if (!exists) {
       throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    // Only the curator/creator can manage the allowlist
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (owner && owner !== selfDid) {
+      throw new Error(
+        `Only the context graph creator can manage invitations. ` +
+        `Creator=${owner}, current=${selfDid}`,
+      );
     }
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
