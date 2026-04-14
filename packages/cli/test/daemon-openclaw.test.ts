@@ -263,7 +263,7 @@ describe('OpenClaw UI setup command resolution', () => {
     const command = getOpenClawUiSetupCommand(
       '@origintrail-official/dkg-adapter-openclaw',
       runtimeModuleUrl,
-      (path) => path.endsWith('packages\\adapter-openclaw\\dist\\setup-cli.js'),
+      (path) => /packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/.test(path),
     );
 
     expect(command.source).toBe('workspace');
