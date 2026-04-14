@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
@@ -95,6 +95,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
   let ParametersStorage: ParametersStorage;
   let Profile: Profile;
   let Token: Token;
+  let ChronosContract: Chronos;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -109,8 +110,17 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ParametersStorage,
       Profile,
       Token,
+      Chronos: ChronosContract,
     } = await loadFixture(deployFixture));
   });
+
+  // Helper — advance block time past `n` full Chronos epochs so the next
+  // `chronos.getCurrentEpoch()` read reflects the new boundary. Mirrors the
+  // pattern in `ConvictionStakingStorage.test.ts::advanceEpochs`.
+  const advanceEpochs = async (n: number) => {
+    const epochLength = await ChronosContract.epochLength();
+    await time.increase(Number(epochLength) * n);
+  };
 
   // Helper — mint a profile via `Profile.createProfile`, using fresh
   // node key material on every call. Mirrors `Staking.test.ts::createProfile`.
@@ -415,6 +425,165 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, minStake, 12);
 
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
+    });
+  });
+
+  // =====================================================================
+  // relock → StakingV10.relock
+  // =====================================================================
+  //
+  // Post-expiry re-commit of an existing position to a new lock tier. Raw
+  // principal stays put (already unlocked); the multiplier + expiry fields
+  // shift, and the rewards bucket is left untouched. The NFT wrapper
+  // enforces ownership + tier fail-fast; StakingV10 enforces lock-expiry
+  // + settles the indices + forwards to
+  // `ConvictionStakingStorage.updateOnRelock`, which owns the
+  // effective-stake diff propagation.
+
+  describe('relock (→ StakingV10.relock)', () => {
+    // -----------------------------------------------------------------
+    // Revert paths
+    // -----------------------------------------------------------------
+
+    it('reverts if not owner (non-owner caller)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 3);
+      // Advance past the 3-epoch lock.
+      await advanceEpochs(4);
+
+      // `accounts[4]` is not the owner of tokenId 0.
+      await expect(
+        NFT.connect(accounts[4]).relock(0, 6),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('reverts on invalid new lock tier (2) at the NFT wrapper layer', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      // Tier 2 was the old 1.5x tier; Phase 5 dropped it. Wrapper rejects
+      // via `_convictionMultiplier` before forwarding to StakingV10.
+      await expect(
+        NFT.connect(accounts[0]).relock(0, 2),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+    });
+
+    it('reverts on invalid new lock tier (13) at the NFT wrapper layer', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+      await expect(
+        NFT.connect(accounts[0]).relock(0, 13),
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+    });
+
+    it('reverts if lock still active (pre-expiry)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+      // No time advance — the 12-epoch lock is still active.
+      await expect(
+        NFT.connect(accounts[0]).relock(0, 6),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'LockStillActive');
+    });
+
+    it('reverts on non-existent position (tokenId never minted)', async () => {
+      // Owner check is the first gate at the NFT wrapper: for a non-minted
+      // tokenId, ERC721 `ownerOf(42)` reverts inside the wrapper before
+      // StakingV10 is ever called. That is the intended behavior — there is
+      // no standalone "PositionNotFound" surface on the happy path because
+      // every tokenId that passed the NFT owner check is guaranteed to have
+      // a matching position (positions are created atomically with the
+      // mint).
+      await expect(NFT.connect(accounts[0]).relock(42, 6)).to.be.reverted;
+    });
+
+    // -----------------------------------------------------------------
+    // Happy paths
+    // -----------------------------------------------------------------
+
+    it('happy path: relocks from tier 1 → tier 12 after expiry (multiplier 6e18, raw + rewards untouched)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      // Advance past the 1-epoch lock.
+      await advanceEpochs(2);
+
+      const beforeEpoch = await ChronosContract.getCurrentEpoch();
+      const tx = await NFT.connect(accounts[0]).relock(0, 12);
+
+      // Wrapper-layer event and StakingV10 authoritative event both fire.
+      await expect(tx).to.emit(NFT, 'PositionRelocked').withArgs(0n, 12);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'Relocked')
+        .withArgs(0n, 12, beforeEpoch + 12n);
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(identityId);
+      expect(pos.raw).to.equal(amount); // principal unchanged
+      expect(pos.rewards).to.equal(0n); // rewards bucket untouched
+      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.multiplier18).to.equal(SIX_X);
+      expect(pos.expiryEpoch).to.equal(beforeEpoch + 12n);
+    });
+
+    it('happy path: relock to tier 0 (permanent rest state, 1x multiplier)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      await advanceEpochs(2);
+
+      const beforeEpoch = await ChronosContract.getCurrentEpoch();
+      // Tier 0 is the permanent rest state: a legitimate post-expiry relock
+      // target per the roadmap ("no lockup / 1 / 3 / 6 / 12 months"). The
+      // storage helper's tier table maps lock==0 → 1x, and the wrapper's
+      // `_convictionMultiplier` helper accepts 0.
+      await NFT.connect(accounts[0]).relock(0, 0);
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(amount);
+      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.multiplier18).to.equal(ONE_X);
+      // `updateOnRelock` sets `pos.expiryEpoch = currentEpoch + 0`.
+      expect(pos.expiryEpoch).to.equal(beforeEpoch);
+    });
+
+    it('happy path: relock updates expiryEpoch to currentEpoch + newLockEpochs', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+
+      const beforeEpoch = await ChronosContract.getCurrentEpoch();
+      await NFT.connect(accounts[0]).relock(0, 6);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.expiryEpoch).to.equal(beforeEpoch + 6n);
+      expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
+    });
+
+    it('direct StakingV10.relock call from non-NFT caller reverts via onlyConvictionNFT gate', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      await advanceEpochs(2);
+
+      // The gate pins the caller to the Hub-registered NFT contract.
+      await expect(
+        StakingV10Contract.connect(accounts[0]).relock(accounts[0].address, 0, 6),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
   });
 });
