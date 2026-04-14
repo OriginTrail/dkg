@@ -300,7 +300,7 @@ export class ChatMemoryManager {
     userMessage: string,
     assistantReply: string,
     toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
-    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending' },
+    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending'; failureReason?: string | null },
   ): Promise<void> {
     await this.ensureInitialized();
     const userTs = new Date();
@@ -312,6 +312,9 @@ export class ChatMemoryManager {
     const assistantMsgUri = `${CHAT_NS}msg:${assistantMsgId}`;
     const turnId = opts?.turnId?.trim();
     const persistenceState = opts?.persistenceState ?? 'stored';
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
     const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
@@ -350,6 +353,9 @@ export class ChatMemoryManager {
         { subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+        ...(persistenceState === 'failed' && failureReason
+          ? [{ subject: turnUri, predicate: `${DKG_ONT}failureReason`, object: JSON.stringify(failureReason), graph: '' }]
+          : []),
         { subject: userMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
         { subject: assistantMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
       );
@@ -629,6 +635,7 @@ export class ChatMemoryManager {
       ts: string;
       turnId?: string;
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+      failureReason?: string | null;
     }>;
   } | null> {
     await this.ensureInitialized();
@@ -642,7 +649,7 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?failureReason WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -653,6 +660,7 @@ export class ChatMemoryManager {
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
             ?turn <${DKG_ONT}turnId> ?turnId .
             ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+            OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
           }
         } ORDER BY ${order}(?ts) LIMIT ${limit}`,
         { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
@@ -674,6 +682,10 @@ export class ChatMemoryManager {
               return status;
             }
             return undefined;
+          })(),
+          failureReason: (() => {
+            const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
+            return reason.length > 0 ? reason : undefined;
           })(),
         })),
       };

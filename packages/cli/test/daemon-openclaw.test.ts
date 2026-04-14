@@ -353,6 +353,30 @@ describe('OpenClaw persist-turn validation', () => {
       persistenceState: 'cancelled',
     })).toBe(false);
   });
+
+  it('accepts string/null failure reasons and rejects invalid ones', () => {
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: 'timeout',
+    })).toBe(true);
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: null,
+    })).toBe(true);
+    expect(isValidOpenClawPersistTurnPayload({
+      sessionId: 'openclaw:dkg-ui',
+      userMessage: 'hi',
+      assistantReply: '',
+      persistenceState: 'failed',
+      failureReason: { code: 'timeout' },
+    })).toBe(false);
+  });
 });
 
 describe('daemon loopback request handling', () => {

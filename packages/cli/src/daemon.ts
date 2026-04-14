@@ -2221,6 +2221,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   userMessage?: unknown;
   assistantReply?: unknown;
   persistenceState?: unknown;
+  failureReason?: unknown;
 }): payload is {
   sessionId: string;
   userMessage: string;
@@ -2228,11 +2229,17 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   turnId?: unknown;
   toolCalls?: unknown;
   persistenceState?: unknown;
+  failureReason?: unknown;
 } {
   return typeof payload.sessionId === 'string'
     && payload.sessionId.trim().length > 0
     && typeof payload.userMessage === 'string'
     && typeof payload.assistantReply === 'string'
+    && (
+      payload.failureReason === undefined
+      || payload.failureReason === null
+      || typeof payload.failureReason === 'string'
+    )
     && (
       payload.persistenceState === undefined
       || payload.persistenceState === 'stored'
@@ -2800,7 +2807,7 @@ async function handleRequest(
     if (!isValidOpenClawPersistTurnPayload(payload)) {
       return jsonResponse(res, 400, { error: 'Missing required fields: sessionId, userMessage, assistantReply' });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls, persistenceState } = payload;
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls, persistenceState, failureReason } = payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? toolCalls as Array<{ name: string; args: Record<string, unknown>; result: unknown }>
       : undefined;
@@ -2808,13 +2815,20 @@ async function handleRequest(
     const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
       ? persistenceState
       : 'stored';
+    const normalizedFailureReason = typeof failureReason === 'string'
+      ? failureReason
+      : (failureReason === null ? null : undefined);
     try {
       await memoryManager.storeChatExchange(
         sessionId,
         userMessage,
         assistantReply,
         normalizedToolCalls,
-        { turnId: normalizedTurnId, persistenceState: normalizedPersistenceState },
+        {
+          turnId: normalizedTurnId,
+          persistenceState: normalizedPersistenceState,
+          failureReason: normalizedFailureReason,
+        },
       );
       return jsonResponse(res, 200, { ok: true });
     } catch (err: any) {

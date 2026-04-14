@@ -33,6 +33,7 @@ export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
 const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const STOP_DRAIN_TIMEOUT_MS = 1_500;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
 const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
 const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
@@ -235,7 +236,12 @@ export class DkgChannelPlugin {
       this.server = null;
     }
 
-    await this.waitForStopDrain();
+    const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
+    if (!drained) {
+      this.api?.logger.warn?.(
+        `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
+      );
+    }
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
@@ -252,12 +258,26 @@ export class DkgChannelPlugin {
     }
   }
 
-  private waitForStopDrain(): Promise<void> {
+  private waitForStopDrain(timeoutMs: number): Promise<boolean> {
     if (this.inFlight === 0 && this.pendingTurnPersistence.size === 0) {
-      return Promise.resolve();
+      return Promise.resolve(true);
     }
     return new Promise((resolve) => {
-      this.stopWaiters.push(resolve);
+      let settled = false;
+      const waiter = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = this.stopWaiters.indexOf(waiter);
+        if (index >= 0) this.stopWaiters.splice(index, 1);
+        resolve(false);
+      }, timeoutMs);
+      this.stopWaiters.push(waiter);
       this.notifyStopIdle();
     });
   }

@@ -828,65 +828,76 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
-  it('stop should still allow one final turn persistence attempt for a reply that finished during shutdown', async () => {
-    let resumeDispatch!: () => void;
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+  it('stop should only wait a bounded time for a final turn persistence attempt that hangs during shutdown', async () => {
+    vi.useFakeTimers();
+    try {
+      let resumeDispatch!: () => void;
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+            },
           },
         },
-      },
-    };
-    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
-    const api = makeApi() as any;
-    api.runtime = mockRuntime;
-    api.cfg = mockCfg;
-    let resolveStore!: () => void;
-    const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
-    plugin.register(api);
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+      plugin.register(api);
 
-    const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-store', 'owner');
-    await expect(stream.next()).resolves.toEqual({
-      done: false,
-      value: { type: 'text_delta', delta: 'Reply before shutdown' },
-    });
+      const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-store', 'owner');
+      await expect(stream.next()).resolves.toEqual({
+        done: false,
+        value: { type: 'text_delta', delta: 'Reply before shutdown' },
+      });
 
-    const nextItem = stream.next();
-    const stopPromise = plugin.stop();
-    resumeDispatch();
-    await expect(nextItem).resolves.toEqual({
-      done: false,
-      value: { type: 'final', text: 'Reply before shutdown', correlationId: 'corr-stream-stop-store' },
-    });
-    await expect(stream.next()).resolves.toEqual({ done: true, value: undefined });
-    let stopSettled = false;
-    void stopPromise.then(() => { stopSettled = true; });
-    await Promise.resolve();
-    expect(stopSettled).toBe(false);
-    resolveStore();
-    await stopPromise;
+      const nextItem = stream.next();
+      const stopPromise = plugin.stop();
+      resumeDispatch();
+      await expect(nextItem).resolves.toEqual({
+        done: false,
+        value: { type: 'final', text: 'Reply before shutdown', correlationId: 'corr-stream-stop-store' },
+      });
+      await expect(stream.next()).resolves.toEqual({ done: true, value: undefined });
 
-    expect(storeSpy).toHaveBeenCalledTimes(1);
-    expect(storeSpy).toHaveBeenCalledWith(
-      'openclaw:dkg-ui',
-      'Hello',
-      'Reply before shutdown',
-      { turnId: 'corr-stream-stop-store' },
-    );
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await stopPromise;
+      expect(stopSettled).toBe(true);
+
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeSpy).toHaveBeenCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stream-stop-store' },
+      );
+
+      resolveStore();
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

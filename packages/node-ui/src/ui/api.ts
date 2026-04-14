@@ -397,6 +397,7 @@ export interface MemorySession {
     ts: string;
     turnId?: string;
     persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+    failureReason?: string | null;
   }>;
 }
 export interface MemorySessionPublicationStatus {
@@ -741,6 +742,7 @@ export interface LocalAgentHistoryMessage {
   author: string;
   ts: string;
   turnId?: string;
+  failureReason?: string | null;
 }
 
 interface LocalAgentSurface {
@@ -815,6 +817,7 @@ async function fetchLocalAgentHistoryBySessionId(
         author: message.author,
         ts: message.ts,
         turnId: message.turnId,
+        failureReason: message.failureReason,
       }));
   } catch (err) {
     if (err instanceof HttpError && err.status === 404) {

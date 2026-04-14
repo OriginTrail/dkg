@@ -38,6 +38,20 @@ describe('ChatMemoryManager', () => {
     expect(sessionTriple.object).toContain('session-1');
   });
 
+  it('persists failureReason on failed chat turns', async () => {
+    mockQuery.mockResolvedValueOnce({ bindings: [] });
+    await manager.storeChatExchange('session-1', 'Hello', 'Hi there!', undefined, {
+      turnId: 'turn-1',
+      persistenceState: 'failed',
+      failureReason: 'timeout',
+    });
+
+    const quads = mockShare.mock.calls[0][1];
+    const failureReasonQuad = quads.find((q: any) => q.predicate?.includes('failureReason'));
+    expect(failureReasonQuad).toBeDefined();
+    expect(failureReasonQuad.object).toBe('"timeout"');
+  });
+
   it('includes session triples only on first write for a session', async () => {
     mockQuery.mockResolvedValueOnce({ bindings: [] });
     await manager.storeChatExchange('session-1', 'First message', 'First reply');
@@ -189,7 +203,7 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:agent-3',
     ]);
     const queryText = String(mockQuery.mock.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?failureReason');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
   });
 
@@ -222,6 +236,29 @@ describe('ChatMemoryManager', () => {
     expect(session!.messages[0].uri).toBe('urn:dkg:chat:msg:agent-1');
     expect(session!.messages[0].turnId).toBe('turn-1');
     expect(session!.messages[0].persistStatus).toBe('stored');
+  });
+
+  it('getSession includes failureReason for failed turns when present', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ bindings: [] })
+      .mockResolvedValueOnce({
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Answer"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"failed"',
+            failureReason: '"timeout"',
+          },
+        ],
+      });
+
+    const session = await manager.getSession('test-session-3');
+    expect(session).not.toBeNull();
+    expect(session!.messages[0].persistStatus).toBe('failed');
+    expect(session!.messages[0].failureReason).toBe('timeout');
   });
 
   it('getStats returns session and triple counts', async () => {
