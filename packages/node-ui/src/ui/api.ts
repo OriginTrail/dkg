@@ -475,27 +475,11 @@ export const publishMemorySession = (
 export const fetchMemoryStats = () =>
   get<{ contextGraphId: string; initialized: boolean; chatTriples: number; knowledgeTriples: number; totalTriples: number; sessionCount: number; entityCount: number }>('/api/memory/stats');
 
-export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
-export type ImportSource = (typeof IMPORT_SOURCES)[number];
-
-export interface ImportMemoryQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-}
-
-export interface ImportMemoryResult {
-  batchId: string | null;
-  source: ImportSource;
-  memoryCount: number;
-  tripleCount: number;
-  entityCount: number;
-  quads: ImportMemoryQuad[];
-  quadsTruncated?: boolean;
-  warnings?: string[];
-}
-export const importMemories = (text: string, source?: ImportSource, useLlm?: boolean) =>
-  post<ImportMemoryResult>('/api/memory/import', { text, source, useLlm });
+// IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
+// importMemories were retired with the /api/memory/import V9 relic as
+// part of the openclaw-dkg-primary-memory work. Agents write memory via
+// the adapter's dkg_memory_import tool, and file-import flows go through
+// /api/assertion/:name/import-file directly.
 
 // --- Peer-to-peer messaging ---
 export const sendPeerMessage = (to: string, text: string) =>

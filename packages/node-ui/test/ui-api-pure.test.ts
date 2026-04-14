@@ -41,7 +41,6 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
-  IMPORT_SOURCES,
   gameApi,
 } from '../src/ui/api.js';
 
@@ -469,11 +468,6 @@ describe('gameApi', () => {
   });
 });
 
-describe('IMPORT_SOURCES', () => {
-  it('contains expected sources', () => {
-    expect(IMPORT_SOURCES).toContain('claude');
-    expect(IMPORT_SOURCES).toContain('chatgpt');
-    expect(IMPORT_SOURCES).toContain('gemini');
-    expect(IMPORT_SOURCES).toContain('other');
-  });
-});
+// IMPORT_SOURCES test block removed — the constant was retired along
+// with /api/memory/import as part of the openclaw-dkg-primary-memory
+// work. See Dashboard / ui/api.ts for the deletion context.

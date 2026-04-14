@@ -147,9 +147,16 @@ describe('dashboard uses runtime data', () => {
     expect(dashboard).toContain('DEMO');
   });
 
-  it('Import Memories modal is functional (no longer coming-soon)', () => {
-    expect(dashboard).toMatch(/importMemories/);
-    expect(dashboard).toMatch(/Import as Private Knowledge/);
+  it('Import Memories modal and its client helpers are absent (retired with /api/memory/import)', () => {
+    // The Dashboard modal, the `importMemories` client helper, and the
+    // "Import as Private Knowledge" button copy were all deleted as part
+    // of the openclaw-dkg-primary-memory retire-and-replace work. Agents
+    // write memory via the adapter's dkg_memory_import tool now, and file
+    // imports go through /api/assertion/:name/import-file directly.
+    expect(dashboard).not.toMatch(/importMemories/);
+    expect(dashboard).not.toMatch(/Import as Private Knowledge/);
+    expect(dashboard).not.toMatch(/ImportModal/);
+    expect(dashboard).not.toMatch(/ImportResultView/);
   });
 
   it('context graph list uses id as React key, not name', () => {
