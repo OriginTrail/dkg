@@ -5,6 +5,7 @@ pragma solidity ^0.8.20;
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
+import {IStaking} from "./interfaces/IStaking.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
@@ -221,6 +222,34 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         if (lockEpochs >= 3) return 2 * SCALE18;
         if (lockEpochs >= 2) return 15 * SCALE18 / 10;
         return SCALE18;
+    }
+
+    // ========================================================================
+    // V10 two-layer staking wire — placeholder call site (Phase 4)
+    // ========================================================================
+    //
+    // This internal helper pins the ABI contract between this NFT contract
+    // and `Staking._recordStake` at compile time. It is intentionally unused
+    // in Phase 4: the real wiring (user-facing `createConviction`, TRAC
+    // transfer, ConvictionStakingStorage position write, effective-stake
+    // finalize) is scheduled for Phase 5.
+    //
+    // Keeping a typed call site here means: (a) any signature drift in
+    // `Staking._recordStake` breaks this contract's compile, and (b) Phase 5
+    // can lift the body of this helper into its real integration path
+    // without re-discovering the call shape.
+    function _recordStakeViaStaking(
+        uint256 tokenId,
+        uint72 identityId,
+        uint96 amount,
+        uint40 lockEpochs
+    ) internal {
+        IStaking(hub.getContractAddress("Staking"))._recordStake(
+            tokenId,
+            identityId,
+            amount,
+            lockEpochs
+        );
     }
 
     function supportsInterface(

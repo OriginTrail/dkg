@@ -2767,4 +2767,377 @@ describe('Staking contract', function () {
       await DelegatorsInfo.getLastClaimedEpoch(identityId, accounts[0].address),
     ).to.equal(epoch);
   });
+
+  /**********************************************************************
+   * V10 Phase 4 — _recordStake (two-layer staking wire, decision #13)
+   *
+   * The NFT path uses `bytes32(tokenId)` as the delegator key in
+   * StakingStorage, disjoint from the V8 legacy `keccak256(address)`
+   * key space. This lets multiple NFTs for the same delegator/node
+   * pair be settled independently without colliding with the V8
+   * stake() path.
+   **********************************************************************/
+
+  // Helper: convert uint256 tokenId -> bytes32 key (same encoding as Solidity
+  // `bytes32(uint256(tokenId))`).
+  const tokenIdKey = (tokenId: bigint | number): string =>
+    hre.ethers.zeroPadValue(hre.ethers.toBeHex(tokenId), 32);
+
+  // Helper: register a signer under a Hub contract name so onlyContracts
+  // and the NFT-identity gate see it as the expected caller.
+  const impersonateHubContract = async (
+    name: string,
+    signer: SignerWithAddress,
+  ) => {
+    const Hub = await hre.ethers.getContract<Hub>('Hub');
+    await Hub.setContractAddress(name, signer.address);
+  };
+
+  it('_recordStake: NFT caller succeeds and writes bytes32(tokenId) key', async () => {
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    const minStake = await ParametersStorage.minimumStake();
+    const amount = minStake; // use minStake so sharding add path is also exercised
+
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const tokenId = 1n;
+    const lockEpochs = 12;
+
+    const totalBefore = await StakingStorage.getTotalStake();
+
+    const tx = await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](tokenId, identityId, amount, lockEpochs);
+    await expect(tx)
+      .to.emit(Staking, 'StakeRecorded')
+      .withArgs(tokenId, identityId, amount, lockEpochs, nftSigner.address);
+
+    // bytes32(tokenId) delegator key has the stake
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(tokenId)),
+    ).to.equal(amount);
+    expect(await StakingStorage.getNodeStake(identityId)).to.equal(amount);
+    expect(await StakingStorage.getTotalStake()).to.equal(totalBefore + amount);
+
+    // V8 legacy key (keccak256(nftSigner.address)) is NOT credited
+    const legacyKey = hre.ethers.keccak256(
+      hre.ethers.solidityPacked(['address'], [nftSigner.address]),
+    );
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, legacyKey),
+    ).to.equal(0);
+
+    // Node should be in sharding table (we staked exactly minStake)
+    expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
+  });
+
+  it('_recordStake: reverts when caller is a random EOA (onlyContracts gate)', async () => {
+    const { identityId } = await createProfile();
+    const randomEOA = accounts[9]; // not registered in Hub, not owner
+    await expect(
+      Staking.connect(randomEOA)[
+        '_recordStake'
+      ](1n, identityId, 1000, 12),
+    ).to.be.revertedWithCustomError(Staking, 'UnauthorizedAccess');
+  });
+
+  it('_recordStake: reverts with OnlyConvictionNFT for a Hub contract that is NOT the NFT contract', async () => {
+    const { identityId } = await createProfile();
+    // Register a signer as DKGStakingConvictionNFT so the identity lookup
+    // resolves, then register a DIFFERENT signer as another Hub contract.
+    // The second signer passes `onlyContracts` but fails the explicit
+    // NFT-identity gate, which is exactly what OnlyConvictionNFT guards.
+    await impersonateHubContract('DKGStakingConvictionNFT', accounts[5]);
+    const fakeOther = accounts[8];
+    await impersonateHubContract('FakeOtherContract', fakeOther);
+    await expect(
+      Staking.connect(fakeOther)[
+        '_recordStake'
+      ](1n, identityId, 1000, 12),
+    ).to.be.revertedWithCustomError(Staking, 'OnlyConvictionNFT');
+  });
+
+  it('_recordStake: reverts on zero amount', async () => {
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](1n, identityId, 0, 12),
+    ).to.be.revertedWithCustomError(Staking, 'ZeroTokenAmount');
+  });
+
+  it('_recordStake: reverts with ProfileDoesntExist for an unregistered identityId', async () => {
+    // Mirror of the V8 `stake()` guard. Without the profileExists modifier
+    // the write path would happily stash stake against a ghost identityId and
+    // _addNodeToShardingTable would insert a phantom node at
+    // sha256(profileStorage.getNodeId(identityId)) — which resolves to
+    // sha256("") for a missing profile — so this test locks the invariant
+    // and the Phase 4 phantom-stake bug cannot reappear.
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+    const minStake = await ParametersStorage.minimumStake();
+    const ghostIdentityId = 9999;
+
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](1n, ghostIdentityId, minStake, 12),
+    ).to.be.revertedWithCustomError(Staking, 'ProfileDoesntExist');
+
+    // And no phantom state leaked past the revert
+    expect(
+      await StakingStorage.getDelegatorStakeBase(
+        ghostIdentityId,
+        tokenIdKey(1n),
+      ),
+    ).to.equal(0);
+    expect(await StakingStorage.getNodeStake(ghostIdentityId)).to.equal(0);
+    expect(await ShardingTableStorage.nodeExists(ghostIdentityId)).to.equal(
+      false,
+    );
+  });
+
+  it('_recordStake: replaying the same tokenId on the same node reverts with TokenIdAlreadyRecorded and accounting stays consistent', async () => {
+    // V10 model: each NFT is an immutable create-once position. A caller bug
+    // that re-submits the same tokenId must not double-count nodeStake /
+    // totalStake while overwriting the delegator base. Without the freshness
+    // guard, the second call would write delegatorBase = secondAmount but
+    // node total = firstAmount + secondAmount — accounting off by exactly
+    // firstAmount. This test locks that guard and also asserts that the
+    // revert leaves the first record untouched.
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const firstAmount = 1_000n;
+    const totalBefore = await StakingStorage.getTotalStake();
+
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](7n, identityId, firstAmount, 12);
+
+    // Replay — same tokenId on the same node — must revert.
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](7n, identityId, 9_999n, 6),
+    )
+      .to.be.revertedWithCustomError(Staking, 'TokenIdAlreadyRecorded')
+      .withArgs(7n, identityId);
+
+    // First record intact, no leak from the reverted replay.
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(7n)),
+    ).to.equal(firstAmount);
+    expect(await StakingStorage.getNodeStake(identityId)).to.equal(firstAmount);
+    expect(await StakingStorage.getTotalStake()).to.equal(
+      totalBefore + firstAmount,
+    );
+  });
+
+  it('_recordStake: replaying the same tokenId on a DIFFERENT node reverts with TokenIdAlreadyRecorded (global scope)', async () => {
+    // An NFT is bound to exactly one node for its lifetime. A per-(node,
+    // tokenId) guard would miss this replay because the fresh node's
+    // bucket is empty — the tokenId would end up staked on two nodes at
+    // once, double-paying rewards. The fix checks
+    // `getDelegatorNodesCount(bytes32(tokenId))` which tracks all nodes
+    // this tokenId is currently registered on.
+    const { identityId: identityA } = await createProfile();
+    const { identityId: identityB } = await createProfile(
+      accounts[0],
+      accounts[2],
+    );
+    expect(identityA).to.not.equal(identityB);
+
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const amountA = 500n;
+    const totalBefore = await StakingStorage.getTotalStake();
+
+    // First call: record tokenId 13 on node A.
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](13n, identityA, amountA, 12);
+
+    // Sanity: tokenId 13 is now registered on exactly one node.
+    expect(
+      await StakingStorage.getDelegatorNodesCount(tokenIdKey(13n)),
+    ).to.equal(1n);
+
+    // Cross-node replay: same tokenId, different node — must revert.
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](13n, identityB, 777n, 6),
+    )
+      .to.be.revertedWithCustomError(Staking, 'TokenIdAlreadyRecorded')
+      .withArgs(13n, identityB);
+
+    // Node A still has the first record, node B untouched, totals unchanged
+    // past the first call.
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityA, tokenIdKey(13n)),
+    ).to.equal(amountA);
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityB, tokenIdKey(13n)),
+    ).to.equal(0n);
+    expect(await StakingStorage.getNodeStake(identityA)).to.equal(amountA);
+    expect(await StakingStorage.getNodeStake(identityB)).to.equal(0n);
+    expect(await StakingStorage.getTotalStake()).to.equal(
+      totalBefore + amountA,
+    );
+    // Still registered on exactly one node.
+    expect(
+      await StakingStorage.getDelegatorNodesCount(tokenIdKey(13n)),
+    ).to.equal(1n);
+  });
+
+  it('_recordStake: baselines delegatorLastSettled to the current nodeEpochScorePerStake (score-earned-before-NFT safety)', async () => {
+    // Without calling _prepareForStakeChange before writing the fresh stake,
+    // a later reward claim on this NFT would read
+    // delegatorLastSettledNodeEpochScorePerStake = 0 and collect score the
+    // node earned before the NFT existed. This test reproduces the scenario
+    // (bump the node's score-per-stake index first, THEN mint the NFT) and
+    // asserts the baseline is set at mint time so the claim window starts
+    // from "now", not from zero. Mirrors the existing V8 zero-stake-restake
+    // regression earlier in this file (search "🪫 zero-stake restake bumps
+    // index without adding score") — same mechanism, NFT-keyed.
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const epoch = await Chronos.getCurrentEpoch();
+
+    // Advance the node's score-per-stake index before the NFT is minted.
+    // accounts[0] is the hub owner so it can call onlyContracts setters.
+    const advancedIndex = 1_234n * 10n ** 18n; // 1e18-scaled, arbitrary
+    await RandomSamplingStorage.addToNodeEpochScorePerStake(
+      epoch,
+      identityId,
+      advancedIndex,
+    );
+
+    const minStake = await ParametersStorage.minimumStake();
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](42n, identityId, minStake, 12);
+
+    // Fresh NFT's delegatorLastSettled must equal the node's current index,
+    // not 0. That makes (nodeIndex_end - delegatorLastSettled) at claim time
+    // count only the score earned AFTER this NFT was minted.
+    const settled =
+      await RandomSamplingStorage.getDelegatorLastSettledNodeEpochScorePerStake(
+        epoch,
+        identityId,
+        tokenIdKey(42n),
+      );
+    expect(settled).to.equal(advancedIndex);
+
+    // And no score was credited to the NFT for the pre-mint period.
+    expect(
+      await RandomSamplingStorage.getEpochNodeDelegatorScore(
+        epoch,
+        identityId,
+        tokenIdKey(42n),
+      ),
+    ).to.equal(0n);
+  });
+
+  it('_recordStake: multiple tokenIds for same (delegator, node) pair are independent', async () => {
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const a1 = 100;
+    const a2 = 250;
+
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](1n, identityId, a1, 12);
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](2n, identityId, a2, 6);
+
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(1n)),
+    ).to.equal(a1);
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(2n)),
+    ).to.equal(a2);
+    expect(await StakingStorage.getNodeStake(identityId)).to.equal(a1 + a2);
+  });
+
+  it('_recordStake: V8 legacy stake() path unchanged, delegator key stays keccak256(address)', async () => {
+    // Regression: the legacy stake() path must be byte-for-byte untouched by
+    // the new _recordStake entry. Same assertion as the pre-existing stake
+    // test, but re-asserted here to lock the invariant against the Phase 4 change.
+    const { identityId } = await createProfile();
+    const amount = hre.ethers.parseEther('100');
+    await Token.mint(accounts[0].address, amount);
+    await Token.connect(accounts[0]).approve(
+      await Staking.getAddress(),
+      amount,
+    );
+    await Staking.stake(identityId, amount);
+
+    const v8Key = hre.ethers.keccak256(
+      hre.ethers.solidityPacked(['address'], [accounts[0].address]),
+    );
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, v8Key),
+    ).to.equal(amount);
+    // And nothing was written to any small-integer tokenId key
+    for (let t = 0; t < 5; t++) {
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(t)),
+      ).to.equal(0);
+    }
+  });
+
+  it('_recordStake: key-space disjointness — sampled keccak256(address) never equals bytes32(smallTokenId)', async () => {
+    // Empirical sample — not a structural proof. `keccak256` outputs are
+    // uniform over the full 256-bit space, so a collision with
+    // `bytes32(smallTokenId)` is mathematically possible but has probability
+    // ≈ 2⁻¹⁶⁰ per hash when `tokenId < 2⁹⁶`. We cannot prove the key spaces
+    // are structurally disjoint, only that they are disjoint for realistic
+    // inputs with overwhelming probability.
+    //
+    // This test locks the empirical guarantee for real Hardhat signer
+    // addresses and small tokenIds: the first 20 bytes of each sampled
+    // keccak256 are non-zero (which would require a 2⁻¹⁶⁰ freak event to
+    // fail), and `bytes32(tokenId)` for `tokenId < 2⁹⁶` is zero across its
+    // first 20 bytes by construction. Disjoint high-byte patterns →
+    // disjoint values → no collision.
+    const addrs = [
+      accounts[0].address,
+      accounts[1].address,
+      accounts[2].address,
+      accounts[3].address,
+      accounts[4].address,
+    ];
+    for (const addr of addrs) {
+      const v8 = hre.ethers.keccak256(
+        hre.ethers.solidityPacked(['address'], [addr]),
+      );
+      // Assert at least one of the first 20 bytes of keccak256(address) is
+      // non-zero. Probability of failure on any real address ≈ 2⁻¹⁶⁰.
+      const v8High20 = v8.slice(2, 2 + 40); // first 20 bytes as hex
+      expect(v8High20).to.not.equal('0'.repeat(40));
+
+      for (let t = 0n; t < 10n; t++) {
+        const nftKey = tokenIdKey(t);
+        // For `tokenId < 2⁹⁶` (all practical NFT counters), the first 20
+        // bytes of `bytes32(tokenId)` are zero by construction — the cast
+        // only touches the low 12 bytes.
+        expect(nftKey.slice(2, 2 + 40)).to.equal('0'.repeat(40));
+        // Therefore the two values cannot be equal without a 2⁻¹⁶⁰ freak
+        // collision in keccak256.
+        expect(v8).to.not.equal(nftKey);
+      }
+    }
+  });
 });

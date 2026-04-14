@@ -941,4 +941,146 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
     ) external pure returns (uint256 multiplier18) {
         return SCALE18;
     }
+
+    // ========================================================================
+    // V10 Two-Layer Staking Wire — NFT-backed stake recording
+    // ========================================================================
+
+    /**
+     * @notice Emitted when an NFT-backed stake is recorded via the two-layer
+     *         wire. `tokenId` doubles as the StakingStorage delegator key
+     *         (`bytes32(tokenId)`), disjoint from the V8 legacy
+     *         `keccak256(delegator)` key space.
+     */
+    event StakeRecorded(
+        uint256 indexed tokenId,
+        uint72 indexed identityId,
+        uint96 amount,
+        uint40 lockEpochs,
+        address indexed caller
+    );
+
+    /**
+     * @notice V10 permissioned entry for recording NFT-backed stake into
+     *         `StakingStorage`. Callable ONLY by the Hub-registered
+     *         `DKGStakingConvictionNFT` contract.
+     *
+     * @dev Source: V10 implementation plan Phase 4 ("two-layer staking
+     *      wire") — see `.ai/v10-implementation-plan.md` §"Phase 4 —
+     *      `Staking._recordStake` permissioned internal entry".
+     *
+     *      Delegator key scheme: `bytes32(tokenId)`, disjoint from the V8
+     *      legacy `keccak256(abi.encodePacked(delegator))` key space. This is
+     *      what allows multiple NFT positions for the same (delegator, node)
+     *      pair to be settled independently.
+     *
+     *      Trust model (grill-me-decisions.md — "Staker Conviction Flow"):
+     *      this function is pure on-chain accounting and performs NO token
+     *      transfer. The resolved flow is:
+     *         user -approve-> DKGStakingConvictionNFT
+     *         user -> NFT.createConviction(...)
+     *         NFT  -transferFrom(user, stakingStorage, amount)-> StakingStorage
+     *         NFT  -> Staking._recordStake(...)  // this function
+     *      TRAC flows user → StakingStorage in ONE hop and never sits in the
+     *      NFT contract (grill-me: "TRAC should go to StakingStorage at
+     *      creation time, not sit in NFT contract" / "Stakers always get
+     *      their TRAC because it's already in StakingStorage from day
+     *      one"). This entry therefore trusts the caller to have already
+     *      moved TRAC before invoking it; the trust boundary is enforced
+     *      by the double gate (`onlyContracts` + explicit
+     *      `DKGStakingConvictionNFT` identity check) and by the fact that
+     *      the only permitted caller is a Hub-registered, audited contract.
+     *      Any future caller added to the Hub under that name inherits the
+     *      same obligation: move the TRAC first, then call.
+     *
+     *      Gate: `onlyContracts` ensures the caller is a Hub-registered
+     *      contract; the explicit `msg.sender` check pins the caller to the
+     *      DKGStakingConvictionNFT contract specifically, so no other
+     *      Hub-registered contract can spoof NFT-backed stake. The
+     *      `profileExists` modifier mirrors the V8 `stake()` guard and
+     *      prevents phantom nodes — without it `_addNodeToShardingTable`
+     *      would happily insert a ghost node at `sha256("")` for any
+     *      unregistered `identityId`.
+     *
+     *      The leading underscore in the function name reflects its semantic
+     *      role as the internal entry of the two-layer wire, even though the
+     *      visibility is `external` so `DKGStakingConvictionNFT` can call it
+     *      cross-contract.
+     *
+     * @param tokenId     NFT position id — also the delegator key (bytes32(tokenId))
+     * @param identityId  Target node (must be an existing profile)
+     * @param amount      Stake amount in TRAC (>0)
+     * @param lockEpochs  Conviction lock duration (recorded in the event only;
+     *                    authoritative lock data lives in `ConvictionStakingStorage`)
+     */
+    function _recordStake(
+        uint256 tokenId,
+        uint72 identityId,
+        uint96 amount,
+        uint40 lockEpochs
+    ) external onlyContracts profileExists(identityId) {
+        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
+            revert StakingLib.OnlyConvictionNFT();
+        }
+        if (amount == 0) {
+            revert TokenLib.ZeroTokenAmount();
+        }
+
+        StakingStorage ss = stakingStorage;
+        bytes32 delegatorKey = bytes32(tokenId);
+
+        // Freshness invariant: reject replays of the same tokenId on ANY
+        // node. V10 treats each NFT as a create-once, one-position entity
+        // (Phase 0d removed the legacy `increaseStake` top-up path as a
+        // gaming vector — every additional stake must be a new NFT with
+        // its own conviction commitment, and an NFT is bound to exactly
+        // one node for its lifetime). Without a global guard, a buggy or
+        // malicious caller could:
+        //   - replay on the SAME node → `+= amount` writes would
+        //     double-count `nodeStake`/`totalStake` while
+        //     `setDelegatorStakeBase` overwrote the delegator base back
+        //     to the latest amount, corrupting accounting by the
+        //     inflated delta; or
+        //   - replay on a DIFFERENT node → the per-(node, key) bucket
+        //     would be fresh, so a per-node guard would miss it, and
+        //     the same tokenId would end up staked on two nodes at once
+        //     — semantic violation, double-pays rewards.
+        // StakingStorage already maintains `delegatorNodes[bytes32(key)]`
+        // via `_updateDelegatorActivity` on every `setDelegatorStakeBase`
+        // write, so `getDelegatorNodesCount(delegatorKey)` is the
+        // authoritative global-scope check: non-zero iff this tokenId is
+        // currently registered on ANY node. Zero gas overhead vs. the
+        // per-node read it replaces.
+        if (ss.getDelegatorNodesCount(delegatorKey) != 0) {
+            revert StakingLib.TokenIdAlreadyRecorded(tokenId, identityId);
+        }
+
+        uint96 maxStake = parametersStorage.maximumStake();
+        uint96 totalNodeStakeAfter = ss.getNodeStake(identityId) + amount;
+        if (totalNodeStakeAfter > maxStake) {
+            revert StakingLib.MaximumStakeExceeded(maxStake);
+        }
+
+        // Baseline the fresh delegator key (bytes32(tokenId)) at the node's
+        // current score-per-stake index for the current epoch. Without
+        // this, a later reward claim on this NFT would start from the
+        // zero-initialised `delegatorLastSettledNodeEpochScorePerStake`
+        // and collect score the node earned *before* this NFT ever
+        // existed. `_prepareForStakeChange` takes the `stakeBase == 0`
+        // fast-path for fresh keys: it bumps
+        // `delegatorLastSettledNodeEpochScorePerStake` to the current
+        // node index and returns without mutating any score totals —
+        // matching exactly what V8 `stake()` already does for first-time
+        // address-keyed delegators.
+        _prepareForStakeChange(chronos.getCurrentEpoch(), identityId, delegatorKey);
+
+        ss.setDelegatorStakeBase(identityId, delegatorKey, amount);
+        ss.setNodeStake(identityId, totalNodeStakeAfter);
+        ss.increaseTotalStake(amount);
+
+        _addNodeToShardingTable(identityId, totalNodeStakeAfter);
+        askContract.recalculateActiveSet();
+
+        emit StakeRecorded(tokenId, identityId, amount, lockEpochs, msg.sender);
+    }
 }
