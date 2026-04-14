@@ -38,14 +38,24 @@ function makeApi(): MockApi {
 }
 
 function makeResolver(
-  overrides?: Partial<DkgMemorySession> & { available?: string[] },
+  overrides?: Partial<DkgMemorySession> & {
+    available?: string[];
+    /**
+     * When set to `null`, `getDefaultAgentAddress` returns `undefined` to
+     * simulate the node peer-id probe being pending. Used by B2 tests.
+     */
+    defaultAgentAddress?: string | null;
+  },
 ): DkgMemorySessionResolver {
+  const defaultAgentAddress = overrides?.defaultAgentAddress === null
+    ? undefined
+    : overrides?.defaultAgentAddress ?? overrides?.agentAddress ?? 'did:dkg:agent:test';
   return {
     getSession: () => ({
       projectContextGraphId: overrides?.projectContextGraphId,
       agentAddress: overrides?.agentAddress ?? 'did:dkg:agent:test',
     }),
-    getDefaultAgentAddress: () => overrides?.agentAddress ?? 'did:dkg:agent:test',
+    getDefaultAgentAddress: () => defaultAgentAddress,
     listAvailableContextGraphs: () => overrides?.available ?? [],
   };
 }
@@ -82,7 +92,12 @@ describe('DkgMemoryPlugin.register', () => {
     expect(toolNames).not.toContain('dkg_memory_search');
   });
 
-  it('dkg_memory_import returns needs_clarification when no CG can be resolved', async () => {
+  it('dkg_memory_import returns needs_clarification when no contextGraphId is supplied', async () => {
+    // Bug B1: `execute(toolCallId, params)` has no session-context parameter
+    // from upstream, so the tool cannot resolve a UI-selected project CG
+    // implicitly. The tool therefore requires the agent to pass
+    // `contextGraphId` explicitly and falls back to a structured
+    // clarification response when absent.
     const api = makeApi();
     plugin.register(api);
     const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
@@ -90,6 +105,7 @@ describe('DkgMemoryPlugin.register', () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe('needs_clarification');
     expect(payload).toHaveProperty('availableContextGraphs');
+    expect(payload.reason).toMatch(/contextGraphId|project context graph/i);
   });
 
   it('dkg_memory_import writes into the memory assertion when an explicit CG is provided', async () => {
@@ -107,21 +123,41 @@ describe('DkgMemoryPlugin.register', () => {
       contextGraphId: 'research-x',
     });
 
-    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION, undefined);
+    // createAssertion is called with exactly two positional args — no
+    // subGraphName opts. Bug B3 removed subgraph-scoped writes from v1
+    // because `subGraphName` + `view: 'working-memory'` is not supported
+    // by the query engine; any subgraph-scoped write would be unreadable.
+    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION);
     expect(writeSpy).toHaveBeenCalledTimes(1);
-    const [cg, assertion, quads] = writeSpy.mock.calls[0];
-    expect(cg).toBe('research-x');
-    expect(assertion).toBe(PROJECT_MEMORY_ASSERTION);
-    expect(Array.isArray(quads)).toBe(true);
+    const writeArgs = writeSpy.mock.calls[0];
+    expect(writeArgs[0]).toBe('research-x');
+    expect(writeArgs[1]).toBe(PROJECT_MEMORY_ASSERTION);
+    expect(Array.isArray(writeArgs[2])).toBe(true);
+    // writeAssertion is called with exactly three args — no opts.
+    expect(writeArgs.length).toBe(3);
     // Minimal schema-aligned shape: schema:Thing + schema:description + schema:dateCreated + schema:creator
-    expect(quads.length).toBe(4);
+    expect(writeArgs[2].length).toBe(4);
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe('stored');
     expect(payload.contextGraphId).toBe('research-x');
     expect(payload.assertionName).toBe(PROJECT_MEMORY_ASSERTION);
+    // subGraphName is NOT in the stored response shape anymore.
+    expect(payload).not.toHaveProperty('subGraphName');
   });
 
-  it('dkg_memory_import passes subGraphName through to createAssertion and writeAssertion', async () => {
+  it('dkg_memory_import ignores subGraphName in params (retired in v1 per B3)', async () => {
+    // Bug B3 regression guard: even if an older agent passes
+    // `subGraphName: 'protocols'`, the tool MUST NOT plumb it into
+    // createAssertion / writeAssertion. Subgraph-scoped writes combined
+    // with `view: 'working-memory'` reads throw from the query engine
+    // at dkg-query-engine.ts:120-124, so the data would be silently
+    // unreadable. Retired until V10.x supports subgraph + view together.
+    //
+    // Use a fresh context graph id for this test. The plugin caches
+    // `${cg}::${assertion}` in a module-level ASSERTION_ENSURED Set
+    // across all DkgMemoryPlugin instances, so reusing 'research-x'
+    // from the previous test would skip the createAssertion call and
+    // make this test's write-args assertion a no-op.
     const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
       assertionUri: 'urn:test:assertion',
       alreadyExists: false,
@@ -129,24 +165,51 @@ describe('DkgMemoryPlugin.register', () => {
     const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
 
     const api = makeApi();
-    const pluginWithResolver = new DkgMemoryPlugin(client, { enabled: true }, makeResolver({
-      available: ['research-x'],
-    }));
-    pluginWithResolver.register(api);
+    plugin.register(api);
     const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
     await importTool.execute('call-1', {
       text: 'a protocol decision',
-      contextGraphId: 'research-x',
+      contextGraphId: 'research-subgraph-guard',
       subGraphName: 'protocols',
     });
 
-    expect(createSpy).toHaveBeenCalledWith('research-x', PROJECT_MEMORY_ASSERTION, { subGraphName: 'protocols' });
-    expect(writeSpy).toHaveBeenCalledWith(
-      'research-x',
-      PROJECT_MEMORY_ASSERTION,
-      expect.any(Array),
-      { subGraphName: 'protocols' },
+    // Neither createAssertion nor writeAssertion receive subGraphName.
+    expect(createSpy).toHaveBeenCalledWith('research-subgraph-guard', PROJECT_MEMORY_ASSERTION);
+    expect(createSpy.mock.calls[0].length).toBe(2);
+    const writeArgs = writeSpy.mock.calls[0];
+    expect(writeArgs.length).toBe(3);
+    expect(writeArgs[3]).toBeUndefined();
+  });
+
+  it('dkg_memory_import returns retryable needs_clarification when node peer-id probe is pending', async () => {
+    // Bug B2: when the resolver's getDefaultAgentAddress returns undefined
+    // (daemon probe not yet complete, /api/status failed, daemon down),
+    // the tool MUST fail with a retryable clarification rather than
+    // writing a durable `did:dkg:agent:unknown` creator triple.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+
+    const api = makeApi();
+    const pluginWithUndefinedAddress = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ defaultAgentAddress: null }),
     );
+    pluginWithUndefinedAddress.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+    const result = await importTool.execute('call-1', {
+      text: 'something',
+      contextGraphId: 'research-x',
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload.retryable).toBe(true);
+    expect(payload.reason).toMatch(/agent address|peer identity|pending/i);
+    // CRITICAL: neither the assertion create nor the write fired.
+    // No durable `did:dkg:agent:unknown` provenance triple was written.
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
   });
 
   it('dkg_memory_import rejects empty text with a tool-level error', async () => {

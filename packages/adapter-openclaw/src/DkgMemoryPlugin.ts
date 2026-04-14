@@ -297,8 +297,8 @@ export function buildDkgMemoryRuntime(
 
 const ASSERTION_ENSURED = new Set<string>();
 
-function assertionCacheKey(contextGraphId: string, name: string, subGraphName?: string): string {
-  return `${contextGraphId}::${subGraphName ?? ''}::${name}`;
+function assertionCacheKey(contextGraphId: string, name: string): string {
+  return `${contextGraphId}::${name}`;
 }
 
 export class DkgMemoryPlugin {
@@ -326,8 +326,11 @@ export class DkgMemoryPlugin {
         'from the same project\'s context graph. ' +
         'Parameters: `text` (required), `contextGraphId` (optional — name of the target project CG; ' +
         'if omitted, the currently UI-selected project CG is used; if neither is available, ' +
-        'returns a structured clarification request so the agent can ask the user which project to use), ' +
-        '`subGraphName` (optional — named subgraph partition inside the CG, e.g. "protocols").',
+        'returns a structured clarification request so the agent can ask the user which project to use). ' +
+        'Subgraph-scoped writes are intentionally not supported in v1: the query engine at ' +
+        'dkg-query-engine.ts:120-124 throws when `subGraphName` is combined with view-based routing, ' +
+        'which would make subgraph-scoped writes silently unreadable through `view: working-memory`. ' +
+        'Tracked as a V10.x follow-up.',
       parameters: {
         type: 'object',
         properties: {
@@ -335,10 +338,6 @@ export class DkgMemoryPlugin {
           contextGraphId: {
             type: 'string',
             description: 'Optional target project context graph id.',
-          },
-          subGraphName: {
-            type: 'string',
-            description: 'Optional subgraph partition inside the target context graph.',
           },
         },
         required: ['text'],
@@ -369,18 +368,18 @@ export class DkgMemoryPlugin {
       return toolError('Missing required parameter "text"');
     }
     const explicitCg = typeof params.contextGraphId === 'string' ? params.contextGraphId.trim() : '';
-    const subGraphName = typeof params.subGraphName === 'string' && params.subGraphName.trim()
-      ? params.subGraphName.trim()
-      : undefined;
 
-    const session = this.resolver.getSession(undefined);
-    const agentAddress = session?.agentAddress ?? this.resolver.getDefaultAgentAddress() ?? 'unknown';
-    const resolvedCg = explicitCg || session?.projectContextGraphId;
+    // `dkg_memory_import` has no upstream-provided per-call session context
+    // today (see openclaw-runtime B1a investigation). We therefore require
+    // the agent to provide `contextGraphId` explicitly. The resolver path
+    // remains for slot-backed recall via `DkgMemorySearchManager.search`,
+    // which DOES receive a sessionKey from the memory slot dispatcher.
+    const resolvedCg = explicitCg;
 
     if (!resolvedCg) {
       return toolJson({
         status: 'needs_clarification',
-        reason: 'No project context graph could be determined for this write.',
+        reason: 'No project context graph was provided for this write.',
         availableContextGraphs: this.resolver.listAvailableContextGraphs(),
         guidance:
           'Please specify which project this belongs to by providing contextGraphId on the next call, ' +
@@ -388,10 +387,26 @@ export class DkgMemoryPlugin {
       });
     }
 
-    const ensureKey = assertionCacheKey(resolvedCg, PROJECT_MEMORY_ASSERTION, subGraphName);
+    // Resolve the agent address for provenance. If the node peer ID probe
+    // has not yet completed (daemon down, /api/status failed, early
+    // dispatch), fail the write with a retryable clarification rather
+    // than writing a durable `did:dkg:agent:unknown` triple.
+    const agentAddress = this.resolver.getDefaultAgentAddress();
+    if (!agentAddress) {
+      return toolJson({
+        status: 'needs_clarification',
+        reason: 'Agent address is not yet available (node identity probe pending).',
+        retryable: true,
+        guidance:
+          'The adapter has not yet resolved the node peer identity from the daemon. ' +
+          'Retry the write on the next turn; the probe typically completes within a few seconds of attach.',
+      });
+    }
+
+    const ensureKey = assertionCacheKey(resolvedCg, PROJECT_MEMORY_ASSERTION);
     if (!ASSERTION_ENSURED.has(ensureKey)) {
       try {
-        await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION, subGraphName ? { subGraphName } : undefined);
+        await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION);
         ASSERTION_ENSURED.add(ensureKey);
       } catch (err) {
         return toolError(
@@ -414,13 +429,11 @@ export class DkgMemoryPlugin {
         resolvedCg,
         PROJECT_MEMORY_ASSERTION,
         quads,
-        subGraphName ? { subGraphName } : undefined,
       );
       return toolJson({
         status: 'stored',
         contextGraphId: resolvedCg,
         assertionName: PROJECT_MEMORY_ASSERTION,
-        subGraphName,
         memoryUri,
         written: result.written,
       });
