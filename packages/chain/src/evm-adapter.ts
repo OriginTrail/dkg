@@ -1155,6 +1155,20 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('KnowledgeAssetsV10 contract not deployed.');
     }
 
+    // Pre-tx validation of `contextGraphId`. The V10 contract rejects
+    // `cgId == 0` at `KnowledgeAssetsV10.sol:379` with `ZeroContextGraphId`;
+    // catching this here gives a clearer error than a generic revert and
+    // saves a round-trip. Tests that use a descriptive string CG name flow
+    // through dkg-publisher with a silent 0n fallback — they never reach
+    // this adapter because they target the MockChainAdapter.
+    if (params.contextGraphId === 0n) {
+      throw new Error(
+        'V10 publishDirect requires a non-zero on-chain context graph id. ' +
+        'Register the context graph via `ContextGraphs.createContextGraph` ' +
+        'first and pass the returned numeric id as `publishContextGraphId`.',
+      );
+    }
+
     const txSigner = this.nextSigner();
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();

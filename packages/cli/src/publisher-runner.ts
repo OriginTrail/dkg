@@ -273,10 +273,17 @@ function createV10ACKProviderForPublisher(
       createKnowledgeAssetsV10?: unknown;
       verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
       getMinimumRequiredSignatures?: () => Promise<number>;
+      getEvmChainId?: () => Promise<bigint>;
+      getKnowledgeAssetsV10Address?: () => Promise<string>;
     };
   }).chain;
   if (!chain || typeof chain.createKnowledgeAssetsV10 !== 'function') return undefined;
   if (typeof chain.verifyACKIdentity !== 'function') return undefined;
+  // The H5 prefix requires both a numeric chain id AND the deployed KAV10
+  // address. Without them the collector cannot build a digest that matches
+  // what core-node handlers sign, so refuse to hand back a provider at all.
+  if (typeof chain.getEvmChainId !== 'function') return undefined;
+  if (typeof chain.getKnowledgeAssetsV10Address !== 'function') return undefined;
 
   const collector = new ACKCollector({
     gossipPublish: transport.gossipPublish,
@@ -296,15 +303,33 @@ function createV10ACKProviderForPublisher(
     epochs,
     tokenAmount,
   ) => {
+    // Fail loud on non-numeric or zero CG ids. V10 publish requires a real
+    // on-chain context graph; `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. The old silent
+    // `cgIdBigInt = 0n` fallback produced ACKs the contract rejected anyway.
     let cgIdBigInt: bigint;
     try {
       cgIdBigInt = BigInt(contextGraphId);
     } catch {
-      cgIdBigInt = 0n;
+      throw new Error(
+        `Async V10 publish requires a numeric on-chain context graph id; ` +
+        `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (cgIdBigInt === 0n) {
+      throw new Error(
+        `Async V10 publish requires a non-zero on-chain context graph id; got 0. ` +
+        `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
     }
     const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
       ? await chain.getMinimumRequiredSignatures()
       : undefined;
+    // Both values are guaranteed present here by the adapter-capability
+    // check at the top of this factory — re-resolving on every publish
+    // keeps the provider agnostic to hot adapter swaps.
+    const chainIdBig = await chain.getEvmChainId!();
+    const kav10Address = await chain.getKnowledgeAssetsV10Address!();
     const result = await collector.collect({
       merkleRoot,
       contextGraphId: cgIdBigInt,
@@ -314,6 +339,8 @@ function createV10ACKProviderForPublisher(
       isPrivate: false,
       kaCount,
       rootEntities,
+      chainId: chainIdBig,
+      kav10Address,
       requiredACKs,
       stagingQuads,
       epochs,

@@ -2,7 +2,7 @@ import {
   PROTOCOL_STORAGE_ACK,
   encodePublishIntent,
   decodeStorageACK,
-  computeACKDigest,
+  computePublishACKDigest,
   type PublishIntentMsg,
   type StorageACKMsg,
 } from '@origintrail-official/dkg-core';
@@ -58,6 +58,10 @@ export class ACKCollector {
     isPrivate: boolean;
     kaCount: number;
     rootEntities: string[];
+    /** Numeric EVM chain id (e.g. 31337n for hardhat). Required by the H5 prefix in the V10 ACK digest. */
+    chainId: bigint;
+    /** Deployed address of `KnowledgeAssetsV10`. Required by the H5 prefix in the V10 ACK digest. */
+    kav10Address: string;
     requiredACKs?: number;
     stagingQuads?: Uint8Array;
     epochs?: number;
@@ -66,7 +70,7 @@ export class ACKCollector {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
       publisherPeerId, publicByteSize, isPrivate,
-      kaCount, rootEntities,
+      kaCount, rootEntities, chainId, kav10Address,
     } = params;
     const REQUIRED_ACKS = params.requiredACKs ?? DEFAULT_REQUIRED_ACKS;
 
@@ -103,7 +107,16 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const ackDigest = computeACKDigest(contextGraphId, merkleRoot, kaCount, publicByteSize, params.epochs, params.tokenAmount);
+    const ackDigest = computePublishACKDigest(
+      chainId,
+      kav10Address,
+      contextGraphId,
+      merkleRoot,
+      BigInt(kaCount),
+      publicByteSize,
+      BigInt(params.epochs ?? 1),
+      params.tokenAmount ?? 0n,
+    );
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();

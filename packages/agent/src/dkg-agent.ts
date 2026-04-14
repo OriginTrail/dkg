@@ -428,14 +428,37 @@ export class DKGAgent {
           const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
           const identityId = await this.chain.getIdentityId();
           if (identityId > 0n) {
-            const ackHandler = new StorageACKHandler(this.store, {
-              nodeRole: effectiveRole,
-              nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
-              signerWallet: ackSignerWallet,
-              contextGraphSharedMemoryUri,
-            }, this.eventBus);
-            this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-            this.log.info(ctx, `Registered V10 StorageACK handler (identity=${identityId})`);
+            // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
+            // per KnowledgeAssetsV10.sol:362-373. Resolve both from the chain
+            // adapter BEFORE constructing the handler so the handler can sign
+            // digests that actually verify on-chain. The handler itself has
+            // no provider-backed dependency, so both values are passed in at
+            // construction.
+            const chainIdForHandler = typeof this.chain.getEvmChainId === 'function'
+              ? await this.chain.getEvmChainId()
+              : undefined;
+            const kav10AddressForHandler = typeof this.chain.getKnowledgeAssetsV10Address === 'function'
+              ? await this.chain.getKnowledgeAssetsV10Address()
+              : undefined;
+            if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
+              this.log.warn(
+                ctx,
+                `Skipping V10 StorageACK handler: chain adapter does not expose ` +
+                `getEvmChainId() + getKnowledgeAssetsV10Address(); handler cannot build the ` +
+                `H5-prefixed ACK digest that KnowledgeAssetsV10 verifies on-chain`,
+              );
+            } else {
+              const ackHandler = new StorageACKHandler(this.store, {
+                nodeRole: effectiveRole,
+                nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
+                signerWallet: ackSignerWallet,
+                contextGraphSharedMemoryUri,
+                chainId: chainIdForHandler,
+                kav10Address: kav10AddressForHandler,
+              }, this.eventBus);
+              this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+              this.log.info(ctx, `Registered V10 StorageACK handler (identity=${identityId})`);
+            }
           } else {
             this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
           }
@@ -3963,18 +3986,42 @@ export class DKGAgent {
       epochs?: number,
       tokenAmount?: bigint,
     ) => {
+      // Fail loud on non-numeric or zero CG ids: V10 publish requires a real
+      // on-chain context graph and the contract rejects `cgId == 0` with
+      // `ZeroContextGraphId`. Matches the same guard in dkg-publisher and
+      // storage-ack-handler so ACK signers, ACK verifiers, and the chain
+      // submitter all agree on the legal domain.
       let cgIdBigInt: bigint;
       try {
         cgIdBigInt = BigInt(contextGraphId);
       } catch {
-        // Non-numeric CG names are off-chain — use 0 so ACK digest matches
-        // the on-chain call which passes 0 for virtual context graphs.
-        cgIdBigInt = 0n;
+        throw new Error(
+          `V10 ACK collection requires a numeric on-chain context graph id; ` +
+          `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        );
+      }
+      if (cgIdBigInt === 0n) {
+        throw new Error(
+          `V10 ACK collection requires a non-zero on-chain context graph id; got 0. ` +
+          `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        );
       }
 
       const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
         ? await chain.getMinimumRequiredSignatures()
         : undefined;
+
+      // H5 prefix inputs — both must come from the chain adapter so that
+      // publisher-side digest construction matches what core-node handlers
+      // produced on their side.
+      if (typeof chain.getEvmChainId !== 'function' || typeof chain.getKnowledgeAssetsV10Address !== 'function') {
+        throw new Error(
+          'V10 ACK collection requires a chain adapter exposing getEvmChainId() and ' +
+          'getKnowledgeAssetsV10Address(); current adapter is not V10-capable.',
+        );
+      }
+      const chainIdBig = await chain.getEvmChainId();
+      const kav10Address = await chain.getKnowledgeAssetsV10Address();
 
       const result = await collector.collect({
         merkleRoot,
@@ -3985,6 +4032,8 @@ export class DKGAgent {
         isPrivate: false,
         kaCount,
         rootEntities,
+        chainId: chainIdBig,
+        kav10Address,
         requiredACKs,
         stagingQuads,
         epochs,

@@ -6,17 +6,24 @@ import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
   computeACKDigest,
+  computePublishACKDigest,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
+
+// Test H5 prefix inputs. Production fail-loud rejects non-numeric / zero
+// CG ids in both the collector and the handler, so the fixture uses a
+// plain numeric id.
+const TEST_CHAIN_ID = 31337n;
+const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
 describe('V10 Publish E2E', () => {
-  const contextGraphId = 'my-research-project';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
   const swmGraphUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
   const publishQuads: Quad[] = [
@@ -114,6 +121,8 @@ describe('V10 Publish E2E', () => {
         signerWallet: wallet,
         contextGraphSharedMemoryUri: (cgId: string) =>
           `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
       };
       const eventBus = {
         emit: vi.fn(),
@@ -147,12 +156,25 @@ describe('V10 Publish E2E', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities,
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     });
 
     expect(result.acks).toHaveLength(3);
 
-    // Verify each collected ACK can be recovered to the core node's address
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 1, BigInt(publishQuads.length * 100));
+    // Verify each collected ACK can be recovered to the core node's address.
+    // The handler signs the 8-field H5-prefixed digest via computePublishACKDigest
+    // in storage-ack-handler.ts; this reference must match byte-for-byte.
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      merkleRoot,
+      1n,
+      BigInt(publishQuads.length * 100),
+      1n,
+      0n,
+    );
     const prefixedHash = ethers.hashMessage(digest);
 
     for (let i = 0; i < 3; i++) {

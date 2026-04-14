@@ -11,6 +11,7 @@ import {
 } from '../src/merkle.js';
 import {
   computeACKDigest,
+  computePublishACKDigest,
   encodePublishIntent,
   decodePublishIntent,
   encodeStorageACK,
@@ -20,6 +21,12 @@ import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 
+// Test H5 prefix inputs. Production fail-loud rejects non-numeric / zero
+// CG ids in both the collector and the handler, so every fixture in this
+// file uses a plain numeric id.
+const TEST_CHAIN_ID = 31337n;
+const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
+
 function makeQuad(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
@@ -28,8 +35,25 @@ function makeEventBus() {
   return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount);
+async function signACK(
+  wallet: ethers.Wallet,
+  contextGraphId: bigint,
+  merkleRoot: Uint8Array,
+  kaCount: number = 0,
+  byteSize: bigint = 0n,
+  epochs: bigint = 1n,
+  tokenAmount: bigint = 0n,
+) {
+  const digest = computePublishACKDigest(
+    TEST_CHAIN_ID,
+    TEST_KAV10_ADDR,
+    contextGraphId,
+    merkleRoot,
+    BigInt(kaCount),
+    byteSize,
+    epochs,
+    tokenAmount,
+  );
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -79,8 +103,8 @@ const specialCharQuads: Quad[] = [
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 PUBLISH Protocol (spec §9.0)', () => {
-  const contextGraphId = 'research-paranet-alpha';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
 
   describe('Phase 1: resolve triples → compute kcMerkleRoot (keccak256)', () => {
     it('merkle root is 32 bytes keccak256', () => {
@@ -140,7 +164,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   });
 
   describe('Phase 2: ACK collection via direct P2P', () => {
-    it('ACK digest = EIP-191 over computeACKDigest (0n bigint for non-numeric context graph id)', async () => {
+    it('ACK digest = EIP-191 over the legacy 2-field computeACKDigest helper', async () => {
       const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
       const digest = computeACKDigest(cgIdBigInt, merkleRoot);
       expect(digest).toBeInstanceOf(Uint8Array);
@@ -192,6 +216,8 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub-0',
         publicByteSize: 500n,
         isPrivate: false,
@@ -222,10 +248,12 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       }
     });
 
-    it('non-numeric contextGraphId maps to 0n for ACK digest', () => {
-      expect(() => BigInt(contextGraphId)).toThrow();
-      expect(cgIdBigInt).toBe(0n);
-    });
+    // The pre-rewire `non-numeric contextGraphId maps to 0n for ACK digest`
+    // test was deleted as part of Bug F. V10 publishDirect requires a
+    // numeric on-chain context graph id; the silent `= 0n` fallback is gone
+    // and the fail-loud guard lives in `dkg-agent.createV10ACKProvider`,
+    // `publisher-runner.createV10ACKProviderForPublisher`,
+    // `storage-ack-handler.ts:handler`, and `evm-adapter.createKnowledgeAssetsV10`.
   });
 
   describe('Phase 4: SWM cleanup after publish', () => {
@@ -255,7 +283,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
 describe('V10 SHARE Protocol (spec §7.0)', () => {
   describe('promote triples from WM to SWM', () => {
     it('WM triples get correct graph URI in SWM', () => {
-      const contextGraphId = 'paranet-123';
+      const contextGraphId = '42';
       const swmUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
       const wmTriples = multiEntityQuads.map(q => ({
@@ -296,7 +324,7 @@ describe('V10 SHARE Protocol (spec §7.0)', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 GET Protocol (spec §12)', () => {
-  const contextGraphId = 'research-net';
+  const contextGraphId = '42';
   const ltmGraph = `did:dkg:context-graph:${contextGraphId}/_data`;
   const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
@@ -327,8 +355,8 @@ describe('V10 GET Protocol (spec §12)', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 ACK Edge Cases', () => {
-  const contextGraphId = 'edge-case-cg';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
   const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
 
   it('fails fast when requiredACKs > connected peers', async () => {
@@ -344,6 +372,8 @@ describe('V10 ACK Edge Cases', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub',
         publicByteSize: 100n,
         isPrivate: false,
@@ -381,6 +411,8 @@ describe('V10 ACK Edge Cases', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub',
         publicByteSize: 100n,
         isPrivate: false,
@@ -416,6 +448,8 @@ describe('V10 ACK Edge Cases', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub',
         publicByteSize: 100n,
         isPrivate: false,
@@ -452,6 +486,8 @@ describe('V10 ACK Edge Cases', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub',
         publicByteSize: 100n,
         isPrivate: false,
@@ -484,6 +520,8 @@ describe('V10 ACK Edge Cases', () => {
         merkleRoot,
         contextGraphId: cgIdBigInt,
         contextGraphIdStr: contextGraphId,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
         publisherPeerId: 'pub',
         publicByteSize: 100n,
         isPrivate: false,
@@ -561,6 +599,8 @@ describe('V10 ACK Edge Cases', () => {
       nodeIdentityId: 1n,
       signerWallet: coreWallets[0],
       contextGraphSharedMemoryUri: () => 'urn:test:swm',
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     };
     const handler = new StorageACKHandler(
       { query: vi.fn() } as any,
@@ -683,8 +723,8 @@ describe('V10 Merkle Root Construction (spec §9.0.2)', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 StorageACKHandler round-trip', () => {
-  const contextGraphId = 'handler-test-cg';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
   const coreWallet = ethers.Wallet.createRandom();
   const fakePeerId = { toString: () => 'requester-peer' };
 
@@ -723,6 +763,8 @@ describe('V10 StorageACKHandler round-trip', () => {
       signerWallet: coreWallet,
       contextGraphSharedMemoryUri: (cgId: string) =>
         `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     };
     return new StorageACKHandler(store as any, config, makeEventBus() as any);
   }
@@ -751,7 +793,16 @@ describe('V10 StorageACKHandler round-trip', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(ethers.hexlify(decodedRoot)).toBe(ethers.hexlify(merkleRoot));
 
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 2, BigInt(stagingBytes.length), 1, 0n);
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      merkleRoot,
+      2n,
+      BigInt(stagingBytes.length),
+      1n,
+      0n,
+    );
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
       r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
@@ -895,6 +946,8 @@ describe('V10 StorageACKHandler round-trip', () => {
       signerWallet: coreWallet,
       contextGraphSharedMemoryUri: (cgId: string) =>
         `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     };
     const store = createMockStore(testQuads);
     const handler = new StorageACKHandler(store as any, config, makeEventBus() as any);
@@ -919,8 +972,8 @@ describe('V10 StorageACKHandler round-trip', () => {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('V10 Finalization (spec §9.0 Phase 6)', () => {
-  const contextGraphId = 'finalization-test';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
   const merkleRoot = computeFlatKCRoot(multiEntityQuads, []);
 
   it('PublishIntent encode/decode round-trip preserves all fields', () => {
@@ -998,12 +1051,17 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
     expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
   });
 
-  it('contextGraphId consistency: publisher and handler both use 0n for non-numeric string', () => {
-    const publisherDerived = 0n;
-    const handlerDerived = 0n;
+  it('contextGraphId consistency: publisher and handler agree on the numeric on-chain id', () => {
+    // V10 publish requires a numeric on-chain context graph id — both the
+    // publisher (dkg-publisher.ts) and the receiving core node
+    // (storage-ack-handler.ts) parse the intent's `contextGraphId` via
+    // `BigInt(cgId)`, and both reject non-numeric or zero values at the
+    // fail-loud guard. This test pins that the two sides see the same id.
+    const publisherDerived = BigInt(contextGraphId);
+    const handlerDerived = BigInt(contextGraphId);
     expect(publisherDerived).toBe(handlerDerived);
     expect(publisherDerived).toBe(cgIdBigInt);
-    expect(publisherDerived).toBe(0n);
+    expect(publisherDerived).toBeGreaterThan(0n);
   });
 
   it('KA root combines public and private roots correctly', () => {
