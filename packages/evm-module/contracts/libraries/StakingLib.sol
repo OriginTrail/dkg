@@ -33,6 +33,4 @@ library StakingLib {
     error MaximumStakeExceeded(uint256 amount);
     error WithdrawalExceedsStake(uint96 stake, uint96 amount);
     error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
-    error InvalidLockEpochs();
-    error ConvictionLockActive(uint72 identityId, uint40 expiresAtEpoch);
 }

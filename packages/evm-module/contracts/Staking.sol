@@ -102,10 +102,10 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
      * @param addedStake Amount of tokens to stake (must be > 0)
      */
     function stake(uint72 identityId, uint96 addedStake) external profileExists(identityId) {
-        _stakeWithLock(identityId, addedStake, 1);
+        _stake(identityId, addedStake);
     }
 
-    function _stakeWithLock(uint72 identityId, uint96 addedStake, uint40 lockEpochs) internal {
+    function _stake(uint72 identityId, uint96 addedStake) internal {
         IERC20 token = tokenContract;
         StakingStorage ss = stakingStorage;
 
@@ -123,15 +123,9 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         _validateDelegatorEpochClaims(identityId, msg.sender);
 
         bytes32 delegatorKey = _getDelegatorKey(msg.sender);
-        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
+        uint256 currentEpoch = chronos.getCurrentEpoch();
         // settle all pending score changes for the node's delegator
         _prepareForStakeChange(currentEpoch, identityId, delegatorKey);
-
-        // Update conviction lock: can only extend, never shorten
-        (uint40 existingLock, ) = delegatorsInfo.getDelegatorLock(identityId, msg.sender);
-        if (lockEpochs > existingLock) {
-            delegatorsInfo.setDelegatorLock(identityId, msg.sender, lockEpochs, currentEpoch);
-        }
 
         uint96 delegatorStakeBase = stakingStorage.getDelegatorStakeBase(identityId, delegatorKey);
 
@@ -251,15 +245,6 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
 
         if (removedStake == 0) {
             revert TokenLib.ZeroTokenAmount();
-        }
-
-        // Check conviction lock: cannot withdraw while lock is active
-        (uint40 lockEpochs, uint40 lockStartEpoch) = delegatorsInfo.getDelegatorLock(identityId, msg.sender);
-        if (lockEpochs > 0) {
-            uint40 currentEpochU40 = uint40(chronos.getCurrentEpoch());
-            if (currentEpochU40 < lockStartEpoch + lockEpochs) {
-                revert StakingLib.ConvictionLockActive(identityId, lockStartEpoch + lockEpochs);
-            }
         }
 
         // Validate that all claims have been settled for the node before changing stake
@@ -945,16 +930,15 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Get the conviction multiplier for a specific delegator on a node.
-     * @param identityId Node identity
-     * @param delegator Delegator address
-     * @return multiplier18 Multiplier scaled by 1e18
+     * @dev Returns SCALE18 (1x) for all delegators. No per-delegator lock state
+     *      is currently tracked in `Staking`; callers requiring multiplier data
+     *      should read from the appropriate staking-position contract instead.
+     * @return multiplier18 SCALE18 (1x).
      */
     function getDelegatorConvictionMultiplier(
-        uint72 identityId,
-        address delegator
-    ) external view returns (uint256 multiplier18) {
-        (uint40 lockEpochs, ) = delegatorsInfo.getDelegatorLock(identityId, delegator);
-        if (lockEpochs == 0) return SCALE18; // Default: V8-compatible 1x for unset locks
-        return convictionMultiplier(lockEpochs);
+        uint72 /* identityId */,
+        address /* delegator */
+    ) external pure returns (uint256 multiplier18) {
+        return SCALE18;
     }
 }
