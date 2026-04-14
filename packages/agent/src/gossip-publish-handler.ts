@@ -96,7 +96,11 @@ export class GossipPublishHandler {
       const dataGraph = subGraphName
         ? contextGraphSubGraphUri(request.paranetId, subGraphName)
         : graphManager.dataGraphUri(request.paranetId);
-      let normalized = quads.map(q => ({ ...q, graph: dataGraph }));
+      // Preserve _meta graph URIs — they carry access control, registration
+      // status, and curator state that must land in the correct named graph.
+      let normalized = quads.map(q =>
+        q.graph.endsWith('/_meta') ? q : { ...q, graph: dataGraph },
+      );
 
       // When receiving ontology-topic broadcasts, skip context graph definition
       // triples for context graphs we already have locally. This prevents duplicate

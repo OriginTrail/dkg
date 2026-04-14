@@ -10,7 +10,7 @@ import {
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, withRetry, sparqlString,
+  Logger, createOperationContext, withRetry, sparqlString, escapeSparqlLiteral,
   type DKGNodeConfig, type OperationContext, type GetView,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -1980,13 +1980,17 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${this.peerId}`, graph: cgMetaGraph },
     );
 
-    // Store peer allowlist for curated CGs
+    // Store peer allowlist for curated CGs (with validation)
     if (opts.allowedPeers && opts.allowedPeers.length > 0) {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
       for (const peer of opts.allowedPeers) {
+        try { peerIdFromString(peer); } catch {
+          throw new Error(`Invalid peer ID in allowedPeers: "${peer}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
+        }
         quads.push({
           subject: paranetUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
-          object: `"${peer}"`,
+          object: `"${escapeSparqlLiteral(peer)}"`,
           graph: cgMetaGraph,
         });
       }
@@ -2196,6 +2200,14 @@ export class DKGAgent {
   async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<void> {
     const ctx = createOperationContext('system');
 
+    // Validate peer ID format (libp2p Ed25519 base58btc, e.g. 12D3KooW…)
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      peerIdFromString(peerId);
+    } catch {
+      throw new Error(`Invalid peer ID format: "${peerId}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
+    }
+
     const exists = await this.contextGraphExists(contextGraphId);
     if (!exists) {
       throw new Error(`Context graph "${contextGraphId}" does not exist`);
@@ -2203,17 +2215,18 @@ export class DKGAgent {
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const paranetUri = paranetDataGraphUri(contextGraphId);
+    const escapedPeerId = escapeSparqlLiteral(peerId);
 
     await this.store.insert([{
       subject: paranetUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
-      object: `"${peerId}"`,
+      object: `"${escapedPeerId}"`,
       graph: cgMetaGraph,
     }]);
 
     // Gossip the invite so peers update their allowlists
     try {
-      const inviteNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> "${peerId}" <${cgMetaGraph}> .`;
+      const inviteNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> "${escapedPeerId}" <${cgMetaGraph}> .`;
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const inviteMsg = encodePublishRequest({
         ual: `did:dkg:context-graph:${contextGraphId}`,
@@ -2433,11 +2446,14 @@ export class DKGAgent {
     const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
-    // Don't claim creator — we may be subscribing to someone else's CG.
-    // Creator is resolved when the real owner's ontology quads arrive via sync.
+    // Write a placeholder creator so getContextGraphOwner()/assertParanetOwner()
+    // have something to work with immediately. For CGs we actually own (daemon
+    // config), this is the correct value. For CGs we're subscribing to, the real
+    // creator's ontology quads will arrive via sync and overwrite this.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
