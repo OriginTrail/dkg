@@ -941,4 +941,88 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
     ) external pure returns (uint256 multiplier18) {
         return SCALE18;
     }
+
+    // ========================================================================
+    // V10 Two-Layer Staking Wire — NFT-backed stake recording
+    // ========================================================================
+
+    /**
+     * @notice Emitted when an NFT-backed stake is recorded via the two-layer
+     *         wire. `tokenId` doubles as the StakingStorage delegator key
+     *         (`bytes32(tokenId)`), disjoint from the V8 legacy
+     *         `keccak256(delegator)` key space.
+     */
+    event StakeRecorded(
+        uint256 indexed tokenId,
+        uint72 indexed identityId,
+        uint96 amount,
+        uint40 lockEpochs,
+        address indexed caller
+    );
+
+    /**
+     * @notice V10 permissioned entry for recording NFT-backed stake into
+     *         `StakingStorage`. Callable ONLY by the Hub-registered
+     *         `DKGStakingConvictionNFT` contract.
+     *
+     * @dev Delegator key scheme: `bytes32(tokenId)`, disjoint from the V8
+     *      legacy `keccak256(abi.encodePacked(delegator))` key space. This is
+     *      what allows multiple NFT positions for the same (delegator, node)
+     *      pair to be settled independently.
+     *
+     *      Token transfer: this function performs pure on-chain accounting.
+     *      The caller (`DKGStakingConvictionNFT`) is responsible for moving
+     *      `amount` TRAC to `StakingStorage` before invoking this function.
+     *      That keeps the staking-side logic symmetrical with the V8
+     *      `stake()` path (both end with TRAC held by `StakingStorage`)
+     *      without forcing an extra allowance hop through this contract.
+     *
+     *      Gate: `onlyContracts` ensures the caller is a Hub-registered
+     *      contract; the explicit `msg.sender` check pins the caller to the
+     *      DKGStakingConvictionNFT contract specifically, so no other
+     *      Hub-registered contract can spoof NFT-backed stake.
+     *
+     *      The leading underscore in the function name reflects its semantic
+     *      role as the internal entry of the two-layer wire, even though the
+     *      visibility is `external` so `DKGStakingConvictionNFT` can call it
+     *      cross-contract.
+     *
+     * @param tokenId     NFT position id — also the delegator key (bytes32(tokenId))
+     * @param identityId  Target node
+     * @param amount      Stake amount in TRAC (>0)
+     * @param lockEpochs  Conviction lock duration (recorded in the event only;
+     *                    authoritative lock data lives in `ConvictionStakingStorage`)
+     */
+    function _recordStake(
+        uint256 tokenId,
+        uint72 identityId,
+        uint96 amount,
+        uint40 lockEpochs
+    ) external onlyContracts {
+        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
+            revert StakingLib.OnlyConvictionNFT();
+        }
+        if (amount == 0) {
+            revert TokenLib.ZeroTokenAmount();
+        }
+
+        StakingStorage ss = stakingStorage;
+        bytes32 delegatorKey = bytes32(tokenId);
+
+        uint96 maxStake = parametersStorage.maximumStake();
+        uint96 totalNodeStakeAfter = ss.getNodeStake(identityId) + amount;
+        if (totalNodeStakeAfter > maxStake) {
+            revert StakingLib.MaximumStakeExceeded(maxStake);
+        }
+
+        // Fresh NFT position — no prior delegator-key state to settle.
+        ss.setDelegatorStakeBase(identityId, delegatorKey, amount);
+        ss.setNodeStake(identityId, totalNodeStakeAfter);
+        ss.increaseTotalStake(amount);
+
+        _addNodeToShardingTable(identityId, totalNodeStakeAfter);
+        askContract.recalculateActiveSet();
+
+        emit StakeRecorded(tokenId, identityId, amount, lockEpochs, msg.sender);
+    }
 }
