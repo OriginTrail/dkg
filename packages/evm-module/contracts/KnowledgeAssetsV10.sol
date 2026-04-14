@@ -717,17 +717,25 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
 
         // --- 1. Read current KC metadata (needed for validation + auth) ---
+        //
+        // `getKnowledgeCollectionUpdateContext` is a scalar-only getter
+        // added for the update path specifically. The legacy
+        // `getKnowledgeCollectionMetadata` performs a full storage → memory
+        // struct copy, which walks every entry of `merkleRoots[]` and
+        // `burned[]`. Both grow monotonically on every update, so calling
+        // the legacy getter from the update path made gas scale (super-)
+        // linearly with history — a KC with enough updates would
+        // eventually become un-updatable. Switching to this scalar getter
+        // keeps the update cost constant. (Codex round 3 finding 1.)
 
         (
-            KnowledgeCollectionLib.MerkleRoot[] memory merkleRoots,
-            ,
+            uint256 preUpdateMerkleRootCount,
             uint256 minted,
             uint88 currentByteSize,
-            ,
             uint40 endEpoch,
             uint96 currentTokenAmount,
             bool isImmutable
-        ) = kcs.getKnowledgeCollectionMetadata(p.id);
+        ) = kcs.getKnowledgeCollectionUpdateContext(p.id);
 
         if (isImmutable) {
             revert KnowledgeCollectionLib.CannotUpdateImmutableKnowledgeCollection(p.id);
@@ -800,10 +808,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // a captured update ACK could be replayed against a later state of the
         // same KC — for paid updates the attacker would burn their own TRAC,
         // but a `delta == 0` (metadata-only) ACK could be replayed for free to
-        // roll the merkle root back. The pre-update length is read from the
-        // metadata snapshot above, so signers and the contract agree on the
-        // exact version they're attesting.
-        uint256 preUpdateMerkleRootCount = merkleRoots.length;
+        // roll the merkle root back. The pre-update length comes from the
+        // scalar metadata getter above — signers read the same value off-chain,
+        // so both sides agree on the exact version they're attesting.
+        //
         // Same field-set rule as publish: NO `publisherNodeIdentityId` in the
         // ACK digest. The publishing node is verified separately above. The
         // publish ACK shape is defined by the PRD (see `_executePublishCore`

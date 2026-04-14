@@ -171,6 +171,50 @@ contract KnowledgeCollectionStorage is
         emit KnowledgeCollectionUpdated(id, updateOperationId, merkleRoot, byteSize, tokenAmount);
     }
 
+    /// @notice Lightweight update-path metadata — scalar fields only + the
+    /// pre-update merkle-root count. Intended for callers (e.g.
+    /// `KnowledgeAssetsV10._executeUpdateCore`) that need the state
+    /// summary but NOT the full history arrays.
+    ///
+    /// Problem: `getKnowledgeCollectionMetadata` performs a full
+    /// storage → memory struct copy, which walks every entry of
+    /// `merkleRoots[]` and `burned[]`. Because both arrays grow
+    /// monotonically on every update, the memory cost (and thus gas
+    /// cost) of calling that getter from the update path itself scales
+    /// linearly — actually super-linearly due to EVM memory-expansion
+    /// quadratic term — with the number of prior updates. A KC with
+    /// thousands of historical entries eventually becomes un-updatable.
+    ///
+    /// This getter returns only the scalar slots and the merkle-root
+    /// chain length (as a plain `uint256`), so the update path's gas
+    /// cost is constant regardless of history.
+    ///
+    /// Codex review round 3 finding 1.
+    function getKnowledgeCollectionUpdateContext(
+        uint256 id
+    )
+        external
+        view
+        returns (
+            uint256 merkleRootsCount,
+            uint256 minted,
+            uint88 byteSize,
+            uint40 endEpoch,
+            uint96 tokenAmount,
+            bool isImmutable
+        )
+    {
+        KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[id];
+        return (
+            kc.merkleRoots.length,
+            kc.minted,
+            kc.byteSize,
+            kc.endEpoch,
+            kc.tokenAmount,
+            kc.isImmutable
+        );
+    }
+
     function getKnowledgeCollectionMetadata(
         uint256 id
     )
