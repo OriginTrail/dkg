@@ -1677,6 +1677,195 @@ fi
 
 #------------------------------------------------------------
 echo ""
+echo "=== SECTION 26: Tri-Modal Memory (Conversation Turns) ==="
+echo ""
+
+MEMORY_CG="$CONTEXT_GRAPH"
+
+echo "--- 26a: Ingest a conversation turn via /api/memory/turn ---"
+TURN_MD="# Tri-Modal Memory Test\n\nThis turn tests the conversation ingest pipeline.\n\n## Key Concepts\n\n- Knowledge Assets share one UAL across text, graph, and vector\n- Conversation turns are stored as markdown files\n- The extraction pipeline derives RDF triples from markdown"
+TURN_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"markdown\":\"$TURN_MD\",
+  \"speaker\":\"devnet-test-agent\",
+  \"role\":\"assistant\"
+}")
+TURN_URI=$(json_get "$TURN_RESP" turnUri)
+TURN_HASH=$(json_get "$TURN_RESP" fileHash)
+TURN_LAYER=$(json_get "$TURN_RESP" layer)
+TURN_QUADS=$(json_get "$TURN_RESP" totalQuads)
+echo "  turnUri=$TURN_URI fileHash=$TURN_HASH layer=$TURN_LAYER quads=$TURN_QUADS"
+[[ "$TURN_URI" != "__NONE__" && "$TURN_URI" != "__ERR__" ]] && ok "Memory turn ingested: $TURN_URI" || fail "Memory turn ingest failed: ${TURN_RESP:0:300}"
+[[ "$TURN_HASH" != "__NONE__" && "$TURN_HASH" != "__ERR__" ]] && ok "Turn file hash returned ($TURN_HASH)" || fail "No turn file hash"
+[[ "$TURN_QUADS" != "__NONE__" && "$TURN_QUADS" != "0" ]] && ok "Turn generated $TURN_QUADS quads" || warn "Turn generated 0 quads"
+
+echo "--- 26b: Turn is queryable as ConversationTurn in SWM ---"
+MEMORY_SETTLE_S="${MEMORY_SETTLE_S:-3}"
+sleep "$MEMORY_SETTLE_S"
+TURN_TYPE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"ASK { <$TURN_URI> a <http://schema.org/ConversationTurn> }\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_TYPE_VAL=$(echo "$TURN_TYPE_Q" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null || echo "ERR")
+if [[ "$TURN_TYPE_VAL" == "yes" ]]; then
+  ok "Turn $TURN_URI is typed as ConversationTurn in SWM"
+elif [[ "$TURN_TYPE_VAL" == "ERR" ]]; then
+  fail "ConversationTurn type query returned unparseable response: ${TURN_TYPE_Q:0:200}"
+else
+  fail "Turn $TURN_URI not found as ConversationTurn in SWM"
+fi
+
+echo "--- 26c: Turn has schema:description quad ---"
+TURN_DESC_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?desc WHERE { <$TURN_URI> <http://schema.org/description> ?desc } LIMIT 1\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_DESC_CT=$(safe_bindings_count "$TURN_DESC_Q")
+if [[ "$TURN_DESC_CT" == "PARSE_ERR" ]]; then
+  fail "Turn description query returned unparseable response: ${TURN_DESC_Q:0:200}"
+elif [[ "$TURN_DESC_CT" -ge 1 ]]; then
+  ok "Turn has schema:description quad"
+else
+  warn "Turn missing schema:description ($TURN_DESC_CT)"
+fi
+
+echo "--- 26d: Turn has agent attribution ---"
+TURN_AGENT_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?agent WHERE { <$TURN_URI> <http://schema.org/agent> ?agent } LIMIT 1\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_AGENT_CT=$(safe_bindings_count "$TURN_AGENT_Q")
+if [[ "$TURN_AGENT_CT" == "PARSE_ERR" ]]; then
+  fail "Turn agent query returned unparseable response: ${TURN_AGENT_Q:0:200}"
+elif [[ "$TURN_AGENT_CT" -ge 1 ]]; then
+  ok "Turn has agent attribution"
+else
+  warn "Turn missing agent attribution ($TURN_AGENT_CT)"
+fi
+
+echo "--- 26e: Source file retrievable via /api/file ---"
+if [[ "$TURN_HASH" != "__NONE__" && "$TURN_HASH" != "__ERR__" ]]; then
+  FILE_CODE=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -H "Authorization: Bearer $AUTH" \
+    -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:9201/api/file/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TURN_HASH', safe=''))")")
+  [[ "$FILE_CODE" == "200" ]] && ok "Source file retrievable (HTTP $FILE_CODE)" || fail "Source file not retrievable (HTTP $FILE_CODE)"
+else
+  skip "26e: no file hash to test"
+fi
+
+echo "--- 26f: Ingest a second turn with session linking ---"
+TURN2_MD="# Follow-up Discussion\n\nThis is a second turn in the same session to test session linking."
+SESSION_URI="urn:dkg:session:devnet-test-$(date +%s)"
+TURN2_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"markdown\":\"$TURN2_MD\",
+  \"speaker\":\"devnet-test-user\",
+  \"role\":\"user\",
+  \"sessionUri\":\"$SESSION_URI\"
+}")
+TURN2_URI=$(json_get "$TURN2_RESP" turnUri)
+TURN2_SESSION=$(json_get "$TURN2_RESP" sessionUri)
+[[ "$TURN2_URI" != "__NONE__" && "$TURN2_URI" != "__ERR__" ]] && ok "Second turn ingested: $TURN2_URI" || fail "Second turn ingest failed: ${TURN2_RESP:0:200}"
+[[ "$TURN2_SESSION" == "$SESSION_URI" ]] && ok "Session URI echoed back correctly" || warn "Session URI mismatch (expected=$SESSION_URI, got=$TURN2_SESSION)"
+
+echo "--- 26g: Session linking quads present ---"
+sleep "$LOCAL_SETTLE_S"
+SESSION_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?turn WHERE { ?turn <http://schema.org/isPartOf> <$SESSION_URI> } LIMIT 5\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+SESSION_CT=$(safe_bindings_count "$SESSION_Q")
+if [[ "$SESSION_CT" == "PARSE_ERR" ]]; then
+  fail "Session linking query returned unparseable response: ${SESSION_Q:0:200}"
+elif [[ "$SESSION_CT" -ge 1 ]]; then
+  ok "Session linking quads present ($SESSION_CT turns linked)"
+else
+  warn "Session linking quads not found ($SESSION_CT)"
+fi
+
+echo "--- 26h: /api/memory/search — SPARQL text match ---"
+SEARCH_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+  \"query\":\"Tri-Modal Memory\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"limit\":5,
+  \"memoryLayers\":[\"swm\"]
+}")
+SEARCH_CT=$(echo "$SEARCH_RESP" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print(len(d.get("results",[])))
+except: print("ERR")
+' 2>/dev/null || echo "ERR")
+echo "  Search results: $SEARCH_CT"
+if [[ "$SEARCH_CT" == "ERR" ]]; then
+  fail "Memory search returned unparseable response: ${SEARCH_RESP:0:200}"
+elif [[ "$SEARCH_CT" -ge 1 ]]; then
+  ok "Memory search returned $SEARCH_CT results for 'Tri-Modal Memory'"
+else
+  fail "Memory search returned 0 results — ingested turn not searchable via SPARQL/text"
+fi
+
+echo "--- 26i: Memory search scoped — no cross-CG leakage ---"
+FAKE_CG="nonexistent-memory-cg-$(date +%s)"
+LEAK_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+  \"query\":\"Tri-Modal Memory\",
+  \"contextGraphId\":\"$FAKE_CG\",
+  \"limit\":5
+}")
+LEAK_CT=$(echo "$LEAK_RESP" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print(len(d.get("results",[])))
+except: print("ERR")
+' 2>/dev/null || echo "ERR")
+if [[ "$LEAK_CT" == "ERR" ]]; then
+  warn "Cross-CG search returned unparseable response: ${LEAK_RESP:0:200}"
+elif [[ "$LEAK_CT" -eq 0 ]]; then
+  ok "Memory search correctly scoped — no cross-CG leakage"
+else
+  fail "Memory search leaked $LEAK_CT results to wrong CG"
+fi
+
+echo "--- 26j: Invalid sessionUri rejected with 400 ---"
+BAD_SESSION_RESP=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+  -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" \
+  -o /dev/null -w "%{http_code}" \
+  -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+    \"contextGraphId\":\"$MEMORY_CG\",
+    \"markdown\":\"test\",
+    \"speaker\":\"test\",
+    \"role\":\"user\",
+    \"sessionUri\":\"has spaces and {braces}\"
+  }")
+[[ "$BAD_SESSION_RESP" == "400" ]] && ok "Invalid sessionUri rejected (HTTP 400)" || fail "Invalid sessionUri returned HTTP $BAD_SESSION_RESP (expected 400)"
+
+echo "--- 26k: Turn gossips to other nodes via SWM ---"
+sleep "$GOSSIP_WAIT_S"
+for p in 9202 9203; do
+  GOS_TURN=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
+    \"sparql\":\"SELECT (COUNT(*) AS ?c) WHERE { ?s a <http://schema.org/ConversationTurn> . FILTER(CONTAINS(STR(?s),'turn/')) }\",
+    \"contextGraphId\":\"$MEMORY_CG\",
+    \"view\":\"shared-working-memory\"
+  }")
+  GOS_CT=$(echo "$GOS_TURN" | python3 -c "
+import sys,json,re
+b=json.load(sys.stdin).get('result',{}).get('bindings',[])
+if b:
+  v=str(b[0].get('c','0'))
+  m=re.search(r'(\d+)',v)
+  print(m.group(1) if m else '0')
+else: print('0')
+" 2>/dev/null)
+  [[ "$GOS_CT" -ge 1 ]] && ok "Node $p has $GOS_CT conversation turns via gossip" || warn "Node $p has $GOS_CT turns (gossip pending?)"
+done
+
+#------------------------------------------------------------
+echo ""
 echo "============================================================"
 echo "TEST SUMMARY"
 echo "============================================================"
