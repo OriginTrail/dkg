@@ -312,11 +312,14 @@ function createV10ACKProviderForPublisher(
     swmGraphId,
     subGraphName,
   ) => {
-    // Fail loud on non-numeric or zero CG ids. V10 publish requires a real
-    // on-chain context graph; `ZeroContextGraphId` at
-    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. `contextGraphId`
-    // here is the TARGET on-chain numeric id; `swmGraphId` (optional) is
-    // the source SWM graph name and is NOT required to be numeric.
+    // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
+    // a real on-chain context graph; `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. Reject `<= 0n`
+    // rather than `=== 0n` so `BigInt("-1") === -1n` is caught here instead
+    // of dying in ethers' uint256 encoder inside the evm-adapter.
+    // `contextGraphId` here is the TARGET on-chain numeric id; `swmGraphId`
+    // (optional) is the source SWM graph name and is NOT required to be
+    // numeric.
     let cgIdBigInt: bigint;
     try {
       cgIdBigInt = BigInt(contextGraphId);
@@ -326,9 +329,9 @@ function createV10ACKProviderForPublisher(
         `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
-    if (cgIdBigInt === 0n) {
+    if (cgIdBigInt <= 0n) {
       throw new Error(
-        `Async V10 publish requires a non-zero on-chain context graph id; got 0. ` +
+        `Async V10 publish requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
         `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }

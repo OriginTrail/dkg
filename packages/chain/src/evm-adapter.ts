@@ -128,16 +128,6 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
-  /**
-   * Minimal view binding to `PaymasterManager.validPaymasters(address)`.
-   * Used by `createKnowledgeAssetsV10` to decide whether a non-zero
-   * paymaster address is whitelisted by the contract. When true, the
-   * contract calls `paymaster.coverCost(tokenAmount)` instead of pulling
-   * TRAC from `msg.sender` — the adapter can skip approval. When false
-   * (or resolution fails), the contract falls back to `msg.sender` and
-   * the adapter must approve TRAC from the operational signer.
-   */
-  paymasterManager?: Contract;
 }
 
 /**
@@ -246,25 +236,6 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
-    }
-
-    // PaymasterManager is only used to check whether a non-zero paymaster
-    // passed to `publishDirect` is whitelisted, so the adapter can decide
-    // whether to approve TRAC from the operational signer. Read-only — bind
-    // to `provider` not `signer`.
-    try {
-      const paymasterManagerAddress: string = await this.contracts.hub.getContractAddress('PaymasterManager');
-      if (paymasterManagerAddress !== ethers.ZeroAddress) {
-        this.contracts.paymasterManager = new Contract(
-          paymasterManagerAddress,
-          ['function validPaymasters(address) view returns (bool)'],
-          this.provider,
-        );
-      }
-    } catch {
-      // PaymasterManager not registered in Hub — conservative fallback: the
-      // adapter always approves when a non-zero paymaster is passed, which
-      // is correct behavior on chains where whitelist enforcement is absent.
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -1187,14 +1158,19 @@ export class EVMChainAdapter implements ChainAdapter {
     // Pre-tx validation of `contextGraphId`. The V10 contract rejects
     // `cgId == 0` at `KnowledgeAssetsV10.sol:379` with `ZeroContextGraphId`;
     // catching this here gives a clearer error than a generic revert and
-    // saves a round-trip. Tests that use a descriptive string CG name flow
-    // through dkg-publisher with a silent 0n fallback — they never reach
-    // this adapter because they target the MockChainAdapter.
-    if (params.contextGraphId === 0n) {
+    // saves a round-trip. Reject `<= 0n` rather than `=== 0n` so that
+    // `BigInt("-1") === -1n` does not slip past our fail-loud boundary and
+    // die in ethers' uint256 encoder with a cryptic low-level error — the
+    // upstream guards in `dkg-publisher.ts`, `agent/dkg-agent.ts`,
+    // `cli/publisher-runner.ts`, and `publisher/storage-ack-handler.ts`
+    // accept whatever `BigInt(...)` returns for non-throwing inputs, which
+    // includes negative decimal strings.
+    if (params.contextGraphId <= 0n) {
       throw new Error(
-        'V10 publishDirect requires a non-zero on-chain context graph id. ' +
-        'Register the context graph via `ContextGraphs.createContextGraph` ' +
-        'first and pass the returned numeric id as `publishContextGraphId`.',
+        'V10 publishDirect requires a positive on-chain context graph id; ' +
+        `got ${params.contextGraphId}. Register the context graph via ` +
+        '`ContextGraphs.createContextGraph` first and pass the returned ' +
+        'numeric id as `publishContextGraphId`.',
       );
     }
 
@@ -1202,33 +1178,20 @@ export class EVMChainAdapter implements ChainAdapter {
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 
-    // Approval policy for TRAC →  KAV10.
+    // Approval policy: always approve TRAC from the operational signer.
     //
-    //   KnowledgeAssetsV10._publishDirect (KnowledgeAssetsV10.sol:613-628):
-    //     if (paymasterManager.validPaymasters(paymaster)) {
-    //       IPaymaster(paymaster).coverCost(tokenAmount);
-    //     } else {
-    //       // falls back to pulling TRAC from msg.sender
-    //       token.transferFrom(msg.sender, stakingStorage, tokenAmount);
-    //     }
-    //
-    // So the contract pulls from msg.sender whenever the paymaster is NOT
-    // whitelisted, regardless of whether it's zero or a random address.
-    // Approve from the operational signer in every case EXCEPT when the
-    // paymaster is non-zero AND `validPaymasters(paymaster)` returns true.
-    let needsApproval = true;
-    if (params.paymaster !== ethers.ZeroAddress && this.contracts.paymasterManager) {
-      try {
-        const whitelisted: boolean = await this.contracts.paymasterManager.validPaymasters(params.paymaster);
-        needsApproval = !whitelisted;
-      } catch {
-        // PaymasterManager query failed (transient RPC, ABI mismatch) —
-        // stay safe and approve anyway. A redundant allowance is cheap; a
-        // missing allowance reverts the publish.
-      }
-    }
-
-    if (this.contracts.token && needsApproval) {
+    // `KnowledgeAssetsV10._publishDirect` (KnowledgeAssetsV10.sol:613-628)
+    // only routes payment to `IPaymaster(paymaster).coverCost(...)` when
+    // `paymasterManager.validPaymasters(paymaster) == true` at tx-mine
+    // time; otherwise it falls back to `token.transferFrom(msg.sender,
+    // ...)`. The adapter used to skip approval when an off-chain
+    // `validPaymasters` probe returned `true`, but that was a TOCTOU bug:
+    // if the whitelist mutates between the probe and the mined tx, the
+    // contract silently reverts to the `msg.sender` branch and hits a
+    // zero allowance → publish reverts. A redundant allowance is cheap
+    // and idle when the paymaster does cover the cost, so we always
+    // approve and drop the probe entirely.
+    if (this.contracts.token) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
       const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {

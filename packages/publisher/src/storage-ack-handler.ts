@@ -185,11 +185,13 @@ export class StorageACKHandler {
       : BigInt(Number(intent.publicByteSize));
 
     // Derive numeric CG ID the same way the publisher does. Fail loud on
-    // non-numeric or zero ids — the V10 contract rejects `contextGraphId == 0`
-    // with `ZeroContextGraphId` at `KnowledgeAssetsV10.sol:379`, so signing an
-    // ACK against CG 0 would just produce a signature the contract rejects
-    // downstream. Refuse the PublishIntent here with a clear error so the
-    // publisher sees the failure on the P2P stream.
+    // non-numeric or non-positive ids — the V10 contract rejects
+    // `contextGraphId == 0` with `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379`, so signing an ACK against CG 0 (or a
+    // negative id from `BigInt("-1")`, which would die later in the
+    // evm-adapter's uint256 encoder) would just produce a signature the
+    // contract rejects downstream. Refuse the PublishIntent here with a
+    // clear error so the publisher sees the failure on the P2P stream.
     let contextGraphIdBigInt: bigint;
     try {
       contextGraphIdBigInt = BigInt(cgId);
@@ -199,10 +201,10 @@ export class StorageACKHandler {
         `got '${cgId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
-    if (contextGraphIdBigInt === 0n) {
+    if (contextGraphIdBigInt <= 0n) {
       throw new Error(
-        `StorageACK: V10 publish requires a non-zero on-chain context graph id; got 0. ` +
-        `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        `StorageACK: V10 publish requires a positive on-chain context graph id; ` +
+        `got ${contextGraphIdBigInt}. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
     const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;

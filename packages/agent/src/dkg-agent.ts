@@ -3998,13 +3998,17 @@ export class DKGAgent {
       swmGraphId?: string,
       subGraphName?: string,
     ) => {
-      // Fail loud on non-numeric or zero CG ids: V10 publish requires a real
-      // on-chain context graph and the contract rejects `cgId == 0` with
-      // `ZeroContextGraphId`. Matches the same guard in dkg-publisher and
-      // storage-ack-handler so ACK signers, ACK verifiers, and the chain
-      // submitter all agree on the legal domain. `contextGraphId` here is
-      // the TARGET on-chain id — `swmGraphId` (optional) is the source SWM
-      // graph name and is NOT required to be numeric.
+      // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
+      // a real on-chain context graph and the contract rejects `cgId == 0`
+      // with `ZeroContextGraphId`. Reject `<= 0n` (not `=== 0n`) because
+      // `BigInt("-1")` returns `-1n` without throwing — a naive zero check
+      // would let negative ids through to the evm-adapter pre-tx guard,
+      // where ethers' uint256 encoder would throw a cryptic low-level
+      // error. Matches the same guard in dkg-publisher, storage-ack-handler,
+      // and async publisher-runner so ACK signers, ACK verifiers, and the
+      // chain submitter all agree on the legal domain. `contextGraphId`
+      // here is the TARGET on-chain id — `swmGraphId` (optional) is the
+      // source SWM graph name and is NOT required to be numeric.
       let cgIdBigInt: bigint;
       try {
         cgIdBigInt = BigInt(contextGraphId);
@@ -4014,9 +4018,9 @@ export class DKGAgent {
           `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
-      if (cgIdBigInt === 0n) {
+      if (cgIdBigInt <= 0n) {
         throw new Error(
-          `V10 ACK collection requires a non-zero on-chain context graph id; got 0. ` +
+          `V10 ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
