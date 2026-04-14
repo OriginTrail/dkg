@@ -586,4 +586,218 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
   });
+
+  // =====================================================================
+  // redelegate → StakingV10.redelegate
+  // =====================================================================
+  //
+  // Moves a V10 NFT-backed position from its current node to a new node.
+  // Per-node `nodeStake` moves (old -= raw+rewards, new += raw+rewards);
+  // global `totalStake` is invariant. The ConvictionStakingStorage diff
+  // layer owns the effective-stake move + `pos.identityId` mutation via
+  // `updateOnRedelegate`. Tier/lock state, raw principal, rewards bucket,
+  // and multiplier are all untouched by redelegate.
+
+  describe('redelegate (→ StakingV10.redelegate)', () => {
+    // -----------------------------------------------------------------
+    // Revert paths
+    // -----------------------------------------------------------------
+
+    it('reverts if not owner (non-owner caller)', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      // `accounts[4]` is not the owner of tokenId 0 — wrapper-layer guard.
+      await expect(
+        NFT.connect(accounts[4]).redelegate(0, toId),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('reverts on same identityId (SameIdentity)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Redelegating to the current node — StakingV10 rejects with
+      // `SameIdentity` before any storage mutation or settle call.
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, identityId),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'SameIdentity');
+    });
+
+    it('reverts on non-existent destination profile', async () => {
+      const { identityId: fromId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      // identityId 9999 is never registered as a profile. StakingV10 must
+      // revert BEFORE touching any storage — otherwise the sharding-table
+      // insert at the bottom of the flow would happily register a ghost
+      // node at `sha256("")`.
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, 9999),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'ProfileDoesNotExist');
+    });
+
+    it('reverts when destination nodeStake + amount > maxStake', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+
+      // Full-size stake on the source node — the destination starts empty,
+      // but we crank maxStake down to one wei above the source so the move
+      // strictly over-shoots the destination cap.
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      // Shrink maxStake below the move size. HubOwner is accounts[0].
+      await ParametersStorage.connect(accounts[0]).setMaximumStake(amount - 1n);
+
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, toId),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'MaxStakeExceeded');
+
+      // No state leak past the revert: source node still holds the raw,
+      // destination is still empty, position still points at the source.
+      expect(await StakingStorage.getNodeStake(fromId)).to.equal(amount);
+      expect(await StakingStorage.getNodeStake(toId)).to.equal(0n);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(fromId);
+    });
+
+    it('direct StakingV10.redelegate call from non-NFT caller reverts via onlyConvictionNFT gate', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      // The gate pins the caller to the Hub-registered NFT contract.
+      await expect(
+        StakingV10Contract.connect(accounts[0]).redelegate(accounts[0].address, 0, toId),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+
+    // -----------------------------------------------------------------
+    // Happy paths
+    // -----------------------------------------------------------------
+
+    it('happy path mid-lock: nodeStake moves, totalStake invariant, delegator base moves, position identityId updated, event emitted', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      expect(await StakingStorage.getNodeStake(fromId)).to.equal(amount);
+      expect(await StakingStorage.getNodeStake(toId)).to.equal(0n);
+
+      // Still mid-lock — the 12-epoch lock is nowhere near done.
+      const tx = await NFT.connect(accounts[0]).redelegate(0, toId);
+
+      // Wrapper-layer event mirrors, authoritative event from StakingV10.
+      await expect(tx)
+        .to.emit(NFT, 'PositionRedelegated')
+        .withArgs(0n, fromId, toId);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'Redelegated')
+        .withArgs(0n, fromId, toId);
+
+      // Per-node stake moved.
+      expect(await StakingStorage.getNodeStake(fromId)).to.equal(0n);
+      expect(await StakingStorage.getNodeStake(toId)).to.equal(amount);
+
+      // Global totalStake is INVARIANT — redelegate is a per-node move only.
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore);
+
+      // Delegator stake base moved between (identityId, bytes32(tokenId)) buckets.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(fromId, tokenIdKey(0)),
+      ).to.equal(0n);
+      expect(
+        await StakingStorage.getDelegatorStakeBase(toId, tokenIdKey(0)),
+      ).to.equal(amount);
+
+      // ConvictionStakingStorage position now points at the new node.
+      // Raw, rewards, lockEpochs, multiplier18, expiryEpoch all untouched.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(toId);
+      expect(pos.raw).to.equal(amount);
+      expect(pos.rewards).to.equal(0n);
+      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.multiplier18).to.equal(SIX_X);
+    });
+
+    it('happy path post-expiry: redelegate after lock expired moves nodeStake correctly', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
+
+      // Advance past the 1-epoch lock; the position is now in post-expiry
+      // rest state on the source node. Redelegate should still work — the
+      // raw principal follows the position to the new node unchanged.
+      await advanceEpochs(2);
+
+      await NFT.connect(accounts[0]).redelegate(0, toId);
+
+      expect(await StakingStorage.getNodeStake(fromId)).to.equal(0n);
+      expect(await StakingStorage.getNodeStake(toId)).to.equal(amount);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(toId);
+      expect(pos.raw).to.equal(amount);
+      // Raw lock state on the position stays as it was pre-redelegate
+      // (Phase 5 storage contract only mutates identityId + per-node diffs).
+      expect(pos.lockEpochs).to.equal(1);
+      expect(pos.multiplier18).to.equal(ONE_AND_HALF_X);
+    });
+
+    it('multi-NFT independence: redelegating NFT A does not affect NFT B on a third node', async () => {
+      const { identityId: nodeA } = await createProfile();
+      const { identityId: nodeB } = await createProfile(accounts[0], accounts[2]);
+      const { identityId: nodeC } = await createProfile(accounts[0], accounts[3]);
+
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount * 2n);
+
+      // NFT 0 → nodeA; NFT 1 → nodeC (separate node, separate tokenId).
+      await NFT.connect(accounts[0]).createConviction(nodeA, amount, 12);
+      await NFT.connect(accounts[0]).createConviction(nodeC, amount, 12);
+
+      const totalBefore = await StakingStorage.getTotalStake();
+
+      // Redelegate ONLY NFT 0 from nodeA → nodeB.
+      await NFT.connect(accounts[0]).redelegate(0, nodeB);
+
+      // NFT 0 moved correctly.
+      expect(await StakingStorage.getNodeStake(nodeA)).to.equal(0n);
+      expect(await StakingStorage.getNodeStake(nodeB)).to.equal(amount);
+      expect(
+        await StakingStorage.getDelegatorStakeBase(nodeA, tokenIdKey(0)),
+      ).to.equal(0n);
+      expect(
+        await StakingStorage.getDelegatorStakeBase(nodeB, tokenIdKey(0)),
+      ).to.equal(amount);
+      expect((await ConvictionStakingStorageContract.getPosition(0)).identityId).to.equal(nodeB);
+
+      // NFT 1 on nodeC is completely untouched — different tokenId, different
+      // node, different delegator key.
+      expect(await StakingStorage.getNodeStake(nodeC)).to.equal(amount);
+      expect(
+        await StakingStorage.getDelegatorStakeBase(nodeC, tokenIdKey(1)),
+      ).to.equal(amount);
+      expect((await ConvictionStakingStorageContract.getPosition(1)).identityId).to.equal(nodeC);
+
+      // Global totalStake invariant across the entire sequence (two mints,
+      // one redelegate).
+      expect(await StakingStorage.getTotalStake()).to.equal(totalBefore);
+    });
+  });
 });
