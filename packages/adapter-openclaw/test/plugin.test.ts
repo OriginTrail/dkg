@@ -232,7 +232,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('preserves a stored gatewayUrl when OpenClaw re-registers its transport', async () => {
+  it('drops a stale stored gatewayUrl when the current runtime is bridge-only', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -270,7 +270,6 @@ describe('DkgNodePlugin', () => {
         registrationMode: 'full',
         registerTool: () => {},
         registerHook: () => {},
-        registerHttpRoute: () => {},
         on: () => {},
         logger: {},
       };
@@ -287,19 +286,45 @@ describe('DkgNodePlugin', () => {
       );
 
       expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toEqual({
+        id: 'openclaw',
+        enabled: true,
+        description: 'Connect a local OpenClaw agent through the DKG node.',
         transport: {
           kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:9200',
         },
+        capabilities: expect.objectContaining({
+          localChat: true,
+          connectFromUi: true,
+          dkgPrimaryMemory: true,
+          wmImportPipeline: true,
+          nodeServedSkill: true,
+        }),
+        manifest: {
+          packageName: '@origintrail-official/dkg-adapter-openclaw',
+          setupEntry: './setup-entry.mjs',
+        },
+        setupEntry: './setup-entry.mjs',
+        metadata: expect.objectContaining({
+          channelId: 'dkg-ui',
+          registrationMode: 'full',
+          transportMode: 'bridge',
+        }),
+        runtime: expect.objectContaining({
+          status: 'connecting',
+          ready: false,
+          lastError: null,
+        }),
       });
       expect(readyCall).toBeTruthy();
       expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
-          gatewayUrl: 'http://127.0.0.1:9200',
+          bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+          healthUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/health$/),
         },
       });
+      expect(JSON.parse(String(readyCall?.[1]?.body)).transport.gatewayUrl).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -491,7 +516,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('does not re-enable a stored disconnected OpenClaw integration on startup', async () => {
+  it('does not re-enable a stored OpenClaw integration when the user explicitly disconnected it', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -503,6 +528,7 @@ describe('DkgNodePlugin', () => {
               id: 'openclaw',
               enabled: false,
               runtime: { status: 'disconnected', ready: false },
+              metadata: { userDisabled: true },
             },
           }),
         };
@@ -545,7 +571,122 @@ describe('DkgNodePlugin', () => {
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       )).toBe(false);
-      expect(info).toHaveBeenCalledWith(expect.stringContaining('skipping startup re-registration'));
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does not re-enable a legacy pre-flag disconnected OpenClaw integration on startup', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              enabled: false,
+              connectedAt: '2026-04-13T09:00:00.000Z',
+              runtime: { status: 'disconnected', ready: false },
+              transport: {
+                kind: 'openclaw-channel',
+                bridgeUrl: 'http://127.0.0.1:9201',
+              },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const info = vi.fn();
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info },
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(fakeFetch.mock.calls.some((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      )).toBe(false);
+      expect(fakeFetch.mock.calls.some((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      )).toBe(false);
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('explicitly disconnected by the user'));
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('re-registers a transport-only OpenClaw record on startup', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        return {
+          ok: true,
+          json: async () => ({
+            integration: {
+              id: 'openclaw',
+              transport: {
+                kind: 'openclaw-channel',
+                bridgeUrl: 'http://127.0.0.1:9201',
+              },
+            },
+          }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(fakeFetch.mock.calls.some((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      )).toBe(true);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;

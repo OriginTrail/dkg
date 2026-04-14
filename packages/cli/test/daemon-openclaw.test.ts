@@ -410,6 +410,45 @@ describe('local agent integration registry helpers', () => {
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
   });
 
+  it('marks explicit OpenClaw disconnects as user-disabled and clears that flag on reconnect', () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          metadata: {
+            source: 'node-ui',
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+        },
+      },
+    });
+
+    const disconnected = updateLocalAgentIntegration(config, 'openclaw', {
+      enabled: false,
+      runtime: {
+        status: 'disconnected',
+        ready: false,
+        lastError: null,
+      },
+    });
+
+    expect(disconnected.enabled).toBe(false);
+    expect(disconnected.metadata?.userDisabled).toBe(true);
+
+    const reconnected = connectLocalAgentIntegration(config, {
+      id: 'openclaw',
+      metadata: {
+        source: 'node-ui',
+      },
+    });
+
+    expect(reconnected.enabled).toBe(true);
+    expect(reconnected.metadata?.userDisabled).toBe(false);
+  });
+
   it('UI connect marks OpenClaw ready immediately when the local bridge is already healthy for an already attached integration', async () => {
     const config = makeConfig({
       localAgentIntegrations: {
@@ -446,6 +485,53 @@ describe('local agent integration registry helpers', () => {
     expect(result.integration.status).toBe('ready');
     expect(result.integration.runtime.ready).toBe(true);
     expect(result.integration.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
+    expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
+  });
+
+  it('UI reconnect keeps the healthy-bridge fast path after a manual OpenClaw disconnect', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: false,
+          metadata: {
+            source: 'node-ui',
+            userDisabled: true,
+          },
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'disconnected',
+            ready: false,
+          },
+        },
+      },
+    });
+    const runSetup = vi.fn();
+    const restartGateway = vi.fn();
+    const waitForReady = vi.fn();
+    const probeHealth = vi.fn().mockResolvedValue({
+      ok: true,
+      target: 'bridge',
+    });
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      {
+        id: 'openclaw',
+        metadata: { source: 'node-ui' },
+      },
+      'bridge-token',
+      { runSetup, restartGateway, waitForReady, probeHealth },
+    );
+
+    expect(runSetup).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(waitForReady).not.toHaveBeenCalled();
+    expect(result.integration.status).toBe('ready');
+    expect(result.integration.runtime.ready).toBe(true);
+    expect(result.integration.metadata?.userDisabled).toBe(false);
     expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
   });
 

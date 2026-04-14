@@ -190,8 +190,8 @@ export class DkgNodePlugin {
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
     const existing = await this.loadStoredOpenClawIntegration(api);
-    if (existing?.enabled === false || existing?.runtime?.status === 'disconnected') {
-      api.logger.info?.('[dkg] Stored OpenClaw integration is disconnected; skipping startup re-registration');
+    if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+      api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
     }
 
@@ -267,14 +267,17 @@ export class DkgNodePlugin {
     }
   }
 
+  private wasOpenClawExplicitlyUserDisconnected(existing: LocalAgentIntegrationRecord | null): boolean {
+    if (!existing) return false;
+    if (existing.metadata?.userDisabled === true) return true;
+    return Boolean(existing.connectedAt && existing.enabled === false && existing.runtime?.status === 'disconnected');
+  }
+
   private buildOpenClawTransport(
     existing?: LocalAgentIntegrationTransport,
     api?: OpenClawPluginApi,
   ): LocalAgentIntegrationTransport {
-    const transport: LocalAgentIntegrationTransport = {
-      ...(existing ?? {}),
-      kind: 'openclaw-channel',
-    };
+    const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
     if (!this.channelPlugin) return transport;
 
     const gatewayBaseUrl = this.resolveGatewayBaseUrl(api, existing?.gatewayUrl);

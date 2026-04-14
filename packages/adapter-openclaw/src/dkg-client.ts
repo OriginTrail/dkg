@@ -61,6 +61,8 @@ export interface LocalAgentIntegrationPayload {
 
 export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayload {
   status?: string;
+  connectedAt?: string;
+  updatedAt?: string;
 }
 
 export class DkgDaemonClient {

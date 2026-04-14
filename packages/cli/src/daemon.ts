@@ -1351,6 +1351,16 @@ function normalizeLocalAgentRuntime(input: unknown): LocalAgentIntegrationRuntim
   return Object.keys(runtime).length > 0 ? runtime : undefined;
 }
 
+function isLocalAgentExplicitlyUserDisabled(
+  integration: Pick<LocalAgentIntegrationConfig, 'metadata'> | null | undefined,
+): boolean {
+  return integration?.metadata?.userDisabled === true;
+}
+
+function isExplicitLocalAgentDisconnectPatch(patch: Pick<LocalAgentIntegrationConfig, 'enabled' | 'runtime'>): boolean {
+  return patch.enabled === false || patch.runtime?.status === 'disconnected';
+}
+
 function mergeLocalAgentIntegrationConfig(
   base: LocalAgentIntegrationConfig | undefined,
   patch: LocalAgentIntegrationConfig,
@@ -1485,6 +1495,9 @@ export function connectLocalAgentIntegration(
     runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
   };
   const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  if (next.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [id]: next };
   if (id === 'openclaw') pruneLegacyOpenClawConfig(config);
@@ -1502,6 +1515,11 @@ export function updateLocalAgentIntegration(
   const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
   const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  if (isExplicitLocalAgentDisconnectPatch(patch)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: true };
+  } else if (patch.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
+    next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
+  }
   next.id = normalizedId;
   next.updatedAt = now.toISOString();
   next.runtime = { ...(next.runtime ?? {}), updatedAt: now.toISOString() };
@@ -1517,10 +1535,10 @@ export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): bool
     && integration.capabilities.localChat === true;
 }
 
-function hasLocalAgentTransportConfig(
-  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime' | 'enabled'> | null | undefined,
+function hasStoredLocalAgentTransportConfig(
+  integration: Pick<LocalAgentIntegrationConfig, 'transport' | 'runtime'> | null | undefined,
 ): boolean {
-  if (!integration || integration.enabled !== true) return false;
+  if (!integration) return false;
   return Boolean(
     integration.transport?.bridgeUrl
     || integration.transport?.gatewayUrl
@@ -1927,7 +1945,7 @@ export async function connectLocalAgentIntegrationFromUi(
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
-  const hadAttachedBridgeBeforeConnect = hasLocalAgentTransportConfig(existingBeforeConnect);
+  const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
   const requested = connectLocalAgentIntegration(config, {
     ...body,
     runtime: {
@@ -1951,7 +1969,7 @@ export async function connectLocalAgentIntegrationFromUi(
   const saveConfigState = deps.saveConfig;
 
   let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
-  if (health.ok && hadAttachedBridgeBeforeConnect) {
+  if (health.ok && hadStoredTransportBeforeConnect) {
     const integration = updateLocalAgentIntegration(config, requested.id, {
       transport: transportPatchFromOpenClawTarget(config, health.target),
       runtime: {
@@ -2031,8 +2049,8 @@ export async function connectLocalAgentIntegrationFromUi(
         return;
       }
       await persistIntegrationState({
-        enabled: hadAttachedBridgeBeforeConnect ? true : false,
-        ...(hadAttachedBridgeBeforeConnect && existingBeforeConnect?.transport
+        enabled: hadStoredTransportBeforeConnect ? true : false,
+        ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
           ? { transport: existingBeforeConnect.transport }
           : {}),
         runtime: {
