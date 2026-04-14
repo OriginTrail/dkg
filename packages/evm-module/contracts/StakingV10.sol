@@ -176,6 +176,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // a tighter ABI surface and so the three withdrawal entry points have a
     // uniform "position exists" shape.
     error PositionNotFound();
+    // Phase 5 SV10-convertToNFT — caller has no V8 address-keyed stake on the
+    // target node. Either they never delegated or the position was already
+    // migrated / withdrawn. Distinct from `V8StakeNotFullyClaimed` so the UI
+    // can tell the user "you have nothing to migrate" instead of "finish your
+    // V8 claims first".
+    error NoV8StakeToConvert();
 
     // ========================================================================
     // Constructor + initialize
@@ -1179,21 +1185,204 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @notice Atomic V8 → V10 migration. Burns the caller's V8 address-keyed
-     *         delegation on `identityId` and mints a fresh V10 NFT-backed
-     *         position at the specified `lockEpochs` tier.
+     * @notice Atomic V8 → V10 migration. Drains the caller's V8 address-keyed
+     *         delegation on `identityId` and creates a fresh V10 NFT-backed
+     *         position at the specified `lockEpochs` tier on the same node.
+     *         The NFT itself is already minted by the wrapper before this
+     *         function is reached.
      * @param staker      Original NFT owner / caller (the V8 delegator).
      * @param tokenId     Fresh NFT token id minted by the wrapper.
      * @param identityId  V8 node the delegator is migrating off of.
-     * @param lockEpochs  New V10 conviction tier. Valid set: {1,3,6,12}.
+     * @param lockEpochs  New V10 conviction tier. Valid set: {0,1,3,6,12}.
+     *                    Tier 0 is the permanent rest state (1x) — a
+     *                    legitimate migration target for users who do not
+     *                    want to commit to a lock but still want the NFT-
+     *                    based position model.
+     *
+     * @dev 7-step atomic migration (V10_CONTRACTS_REDESIGN_v2.md:343-352):
+     *
+     *        1. Precondition check: V8 rolling rewards == 0 AND
+     *           `lastClaimedEpoch >= currentEpoch - 1`. The Phase 5 scope
+     *           intentionally keeps StakingV10 out of the V8 reward-
+     *           distribution path: the user must run
+     *           `Staking.claimDelegatorRewards` for every unclaimed epoch
+     *           BEFORE invoking convertToNFT. Otherwise we would need to
+     *           fold the pending rolling rewards into the V10 position's
+     *           raw bucket, which drags the V10 reward math into V8's
+     *           `netNodeEpochRewards` / `allNodesScore18` territory. Off
+     *           limits for Phase 5.
+     *
+     *        2. Settle V8 indices at current epoch for the V8
+     *           `keccak256(abi.encodePacked(staker))` key. This baselines
+     *           the V8 delegator score cursor so any still-outstanding
+     *           per-epoch score (settled but not yet distributed) is
+     *           captured against the V8 key, not silently inherited by
+     *           the V10 key.
+     *
+     *        3. Read V8 amount. `amount == 0` → `NoV8StakeToConvert`.
+     *           Distinct from the precondition check: a user who never
+     *           delegated on this node trivially has
+     *           `lastClaimedEpoch == 0 >= currentEpoch - 1` at currentEpoch
+     *           == 1, so the rolling-rewards check would pass but there's
+     *           nothing to migrate. The custom error lets the UI surface
+     *           "you have nothing to migrate" instead of a generic "V8
+     *           stake not claimed" message.
+     *
+     *        4. Zero V8 key + decrement node/total/DelegatorsInfo.
+     *           `setDelegatorStakeBase(id, v8Key, 0)` triggers
+     *           `_updateDelegatorActivity(wasActive=true, isActive=false)`
+     *           which removes the V8 key from `delegatorNodes[v8Key]` and
+     *           decrements the node's `delegatorCount`. We then call
+     *           `decreaseNodeStake` + `decreaseTotalStake` to remove the
+     *           amount from the per-node and global counters — these will
+     *           be re-added in step 6 so the net migration is zero, but
+     *           the intermediate symmetry keeps the stake accounting
+     *           invariants tight and matches the V8 `requestWithdrawal`
+     *           pattern (decrement on leave, re-increment on re-join).
+     *           `delegatorsInfo.removeDelegator(id, staker)` clears the
+     *           V8 delegator set entry; the V8 path's
+     *           `_handleDelegatorRemovalOnZeroStake` does the same when a
+     *           delegator fully withdraws mid-epoch.
+     *
+     *        5. NFT already minted by the wrapper before this call — no
+     *           action required here.
+     *
+     *        6. Create V10 position:
+     *              - `staking.prepareForStakeChange(currentEpoch, id,
+     *                bytes32(tokenId))` — baseline the fresh V10 key at
+     *                the node's current score-per-stake index. Required
+     *                even on a zero-stake key so a later
+     *                `claim()` doesn't collect score that the node earned
+     *                before the V10 position existed.
+     *              - `setDelegatorStakeBase(id, bytes32(tokenId), amount)`
+     *                writes the V10 key with the migrated amount.
+     *              - `increaseNodeStake` + `increaseTotalStake` re-add the
+     *                amount. Net change vs. pre-convert state: zero.
+     *              - `convictionStorage.expectedMultiplier18(lockEpochs)`
+     *                validates the tier (reverts "Invalid lock" on an
+     *                out-of-set tier) and returns the canonical multiplier.
+     *                This is the ONLY tier check in this function — the
+     *                NFT wrapper's `_convictionMultiplier` already
+     *                rejects tier 2, 4, etc. at the entry layer.
+     *              - `convictionStorage.createPosition(tokenId, id, amount,
+     *                lockEpochs, multiplier18)` writes the V10 position.
+     *                Note that `createPosition` accepts `lockEpochs == 0`
+     *                as the permanent rest state, so a migration at the
+     *                "no lockup" tier is a legitimate flow (users who
+     *                want the NFT model without committing to a lock).
+     *
+     *        7. `ask.recalculateActiveSet()` — the node stake delta is
+     *           ZERO (V8 amount out, V10 amount in), so the sharding table
+     *           never shifts (a node that was above `minimumStake` stays
+     *           above, a node below stays below). No
+     *           `shardingTable.insertNode` / `removeNode` call needed.
+     *           The `ask` recalc is kept for symmetry with the other
+     *           entry points (it's cheap — a single storage read on an
+     *           empty active-set change).
+     *
+     *      Emits `ConvertedFromV8(staker, tokenId, identityId, amount,
+     *      lockEpochs)` — off-chain indexers observe the migration as a
+     *      single event on the StakingV10 layer; the wrapper also emits
+     *      its own layer-local `ConvertedFromV8` for NFT-only watchers.
      */
     function convertToNFT(
         address staker,
         uint256 tokenId,
         uint72 identityId,
         uint8 lockEpochs
-    ) external view onlyConvictionNFT {
-        staker; tokenId; identityId; lockEpochs;
-        revert("NotImplemented");
+    ) external onlyConvictionNFT {
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+
+        // 1. Precondition: V8 rolling rewards must be 0 AND V8
+        //    `lastClaimedEpoch >= currentEpoch - 1`. On the very first
+        //    epoch (`currentEpoch == 1`), the second branch reduces to
+        //    `lastClaimedEpoch >= 0` which is trivially true (the slot
+        //    defaults to 0). For `currentEpoch > 1` the user must have run
+        //    `Staking.claimDelegatorRewards` for every epoch up to
+        //    `currentEpoch - 1` before migrating.
+        //
+        //    We check rolling rewards first — that branch is the one a
+        //    mid-epoch user is most likely to trip (claim loop produces
+        //    non-zero rolling rewards mid-walk and clears it on the final
+        //    settle). The `lastClaimedEpoch` check catches users who
+        //    forgot to run claim at all.
+        if (delegatorsInfo.getDelegatorRollingRewards(identityId, staker) != 0) {
+            revert V8StakeNotFullyClaimed();
+        }
+        if (currentEpoch > 1) {
+            uint256 lastClaimed = delegatorsInfo.getLastClaimedEpoch(identityId, staker);
+            if (lastClaimed < currentEpoch - 1) {
+                revert V8StakeNotFullyClaimed();
+            }
+        }
+
+        // 2. Settle V8 indices at current epoch for the V8 address-keyed
+        //    delegator. Must be called BEFORE the V8 bucket is drained —
+        //    the score cursor is keyed on the stake base AT the moment of
+        //    the call and zeroing the base first would leave the cursor
+        //    stuck at the pre-migration baseline.
+        bytes32 v8Key = keccak256(abi.encodePacked(staker));
+        staking.prepareForStakeChange(currentEpoch, identityId, v8Key);
+
+        // 3. Read V8 amount. Revert if there's nothing to migrate. This
+        //    check runs AFTER the precondition so a user who has both
+        //    outstanding rolling rewards AND zero stake still gets the
+        //    `V8StakeNotFullyClaimed` error (the roll-up rewards slot
+        //    protects against a mis-indexed delegator record).
+        StakingStorage ss = stakingStorage;
+        uint96 amount = ss.getDelegatorStakeBase(identityId, v8Key);
+        if (amount == 0) revert NoV8StakeToConvert();
+
+        // 4. Zero the V8 key + decrement node/total + clear DelegatorsInfo.
+        //    Writing 0 on the V8 bucket triggers
+        //    `_updateDelegatorActivity(wasActive=true, isActive=false)`
+        //    which removes the V8 key from `delegatorNodes[v8Key]` and
+        //    decrements the node's delegator count. The
+        //    `delegatorsInfo.removeDelegator` call mirrors the V8
+        //    `_handleDelegatorRemovalOnZeroStake` bookkeeping in
+        //    `Staking.sol:884-898`.
+        ss.setDelegatorStakeBase(identityId, v8Key, 0);
+        ss.decreaseNodeStake(identityId, amount);
+        ss.decreaseTotalStake(amount);
+        delegatorsInfo.removeDelegator(identityId, staker);
+
+        // 5. NFT already minted by the wrapper. Nothing to do here.
+
+        // 6. Create the V10 position. Tier validation is folded into
+        //    `expectedMultiplier18` — reverts "Invalid lock" for anything
+        //    outside the {0,1,3,6,12} set. `createPosition` itself re-
+        //    validates via `multiplier18 == expectedMultiplier18(lockEpochs)`,
+        //    so the tier mismatch surface is double-covered.
+        //
+        //    For `lockEpochs == 0`, `createPosition` writes
+        //    `expiryEpoch = 0` (permanent rest state) and the multiplier
+        //    is 1x — this is a valid migration target for users who
+        //    don't want to commit to a lock tier but still want the
+        //    NFT-backed model.
+        bytes32 v10Key = bytes32(tokenId);
+        staking.prepareForStakeChange(currentEpoch, identityId, v10Key);
+
+        ss.setDelegatorStakeBase(identityId, v10Key, amount);
+        ss.increaseNodeStake(identityId, amount);
+        ss.increaseTotalStake(amount);
+
+        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockEpochs));
+        convictionStorage.createPosition(
+            tokenId,
+            identityId,
+            amount,
+            uint40(lockEpochs),
+            multiplier18
+        );
+
+        // 7. Ask recalculation. Node stake delta is zero so the sharding
+        //    table composition is unchanged and no insert/remove is
+        //    needed, but the recalc is kept for symmetry with the other
+        //    entry points (`stake` / `redelegate` / `finalizeWithdrawal`
+        //    all call it) — a cheap no-op that keeps the call graph
+        //    uniform across all eight V10 entry points.
+        ask.recalculateActiveSet();
+
+        emit ConvertedFromV8(staker, tokenId, identityId, amount, lockEpochs);
     }
 }
