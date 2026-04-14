@@ -395,17 +395,96 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /**
      * @notice Post-expiry re-commit of an existing position to a new lock
      *         tier. Raw stake unchanged; multiplier + expiry shift.
-     * @param staker        Original NFT owner / caller.
+     * @param staker        Original NFT owner / caller (unused in the body —
+     *                      ownership is enforced at
+     *                      `DKGStakingConvictionNFT.relock` via `ownerOf`
+     *                      before this function is ever reached; kept in
+     *                      the signature so every `onlyConvictionNFT`
+     *                      entry point shares the same call shape).
      * @param tokenId       Target position.
-     * @param newLockEpochs New lock tier. Valid set: {1,3,6,12}.
+     * @param newLockEpochs New lock tier. Valid set: {0,1,3,6,12}. Tier 0 is
+     *                      the permanent rest state and is an explicit
+     *                      post-expiry relock target per the roadmap
+     *                      (`04_TOKEN_ECONOMICS §4.1`). The tier check lives
+     *                      in `ConvictionStakingStorage.expectedMultiplier18`
+     *                      which reverts `"Invalid lock"` for anything else.
+     *
+     * @dev Flow:
+     *        1. Read position; `raw == 0` → `PositionNotFound`.
+     *        2. Require `currentEpoch > pos.expiryEpoch` (strict; the
+     *           storage `updateOnRelock` accepts `>=` but the NFT UX is
+     *           strict "post-expiry" per the roadmap).
+     *        3. Settle score-per-stake indices at `currentEpoch` for the
+     *           delegator key before mutating any effective-stake state.
+     *        4. Resolve the new tier via
+     *           `ConvictionStakingStorage.expectedMultiplier18` — reverts
+     *           "Invalid lock" on an out-of-set tier.
+     *        5. Forward to `ConvictionStakingStorage.updateOnRelock`,
+     *           which owns the effective-stake diff propagation +
+     *           finalizes pending epochs + rewrites pos fields.
+     *        6. Emit `Relocked` with the freshly-computed `newExpiryEpoch`.
+     *
+     *      The raw principal stays put (it was already unlocked and is
+     *      re-committed without a transfer). The rewards bucket
+     *      (`pos.rewards`) is untouched — rewards always earn 1x and are
+     *      withdrawable on their own rhythm.
      */
     function relock(
         address staker,
         uint256 tokenId,
         uint8 newLockEpochs
-    ) external view onlyConvictionNFT {
-        staker; tokenId; newLockEpochs;
-        revert("NotImplemented");
+    ) external onlyConvictionNFT {
+        staker; // unused — see NatSpec. Kept in the signature so every
+                // `onlyConvictionNFT` entry point shares the same call
+                // shape from the NFT wrapper.
+
+        // 1. Read position. No explicit "position exists" guard here: the
+        //    NFT wrapper's `ownerOf(tokenId) != msg.sender` check in
+        //    `DKGStakingConvictionNFT.relock` already rejects un-minted
+        //    tokenIds at the wrapper layer. A fully drained
+        //    (`raw == 0 && identityId != 0`) rewards-only position would
+        //    bypass that check, but the downstream
+        //    `ConvictionStakingStorage.updateOnRelock` precondition
+        //    `require(pos.raw > 0, "No position")` catches it with a
+        //    string revert — no principal to re-lock.
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+
+        // 2. Lock expiry. `pos.expiryEpoch` for a freshly-minted position
+        //    is always `createEpoch + lockEpochs > 0`, so no zero-guard is
+        //    needed here (a zero `expiryEpoch` only arises if the position
+        //    was created at lock==0, but that path is rejected by
+        //    `stake()`/`createConviction` upstream). Strict `>` matches the
+        //    roadmap phrasing "post-expiry re-commit".
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (currentEpoch <= pos.expiryEpoch) revert LockStillActive();
+
+        // 3. Settle the delegator's score index at the current epoch BEFORE
+        //    we mutate the effective-stake diff. `_prepareForStakeChange`
+        //    bumps `delegatorLastSettledNodeEpochScorePerStake` to the
+        //    node's current index so a post-relock reward claim doesn't
+        //    re-collect score the delegator has already effectively earned
+        //    under the old (post-expiry, 1x) contribution profile. Mirrors
+        //    the Phase 4 `Staking._recordStake` settlement step.
+        bytes32 delegatorKey = bytes32(tokenId);
+        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+
+        // 4. Resolve the new tier multiplier. Reverts `"Invalid lock"` for
+        //    any lock outside {0,1,3,6,12}. Tier==0 is the rest state at 1x
+        //    (permanent, no expiry drop) — an explicit valid relock target.
+        uint64 newMultiplier18 = convictionStorage.expectedMultiplier18(uint40(newLockEpochs));
+
+        // 5. Storage mutator: writes `pos.lockEpochs`, `pos.expiryEpoch`,
+        //    `pos.multiplier18` and propagates the effective-stake diff at
+        //    `currentEpoch` + pending drop at `currentEpoch + newLockEpochs`.
+        //    Also finalizes any dormant-epoch prefix via
+        //    `_finalizeEffectiveStakeUpTo(currentEpoch - 1)` and
+        //    `_finalizeNodeEffectiveStakeUpTo(...)`.
+        convictionStorage.updateOnRelock(tokenId, uint40(newLockEpochs), newMultiplier18);
+
+        // 6. Emit with the freshly-computed expiry. `currentEpoch` comes from
+        //    the Chronos read above; `newLockEpochs` is the user's new
+        //    commitment — their sum is the epoch at which the boost drops.
+        emit Relocked(tokenId, newLockEpochs, uint64(currentEpoch + uint256(newLockEpochs)));
     }
 
     /**
