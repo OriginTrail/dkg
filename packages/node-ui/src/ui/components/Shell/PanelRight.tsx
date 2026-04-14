@@ -5,6 +5,7 @@ import {
   importFile,
   type ImportFileResult,
   type LocalAgentChatAttachmentRef,
+  type LocalAgentChatContextEntry,
   type LocalAgentIntegration,
   type LocalAgentHistoryMessage,
   type LocalAgentStreamEvent,
@@ -139,6 +140,16 @@ function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatA
   };
 }
 
+function buildChatContextEntries(projects: ContextGraph[], activeProjectId: string | null): LocalAgentChatContextEntry[] {
+  if (!activeProjectId) return [];
+  const displayName = getProjectDisplayName(projects, activeProjectId);
+  return [{
+    key: 'target_context_graph',
+    label: 'Target context graph',
+    value: displayName === activeProjectId ? activeProjectId : `${displayName} (${activeProjectId})`,
+  }];
+}
+
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
   const author = message.author.toLowerCase();
   return {
@@ -169,6 +180,52 @@ function mergeLocalAgentMessages(existing: LocalAgentMessage[], incoming: LocalA
     merged.push(message);
   }
   return merged;
+}
+
+function normalizeMessageContent(content: string): string {
+  return content.replace(/\\n/g, '\n');
+}
+
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex, match.index)}</React.Fragment>);
+    }
+
+    const token = match[0];
+    if (token.startsWith('**') && token.endsWith('**')) {
+      nodes.push(<strong key={`md-${key++}`}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      nodes.push(<code key={`md-${key++}`}>{token.slice(1, -1)}</code>);
+    } else {
+      nodes.push(<React.Fragment key={`md-${key++}`}>{token}</React.Fragment>);
+    }
+
+    lastIndex = match.index + token.length;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(<React.Fragment key={`md-${key++}`}>{text.slice(lastIndex)}</React.Fragment>);
+  }
+
+  return nodes;
+}
+
+function renderMessageContent(content: string): React.ReactNode {
+  const normalized = normalizeMessageContent(content);
+  const lines = normalized.split('\n');
+  return lines.map((line, index) => (
+    <React.Fragment key={`line-${index}`}>
+      {renderInlineMarkdown(line)}
+      {index < lines.length - 1 && <br />}
+    </React.Fragment>
+  ));
 }
 
 export function getLocalAgentConversationStateKey(
@@ -461,7 +518,7 @@ function formatLocalAgentErrorMessage(
   return message;
 }
 
-function ConnectedAgentsTab(props: {
+export function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
   selectedIntegration: LocalAgentIntegration | null;
@@ -694,7 +751,7 @@ function ConnectedAgentsTab(props: {
               {localMessages.map((message) => (
                 <div key={message.id} className={`v10-chat-msg ${message.role}`}>
                   <div className={`v10-chat-bubble ${message.role}`}>
-                    {message.content}
+                    {renderMessageContent(message.content)}
                     {message.streaming && <span className="v10-chat-cursor" />}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
@@ -727,10 +784,9 @@ function ConnectedAgentsTab(props: {
             <div className="v10-agent-input-area">
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
                 {selectedAttachmentDrafts.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  <div className="v10-local-agent-attachment-list">
                     {selectedAttachmentDrafts.map((attachment) => {
                       const triples = attachment.result?.extraction.tripleCount ?? attachment.result?.extraction.triplesWritten;
-                      const targetLabel = getProjectDisplayName(availableProjects, attachment.contextGraphId);
                       const statusLabel = attachment.status === 'queued'
                         ? 'Queued - imports on send'
                         : attachment.status === 'uploading'
@@ -745,30 +801,27 @@ function ConnectedAgentsTab(props: {
                       return (
                         <div
                           key={attachment.id}
-                          style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            padding: '6px 10px',
-                            borderRadius: 999,
-                            border: '1px solid var(--border-subtle)',
-                            background: 'var(--panel-elevated)',
-                            fontSize: 12,
-                          }}
+                          className="v10-local-agent-attachment-item"
                         >
-                          <span style={{ fontWeight: 700 }}>{fileBadge(attachment.file.name)}</span>
-                          <span>{attachment.file.name}</span>
-                          <span style={{ color: 'var(--text-tertiary)' }}>{formatFileSize(attachment.file.size)}</span>
-                          <span style={{ color: 'var(--text-tertiary)' }}>To {targetLabel}</span>
-                          <span style={{ color: attachment.status === 'error' ? 'var(--accent-red)' : 'var(--text-tertiary)' }}>
-                            {statusLabel}
-                          </span>
+                          <div className="v10-local-agent-attachment-main">
+                            <div className="v10-local-agent-attachment-title-row">
+                              <span className="v10-local-agent-attachment-badge">{fileBadge(attachment.file.name)}</span>
+                              <span className="v10-local-agent-attachment-name" title={attachment.file.name}>{attachment.file.name}</span>
+                            </div>
+                            <div className="v10-local-agent-attachment-meta-row">
+                              <span>{formatFileSize(attachment.file.size)}</span>
+                              <span style={{ color: attachment.status === 'error' ? 'var(--accent-red)' : undefined }}>
+                                {statusLabel}
+                              </span>
+                            </div>
+                          </div>
                           <button
                             className="v10-agents-refresh"
+                            type="button"
                             onClick={() => onRemoveAttachment(attachment.id)}
                             title="Remove attachment"
                             disabled={localSending}
-                            style={{ padding: '2px 8px' }}
+                            style={{ padding: '2px 8px', flexShrink: 0 }}
                           >
                             Remove
                           </button>
@@ -778,14 +831,14 @@ function ConnectedAgentsTab(props: {
                   </div>
                 )}
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                  <label className="v10-local-agent-copy" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-                    New attachments target:
+                <div className="v10-local-agent-toolbar">
+                  <label className="v10-local-agent-target-picker">
+                    <span className="v10-local-agent-target-label">Project</span>
                     <select
+                      className="v10-local-agent-target-select"
                       value={activeProjectId ?? ''}
                       onChange={(e) => onSelectProject(e.target.value)}
                       disabled={projectsLoading || availableProjects.length === 0}
-                      style={{ minWidth: 220 }}
                     >
                       <option value="">{projectsLoading ? 'Loading projects...' : 'Choose a project'}</option>
                       {availableProjects.map((project) => (
@@ -796,27 +849,7 @@ function ConnectedAgentsTab(props: {
                     </select>
                   </label>
 
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <input
-                      ref={attachmentInputRef}
-                      type="file"
-                      multiple
-                      style={{ display: 'none' }}
-                      onChange={(e) => {
-                        if (e.target.files) {
-                          onAddAttachments(e.target.files);
-                          e.target.value = '';
-                        }
-                      }}
-                    />
-                    <button
-                      className="v10-agents-refresh"
-                      onClick={() => attachmentInputRef.current?.click()}
-                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
-                    >
-                      Attach files
-                    </button>
-                  </div>
+                  <div className="v10-local-agent-toolbar-actions" />
                 </div>
                 {selectedAttachmentDrafts.length > 0 && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
@@ -826,37 +859,62 @@ function ConnectedAgentsTab(props: {
                   </div>
                 )}
 
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input
-                    type="text"
-                    placeholder={
-                      showingSessionHistory
-                        ? `Reconnect ${selected.name} to resume live chat...`
-                        : selected.chatReady
-                        ? `Message ${selected.name}...`
-                        : selected.status === 'connecting'
-                          ? `${selected.name} is still connecting...`
-                          : `${selected.name} bridge offline...`
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files) {
+                      onAddAttachments(e.target.files);
+                      e.target.value = '';
                     }
-                    className="v10-agent-input"
-                    value={localInput}
-                    onChange={(e) => onLocalInputChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        onSendLocalMessage();
+                  }}
+                />
+
+                <div className="v10-local-agent-composer-row">
+                  <div className="v10-local-agent-composer-shell">
+                    <button
+                      type="button"
+                      className="v10-agent-send-btn secondary v10-local-agent-inline-attach"
+                      onClick={() => attachmentInputRef.current?.click()}
+                      disabled={!selected?.chatAttachments || !activeProjectId || localSending}
+                      title="Attach files"
+                      aria-label="Attach files"
+                    >
+                      <span aria-hidden="true">📎</span>
+                      <span>Upload file</span>
+                    </button>
+                    <textarea
+                      placeholder={
+                        showingSessionHistory
+                          ? `Reconnect ${selected.name} to resume live chat...`
+                          : selected.chatReady
+                          ? `Message ${selected.name}...`
+                          : selected.status === 'connecting'
+                            ? `${selected.name} is still connecting...`
+                            : `${selected.name} bridge offline...`
                       }
-                    }}
-                    disabled={inputDisabled}
-                    style={{ flex: 1 }}
-                  />
-                  <button
-                    className="v10-agent-send-btn"
-                    onClick={onSendLocalMessage}
-                    disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
-                  >
-                    Send
-                  </button>
+                      className="v10-agent-input"
+                      value={localInput}
+                      onChange={(e) => onLocalInputChange(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          onSendLocalMessage();
+                        }
+                      }}
+                      disabled={inputDisabled}
+                      rows={3}
+                    />
+                    <button
+                      className="v10-agent-send-btn v10-local-agent-inline-send"
+                      onClick={onSendLocalMessage}
+                      disabled={inputDisabled || (!localInput.trim() && !hasSendableAttachmentDrafts)}
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
                 {!activeProjectId && (
                   <div className="v10-local-agent-copy" style={{ margin: 0, color: 'var(--text-tertiary)' }}>
@@ -987,6 +1045,10 @@ export function PanelRight() {
   const localAbortRef = useRef<AbortController | null>(null);
   const autoFocusedLocalAgentRef = useRef(false);
   const localChatEndRef = useRef<HTMLDivElement>(null);
+  const memorySessionsRef = useRef<MemorySession[]>([]);
+  const localMessagesByConversationRef = useRef<Record<string, LocalAgentMessage[]>>({});
+  const selectedIntegrationIdRef = useRef('openclaw');
+  const selectedSessionIdRef = useRef<string | null>(getDefaultLocalAgentSessionId('openclaw'));
   const availableProjects = useProjectsStore((state) => state.contextGraphs);
   const projectsLoading = useProjectsStore((state) => state.loading);
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
@@ -1028,6 +1090,22 @@ export function PanelRight() {
   }, []);
 
   useEffect(scrollLocalChatToBottom, [selectedConversationKey, selectedLocalMessages, scrollLocalChatToBottom]);
+
+  useEffect(() => {
+    memorySessionsRef.current = memorySessions;
+  }, [memorySessions]);
+
+  useEffect(() => {
+    localMessagesByConversationRef.current = localMessagesByConversation;
+  }, [localMessagesByConversation]);
+
+  useEffect(() => {
+    selectedIntegrationIdRef.current = selectedIntegrationId;
+  }, [selectedIntegrationId]);
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+  }, [selectedSessionId]);
 
   const updateLocalMessages = useCallback((
     conversationKey: string,
@@ -1199,14 +1277,16 @@ export function PanelRight() {
     try {
       const { integrations: items } = await fetchLocalAgentIntegrations();
       setIntegrations(items);
-      const sessionSummaries = summarizeLocalAgentSessions(memorySessions, items);
+      const sessionSummaries = summarizeLocalAgentSessions(memorySessionsRef.current, items);
       const connected = [...items].sort(compareLocalAgentIntegrations).filter((item) => item.persistentChat);
+      const selectedIntegrationId = selectedIntegrationIdRef.current;
+      const selectedSessionId = selectedSessionIdRef.current;
       const selectedItem = items.find((item) => item.id === selectedIntegrationId) ?? null;
       const preserveSelected = shouldPreserveSelectedLocalAgentTab({
         selectedIntegrationId,
         selectedItem,
         selectedSessionId,
-        localMessagesByConversation,
+        localMessagesByConversation: localMessagesByConversationRef.current,
         sessionSummaries,
       });
       if (!preserveSelected) {
@@ -1225,7 +1305,7 @@ export function PanelRight() {
       // Keep the last known integrations in place so transient refresh failures
       // do not collapse an attached agent chat surface back into the add-agent UI.
     }
-  }, [localMessagesByConversation, memorySessions, selectedIntegrationId, selectedSessionId, setSelectedIntegration]);
+  }, [setSelectedIntegration]);
 
   const loadLocalHistory = useCallback(async (integrationId: string, sessionId: string | null = null) => {
     const conversation = resolveLocalAgentConversation({ integrationId, sessionId });
@@ -1346,12 +1426,14 @@ export function PanelRight() {
 
       controller = new AbortController();
       localAbortRef.current = controller;
+      const contextEntries = buildChatContextEntries(availableProjects, activeProjectId);
 
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
         attachments,
+        contextEntries,
         onEvent: (event: LocalAgentStreamEvent) => {
           if (event.type === 'text_delta') {
             updateLocalMessages(conversationKey, (prev) =>
@@ -1402,7 +1484,9 @@ export function PanelRight() {
       localAbortRef.current = null;
     }
   }, [
+    activeProjectId,
     advance,
+    availableProjects,
     loadSessions,
     localInput,
     localSending,

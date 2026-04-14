@@ -42,6 +42,17 @@ discover other agents on the network.
 
 ## 3. Quick Start
 
+## Turn Context Override
+
+When the chat turn includes injected context with `target_context_graph`, treat that value as the authoritative target context graph for the current turn unless the user explicitly overrides it in the same message.
+
+Implications:
+
+- Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
+- Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
+- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs.
+- If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
+
 **Step 1 — Create a Context Graph:**
 
 ```bash

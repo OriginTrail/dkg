@@ -208,15 +208,17 @@ describe('PanelRight UI - connected agent flow', () => {
   });
 
   it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
-    expect(panelRight).toContain('Attach files');
-    expect(panelRight).toContain('New attachments target:');
+    expect(panelRight).toContain('aria-label="Attach files"');
+    expect(panelRight).toContain('Upload file');
+    expect(panelRight).toContain('📎');
+    expect(panelRight).toContain('Target');
     expect(panelRight).toContain('Choose a project');
     expect(panelRight).toContain("value={activeProjectId ?? ''}");
     expect(panelRight).not.toContain('{activeProjectId ? (');
     expect(panelRight).toContain('Stored only');
     expect(panelRight).toContain('Queued - imports on send');
     expect(panelRight).toContain('Queued files keep their stored target');
-    expect(panelRight).toContain('To {targetLabel}');
+    expect(panelRight).not.toContain('To {targetLabel}');
     expect(panelRight).toContain('attachment.id ?? attachment.assertionUri ?? attachment.fileHash');
   });
 
@@ -650,6 +652,32 @@ describe('OpenClaw bridge behavioral tests', () => {
       const body = JSON.parse(opts.body);
       expect(body.identity).toBe('background-worker');
       expect(body.correlationId).toBeTruthy();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('streamLocalAgentChat forwards injected context entries', async () => {
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'application/json' },
+      body: null,
+      json: async () => ({ text: 'reply', correlationId: 'corr-2' }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = fakeFetch;
+    try {
+      const { streamLocalAgentChat } = await import('../src/ui/api.js');
+      await streamLocalAgentChat('openclaw', 'hello', {
+        contextEntries: [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+        ],
+      });
+      const [, opts] = fakeFetch.mock.calls[0];
+      const body = JSON.parse(opts.body);
+      expect(body.contextEntries).toEqual([
+        { key: 'target_context_graph', label: 'Target context graph', value: 'the minotaur' },
+      ]);
     } finally {
       globalThis.fetch = original;
     }

@@ -539,11 +539,18 @@ export interface LocalAgentChatAttachmentRef {
   rootEntity?: string;
 }
 
+export interface LocalAgentChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
 interface LocalAgentChatRequestOptions {
   correlationId?: string;
   signal?: AbortSignal;
   identity?: string;
   attachments?: LocalAgentChatAttachmentRef[];
+  contextEntries?: LocalAgentChatContextEntry[];
 }
 
 export const sendOpenClawChat = (peerId: string, text: string) =>
@@ -563,6 +570,7 @@ export async function sendOpenClawLocalChat(
     correlationId: opts?.correlationId ?? crypto.randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts?.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
   };
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
@@ -597,6 +605,7 @@ export async function streamOpenClawLocalChat(
     correlationId: opts.correlationId ?? crypto.randomUUID(),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.attachments?.length ? { attachmentRefs: opts.attachments } : {}),
+    ...(opts.contextEntries?.length ? { contextEntries: opts.contextEntries } : {}),
   };
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
@@ -1032,6 +1041,7 @@ export async function streamLocalAgentChat(
     onEvent?: (event: LocalAgentStreamEvent) => void;
     sessionId?: string;
     attachments?: LocalAgentChatAttachmentRef[];
+    contextEntries?: LocalAgentChatContextEntry[];
   } = {},
 ): Promise<{ text: string; correlationId: string }> {
   const normalizedId = id.trim().toLowerCase();

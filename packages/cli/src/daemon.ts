@@ -2307,6 +2307,35 @@ export function normalizeOpenClawAttachmentRefs(raw: unknown): OpenClawAttachmen
   return refs;
 }
 
+export interface OpenClawChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function normalizeOpenClawChatContextEntry(raw: unknown): OpenClawChatContextEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === 'string' ? record.key.trim() : '';
+  const label = typeof record.label === 'string' ? record.label.trim() : '';
+  const value = typeof record.value === 'string' ? record.value.trim() : '';
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+export function normalizeOpenClawChatContextEntries(raw: unknown): OpenClawChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: OpenClawChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeOpenClawChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
+}
+
 export function hasOpenClawChatTurnContent(
   text: unknown,
   attachmentRefs: OpenClawAttachmentRef[] | undefined,
@@ -2845,18 +2874,22 @@ async function handleRequest(
   // OpenClaw channel bridge — routes DKG UI messages through OpenClaw agent
   // -----------------------------------------------------------------------
 
-  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs? }
+  // POST /api/openclaw-channel/send  { text, correlationId, identity?, attachmentRefs?, contextEntries? }
   // DKG Node UI frontend calls this to send a message to the local OpenClaw
   // agent.  The daemon forwards to the adapter's channel bridge server and
   // returns the agent's reply.
   if (req.method === 'POST' && path === '/api/openclaw-channel/send') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
+    const normalizedContextEntries = normalizeOpenClawChatContextEntries(payload.contextEntries);
+    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
     }
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
@@ -2891,6 +2924,7 @@ async function handleRequest(
             correlationId: corrId,
             identity: identity ?? 'owner',
             ...(attachmentRefs ? { attachmentRefs } : {}),
+            ...(normalizedContextEntries ? { contextEntries: normalizedContextEntries } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
@@ -2933,16 +2967,20 @@ async function handleRequest(
     );
   }
 
-  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, attachmentRefs? }
+  // POST /api/openclaw-channel/stream  { text, correlationId, identity?, attachmentRefs?, contextEntries? }
   // SSE streaming variant — pipes agent response chunks as they arrive.
   if (req.method === 'POST' && path === '/api/openclaw-channel/stream') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown };
+    let payload: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
     try { payload = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON' }); }
 
     const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(payload.attachmentRefs);
     if (payload.attachmentRefs != null && normalizedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
+    }
+    const normalizedContextEntries = normalizeOpenClawChatContextEntries(payload.contextEntries);
+    if (payload.contextEntries != null && normalizedContextEntries === undefined) {
+      return jsonResponse(res, 400, { error: 'Invalid "contextEntries"' });
     }
     const { text, correlationId, identity } = payload;
     if (!hasOpenClawChatTurnContent(text, normalizedAttachmentRefs)) {
@@ -2980,6 +3018,7 @@ async function handleRequest(
             correlationId: corrId,
             identity: identity ?? 'owner',
             ...(attachmentRefs ? { attachmentRefs } : {}),
+            ...(normalizedContextEntries ? { contextEntries: normalizedContextEntries } : {}),
           }),
           signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
