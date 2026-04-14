@@ -9,16 +9,29 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ConvictionStakingStorage";
-    string private constant _VERSION = "1.0.0";
+    // Phase 5 bumps from 1.0.0: adds `rewards` bucket to `Position`, three
+    // new mutators (increaseRewards / decreaseRewards / decreaseRaw), and
+    // tightens the tier ladder to the discrete set {0,1,3,6,12}.
+    string private constant _VERSION = "1.1.0";
 
     // Multiplier scale, matches Staking.convictionMultiplier /
     // DKGStakingConvictionNFT._convictionMultiplier (both return 1e18-scaled
     // values so fractional tiers like 1.5x and 3.5x are representable).
     uint256 internal constant SCALE18 = 1e18;
 
-    // Position layout (two storage slots):
+    // Position layout (two storage slots — Phase 5 split-bucket model):
     //   slot 1: raw(96) + lockEpochs(40) + expiryEpoch(40) + identityId(72) = 248 bits
-    //   slot 2: multiplier18(64) + lastClaimedEpoch(64)                    = 128 bits
+    //   slot 2: rewards(96) + multiplier18(64) + lastClaimedEpoch(64)        = 224 bits
+    // Slot 1 is unchanged from the Phase 2 layout so existing field offsets
+    // and the effective-stake diff code continue to read through to the
+    // same slot without any storage-layout churn.
+    //
+    // `raw`     — principal, locked pre-expiry, earns multiplier pre-expiry
+    //             and drops back to 1x on `expiryEpoch`.
+    // `rewards` — compounded rewards, withdrawable anytime via the NFT,
+    //             ALWAYS contributes at 1x (no multiplier, no expiry drop).
+    //             Populated by `increaseRewards` on `claim`, drained by
+    //             `decreaseRewards` on partial/full rewards withdrawal.
     // `multiplier18` is 1e18-scaled; max tier 6e18 fits comfortably in uint64.
     // `lastClaimedEpoch` is a Chronos epoch number; uint64 holds ~5.8e11 years.
     struct Position {
@@ -26,6 +39,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint40 lockEpochs;
         uint40 expiryEpoch;
         uint72 identityId;
+        // slot 2 — `rewards` is declared first so it aligns at a slot
+        //          boundary; see layout comment above.
+        uint96 rewards;
         uint64 multiplier18;
         uint64 lastClaimedEpoch;
     }
@@ -51,6 +67,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     );
     event PositionDeleted(uint256 indexed tokenId);
     event LastClaimedEpochUpdated(uint256 indexed tokenId, uint64 epoch);
+    // Phase 5 — split-bucket mutators. Emitted alongside the effective-stake
+    // diff writes so off-chain indexers can follow the rewards bucket and
+    // partial-raw-drain path without re-reading `positions[tokenId]`.
+    event RewardsIncreased(uint256 indexed tokenId, uint96 amount, uint96 newRewards);
+    event RewardsDecreased(uint256 indexed tokenId, uint96 amount, uint96 newRewards);
+    event RawDecreased(uint256 indexed tokenId, uint96 amount, uint96 newRaw);
     event EffectiveStakeFinalized(uint256 startEpoch, uint256 endEpoch);
     event NodeEffectiveStakeFinalized(uint72 indexed identityId, uint256 startEpoch, uint256 endEpoch);
 
@@ -89,19 +111,24 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //                 Conviction tier ladder
     // ============================================================
 
-    // Mirrors `Staking.convictionMultiplier` and
-    // `DKGStakingConvictionNFT._convictionMultiplier`. Stored here (rather
-    // than imported) so storage has no dependency on the logic contracts; any
-    // future tier change must be applied symmetrically across all three.
-    // `lockEpochs == 0` is a storage-level sentinel for the permanent 1x rest
-    // state (post-expiry positions and V8-compat defaults both land here).
+    // Phase 5 discrete tier ladder. Valid lock set: {0, 1, 3, 6, 12}.
+    // Any lock outside this set reverts — no tier snapping, no intermediate
+    // locks. `lockEpochs == 0` is a storage-level sentinel for the permanent
+    // 1x rest state (post-expiry positions and V8-compat defaults both land
+    // here). `lockEpochs == 1` is the 1-month bootstrap tier at 1.5x.
+    //
+    // NOTE: `Staking.convictionMultiplier` and
+    // `DKGStakingConvictionNFT._convictionMultiplier` still carry the legacy
+    // snap-down tier tables. Updating them is out of scope for this Phase 5
+    // storage hotfix; downstream subagents must align all three in a single
+    // symmetric change before mainnet.
     function expectedMultiplier18(uint40 lockEpochs) public pure returns (uint64) {
-        if (lockEpochs == 0) return uint64(SCALE18);            // permanent 1.0x
-        if (lockEpochs >= 12) return uint64(6 * SCALE18);       // 6.0x
-        if (lockEpochs >= 6)  return uint64((35 * SCALE18) / 10); // 3.5x
-        if (lockEpochs >= 3)  return uint64(2 * SCALE18);       // 2.0x
-        if (lockEpochs >= 2)  return uint64((15 * SCALE18) / 10); // 1.5x
-        return uint64(SCALE18);                                 // lock == 1 → 1.0x
+        if (lockEpochs == 0) return uint64(SCALE18);              // rest state: 1.0x
+        if (lockEpochs == 1) return uint64((15 * SCALE18) / 10);  // 1.5x
+        if (lockEpochs == 3) return uint64(2 * SCALE18);          // 2.0x
+        if (lockEpochs == 6) return uint64((35 * SCALE18) / 10);  // 3.5x
+        if (lockEpochs == 12) return uint64(6 * SCALE18);         // 6.0x
+        revert("Invalid lock");
     }
 
     // ============================================================
@@ -131,6 +158,10 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             lockEpochs: lockEpochs,
             expiryEpoch: expiryEpoch,
             identityId: identityId,
+            // Phase 5: rewards bucket starts at 0 and is populated by
+            // `increaseRewards` on each `claim`. It tracks compounded
+            // rewards, always contributes at 1x, no multiplier, no expiry.
+            rewards: 0,
             multiplier18: multiplier18,
             lastClaimedEpoch: uint64(currentEpoch - 1)
         });
@@ -165,10 +196,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     ) external onlyContracts {
         Position storage pos = positions[tokenId];
         require(pos.raw > 0, "No position");
-        // Relock must carry an actual boost — lock 0 and lock 1 both map to
-        // 1x under the tier ladder and are the post-expiry rest state, not a
-        // valid re-commit target.
-        require(newLockEpochs >= 2, "Lock too short");
+        // Phase 5: relock must carry an actual boost — lock 0 is the rest
+        // state (post-expiry 1x), not a valid re-commit target. Lock 1 is
+        // the 1-month 1.5x bootstrap tier and IS valid. Any lock outside
+        // the discrete set {1,3,6,12} will revert inside `expectedMultiplier18`
+        // with "Invalid lock" before `Tier mismatch` is ever checked.
+        require(newLockEpochs >= 1, "Lock too short");
         require(newMultiplier18 == expectedMultiplier18(newLockEpochs), "Tier mismatch");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
@@ -212,15 +245,19 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
         uint96 raw = pos.raw;
+        uint96 rewardsBucket = pos.rewards;
         uint40 expiryEpoch = pos.expiryEpoch;
         uint64 multiplier18 = pos.multiplier18;
         bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
 
-        // Effective stake contribution that must transfer per-node RIGHT NOW
-        // = raw * (boosted ? multiplier18 : SCALE18) / SCALE18
-        uint256 effectiveNow = stillBoosted
-            ? (uint256(raw) * uint256(multiplier18)) / SCALE18
-            : uint256(raw);
+        // Phase 5: effective stake contribution that must transfer per-node
+        // RIGHT NOW = raw*(boosted ? mult : 1) + rewards. The rewards bucket
+        // always contributes at 1x, regardless of boost state.
+        uint256 effectiveNow = (
+            stillBoosted
+                ? (uint256(raw) * uint256(multiplier18)) / SCALE18
+                : uint256(raw)
+        ) + uint256(rewardsBucket);
 
         // Per-node diff move only; global totals unchanged
         int256 signedEffectiveNow = int256(effectiveNow);
@@ -229,7 +266,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         _markNodeDirty(oldIdentityId, currentEpoch);
         _markNodeDirty(newIdentityId, currentEpoch);
 
-        // Pending expiry drop must also follow the position
+        // Pending expiry drop (only the raw-side boost) must follow the
+        // position. The rewards bucket has no pending expiry delta — it
+        // earns 1x forever — so nothing to move for rewards.
         if (stillBoosted) {
             int256 expiryDelta = (int256(uint256(raw)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
             // cancel old subtraction
@@ -260,13 +299,18 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         uint96 raw = pos.raw;
+        uint96 rewardsBucket = pos.rewards;
         uint72 identityId = pos.identityId;
         uint40 expiryEpoch = pos.expiryEpoch;
         uint64 multiplier18 = pos.multiplier18;
         bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
-        uint256 effectiveNow = stillBoosted
-            ? (uint256(raw) * uint256(multiplier18)) / SCALE18
-            : uint256(raw);
+        // Phase 5: total effective contribution = raw*(boosted ? mult : 1) + rewards.
+        // Rewards always contribute at 1x and must also be removed.
+        uint256 effectiveNow = (
+            stillBoosted
+                ? (uint256(raw) * uint256(multiplier18)) / SCALE18
+                : uint256(raw)
+        ) + uint256(rewardsBucket);
 
         // Remove contribution from currentEpoch onward
         int256 signedEffectiveNow = int256(effectiveNow);
@@ -290,6 +334,145 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         }
 
         emit PositionDeleted(tokenId);
+    }
+
+    // ============================================================
+    //           Phase 5 — split-bucket rewards mutators
+    // ============================================================
+    //
+    // These three mutators exist for the Phase 5 split-bucket Position model:
+    //
+    //   effStake(e) = (e < expiryEpoch ? raw*mult/1e18 : raw) + rewards
+    //
+    // `rewards` is compounded claim output, withdrawable anytime, always at
+    // 1x (no multiplier, no expiry drop). Call sites are Phase 5
+    // `DKGStakingConvictionNFT.claim` (increaseRewards) and the partial /
+    // full rewards + raw withdrawal flow (decreaseRewards + decreaseRaw).
+    //
+    // All three:
+    //   • Use `identityId != 0` as the existence sentinel so they remain
+    //     valid even after `decreaseRaw` has drained `raw` to 0, keeping
+    //     the rewards bucket accessible for withdrawal.
+    //   • Mirror the existing Phase 2 diff pattern: write the diff at
+    //     `currentEpoch`, mark dirty, finalize `[last+1, currentEpoch-1]`.
+    //   • Do NOT touch `lockEpochs`, `expiryEpoch`, `multiplier18`, or
+    //     `lastClaimedEpoch`. Those are owned by `createPosition` /
+    //     `updateOnRelock` / `setLastClaimedEpoch`.
+
+    function increaseRewards(uint256 tokenId, uint96 amount) external onlyContracts {
+        Position storage pos = positions[tokenId];
+        // `identityId != 0` is the Phase 5 existence sentinel: a position
+        // with raw==0 and rewards>0 is a valid "rewards-only" state after
+        // `decreaseRaw` has fully drained the principal.
+        require(pos.identityId != 0, "No position");
+        if (amount == 0) {
+            // No-op: avoid burning a dirty-epoch write and an empty finalize
+            // loop on a zero-value call. Still a legitimate path for callers
+            // that compute `amount = pending - claimed` and can land on 0.
+            emit RewardsIncreased(tokenId, 0, pos.rewards);
+            return;
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        uint72 identityId = pos.identityId;
+
+        // Rewards always contribute at 1x → diff at currentEpoch is +amount
+        // for both global and per-node. NO expiry delta: rewards never lose
+        // their contribution (they are already at 1x).
+        int256 signedAmount = int256(uint256(amount));
+        effectiveStakeDiff[currentEpoch] += signedAmount;
+        nodeEffectiveStakeDiff[identityId][currentEpoch] += signedAmount;
+        _markGlobalDirty(currentEpoch);
+        _markNodeDirty(identityId, currentEpoch);
+
+        pos.rewards = pos.rewards + amount;
+
+        if (currentEpoch > 1) {
+            _finalizeEffectiveStakeUpTo(currentEpoch - 1);
+            _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
+        }
+
+        emit RewardsIncreased(tokenId, amount, pos.rewards);
+    }
+
+    function decreaseRewards(uint256 tokenId, uint96 amount) external onlyContracts {
+        Position storage pos = positions[tokenId];
+        require(pos.identityId != 0, "No position");
+        require(pos.rewards >= amount, "Insufficient rewards");
+        if (amount == 0) {
+            emit RewardsDecreased(tokenId, 0, pos.rewards);
+            return;
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        uint72 identityId = pos.identityId;
+
+        int256 signedAmount = int256(uint256(amount));
+        effectiveStakeDiff[currentEpoch] -= signedAmount;
+        nodeEffectiveStakeDiff[identityId][currentEpoch] -= signedAmount;
+        _markGlobalDirty(currentEpoch);
+        _markNodeDirty(identityId, currentEpoch);
+
+        pos.rewards = pos.rewards - amount;
+
+        if (currentEpoch > 1) {
+            _finalizeEffectiveStakeUpTo(currentEpoch - 1);
+            _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
+        }
+
+        emit RewardsDecreased(tokenId, amount, pos.rewards);
+    }
+
+    function decreaseRaw(uint256 tokenId, uint96 amount) external onlyContracts {
+        Position storage pos = positions[tokenId];
+        require(pos.identityId != 0, "No position");
+        require(pos.raw >= amount, "Insufficient raw");
+        if (amount == 0) {
+            emit RawDecreased(tokenId, 0, pos.raw);
+            return;
+        }
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        uint72 identityId = pos.identityId;
+        uint40 expiryEpoch = pos.expiryEpoch;
+        uint64 multiplier18 = pos.multiplier18;
+        bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
+
+        // Mirror `deletePosition` pattern, scaled down to `amount` of raw:
+        //   pre-expiry: subtract amount*mult/1e18 at currentEpoch,
+        //               and SHRINK the pending expiry delta by
+        //               amount*(mult-1e18)/1e18 (because the remaining raw
+        //               still has that much boost left to drop at expiry).
+        //   post-expiry: subtract flat `amount` at currentEpoch; no delta.
+        uint256 effectiveNow = stillBoosted
+            ? (uint256(amount) * uint256(multiplier18)) / SCALE18
+            : uint256(amount);
+
+        int256 signedEffectiveNow = int256(effectiveNow);
+        effectiveStakeDiff[currentEpoch] -= signedEffectiveNow;
+        nodeEffectiveStakeDiff[identityId][currentEpoch] -= signedEffectiveNow;
+        _markGlobalDirty(currentEpoch);
+        _markNodeDirty(identityId, currentEpoch);
+
+        if (stillBoosted && multiplier18 > SCALE18) {
+            // The original `createPosition` call installed
+            //   diff[expiryEpoch] -= raw * (mult-1) / SCALE18.
+            // A `decreaseRaw(amount)` shrinks the future boost drop by
+            //   amount * (mult-1) / SCALE18 — i.e. we ADD that much back
+            //   to diff[expiryEpoch] to cancel the over-subtraction.
+            int256 expiryDelta = (int256(uint256(amount)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
+            effectiveStakeDiff[expiryEpoch] += expiryDelta;
+            nodeEffectiveStakeDiff[identityId][expiryEpoch] += expiryDelta;
+        }
+
+        pos.raw = pos.raw - amount;
+
+        if (currentEpoch > 1) {
+            _finalizeEffectiveStakeUpTo(currentEpoch - 1);
+            _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
+        }
+
+        emit RawDecreased(tokenId, amount, pos.raw);
     }
 
     // ============================================================
