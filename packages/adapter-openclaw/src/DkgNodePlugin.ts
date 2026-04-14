@@ -131,7 +131,7 @@ export class DkgNodePlugin {
   }
 
   /**
-   * Register DKG integration modules: channel, memory, write-capture.
+   * Register DKG integration modules: channel and memory.
    * Each module is optional — enabled via config flags.
    */
   private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {

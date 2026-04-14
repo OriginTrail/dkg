@@ -1,9 +1,9 @@
 /**
  * Thin HTTP client for the DKG daemon API (localhost:9200 by default).
  *
- * All adapter modules (channel, memory, write-capture) use this client
- * instead of embedding a second DKGAgent.  The daemon owns the agent,
- * triple store, and Node UI.
+ * All adapter modules (channel, memory) use this client instead of
+ * embedding a second DKGAgent. The daemon owns the agent, triple store,
+ * and Node UI.
  */
 
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
@@ -222,25 +222,6 @@ export class DkgDaemonClient {
       quads,
       subGraphName: opts?.subGraphName,
     });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Legacy memory import (deprecated — retired in a later slice)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * @deprecated Phase-0 LLM-parse-and-categorize ingest path. Kept as a
-   * compile-time bridge so callers that will be retired in later slices
-   * (`DkgMemoryPlugin.dkg_memory_import` legacy body, `DkgNodePlugin.runBacklogImportIfNeeded`,
-   * `WriteCapture`) continue to type-check. Replaced by direct
-   * `writeAssertion` calls against the `'memory'` WM assertion.
-   */
-  async importMemories(
-    text: string,
-    source: string,
-    opts?: { useLlm?: boolean },
-  ): Promise<{ batchId: string; memoryCount: number; tripleCount: number }> {
-    return this.post('/api/memory/import', { text, source, useLlm: opts?.useLlm ?? true });
   }
 
   // ---------------------------------------------------------------------------
