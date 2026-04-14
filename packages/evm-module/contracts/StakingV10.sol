@@ -490,18 +490,200 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /**
      * @notice Move a position from its current node to `newIdentityId`.
      *         Per-node effective stake moves; global totals invariant.
-     * @param staker         Original NFT owner / caller.
+     * @param staker         Original NFT owner / caller (unused in the body —
+     *                       ownership is enforced at
+     *                       `DKGStakingConvictionNFT.redelegate` via
+     *                       `ownerOf` before this function is ever reached;
+     *                       kept in the signature so every
+     *                       `onlyConvictionNFT` entry point shares the same
+     *                       call shape).
      * @param tokenId        Target position.
      * @param newIdentityId  Destination node (must exist and be distinct
      *                       from the current node).
+     *
+     * @dev Flow (mirror of the V8 `Staking.redelegate` layout adapted to
+     *      the V10 `bytes32(tokenId)` delegator-key scheme):
+     *        1. Read position; capture `oldIdentityId` / `totalAmount`.
+     *        2. Reject `SameIdentity` if `oldIdentityId == newIdentityId`.
+     *        3. Validate destination profile existence.
+     *        4. Enforce destination `maxStake` cap on the post-move node total.
+     *        5. Settle score-per-stake indices at `currentEpoch` on BOTH
+     *           nodes for `bytes32(tokenId)`. This is the V10 analog of
+     *           the V8 `_prepareForStakeChange` pair in `Staking.redelegate`
+     *           and the reason `Staking.prepareForStakeChange` was exposed
+     *           as an `external onlyContracts` helper in Phase 4.
+     *        6. Move the `StakingStorage` delegator stake base between
+     *           `(oldIdentityId, bytes32(tokenId))` and
+     *           `(newIdentityId, bytes32(tokenId))`. Writing `0` to the
+     *           old bucket triggers `_updateDelegatorActivity`, which
+     *           removes the key from the old node's `delegatorNodes` set
+     *           and decrements its `delegatorCount`. Writing
+     *           `totalAmount` into the new bucket re-adds it on the new
+     *           node. This is the V10-key equivalent of the V8
+     *           `decreaseDelegatorStakeBase` / `increaseDelegatorStakeBase`
+     *           pair in `Staking.redelegate` — we use `setDelegatorStakeBase`
+     *           instead because a V10 NFT owns exactly ONE position and
+     *           the entire balance moves together.
+     *        7. Per-node `nodeStake` move: old node -= totalAmount,
+     *           new node += totalAmount. **No** `increaseTotalStake` /
+     *           `decreaseTotalStake` call — global `totalStake` is an
+     *           invariant during redelegate (this is the load-bearing
+     *           difference vs. `stake`/`withdraw`).
+     *        8. `ConvictionStakingStorage.updateOnRedelegate` owns the
+     *           effective-stake diff propagation + the `pos.identityId`
+     *           mutation. It also finalizes any dormant-epoch prefix on
+     *           both nodes. We pass only `(tokenId, newIdentityId)` and
+     *           let storage compute the rest from the live `Position`.
+     *        9. Sharding-table maintenance on BOTH nodes:
+     *              - old node: if post-move `nodeStake < minimumStake` and
+     *                the node was previously in the sharding table, remove.
+     *              - new node: if post-move `nodeStake >= minimumStake` and
+     *                the node was not previously in the sharding table, insert.
+     *           This mirrors the V8 `Staking.redelegate` pattern via the
+     *           local `_addNodeToShardingTable` / `_removeNodeFromShardingTable`
+     *           helpers there.
+     *       10. `Ask.recalculateActiveSet()` — the per-node delta on either
+     *           side may have shifted the active-set composition.
+     *       11. Emit `Redelegated(tokenId, oldIdentityId, newIdentityId)`.
+     *
+     *      `totalAmount = pos.raw + pos.rewards`: both buckets contribute
+     *      to `nodeStake`, so both must move. For a fresh NFT with no
+     *      `claim()` yet, `pos.rewards == 0` and `totalAmount == pos.raw`
+     *      — but the formulation is future-proof for the post-claim path.
      */
     function redelegate(
         address staker,
         uint256 tokenId,
         uint72 newIdentityId
-    ) external view onlyConvictionNFT {
-        staker; tokenId; newIdentityId;
-        revert("NotImplemented");
+    ) external onlyConvictionNFT {
+        staker; // unused — see NatSpec. Kept in the signature so every
+                // `onlyConvictionNFT` entry point shares the same call
+                // shape from the NFT wrapper.
+
+        // 1. Read the position up front. No explicit "position exists" guard
+        //    here: the NFT wrapper's `ownerOf(tokenId) != msg.sender` check
+        //    in `DKGStakingConvictionNFT.redelegate` already rejects
+        //    un-minted tokenIds at the wrapper layer, and the downstream
+        //    `ConvictionStakingStorage.updateOnRedelegate` precondition
+        //    `require(pos.raw > 0, "No position")` catches any
+        //    fully-drained rewards-only position that slipped past the
+        //    owner check. Mirrors the relock precedent above.
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        uint72 oldIdentityId = pos.identityId;
+
+        // 2. Same-node short-circuit. Storage (`updateOnRedelegate`) also
+        //    enforces this with a string revert, but a custom error here
+        //    surfaces a cleaner ABI for wrapper / indexer consumers and
+        //    cuts the revert distance by one cross-contract hop.
+        if (oldIdentityId == newIdentityId) revert SameIdentity();
+
+        // 3. Destination profile must exist. Mirrors the `stake()` /
+        //    `_recordStake` guard — without it the sharding-table insert
+        //    below would happily register a ghost node at `sha256("")` for
+        //    any unregistered `newIdentityId`.
+        if (!profileStorage.profileExists(newIdentityId)) {
+            revert ProfileDoesNotExist();
+        }
+
+        // 4. `totalAmount` = full stake moving between nodes. Both raw and
+        //    rewards contribute to `nodeStake` at 1:1 in `StakingStorage`
+        //    (the multiplier only affects the CONVICTION-layer effective
+        //    stake diff, not the raw per-node totals), so both buckets
+        //    must move together. For a fresh NFT with no `claim()` yet,
+        //    `pos.rewards == 0` — but formulation is future-proof.
+        uint96 totalAmount = pos.raw + pos.rewards;
+
+        // 5. Destination `maxStake` cap. Compute the post-move node total
+        //    with explicit widening to prevent a silent uint96 wrap on
+        //    hostile inputs (a malicious caller can't get past the gate,
+        //    but belt-and-suspenders is free here).
+        StakingStorage ss = stakingStorage;
+        uint256 newNodeStakeAfter = uint256(ss.getNodeStake(newIdentityId)) + uint256(totalAmount);
+        uint256 maxStake = uint256(parametersStorage.maximumStake());
+        if (newNodeStakeAfter > maxStake) revert MaxStakeExceeded();
+
+        // 6. Settle score-per-stake indices on BOTH nodes before mutating
+        //    any effective-stake state. The V10 path uses the Phase 4
+        //    `Staking.prepareForStakeChange(epoch, identityId, delegatorKey)`
+        //    external helper — same `_prepareForStakeChange` internal that
+        //    V8 `Staking.redelegate` calls for address-keyed delegators.
+        //    Settling both endpoints guarantees:
+        //      - old node: any score the NFT earned up to this epoch is
+        //        finalized against the OLD identity before it stops
+        //        contributing there.
+        //      - new node: the fresh delegator key is baselined at the new
+        //        node's current index so a post-move claim doesn't collect
+        //        score the new node earned before the NFT ever arrived.
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        bytes32 delegatorKey = bytes32(tokenId);
+        staking.prepareForStakeChange(currentEpoch, oldIdentityId, delegatorKey);
+        staking.prepareForStakeChange(currentEpoch, newIdentityId, delegatorKey);
+
+        // 7. Move the StakingStorage delegator stake base. Writing 0 on
+        //    the old (identity, key) bucket triggers
+        //    `_updateDelegatorActivity`, which removes `delegatorKey` from
+        //    `delegatorNodes[key]` and decrements the old node's
+        //    `delegatorCount` (V10 analog of V8 `_handleDelegatorRemovalOnZeroStake`
+        //    minus the DelegatorsInfo bookkeeping, which the NFT path
+        //    does not touch — V10 positions are NFT-keyed, not
+        //    address-keyed, so `delegatorsInfo` entries are managed by the
+        //    V8 path only). Writing `totalAmount` on the new bucket
+        //    re-adds the key to `delegatorNodes[key]` and increments the
+        //    new node's `delegatorCount`.
+        ss.setDelegatorStakeBase(oldIdentityId, delegatorKey, 0);
+        ss.setDelegatorStakeBase(newIdentityId, delegatorKey, totalAmount);
+
+        // 8. Per-node `nodeStake` move. **NO** total-stake mutation: this
+        //    is the load-bearing invariant of redelegate (funds stay in
+        //    StakingStorage, only the per-node accounting shifts). We use
+        //    `decreaseNodeStake` / `increaseNodeStake` instead of
+        //    `setNodeStake(... - totalAmount)` / `setNodeStake(... +
+        //    totalAmount)` so the delta is in the storage event stream
+        //    (`NodeStakeUpdated` fires with the new totals) without an
+        //    extra read of the pre-decrement value.
+        ss.decreaseNodeStake(oldIdentityId, totalAmount);
+        ss.increaseNodeStake(newIdentityId, totalAmount);
+
+        // 9. Conviction-layer mutator. Owns the effective-stake diff
+        //    propagation on both nodes + the pending expiry-drop move
+        //    (if still boosted) + the `pos.identityId = newIdentityId`
+        //    write. Also finalizes the dormant-epoch prefix on both
+        //    nodes via `_finalizeNodeEffectiveStakeUpTo(...)`. We pass
+        //    only `(tokenId, newIdentityId)` — storage re-reads the
+        //    live `Position` for everything else.
+        convictionStorage.updateOnRedelegate(tokenId, newIdentityId);
+
+        // 10. Sharding-table maintenance on BOTH nodes. The post-move
+        //     totals are `(ss.getNodeStake(oldIdentityId), ss.getNodeStake(
+        //     newIdentityId))` — the decrease / increase calls above have
+        //     already been applied, so reading through StakingStorage
+        //     reflects the true post-move state.
+        //
+        //     We inline the add/remove guards here (local helpers like
+        //     `_addNodeToShardingTable` only exist in the V8 `Staking.sol`
+        //     contract and are out of scope for Phase 5 — we re-use the
+        //     same idempotent external `ShardingTable.insertNode` /
+        //     `ShardingTable.removeNode` entries from `ShardingTable.sol`
+        //     that `_recordStake` on the V8 side goes through).
+        ShardingTableStorage sts = shardingTableStorage;
+        uint96 minStake = parametersStorage.minimumStake();
+
+        uint96 oldNodeStakeAfter = ss.getNodeStake(oldIdentityId);
+        if (sts.nodeExists(oldIdentityId) && oldNodeStakeAfter < minStake) {
+            shardingTable.removeNode(oldIdentityId);
+        }
+
+        uint96 newNodeStakeAfter96 = ss.getNodeStake(newIdentityId);
+        if (!sts.nodeExists(newIdentityId) && newNodeStakeAfter96 >= minStake) {
+            shardingTable.insertNode(newIdentityId);
+        }
+
+        // 11. Ask recalculation — the per-node deltas on either side may
+        //     have shifted the active-set composition (a sub-min node
+        //     dropping out, or a newly-funded node crossing the threshold).
+        ask.recalculateActiveSet();
+
+        emit Redelegated(tokenId, oldIdentityId, newIdentityId);
     }
 
     /**
