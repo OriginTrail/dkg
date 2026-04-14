@@ -7,65 +7,181 @@ import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IStaking} from "./interfaces/IStaking.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
+import {Ask} from "./Ask.sol";
+import {ShardingTable} from "./ShardingTable.sol";
+import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
+import {StakingStorage} from "./storage/StakingStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
+import {ParametersStorage} from "./storage/ParametersStorage.sol";
+import {ProfileStorage} from "./storage/ProfileStorage.sol";
+import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
+import {Chronos} from "./storage/Chronos.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 
 /**
  * @title DKGStakingConvictionNFT
- * @notice Wraps DKG staking positions as transferable ERC-721 NFTs.
+ * @notice Wraps V10 DKG staking positions as transferable ERC-721 NFTs.
  *
- * Each NFT represents a staking position on a specific node with a conviction
- * lock tier. The position can be transferred to another address (secondary
- * market), and the new owner inherits the stake, lock, and multiplier.
+ * Each NFT represents a staking position on a specific node with a discrete
+ * conviction lock tier (1, 3, 6, or 12 epochs → 1.0x/2.0x/3.5x/6.0x boost).
+ * The position can be transferred to another address (accrued-interest
+ * transfer model — the new owner inherits both the raw stake and any
+ * unclaimed rewards; see `_update` below).
  *
- * Delegates to the underlying Staking contract for actual stake/unstake logic.
+ * @dev V10 two-layer staking wire: this contract orchestrates the
+ *      user-facing API (`createConviction`, `relock`, `redelegate`,
+ *      `requestWithdrawal`, `processWithdrawal`, `claimRewards`,
+ *      `convertToNFT`) and delegates authoritative storage writes to:
+ *        - `Staking._recordStake` for the NFT-mint stake path (Phase 4),
+ *        - `StakingStorage` direct calls for redelegate / withdrawal teardown,
+ *        - `ConvictionStakingStorage` for position bookkeeping + effective
+ *          stake diff accounting.
+ *      TRAC never sits in this contract: at `createConviction` it flows
+ *      user → StakingStorage in one hop; at `processWithdrawal` it flows
+ *      StakingStorage → user via `StakingStorage.transferStake`.
+ *
+ *      Phase 5 scaffold: constructor, initialize, Hub wiring, tier table,
+ *      and `_update` override are live; the seven external entry points
+ *      are stubbed as `revert("NotImplemented")` and will be filled in
+ *      by S2–S7.
  */
 contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitializable, ERC721Enumerable {
     string private constant _NAME = "DKGStakingConvictionNFT";
     string private constant _VERSION = "1.0.0";
+
+    // ========================================================================
+    // Constants
+    // ========================================================================
+
+    /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`
+    ///         and `Staking.convictionMultiplier`. Tier table and reward
+    ///         math all use this scale.
     uint256 public constant SCALE18 = 1e18;
 
-    struct Position {
-        uint72 identityId;  // node being staked on
-        uint96 stakedAmount;
-        uint40 lockEpochs;
-        uint40 createdAtEpoch;
-    }
+    /// @notice Time between `requestWithdrawal` and `processWithdrawal`.
+    ///         Hardcoded at 15 days per Q6 of the Phase 5 decisions — NOT
+    ///         sourced from `ParametersStorage.stakeWithdrawalDelay` (that
+    ///         parameter governs the V8 legacy address-keyed path).
+    uint256 public constant WITHDRAWAL_DELAY = 15 days;
 
+    // ========================================================================
+    // Hub-wired dependencies
+    // ========================================================================
+
+    IStaking public stakingContract;
+    StakingStorage public stakingStorage;
+    ConvictionStakingStorage public convictionStakingStorage;
+    DelegatorsInfo public delegatorsInfo;
+    Chronos public chronos;
+    RandomSamplingStorage public randomSamplingStorage;
+    ShardingTableStorage public shardingTableStorage;
+    ShardingTable public shardingTableContract;
+    Ask public askContract;
+    ParametersStorage public parametersStorage;
+    ProfileStorage public profileStorage;
     IERC20 public tokenContract;
-    address public stakingStorageAddress;
-    address public chronosAddress;
 
-    uint256 private _nextPositionId;
-    mapping(uint256 => Position) public positions;
+    // ========================================================================
+    // Storage
+    // ========================================================================
 
-    // --- Events ---
+    /// @notice Monotonic token id counter. First mint is tokenId 0 (no
+    ///         sentinel reservation — `ownerOf(0)` reverts before mint, and
+    ///         every consumer keys on `positions[tokenId].raw > 0` as the
+    ///         liveness check).
+    uint256 public nextTokenId;
 
-    event PositionCreated(uint256 indexed positionId, address indexed owner, uint72 identityId, uint96 amount, uint40 lockEpochs);
-    event PositionUnstaked(uint256 indexed positionId, uint96 amount);
+    // ========================================================================
+    // Events
+    // ========================================================================
 
-    // --- Errors ---
+    /// @notice Emitted by `createConviction` and `convertToNFT` after the
+    ///         position is fully registered in `ConvictionStakingStorage`
+    ///         and `Staking._recordStake` has run.
+    event PositionCreated(
+        uint256 indexed tokenId,
+        address indexed owner,
+        uint72 indexed identityId,
+        uint96 amount,
+        uint8 lockEpochs
+    );
 
-    error PositionNotFound(uint256 positionId);
-    error NotPositionOwner(uint256 positionId, address caller);
-    error InvalidAmount();
+    /// @notice Emitted by `relock` after a post-expiry re-commit to a new
+    ///         tier. `raw` is unchanged — only multiplier and expiry shift.
+    event PositionRelocked(uint256 indexed tokenId, uint8 newLockEpochs);
+
+    /// @notice Emitted by `redelegate`. Global totals are invariant; only
+    ///         per-node effective stake moves.
+    event PositionRedelegated(
+        uint256 indexed tokenId,
+        uint72 indexed oldIdentityId,
+        uint72 indexed newIdentityId
+    );
+
+    /// @notice Emitted by `requestWithdrawal` when the 15-day delay timer
+    ///         starts. `releaseAt` is a Unix timestamp.
+    event WithdrawalRequested(uint256 indexed tokenId, uint256 releaseAt);
+
+    /// @notice Emitted by `processWithdrawal` after the NFT is burned and
+    ///         TRAC is released back to the owner.
+    event WithdrawalProcessed(uint256 indexed tokenId, uint96 amount);
+
+    /// @notice Emitted by `claimRewards`. Phase 5 only accrues bookkeeping;
+    ///         Phase 11 wires the actual TRAC transfer.
+    event RewardsAccrued(uint256 indexed tokenId, uint96 amount);
+
+    /// @notice Emitted by `convertToNFT` when a V8 address-keyed delegation
+    ///         is migrated into a V10 NFT-backed position.
+    event ConvertedFromV8(
+        address indexed delegator,
+        uint256 indexed tokenId,
+        uint72 indexed identityId,
+        uint96 amount
+    );
+
+    // ========================================================================
+    // Errors
+    // ========================================================================
+
     error InvalidLockEpochs();
-    error LockNotExpired(uint256 positionId, uint40 expiresAtEpoch);
-    error InsufficientStake(uint256 positionId, uint96 requested, uint96 available);
+    error LockNotExpired();
+    error LockStillActive();
+    error WithdrawalNotRequested();
+    error WithdrawalAlreadyRequested();
+    error WithdrawalDelayPending();
+    error V8StakeNotFullyClaimed();
+    error NotPositionOwner();
+    error PositionNotFound();
+    error ZeroAmount();
+    error ProfileDoesNotExist();
+    error SameIdentity();
+    error MaxStakeExceeded();
 
-    constructor(address hubAddress) ContractStatus(hubAddress) ERC721("DKG Staking Conviction", "DKGSC") {}
+    // ========================================================================
+    // Constructor + initialize
+    // ========================================================================
+
+    // solhint-disable-next-line no-empty-blocks
+    constructor(
+        address hubAddress
+    ) ContractStatus(hubAddress) ERC721("DKG Staker Conviction", "DKGSC") {}
 
     function initialize() public onlyHub {
+        stakingContract = IStaking(hub.getContractAddress("Staking"));
+        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
+        chronos = Chronos(hub.getContractAddress("Chronos"));
+        randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
+        shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
+        shardingTableContract = ShardingTable(hub.getContractAddress("ShardingTable"));
+        askContract = Ask(hub.getContractAddress("Ask"));
+        parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
+        profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         tokenContract = IERC20(hub.getContractAddress("Token"));
-        try hub.getContractAddress("StakingStorage") returns (address addr) {
-            stakingStorageAddress = addr;
-        } catch {}
-        try hub.getContractAddress("Chronos") returns (address addr) {
-            chronosAddress = addr;
-        } catch {}
-
-        if (_nextPositionId == 0) _nextPositionId = 1;
     }
 
     function name() public pure virtual override(INamed, ERC721) returns (string memory) {
@@ -77,180 +193,18 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     }
 
     // ========================================================================
-    // Staking
-    // ========================================================================
-
-    /**
-     * @notice Create a new staking position NFT.
-     * Locks `amount` TRAC for `lockEpochs` on node `identityId`.
-     *
-     * TRAC is held in this contract until staking protocol integration is
-     * complete (requires stakeOnBehalf in Staking.sol). Once integrated,
-     * stake() will delegate to the internal Staking locked-stake path so
-     * positions are tracked for rewards, slashing, and voting power.
-     */
-    function stake(
-        uint72 identityId,
-        uint96 amount,
-        uint40 lockEpochs
-    ) external returns (uint256 positionId) {
-        if (amount == 0) revert InvalidAmount();
-        if (lockEpochs == 0) revert InvalidLockEpochs();
-
-        positionId = _nextPositionId++;
-        uint40 currentEpoch = _getCurrentEpoch();
-
-        positions[positionId] = Position({
-            identityId: identityId,
-            stakedAmount: amount,
-            lockEpochs: lockEpochs,
-            createdAtEpoch: currentEpoch
-        });
-
-        _mint(msg.sender, positionId);
-
-        if (!tokenContract.transferFrom(msg.sender, address(this), amount)) {
-            revert InvalidAmount();
-        }
-
-        emit PositionCreated(positionId, msg.sender, identityId, amount, lockEpochs);
-    }
-
-    /**
-     * @notice Unstake (withdraw) from a position after the lock has expired.
-     *         Burns the NFT if the full amount is withdrawn.
-     */
-    function unstake(uint256 positionId, uint96 amount) external {
-        _requireOwner(positionId);
-        Position storage pos = positions[positionId];
-
-        uint40 currentEpoch = _getCurrentEpoch();
-        uint40 expiresAt = pos.createdAtEpoch + pos.lockEpochs;
-        if (currentEpoch < expiresAt) {
-            revert LockNotExpired(positionId, expiresAt);
-        }
-
-        if (amount > pos.stakedAmount) {
-            revert InsufficientStake(positionId, amount, pos.stakedAmount);
-        }
-
-        pos.stakedAmount -= amount;
-
-        if (pos.stakedAmount == 0) {
-            _burn(positionId);
-            delete positions[positionId];
-        }
-
-        if (!tokenContract.transfer(msg.sender, amount)) {
-            revert InvalidAmount();
-        }
-
-        emit PositionUnstaked(positionId, amount);
-    }
-
-    // ========================================================================
-    // View Functions
-    // ========================================================================
-
-    function getConviction(uint256 positionId) external view returns (uint256) {
-        _requireExists(positionId);
-        Position storage pos = positions[positionId];
-        return uint256(pos.stakedAmount) * uint256(pos.lockEpochs);
-    }
-
-    function getMultiplier(uint256 positionId) external view returns (uint256) {
-        _requireExists(positionId);
-        return _convictionMultiplier(positions[positionId].lockEpochs);
-    }
-
-    function getPosition(uint256 positionId) external view returns (
-        address owner_,
-        uint72 identityId,
-        uint96 stakedAmount,
-        uint40 lockEpochs,
-        uint40 createdAtEpoch,
-        uint256 conviction,
-        uint256 multiplier
-    ) {
-        _requireExists(positionId);
-        Position storage pos = positions[positionId];
-        return (
-            ownerOf(positionId),
-            pos.identityId,
-            pos.stakedAmount,
-            pos.lockEpochs,
-            pos.createdAtEpoch,
-            uint256(pos.stakedAmount) * uint256(pos.lockEpochs),
-            _convictionMultiplier(pos.lockEpochs)
-        );
-    }
-
-    function isLockExpired(uint256 positionId) external view returns (bool) {
-        _requireExists(positionId);
-        Position storage pos = positions[positionId];
-        return _getCurrentEpoch() >= pos.createdAtEpoch + pos.lockEpochs;
-    }
-
-    // ========================================================================
-    // Internal
-    // ========================================================================
-
-    function _requireExists(uint256 positionId) internal view {
-        _requireOwned(positionId);
-    }
-
-    function _requireOwner(uint256 positionId) internal view {
-        _requireExists(positionId);
-        if (ownerOf(positionId) != msg.sender) {
-            revert NotPositionOwner(positionId, msg.sender);
-        }
-    }
-
-    function _getCurrentEpoch() internal view returns (uint40) {
-        if (chronosAddress == address(0)) return 1;
-        (bool ok, bytes memory ret) = chronosAddress.staticcall(
-            abi.encodeWithSignature("getCurrentEpoch()")
-        );
-        if (!ok || ret.length < 32) return 1;
-        return uint40(abi.decode(ret, (uint256)));
-    }
-
-    function _convictionMultiplier(uint40 lockEpochs) internal pure returns (uint256) {
-        if (lockEpochs == 0) return 0;
-        if (lockEpochs >= 12) return 6 * SCALE18;
-        if (lockEpochs >= 6) return 35 * SCALE18 / 10;
-        if (lockEpochs >= 3) return 2 * SCALE18;
-        if (lockEpochs >= 2) return 15 * SCALE18 / 10;
-        return SCALE18;
-    }
-
-    // ========================================================================
-    // V10 two-layer staking wire — placeholder call site (Phase 4)
+    // ERC-721 overrides — accrued-interest transfer model (Phase 5 Q8)
     // ========================================================================
     //
-    // This internal helper pins the ABI contract between this NFT contract
-    // and `Staking._recordStake` at compile time. It is intentionally unused
-    // in Phase 4: the real wiring (user-facing `createConviction`, TRAC
-    // transfer, ConvictionStakingStorage position write, effective-stake
-    // finalize) is scheduled for Phase 5.
+    // Mint/burn/transfer all flow through `_update`. For transfers, we do
+    // NOT settle rewards, reset `lastClaimedEpoch`, or touch the position —
+    // the NFT carries its unclaimed rewards like a bond with accrued
+    // coupon. See `V10_CONTRACTS_REDESIGN_v2.md §"NFT transfer model:
+    // accrued-interest"` and the Phase 5 decisions doc Q8.
     //
-    // Keeping a typed call site here means: (a) any signature drift in
-    // `Staking._recordStake` breaks this contract's compile, and (b) Phase 5
-    // can lift the body of this helper into its real integration path
-    // without re-discovering the call shape.
-    function _recordStakeViaStaking(
-        uint256 tokenId,
-        uint72 identityId,
-        uint96 amount,
-        uint40 lockEpochs
-    ) internal {
-        IStaking(hub.getContractAddress("Staking"))._recordStake(
-            tokenId,
-            identityId,
-            amount,
-            lockEpochs
-        );
-    }
+    // The body is a pure `super._update` pass-through; this explicit
+    // override exists to (a) document the intent and (b) satisfy the
+    // compiler override requirement for `ERC721Enumerable`.
 
     function supportsInterface(
         bytes4 interfaceId
