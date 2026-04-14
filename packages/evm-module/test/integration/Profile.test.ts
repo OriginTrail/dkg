@@ -222,6 +222,16 @@ export async function buildInitialRewardsState() {
   const receivingNodesIdentityIds: number[] = [];
 
   await contracts.hub.setContractAddress('HubOwner', accounts.owner.address);
+  // Phase 10 — opt this fixture into the auto-bridge in `kc-helpers.ts`. The
+  // helper reads `Hub.getContractAddress("TestStorageOperator")` and, when
+  // present, transparently registers each freshly-published KC into a default
+  // open Context Graph and seeds its per-epoch value so the new
+  // `RandomSampling.createChallenge` picker has eligible state to draw from.
+  // signers[150] is well above any test-account index in this file.
+  await contracts.hub.setContractAddress(
+    'TestStorageOperator',
+    signers[150].address,
+  );
 
   // Initialize ask system to prevent division by zero
   await contracts.parametersStorage.setMinimumStake(toTRAC(100));
