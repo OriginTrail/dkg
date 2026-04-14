@@ -134,7 +134,7 @@ function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatA
     assertionUri: draft.result.assertionUri,
     fileHash: draft.result.fileHash,
     detectedContentType: draft.result.detectedContentType,
-    extractionStatus: draft.result.extraction.status,
+    extractionStatus: 'completed',
     tripleCount: draft.result.extraction.tripleCount ?? draft.result.extraction.triplesWritten,
   };
 }

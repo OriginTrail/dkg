@@ -534,7 +534,7 @@ export interface LocalAgentChatAttachmentRef {
   assertionUri: string;
   fileHash: string;
   detectedContentType?: string;
-  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
 }

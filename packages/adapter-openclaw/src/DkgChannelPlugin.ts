@@ -63,8 +63,10 @@ function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
   if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
     normalized.detectedContentType = record.detectedContentType.trim();
   }
-  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
+  if (record.extractionStatus === 'completed') {
     normalized.extractionStatus = record.extractionStatus;
+  } else if (record.extractionStatus !== undefined) {
+    return null;
   }
   if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
     normalized.tripleCount = record.tripleCount;
@@ -101,6 +103,41 @@ function sanitizeAttachmentPromptField(raw: string | undefined, fallback: string
     .replace(/\s+/g, ' ')
     .trim();
   return JSON.stringify(normalize(raw) || normalize(fallback));
+}
+
+function sanitizeAttachmentContextValue(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAttachmentRef {
+  const sanitized: OpenClawAttachmentRef = {
+    assertionUri: sanitizeAttachmentContextValue(ref.assertionUri),
+    fileHash: sanitizeAttachmentContextValue(ref.fileHash),
+    contextGraphId: sanitizeAttachmentContextValue(ref.contextGraphId),
+    fileName: sanitizeAttachmentContextValue(ref.fileName),
+  };
+  if (ref.detectedContentType) {
+    sanitized.detectedContentType = sanitizeAttachmentContextValue(ref.detectedContentType);
+  }
+  if (ref.extractionStatus) {
+    sanitized.extractionStatus = ref.extractionStatus;
+  }
+  if (ref.tripleCount != null) {
+    sanitized.tripleCount = ref.tripleCount;
+  }
+  if (ref.rootEntity) {
+    sanitized.rootEntity = sanitizeAttachmentContextValue(ref.rootEntity);
+  }
+  return sanitized;
+}
+
+function sanitizeAttachmentRefsForContext(
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): OpenClawAttachmentRef[] | undefined {
+  return attachmentRefs?.map((ref) => sanitizeAttachmentRefForContext(ref));
 }
 
 function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): string {
@@ -510,6 +547,7 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
     const cfg = this.cfg;
     const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -518,7 +556,7 @@ export class DkgChannelPlugin {
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, attachmentRefs);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
@@ -538,7 +576,7 @@ export class DkgChannelPlugin {
         channelName: CHANNEL_NAME,
         senderId: identity || 'owner',
         senderIsOwner: true,
-        text: buildAgentBody(text, attachmentRefs),
+        text: buildAgentBody(text, contextAttachmentRefs),
         correlationId,
       } as any);
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
@@ -766,6 +804,7 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
     const cfg = this.cfg;
     const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -795,7 +834,7 @@ export class DkgChannelPlugin {
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
       storePath, sessionKey: route.sessionKey,
     });
-    const agentBody = buildAgentBody(text, attachmentRefs);
+    const agentBody = buildAgentBody(text, contextAttachmentRefs);
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
       channel: 'DKG UI', from: identity || 'Owner', body: agentBody,
       timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
@@ -809,9 +848,9 @@ export class DkgChannelPlugin {
       CommandAuthorized: true, SenderId: identity || 'owner',
       SenderName: identity || 'Owner', Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
-      ...(attachmentRefs?.length ? {
-        AttachmentRefs: attachmentRefs.map((ref) => ({ ...ref })),
-        AttachmentSummary: formatAttachmentContext(attachmentRefs),
+      ...(contextAttachmentRefs?.length ? {
+        AttachmentRefs: contextAttachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(contextAttachmentRefs),
       } : {}),
     };
 

@@ -2263,7 +2263,7 @@ export interface OpenClawAttachmentRef {
   contextGraphId: string;
   fileName: string;
   detectedContentType?: string;
-  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
 }
@@ -2280,8 +2280,10 @@ function normalizeOpenClawAttachmentRef(raw: unknown): OpenClawAttachmentRef | n
   if (typeof raw.detectedContentType === 'string' && raw.detectedContentType.trim()) {
     normalized.detectedContentType = raw.detectedContentType.trim();
   }
-  if (raw.extractionStatus === 'completed' || raw.extractionStatus === 'skipped' || raw.extractionStatus === 'failed') {
+  if (raw.extractionStatus === 'completed') {
     normalized.extractionStatus = raw.extractionStatus;
+  } else if (raw.extractionStatus !== undefined) {
+    return null;
   }
   if (typeof raw.tripleCount === 'number' && Number.isFinite(raw.tripleCount) && raw.tripleCount >= 0) {
     normalized.tripleCount = raw.tripleCount;
@@ -2462,7 +2464,7 @@ export async function verifyOpenClawAttachmentRefsProvenance(
       return undefined;
     }
     const storedFileName = stripOpenClawAttachmentLiteral(binding.sourceFileName ?? '').trim();
-    if (!storedFileName || storedFileName !== ref.fileName) return undefined;
+    if (storedFileName && storedFileName !== ref.fileName) return undefined;
 
     const storedRootEntity = typeof binding.rootEntity === 'string'
       ? binding.rootEntity.replace(/[<>]/g, '').trim()

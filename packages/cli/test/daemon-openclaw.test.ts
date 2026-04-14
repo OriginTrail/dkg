@@ -383,6 +383,24 @@ describe('OpenClaw persist-turn validation', () => {
     expect(hasOpenClawChatTurnContent(undefined, attachmentRefs)).toBe(false);
   });
 
+  it('rejects non-completed extraction statuses on sendable attachment refs', () => {
+    expect(normalizeOpenClawAttachmentRefs([{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'skipped',
+    }])).toBeUndefined();
+
+    expect(normalizeOpenClawAttachmentRefs([{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'failed',
+    }])).toBeUndefined();
+  });
+
   it('rejects malformed attachment refs in persist-turn payloads', () => {
     expect(isValidOpenClawPersistTurnPayload({
       sessionId: 'openclaw:dkg-ui',
@@ -509,6 +527,28 @@ describe('OpenClaw persist-turn validation', () => {
         bindings: [{
           fileHash: '"sha256:abc123"',
           sourceFileName: '"report \\"final\\".pdf"',
+        }],
+      }),
+    };
+
+    await expect(
+      verifyOpenClawAttachmentRefsProvenance({ store } as any, new Map(), attachmentRefs),
+    ).resolves.toEqual(attachmentRefs);
+  });
+
+  it('accepts attachment refs when older metadata does not include sourceFileName', async () => {
+    const attachmentRefs = [{
+      assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+      fileHash: 'sha256:abc123',
+      contextGraphId: 'cg1',
+      fileName: 'chat-doc.pdf',
+      extractionStatus: 'completed' as const,
+    }];
+    const store = {
+      query: vi.fn().mockResolvedValue({
+        bindings: [{
+          fileHash: '"sha256:abc123"',
+          contentType: '"application/pdf"',
         }],
       }),
     };

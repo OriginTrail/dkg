@@ -23,7 +23,7 @@ export interface OpenClawAttachmentRef {
   contextGraphId: string;
   fileName: string;
   detectedContentType?: string;
-  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  extractionStatus?: 'completed';
   tripleCount?: number;
   rootEntity?: string;
 }

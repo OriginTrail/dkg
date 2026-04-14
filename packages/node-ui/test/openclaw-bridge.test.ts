@@ -70,6 +70,8 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('chatAttachments?: boolean');
     expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
     expect(apiSrc).toContain('attachmentRefs');
+    expect(apiSrc).toContain("extractionStatus?: 'completed';");
+    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("extractionStatus: 'completed'");
   });
 });
 
