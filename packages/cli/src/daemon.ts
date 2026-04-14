@@ -3428,10 +3428,14 @@ async function handleRequest(
       }
       throw err;
     }
-    // Backward compatibility: callers that expect create+register in one step
-    // can pass `register: true`. New callers should use the separate
-    // POST /api/context-graph/register endpoint.
-    if (register === true) {
+    // Backward compatibility: auto-register on-chain when a real chain is
+    // configured, unless the caller explicitly opts out with register: false.
+    // New callers that want local-only creation pass register: false and
+    // later use POST /api/context-graph/register.
+    const chainConf = config.chain ?? network?.chain;
+    const hasRealChain = chainConf && chainConf.chainId && chainConf.chainId !== 'none';
+    const shouldRegister = register === true || (register !== false && hasRealChain);
+    if (shouldRegister) {
       try {
         const regResult = await agent.registerContextGraph(id);
         return jsonResponse(res, 200, {
