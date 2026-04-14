@@ -1113,5 +1113,91 @@ describe('@unit RandomSampling', () => {
         expect(preview.kcId).to.equal(activeKc);
       }
     });
+
+    // -----------------------------------------------------------------------
+    // Test 7 — Plan invariant (v10 plan lines 713–714): a CG's per-epoch
+    // contribution must auto-decay to zero once its seeded lifetime expires,
+    // and the picker must then auto-exclude it. The KC is deliberately kept
+    // live beyond the seed lifetime so the only driver of auto-exclusion is
+    // the value decay in ContextGraphValueStorage — not KC expiry.
+    // -----------------------------------------------------------------------
+    it('auto-excludes a CG whose seed lifetime has expired (per-epoch contribution decays to zero)', async () => {
+      const cgId = await createCG(OPEN_POLICY);
+      const startEpoch = await Chronos.getCurrentEpoch();
+      const seedLifetime = 5n;
+      // KC outlives the seed so auto-exclusion can only be driven by
+      // ContextGraphValueStorage's per-epoch decay.
+      await createKC(cgId, startEpoch + 100n);
+      await seedCGValue(cgId, 10_000n, seedLifetime);
+
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(cgId, startEpoch),
+      ).to.be.greaterThan(0n);
+
+      const epochLength = await Chronos.epochLength();
+      await time.increase(Number(epochLength) * Number(seedLifetime + 1n));
+      const newEpoch = await Chronos.getCurrentEpoch();
+      expect(newEpoch).to.be.greaterThan(startEpoch + seedLifetime);
+
+      // Storage-level invariant: per-epoch contribution decayed to zero.
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(cgId, newEpoch),
+      ).to.equal(0n);
+
+      // Picker-level invariant: adjustedTotal == 0 → revert.
+      await expect(
+        RandomSampling.previewChallengeForSeed(testSeed(0), newEpoch),
+      ).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleContextGraph',
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 8 — Plan invariant (v10 plan line 713): an "empty" CG (per-epoch
+    // contribution = 0 post-expiry) must never be selected even when it
+    // originally held 10× the nominal value, provided a still-active CG
+    // coexists. Proves the weighted walk respects per-epoch decay — a live
+    // low-value CG beats a "rich" decayed CG.
+    // -----------------------------------------------------------------------
+    it('never selects a CG whose seed has decayed while a live neighbor exists', async () => {
+      const expiredCg = await createCG(OPEN_POLICY);
+      const activeCg = await createCG(OPEN_POLICY);
+      const startEpoch = await Chronos.getCurrentEpoch();
+      const shortLifetime = 5n;
+      const longLifetime = 100n;
+
+      // Both KCs live past the advance so picker exclusion is driven only
+      // by value decay, not KC expiry.
+      await createKC(expiredCg, startEpoch + longLifetime);
+      const activeKc = await createKC(activeCg, startEpoch + longLifetime);
+
+      // Expired CG: 10× the nominal TRAC but a 5-epoch lifetime.
+      // Active  CG: 1/10 the nominal TRAC but a 100-epoch lifetime.
+      await seedCGValue(expiredCg, 10_000n, shortLifetime);
+      await seedCGValue(activeCg, 1_000n, longLifetime);
+
+      const epochLength = await Chronos.epochLength();
+      await time.increase(Number(epochLength) * Number(shortLifetime + 1n));
+      const newEpoch = await Chronos.getCurrentEpoch();
+
+      // Storage invariant: expired decayed to zero, active still > 0.
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(expiredCg, newEpoch),
+      ).to.equal(0n);
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(activeCg, newEpoch),
+      ).to.be.greaterThan(0n);
+
+      // Picker invariant: every draw lands on the active CG.
+      for (let i = 0; i < 20; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          newEpoch,
+        );
+        expect(preview.cgId).to.equal(activeCg);
+        expect(preview.kcId).to.equal(activeKc);
+      }
+    });
   });
 });
