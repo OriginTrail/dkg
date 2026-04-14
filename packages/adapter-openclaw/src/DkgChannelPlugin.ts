@@ -75,7 +75,11 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
-  private readonly pendingTurnPersistence = new Map<string, { attempt: number; timer: ReturnType<typeof setTimeout> | null }>();
+  private readonly pendingTurnPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+  }>();
   private readonly port: number;
   private useGatewayRoute = false;
   private channelRegistered = false;
@@ -223,6 +227,7 @@ export class DkgChannelPlugin {
     }
 
     for (const [id, job] of this.pendingTurnPersistence) {
+      if (job.allowDuringShutdown) continue;
       if (!job.timer) continue;
       clearTimeout(job.timer);
       this.deletePendingTurnPersistence(id);
@@ -970,7 +975,7 @@ export class DkgChannelPlugin {
 
     const attemptPersist = (attempt: number): void => {
       if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
-      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null });
+      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null, allowDuringShutdown });
       void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
         .then(() => {
           this.deletePendingTurnPersistence(correlationId);
@@ -1004,10 +1009,10 @@ export class DkgChannelPlugin {
             }
             const job = this.pendingTurnPersistence.get(correlationId);
             if (!job) return;
-            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null });
+            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
             attemptPersist(attempt + 1);
           }, retryDelayMs);
-          this.pendingTurnPersistence.set(correlationId, { attempt, timer });
+          this.pendingTurnPersistence.set(correlationId, { attempt, timer, allowDuringShutdown });
         });
     };
 

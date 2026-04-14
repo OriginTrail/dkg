@@ -874,6 +874,74 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('retries startup re-registration in-process after a transient stored-state load failure', async () => {
+    vi.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const warn = vi.fn();
+    const fakeFetch = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/local-agent-integrations/openclaw') && init?.method === 'GET') {
+        if (fakeFetch.mock.calls.filter((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
+        ).length === 1) {
+          throw new Error('temporary daemon outage');
+        }
+        return {
+          ok: true,
+          json: async () => ({ integration: null }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { warn },
+      };
+
+      plugin.register(mockApi);
+      await Promise.resolve();
+
+      expect(fakeFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/local-agent-integrations/openclaw'),
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(fakeFetch.mock.calls.some((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      )).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(fakeFetch.mock.calls.filter((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw') && call[1]?.method === 'GET',
+      )).toHaveLength(2);
+      expect(fakeFetch.mock.calls.some((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      )).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load stored OpenClaw integration state'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('aborting startup re-registration'));
+    } finally {
+      vi.useRealTimers();
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('setup-only registration skips tool registration but keeps the plugin bootable', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',

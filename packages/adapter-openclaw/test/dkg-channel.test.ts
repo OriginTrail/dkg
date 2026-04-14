@@ -832,6 +832,62 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
+  it('stop should preserve an already-scheduled shutdown-allowed persistence retry within the bounded drain window', async () => {
+    vi.useFakeTimers();
+    try {
+      const mockRuntime = {
+        channel: {
+          routing: {
+            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
+          },
+          session: {
+            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
+            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
+            recordInboundSession: vi.fn(),
+          },
+          reply: {
+            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
+            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
+            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+            },
+          },
+        },
+      };
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi() as any;
+      api.runtime = mockRuntime;
+      api.cfg = mockCfg;
+      const storeSpy = vi.spyOn(client, 'storeChatTurn')
+        .mockRejectedValueOnce(new Error('temporary daemon outage'))
+        .mockResolvedValueOnce(undefined);
+      plugin.register(api);
+
+      await plugin.processInbound('Hello', 'corr-stop-preserve-retry', 'owner');
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await Promise.resolve();
+      const stopPromise = plugin.stop();
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(storeSpy).toHaveBeenLastCalledWith(
+        'openclaw:dkg-ui',
+        'Hello',
+        'Reply before shutdown',
+        { turnId: 'corr-stop-preserve-retry' },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('processInbound should still persist a completed non-stream reply when shutdown has already begun', async () => {
     let resumeDispatch!: () => void;
     let markDispatchReady!: () => void;

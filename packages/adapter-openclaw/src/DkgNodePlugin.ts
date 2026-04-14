@@ -42,6 +42,7 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
 } as const;
+const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
@@ -56,6 +57,7 @@ export class DkgNodePlugin {
   /** Guard: backlog import runs at most once per plugin lifecycle. */
   private backlogImportDone: Promise<void> | null = null;
   private warnedLegacyGameConfig = false;
+  private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
@@ -174,7 +176,22 @@ export class DkgNodePlugin {
       return;
     }
 
+    this.clearLocalAgentIntegrationRetry();
     void this.syncLocalAgentIntegrationState(api, registrationMode);
+  }
+
+  private clearLocalAgentIntegrationRetry(): void {
+    if (!this.localAgentIntegrationRetryTimer) return;
+    clearTimeout(this.localAgentIntegrationRetryTimer);
+    this.localAgentIntegrationRetryTimer = null;
+  }
+
+  private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
+    if (this.localAgentIntegrationRetryTimer) return;
+    this.localAgentIntegrationRetryTimer = setTimeout(() => {
+      this.localAgentIntegrationRetryTimer = null;
+      void this.syncLocalAgentIntegrationState(api, registrationMode);
+    }, LOCAL_AGENT_STATE_RETRY_DELAY_MS);
   }
 
   private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
@@ -192,8 +209,10 @@ export class DkgNodePlugin {
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
       api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
       return;
     }
+    this.clearLocalAgentIntegrationRetry();
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
@@ -382,6 +401,7 @@ export class DkgNodePlugin {
 
   async stop(): Promise<void> {
     // Stop integration modules
+    this.clearLocalAgentIntegrationRetry();
     this.writeCapture?.stop();
     await this.channelPlugin?.stop();
   }
