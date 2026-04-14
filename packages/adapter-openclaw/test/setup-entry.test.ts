@@ -50,4 +50,16 @@ describe('setup-entry', () => {
 
     expect(runtimeEntry).toHaveBeenCalledWith(api);
   });
+
+  it('defaults missing registrationMode to the runtime entry', async () => {
+    const { default: setupEntry } = await import('../setup-entry.mjs');
+    const api = {
+      config: {},
+      logger: { info: vi.fn() },
+    } as any;
+
+    setupEntry(api);
+
+    expect(runtimeEntry).toHaveBeenCalledWith(api);
+  });
 });

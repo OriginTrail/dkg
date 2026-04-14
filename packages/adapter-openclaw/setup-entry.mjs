@@ -1,7 +1,7 @@
 import runtimeEntry from './openclaw-entry.mjs';
 
 export default function setupEntry(api = {}) {
-  const mode = api.registrationMode ?? 'setup-only';
+  const mode = api.registrationMode ?? 'full';
   const log = api.logger ?? console;
 
   if (mode === 'setup-only' || mode === 'cli-metadata') {
