@@ -37,6 +37,11 @@
   },
   {
     "inputs": [],
+    "name": "NoV8StakeToConvert",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotPositionOwner",
     "type": "error"
   },
@@ -420,7 +425,7 @@
     ],
     "name": "convertToNFT",
     "outputs": [],
-    "stateMutability": "view",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
