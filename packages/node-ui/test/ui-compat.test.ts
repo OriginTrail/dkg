@@ -547,40 +547,40 @@ describe('synced status logic', () => {
   });
 });
 
-describe('clickable notification items', () => {
+describe('notification items are non-interactive until peer chat exists', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('conditionally adds clickable class for peer notifications', () => {
-    expect(header).toContain("n.peer ? 'clickable' : ''");
+  it('does not add clickable class to notification items', () => {
+    expect(header).not.toContain("'clickable'");
   });
 
-  it('sets role=button and tabIndex for keyboard accessibility', () => {
-    expect(header).toContain("role={n.peer ? 'button' : undefined}");
-    expect(header).toContain("tabIndex={n.peer ? 0 : undefined}");
+  it('does not set role=button on notification items', () => {
+    expect(header).not.toMatch(/role=\{.*'button'/);
   });
 
-  it('handles Enter and Space key events', () => {
-    expect(header).toContain("e.key === 'Enter'");
-    expect(header).toContain("e.key === ' '");
-  });
-
-  it('closes notification dropdown on peer click', () => {
-    expect(header).toMatch(/onClick=\{.*setShowNotifs\(false\)/s);
-    expect(header).toMatch(/onKeyDown=\{.*setShowNotifs\(false\)/s);
+  it('renders notification text and timestamp', () => {
+    expect(header).toContain('v10-header-notif-item-text');
+    expect(header).toContain('v10-header-notif-item-time');
+    expect(header).toContain('toLocaleTimeString');
   });
 });
 
-describe('dashboard import target derived from cgData', () => {
+describe('dashboard import target uses explicit selection', () => {
   const dashboard = readFile('views/DashboardView.tsx');
 
-  it('import memories checks cgData.contextGraphs, not projects store', () => {
-    expect(dashboard).toContain("const cgs = cgData?.contextGraphs ?? []");
-    expect(dashboard).toContain("cgs.length > 0");
+  it('import memories resolves target from active project or cgData', () => {
+    expect(dashboard).toContain('importTargetId');
+    expect(dashboard).toContain('setImportTargetId');
   });
 
-  it('ImportFilesModal target comes from cgData, not activeProjectId', () => {
-    expect(dashboard).toMatch(/contextGraphId=\{\(cgData\?\.contextGraphs \?\? \[\]\)\[0\]\?\.id/);
-    expect(dashboard).toMatch(/contextGraphName=\{\(cgData\?\.contextGraphs \?\? \[\]\)\[0\]\?\.name/);
+  it('prefers active project when selecting import target', () => {
+    expect(dashboard).toContain('activeProject');
+    expect(dashboard).toMatch(/cgs\.find.*activeProject/);
+  });
+
+  it('ImportFilesModal receives importTargetId, not hardcoded [0]', () => {
+    expect(dashboard).toMatch(/contextGraphId=\{importTargetId/);
+    expect(dashboard).not.toMatch(/contextGraphId=\{.*\[0\]/);
   });
 
   it('shows create-project when no context graphs exist', () => {
@@ -613,6 +613,30 @@ describe('file serving security (daemon)', () => {
 
   it('forces attachment disposition for unsafe types', () => {
     expect(daemon).toMatch(/SAFE_PREVIEW_TYPES\.has\(rawCt\) \? 'inline' : 'attachment'/);
+  });
+});
+
+describe('FilePreviewModal types aligned with server', () => {
+  const modal = readFileSync(resolve(UI_DIR, 'components', 'Modals', 'FilePreviewModal.tsx'), 'utf-8');
+
+  it('does not treat text/html as previewable (XSS vector)', () => {
+    const typesMatch = modal.match(/PREVIEWABLE_TYPES[^=]*=\s*\{([\s\S]*?)\}/);
+    expect(typesMatch).not.toBeNull();
+    const types = typesMatch![1];
+    expect(types).not.toContain("'text/html'");
+  });
+
+  it('does not treat image/svg+xml as previewable (XSS vector)', () => {
+    const typesMatch = modal.match(/PREVIEWABLE_TYPES[^=]*=\s*\{([\s\S]*?)\}/);
+    expect(typesMatch).not.toBeNull();
+    const types = typesMatch![1];
+    expect(types).not.toContain("'image/svg+xml'");
+  });
+
+  it('includes safe image types', () => {
+    expect(modal).toContain("'image/png': 'image'");
+    expect(modal).toContain("'image/jpeg': 'image'");
+    expect(modal).toContain("'image/webp': 'image'");
   });
 });
 

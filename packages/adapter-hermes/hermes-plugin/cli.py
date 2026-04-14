@@ -73,7 +73,13 @@ def register_cli(cli_group):
 
     @dkg.command("sync")
     def dkg_sync():
-        """Force-sync local cache to DKG (useful after offline period)."""
+        """Force-sync local cache to DKG (useful after offline period).
+
+        Replays queued mutations (add/replace/remove) against the local
+        cache in order, then writes the final materialized state to DKG
+        once per affected target.  This preserves semantics — removes
+        actually delete facts, and replaces overwrite them.
+        """
         from plugins.memory.dkg.client import DKGClient
         from plugins.memory.dkg import _load_config, _load_cache, _save_cache
 
@@ -93,8 +99,12 @@ def register_cli(cli_group):
             return
 
         click.echo(f"Syncing {len(queued)} queued writes...")
+        context_graph = config.get("context_graph", "hermes-memory")
+        assertion_name = agent_name or "hermes"
         synced = 0
         failed = []
+        dirty_targets: set = set()
+
         for item in queued:
             try:
                 if item.get("type") == "turn":
@@ -103,38 +113,51 @@ def register_cli(cli_group):
                         item.get("user", ""),
                         item.get("assistant", ""),
                     )
-                    if result.get("success") is not False:
-                        synced += 1
-                    else:
+                    if result.get("success") is False:
+                        click.echo(f"  Turn sync failed: {result.get('error', 'unknown')}")
                         failed.append(item)
-                        click.echo(f"  Failed (turn): {result.get('error', 'unknown')}")
+                    else:
+                        synced += 1
                 elif item.get("type") == "memory":
-                    action = item.get("action", "add")
-                    target = item.get("target", "memory")
-                    content = item.get("content", "")
-                    context_graph = config.get("context_graph", "hermes-memory")
-                    assertion_name = agent_name or "hermes"
-                    quads = [{
-                        "subject": f"urn:hermes:{assertion_name}:{target}",
-                        "predicate": "urn:hermes:content",
-                        "object": f"[{target}]\n{content}",
-                    }]
-                    if action == "remove":
-                        synced += 1
-                        continue
-                    result = client.write_assertion(assertion_name, context_graph, quads)
-                    if result.get("success") is not False:
-                        synced += 1
-                    else:
-                        failed.append(item)
-                        click.echo(f"  Failed (memory/{action}): {result.get('error', 'unknown')}")
+                    dirty_targets.add(item.get("target", "memory"))
+                    synced += 1
                 else:
                     synced += 1
             except Exception as e:
                 click.echo(f"  Failed: {e}")
                 failed.append(item)
 
+        write_failures = 0
+        failed_targets: set = set()
+        for target in dirty_targets:
+            entries = cache.get(target, [])
+            if not entries:
+                click.echo(f"  Target '{target}' is now empty — no remote delete API yet, keeping queued for retry.")
+                failed_targets.add(target)
+                continue
+            quads = [{
+                "subject": f"urn:hermes:{assertion_name}:{target}",
+                "predicate": "urn:hermes:content",
+                "object": f"[{e.get('target', target)}]\n{e['content']}",
+            } for e in entries]
+            try:
+                result = client.write_assertion(assertion_name, context_graph, quads)
+                if result.get("success") is False:
+                    raise RuntimeError(result.get("error", "unknown"))
+            except Exception as e:
+                click.echo(f"  Failed to write {target} assertion: {e}")
+                write_failures += 1
+                failed_targets.add(target)
+
+        if failed_targets:
+            failed.extend(
+                item for item in queued
+                if item.get("type") == "memory" and item.get("target", "memory") in failed_targets
+            )
+
         cache["queued_writes"] = failed
         _save_cache(cache, agent_name)
-        click.echo(f"Synced {synced}/{len(queued)} writes. {len(failed)} remaining.")
+        click.echo(f"Synced {synced}/{len(queued)} writes ({len(dirty_targets)} targets updated). {len(failed)} remaining.")
+        if write_failures:
+            click.echo(f"  Warning: {write_failures} assertion write(s) failed — data is saved locally, re-run sync to retry.")
         client.close()
