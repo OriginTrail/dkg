@@ -266,6 +266,24 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      * @param identityId  Target node (must be an existing profile).
      * @param amount      Stake amount in TRAC (>0).
      * @param lockEpochs  Conviction lock duration. Valid set: {1,3,6,12}.
+     *
+     * @dev Mirrors the Phase 4 `Staking._recordStake` layout step-for-step
+     *      (freshness check → maxStake cap → score-per-stake baseline →
+     *      TRAC pull → StakingStorage writes → sharding insert → ask
+     *      recalc) but targets `bytes32(tokenId)` delegator keys instead
+     *      of the V8 `keccak256(address)` key space, and creates the
+     *      `ConvictionStakingStorage` position as part of the same
+     *      atomic mutation.
+     *
+     *      NOTE: No `TokenIdAlreadyRecorded` freshness guard: the caller
+     *      path `DKGStakingConvictionNFT.createConviction` does
+     *      `_mint(msg.sender, tokenId)` before calling us, and ERC721
+     *      `_mint` reverts on any already-minted tokenId. That already
+     *      enforces per-tokenId uniqueness for the `createConviction`
+     *      / `convertToNFT` entry points — the guard would be pure
+     *      defense-in-depth against a hypothetical future caller, and
+     *      the scope for this subagent explicitly limits new errors to
+     *      the already-declared V10 set (no StakingLib edits).
      */
     function stake(
         address staker,
@@ -273,9 +291,105 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint96 amount,
         uint8 lockEpochs
-    ) external view onlyConvictionNFT {
-        staker; tokenId; identityId; amount; lockEpochs;
-        revert("NotImplemented");
+    ) external onlyConvictionNFT {
+        staker; // unused in body — retained in the signature because
+                // `DKGStakingConvictionNFT` passes the original caller
+                // explicitly (no `tx.origin`) and every other V10 entry
+                // point that follows this one DOES use it for ownership
+                // checks. Keeping the argument shape uniform across all
+                // eight entry points prevents the NFT wrapper from
+                // shipping a bespoke call for each method.
+
+        // 1. Validate amount. Profile existence is validated below via
+        //    `profileStorage.profileExists`; the tier check is folded
+        //    into the `expectedMultiplier18` call on (3).
+        if (amount == 0) revert ZeroAmount();
+
+        // 2. Profile existence. Mirrors the V8 `stake()` / Phase 4
+        //    `_recordStake` guard — without it the sharding-table insert
+        //    below would happily register a ghost node at `sha256("")`
+        //    for any unregistered identityId.
+        if (!profileStorage.profileExists(identityId)) {
+            revert ProfileDoesNotExist();
+        }
+
+        // 3. Resolve the Phase 5 discrete tier. Reverts "Invalid lock"
+        //    for anything outside {0,1,3,6,12}. `createConviction` must
+        //    additionally reject lock==0 (it's the post-expiry rest
+        //    state, not a valid fresh-mint tier): the storage helper
+        //    stays tolerant of lock==0 for reward-math callers, so the
+        //    policy check lives here.
+        if (lockEpochs == 0) revert InvalidLockEpochs();
+        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockEpochs));
+
+        // 4. maxStake cap on the destination node.
+        StakingStorage ss = stakingStorage;
+        uint96 maxStake = parametersStorage.maximumStake();
+        uint96 totalNodeStakeAfter = ss.getNodeStake(identityId) + amount;
+        if (totalNodeStakeAfter > maxStake) revert MaxStakeExceeded();
+
+        // 5. Baseline this fresh delegator key to the node's current
+        //    score-per-stake index so a later reward claim on this NFT
+        //    does NOT collect score the node earned before the NFT
+        //    existed. `Staking.prepareForStakeChange` takes the
+        //    stakeBase==0 fast-path for fresh keys: it bumps
+        //    delegatorLastSettledNodeEpochScorePerStake to the current
+        //    node index and returns without mutating any score totals.
+        //    This is the same protection the V8 `_stake` path applies
+        //    to first-time address-keyed delegators, and the Phase 4
+        //    `_recordStake` path applies to NFT-keyed ones.
+        bytes32 delegatorKey = bytes32(tokenId);
+        staking.prepareForStakeChange(chronos.getCurrentEpoch(), identityId, delegatorKey);
+
+        // 6. Pull TRAC straight from `staker` into `StakingStorage`.
+        //    The NFT wrapper never holds funds (Phase 5 decision Q4):
+        //    the caller has approved THIS contract, not the NFT.
+        //    Matches V8 `_stake` which also calls `transferFrom`
+        //    without inspecting the return value — the Hub-registered
+        //    Token contract (OZ ERC20) reverts on failure, so a
+        //    returned `false` is impossible in practice.
+        token.transferFrom(staker, address(ss), amount);
+
+        // 7. StakingStorage writes — delegator base, node total,
+        //    global total. `bytes32(tokenId)` is the V10 delegator key
+        //    (disjoint from the V8 `keccak256(address)` key space), so
+        //    the fresh write is safe even if the same `staker` already
+        //    has a V8 address-keyed delegation on this node.
+        ss.setDelegatorStakeBase(identityId, delegatorKey, amount);
+        ss.setNodeStake(identityId, totalNodeStakeAfter);
+        ss.increaseTotalStake(amount);
+
+        // 8. Create the V10 position in ConvictionStakingStorage.
+        //    `createPosition` computes `expiryEpoch` internally as
+        //    `currentEpoch + lockEpochs` (lockEpochs is a raw epoch
+        //    count, NOT a month count — the Phase 2 storage layout is
+        //    epoch-denominated, the tier labels {0,1,3,6,12} just
+        //    happen to match month counts by policy).
+        convictionStorage.createPosition(
+            tokenId,
+            identityId,
+            amount,
+            uint40(lockEpochs),
+            multiplier18
+        );
+
+        // 9. Sharding-table maintenance — add the node if it crossed
+        //    `minimumStake`. Encapsulated in
+        //    `ShardingTable.insertNode` which is idempotent (it
+        //    no-ops if the node already exists), but we still guard on
+        //    the minimum-stake threshold locally to avoid an
+        //    unnecessary external call for sub-minimum stakes.
+        ParametersStorage ps = parametersStorage;
+        ShardingTableStorage sts = shardingTableStorage;
+        if (!sts.nodeExists(identityId) && totalNodeStakeAfter >= ps.minimumStake()) {
+            shardingTable.insertNode(identityId);
+        }
+
+        // 10. Active-set recalc so the node's new effective stake is
+        //     reflected in the next sampling window.
+        ask.recalculateActiveSet();
+
+        emit Staked(tokenId, staker, identityId, amount, lockEpochs);
     }
 
     /**
