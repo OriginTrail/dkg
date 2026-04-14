@@ -26,7 +26,7 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  * @notice Wraps V10 DKG staking positions as transferable ERC-721 NFTs.
  *
  * Each NFT represents a staking position on a specific node with a discrete
- * conviction lock tier (1, 3, 6, or 12 epochs → 1.0x/2.0x/3.5x/6.0x boost).
+ * conviction lock tier (1, 3, 6, or 12 epochs → 1.5x/2.0x/3.5x/6.0x boost).
  * The position can be transferred to another address (accrued-interest
  * transfer model — the new owner inherits both the raw stake and any
  * unclaimed rewards; see `_update` below).
@@ -196,16 +196,13 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // Conviction multiplier tier ladder
     // ========================================================================
     //
-    // NOTE: The S1 brief's Q5 tier table had a typo — it listed
-    // `lockEpochs == 1 → 1.5e18`, which would clash with the rest of the
-    // V10 system where the 1.5x tier lives at `lockEpochs == 2`. Aligned
-    // here with `ConvictionStakingStorage.expectedMultiplier18` (the
-    // authoritative storage-side source of truth) and with
-    // `Staking.convictionMultiplier`. Accepting the typo would cause
-    // every `createConviction(_, _, 1)` to revert at the storage
-    // "Tier mismatch" check, because `expectedMultiplier18(1) == 1e18`
-    // while the helper would have returned `1.5e18`. Reconciled set:
-    // {0, 2, 3, 6, 12}.
+    // Roadmap-authoritative tier set, per `04_TOKEN_ECONOMICS §4.1`
+    // ("no lockup / 1 / 3 / 6 / 12 months"): {0, 1, 3, 6, 12}. After the
+    // Phase 5 P2 hotfix (commit `e7528d38`),
+    // `ConvictionStakingStorage.expectedMultiplier18` matches this set
+    // exactly, so the NFT-side helper and the storage-side tier check
+    // are now aligned — `createConviction(_, _, 1)` maps to the 1.5x
+    // tier on both sides.
     //
     // Discrete, exact-match tier table — no snap-down semantics. Values
     // that don't land on one of the tiers revert. This is stricter than
@@ -219,31 +216,23 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     //
     // Why `0 → SCALE18` rather than a revert at the helper level:
     //   The post-expiry rest state in `ConvictionStakingStorage` is
-    //   encoded as `lockEpochs == 0 → 1x` (line 99 of that contract), and
-    //   reward-math callers may re-invoke this helper with a position's
-    //   current `lockEpochs` after expiry has driven the tier back to
-    //   the rest state. See Phase 5 decisions doc Q5 for the full
-    //   reasoning. The `lockEpochs == 0` *policy* check lives in
-    //   `createConviction` / `convertToNFT` themselves — they MUST
-    //   reject `lockEpochs == 0` via their own validation, but the
-    //   helper stays tolerant for reward-math callers.
-    //
-    // Why `lockEpochs == 1` is NOT in the valid set:
-    //   Storage-side `expectedMultiplier18(1) == 1e18` means the lock-1
-    //   tier is functionally indistinguishable from the rest state (no
-    //   boost). `ConvictionStakingStorage.updateOnRelock` explicitly
-    //   rejects `newLockEpochs < 2` as "Lock too short" — the V10 system
-    //   treats `lockEpochs >= 2` as the floor for a meaningful
-    //   commitment. The NFT API mirrors that invariant.
+    //   encoded as `lockEpochs == 0 → 1x`, and reward-math callers may
+    //   re-invoke this helper with a position's current `lockEpochs`
+    //   after expiry has driven the tier back to the rest state. See
+    //   Phase 5 decisions doc Q5 for the full reasoning. The
+    //   `lockEpochs == 0` *policy* check lives in `createConviction` /
+    //   `convertToNFT` themselves — they MUST reject `lockEpochs == 0`
+    //   via their own validation, but the helper stays tolerant for
+    //   reward-math callers.
     //
     // @param lockEpochs Lock duration in epochs.
     // @return multiplier18 1e18-scaled tier multiplier.
     function _convictionMultiplier(uint256 lockEpochs) internal pure returns (uint256) {
         if (lockEpochs == 0) return SCALE18;             // rest state: 1.0x
-        if (lockEpochs == 2) return (15 * SCALE18) / 10; // 1.5x
-        if (lockEpochs == 3) return 2 * SCALE18;         // 2.0x
-        if (lockEpochs == 6) return (35 * SCALE18) / 10; // 3.5x
-        if (lockEpochs == 12) return 6 * SCALE18;        // 6.0x
+        if (lockEpochs == 1) return (15 * SCALE18) / 10; // 1.5x (1 month)
+        if (lockEpochs == 3) return 2 * SCALE18;         // 2.0x (3 months)
+        if (lockEpochs == 6) return (35 * SCALE18) / 10; // 3.5x (6 months)
+        if (lockEpochs == 12) return 6 * SCALE18;        // 6.0x (12 months)
         revert InvalidLockEpochs();
     }
 
