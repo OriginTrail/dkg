@@ -2082,4 +2082,382 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.equal(amount);
     });
   });
+
+  // =====================================================================
+  // transfer (ERC-721) — accrued-interest model (Phase 5 Q8)
+  // =====================================================================
+  //
+  // Phase 5 transfer semantics: when Alice transfers tokenId to Bob mid-lock,
+  // the underlying `ConvictionStakingStorage.Position` is NOT mutated. No
+  // rewards are settled, `lastClaimedEpoch` does not reset, the raw /
+  // rewards / identityId / lockEpochs / expiryEpoch / multiplier18 fields
+  // all stay with the tokenId. Bob now owns the tokenId and can exercise
+  // every NFT entry point (claim, relock, redelegate, createWithdrawal,
+  // cancelWithdrawal, finalizeWithdrawal) that gates on
+  // `ownerOf(tokenId) == msg.sender`.
+  //
+  // The `_update` override in `DKGStakingConvictionNFT` is a pure
+  // `super._update` pass-through — no settlement, no storage mutation.
+  // This describe block PROVES the pass-through by asserting:
+  //   1. Position byte-identity across a transfer.
+  //   2. Bob can claim Alice's unclaimed rewards (the accrued coupon).
+  //   3. Alice's claim / relock / redelegate post-transfer revert
+  //      `NotPositionOwner`.
+  //   4. Owner rights fully migrate (Bob can redelegate).
+  //   5. ERC-721 transfer gas is below a hard ceiling (no accidental
+  //      storage work slipped into `_update`).
+
+  describe('transfer (accrued-interest model)', () => {
+    // Helper — inject `nodeEpochScorePerStake36` at a specific epoch via the
+    // hub-owner-privileged setter. Mirrors the helper in the claim describe
+    // block — duplicated locally so this block stays self-contained. The
+    // `claim` helper cannot be referenced across describe boundaries.
+    const injectScorePerStake = async (
+      epoch: number | bigint,
+      identityId: number,
+      scorePerStake36: bigint,
+    ) => {
+      const RandomSamplingStorageContract = await hre.ethers.getContract<RandomSamplingStorage>(
+        'RandomSamplingStorage',
+      );
+      await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
+        epoch,
+        identityId,
+        scorePerStake36,
+      );
+    };
+
+    // Helper — pre-fund the StakingStorage vault so the claim's
+    // `increaseRewards` / `increaseNodeStake` bookkeeping has matching TRAC.
+    const fundVault = async (amount: bigint) => {
+      const stakingStorageAddr = await StakingStorage.getAddress();
+      await Token.mint(stakingStorageAddr, amount);
+    };
+
+    // Single-epoch reward formula — mirrors StakingV10.claim's inner loop
+    // exactly: `reward = effStake * scorePerStake36 / 1e18`.
+    const computeReward = (effStake: bigint, scorePerStake36: bigint): bigint => {
+      return (effStake * scorePerStake36) / SCALE18;
+    };
+
+    it('ERC-721 transfer does not mutate Position state', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Capture every Position field before the transfer. `_update` is a
+      // pure pass-through — every field must survive a transfer byte-identical.
+      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+
+      const tx = await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+      // ERC-721 Transfer event fires (inherited from base ERC721).
+      await expect(tx)
+        .to.emit(NFT, 'Transfer')
+        .withArgs(accounts[0].address, accounts[4].address, 0n);
+
+      // New owner.
+      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
+      expect(await NFT.balanceOf(accounts[4].address)).to.equal(1n);
+
+      // Position state byte-identical — not a single field touched.
+      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfter.raw).to.equal(posBefore.raw);
+      expect(posAfter.rewards).to.equal(posBefore.rewards);
+      expect(posAfter.lockEpochs).to.equal(posBefore.lockEpochs);
+      expect(posAfter.expiryEpoch).to.equal(posBefore.expiryEpoch);
+      expect(posAfter.identityId).to.equal(posBefore.identityId);
+      expect(posAfter.multiplier18).to.equal(posBefore.multiplier18);
+      expect(posAfter.lastClaimedEpoch).to.equal(posBefore.lastClaimedEpoch);
+    });
+
+    it('Bob claims all rewards including epochs Alice held (accrued-interest transfer)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Remember the creation epoch: fresh position has lastClaimedEpoch =
+      // creationEpoch - 1, so after advancing 3 epochs the claim window is
+      // [creationEpoch, creationEpoch+1, creationEpoch+2] (3 epochs).
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      await advanceEpochs(3);
+
+      // Inject score for 3 epochs — pre-expiry throughout (12-epoch lock),
+      // so effStake = raw * 6x for all three.
+      const s0 = hre.ethers.parseEther('0.001'); // 1e15
+      const s1 = hre.ethers.parseEther('0.002'); // 2e15
+      const s2 = hre.ethers.parseEther('0.003'); // 3e15
+      await injectScorePerStake(creationEpoch, identityId, s0);
+      await injectScorePerStake(creationEpoch + 1n, identityId, s1);
+      await injectScorePerStake(creationEpoch + 2n, identityId, s2);
+
+      const effStake = (amount * SIX_X) / SCALE18;
+      const expectedReward = computeReward(effStake, s0 + s1 + s2);
+      await fundVault(expectedReward);
+
+      // Alice transfers to Bob WITHOUT claiming first. The accrued coupon
+      // (three epochs of reward) transfers with the NFT. Bob is now the
+      // rightful claimant for Alice's entire holding period.
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      const rewardsBefore = (await ConvictionStakingStorageContract.getPosition(0)).rewards;
+      expect(rewardsBefore).to.equal(0n); // nothing banked yet
+
+      // Bob claims — receives the full 3-epoch reward Alice never collected.
+      const tx = await NFT.connect(accounts[4]).claim(0);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'RewardsClaimed')
+        .withArgs(0n, expectedReward);
+
+      const rewardsAfter = (await ConvictionStakingStorageContract.getPosition(0)).rewards;
+      expect(rewardsAfter).to.equal(expectedReward);
+      expect(rewardsAfter).to.be.gt(rewardsBefore);
+    });
+
+    it('Alice cannot claim after transfer (reverts NotPositionOwner)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Advance + inject so there's actual reward on the table — otherwise
+      // a revert at the ownership gate would be indistinguishable from a
+      // no-op window. This verifies the gate fires BEFORE the walk.
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      await advanceEpochs(1);
+      const scorePerStake36 = hre.ethers.parseEther('0.001');
+      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // Alice no longer owns the NFT — wrapper-layer ownership gate fires.
+      await expect(NFT.connect(accounts[0]).claim(0)).to.be.revertedWithCustomError(
+        NFT,
+        'NotPositionOwner',
+      );
+    });
+
+    it('Alice cannot relock / redelegate / createWithdrawal / cancelWithdrawal / finalizeWithdrawal after transfer', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
+      await advanceEpochs(2); // post-expiry so relock + full withdraw paths are reachable
+
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // Every owner-gated entry point rejects Alice post-transfer. This is
+      // the full surface check: any gate that forgot the `ownerOf` guard
+      // would leak ownership authority back to the pre-transfer holder.
+      await expect(NFT.connect(accounts[0]).relock(0, 6)).to.be.revertedWithCustomError(
+        NFT,
+        'NotPositionOwner',
+      );
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, toId),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, 100n),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+      await expect(
+        NFT.connect(accounts[0]).cancelWithdrawal(0),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+      await expect(
+        NFT.connect(accounts[0]).finalizeWithdrawal(0),
+      ).to.be.revertedWithCustomError(NFT, 'NotPositionOwner');
+    });
+
+    it('Bob cannot claim twice for the same window (second call is a no-op)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      await advanceEpochs(2);
+      const s0 = hre.ethers.parseEther('0.001');
+      const s1 = hre.ethers.parseEther('0.002');
+      await injectScorePerStake(creationEpoch, identityId, s0);
+      await injectScorePerStake(creationEpoch + 1n, identityId, s1);
+
+      const effStake = (amount * SIX_X) / SCALE18;
+      const expectedReward = computeReward(effStake, s0 + s1);
+      await fundVault(expectedReward);
+
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // First claim drains the window.
+      await NFT.connect(accounts[4]).claim(0);
+      const rewardsAfterFirst = (await ConvictionStakingStorageContract.getPosition(0)).rewards;
+      expect(rewardsAfterFirst).to.equal(expectedReward);
+
+      // Second claim in the same epoch — lastClaimedEpoch is already
+      // caught up to currentEpoch - 1, so the claim window is empty and
+      // StakingV10.claim short-circuits without emitting RewardsClaimed.
+      const tx = await NFT.connect(accounts[4]).claim(0);
+      await expect(tx).to.not.emit(StakingV10Contract, 'RewardsClaimed');
+
+      const rewardsAfterSecond = (await ConvictionStakingStorageContract.getPosition(0)).rewards;
+      expect(rewardsAfterSecond).to.equal(rewardsAfterFirst); // bucket unchanged
+    });
+
+    it('transferFrom gas is below 100,000 (no hidden work in _update)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      // Pure ERC-721 `transferFrom` with a pass-through `_update`:
+      //   - one ownership map write
+      //   - one _ownedTokens / _ownedTokensIndex swap (ERC721Enumerable)
+      //   - one _allTokens / _allTokensIndex swap (ERC721Enumerable)
+      //   - two balance updates
+      //   - one Transfer event
+      // This lands in the ~75K-90K range on Hardhat. 100K is a comfortable
+      // ceiling: anything notably higher would signal a regression where
+      // real storage work slipped into `_update` (e.g. settlement, position
+      // mutation, effective-stake walk).
+      const tx = await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+      const receipt = await tx.wait();
+      expect(receipt!.gasUsed).to.be.lt(100_000n);
+    });
+
+    it('Bob can redelegate after transfer (owner rights fully transferred)', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // Bob — the new owner — calls redelegate. Wrapper-layer ownership
+      // gate passes (`ownerOf(0) == accounts[4]`), storage mutates under
+      // the new identity.
+      await NFT.connect(accounts[4]).redelegate(0, toId);
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.identityId).to.equal(toId);
+      // Raw, rewards, lockEpochs, multiplier18 all untouched by redelegate.
+      expect(pos.raw).to.equal(amount);
+      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.multiplier18).to.equal(SIX_X);
+    });
+
+    it('safeTransferFrom to an EOA preserves accrued-interest semantics', async () => {
+      // NOTE: no ERC-721 receiver mock contract exists under contracts/;
+      // adding one is out of scope for the transfer test block (would
+      // require a new .sol file). The pass-through `_update` makes the
+      // receiver-path branch of ERC-721 transparent anyway — the only
+      // difference between `transferFrom` and `safeTransferFrom` is the
+      // post-transfer `onERC721Received` callback, which is an ERC-721 base
+      // concern, not a conviction-NFT concern. Testing the EOA path of
+      // `safeTransferFrom` still exercises the full `_update` flow.
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+
+      // OZ v5 ERC-721 has two safeTransferFrom overloads: (from, to, tokenId)
+      // and (from, to, tokenId, data). Exercise the 3-arg form.
+      await NFT.connect(accounts[0])['safeTransferFrom(address,address,uint256)'](
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address);
+      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfter.raw).to.equal(posBefore.raw);
+      expect(posAfter.rewards).to.equal(posBefore.rewards);
+      expect(posAfter.lastClaimedEpoch).to.equal(posBefore.lastClaimedEpoch);
+    });
+
+    it('contract TRAC balance is always zero after transfer', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const nftAddr = await NFT.getAddress();
+      // Baseline post-mint — TRAC routed staker → StakingStorage, NFT is clean.
+      expect(await Token.balanceOf(nftAddr)).to.equal(0n);
+
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // Transfer must not touch the TRAC ledger in any way. The wrapper
+      // contract holds no funds pre- or post-transfer.
+      expect(await Token.balanceOf(nftAddr)).to.equal(0n);
+      // StakingV10 likewise — TRAC is always held by StakingStorage.
+      expect(await Token.balanceOf(await StakingV10Contract.getAddress())).to.equal(0n);
+    });
+
+    it('Alice can mint a second NFT after transferring the first — tokenIds remain monotonic', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      // Fund Alice for both mints (mint #1 consumes `amount`, mint #2 consumes `amount / 2`).
+      const second = hre.ethers.parseEther('500');
+      await mintAndApprove(accounts[0], amount + second);
+
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+      await NFT.connect(accounts[0]).transferFrom(
+        accounts[0].address,
+        accounts[4].address,
+        0,
+      );
+
+      // `nextTokenId` is a monotonic counter — it does NOT reuse the tokenId
+      // that was transferred. tokenId=0 still belongs to Bob; Alice's next
+      // mint gets tokenId=1.
+      await NFT.connect(accounts[0]).createConviction(identityId, second, 6);
+
+      expect(await NFT.ownerOf(0)).to.equal(accounts[4].address); // Bob still holds #0
+      expect(await NFT.ownerOf(1)).to.equal(accounts[0].address); // Alice now holds #1
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
+      expect(await NFT.balanceOf(accounts[4].address)).to.equal(1n);
+
+      // Positions are independent — tier 12 on #0, tier 6 on #1.
+      expect((await ConvictionStakingStorageContract.getPosition(0)).multiplier18).to.equal(SIX_X);
+      expect((await ConvictionStakingStorageContract.getPosition(1)).multiplier18).to.equal(
+        THREE_AND_HALF_X,
+      );
+    });
+  });
 });
