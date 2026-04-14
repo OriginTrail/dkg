@@ -36,4 +36,25 @@ interface IDKGPublishingConvictionNFT {
     /// @dev Reverts for non-existent tokens (no such account). Callers MUST
     ///      use try/catch to distinguish "no such account" from a live miss.
     function ownerOf(uint256 accountId) external view returns (address);
+
+    /// @notice Spend a publishing agent's conviction allowance for a base cost.
+    /// @dev Caller MUST be `KnowledgeAssetsV10` — the NFT gates this via Hub
+    ///      lookup. The NFT resolves the paying account internally from
+    ///      `agentToAccountId[publishingAgent]`, so KAV10 MUST NOT supply an
+    ///      account id (N28 closure: removes victim-account-drain vector).
+    ///
+    ///      Reverts:
+    ///      - `NoConvictionAccount(publishingAgent)` if agent has no account.
+    ///      - `AccountExpired(accountId, expiresAt)` if account is past lock.
+    ///      - `InsufficientAllowance(...)` if epoch + top-up cannot cover cost.
+    ///      - `OnlyKnowledgeAssetsV10(caller)` if msg.sender is not KAV10.
+    ///
+    ///      Does NOT move TRAC — TRAC is already in StakingStorage from the
+    ///      NFT's `createAccount`/`topUp` paths. This call only updates the
+    ///      per-epoch spent ledger and returns the discounted amount for
+    ///      caller-side accounting.
+    function coverPublishingCost(
+        address publishingAgent,
+        uint96 baseCost
+    ) external returns (uint96 discountedCost);
 }

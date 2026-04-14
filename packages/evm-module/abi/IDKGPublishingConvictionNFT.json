@@ -21,6 +21,30 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "publishingAgent",
+        "type": "address"
+      },
+      {
+        "internalType": "uint96",
+        "name": "baseCost",
+        "type": "uint96"
+      }
+    ],
+    "name": "coverPublishingCost",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "discountedCost",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
