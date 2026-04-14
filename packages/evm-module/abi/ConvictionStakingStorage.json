@@ -56,9 +56,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "epoch",
-        "type": "uint256"
+        "type": "uint64"
       }
     ],
     "name": "LastClaimedEpochUpdated",
@@ -124,9 +124,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "multiplier",
-        "type": "uint8"
+        "internalType": "uint64",
+        "name": "multiplier18",
+        "type": "uint64"
       }
     ],
     "name": "PositionCreated",
@@ -193,9 +193,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "newMultiplier",
-        "type": "uint8"
+        "internalType": "uint64",
+        "name": "newMultiplier18",
+        "type": "uint64"
       }
     ],
     "name": "PositionRelocked",
@@ -237,9 +237,9 @@
         "type": "uint40"
       },
       {
-        "internalType": "uint8",
-        "name": "multiplier",
-        "type": "uint8"
+        "internalType": "uint64",
+        "name": "multiplier18",
+        "type": "uint64"
       }
     ],
     "name": "createPosition",
@@ -394,19 +394,19 @@
             "type": "uint40"
           },
           {
-            "internalType": "uint8",
-            "name": "multiplier",
-            "type": "uint8"
-          },
-          {
             "internalType": "uint72",
             "name": "identityId",
             "type": "uint72"
           },
           {
-            "internalType": "uint256",
+            "internalType": "uint64",
+            "name": "multiplier18",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
             "name": "lastClaimedEpoch",
-            "type": "uint256"
+            "type": "uint64"
           }
         ],
         "internalType": "struct ConvictionStakingStorage.Position",
@@ -575,19 +575,19 @@
         "type": "uint40"
       },
       {
-        "internalType": "uint8",
-        "name": "multiplier",
-        "type": "uint8"
-      },
-      {
         "internalType": "uint72",
         "name": "identityId",
         "type": "uint72"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
+        "name": "multiplier18",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
         "name": "lastClaimedEpoch",
-        "type": "uint256"
+        "type": "uint64"
       }
     ],
     "stateMutability": "view",
@@ -601,9 +601,9 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256",
+        "internalType": "uint64",
         "name": "epoch",
-        "type": "uint256"
+        "type": "uint64"
       }
     ],
     "name": "setLastClaimedEpoch",
@@ -661,9 +661,9 @@
         "type": "uint40"
       },
       {
-        "internalType": "uint8",
-        "name": "newMultiplier",
-        "type": "uint8"
+        "internalType": "uint64",
+        "name": "newMultiplier18",
+        "type": "uint64"
       }
     ],
     "name": "updateOnRelock",

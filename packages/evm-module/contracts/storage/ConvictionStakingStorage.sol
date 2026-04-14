@@ -11,13 +11,23 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ConvictionStakingStorage";
     string private constant _VERSION = "1.0.0";
 
+    // Multiplier scale, matches Staking.convictionMultiplier /
+    // DKGStakingConvictionNFT._convictionMultiplier (both return 1e18-scaled
+    // values so fractional tiers like 1.5x and 3.5x are representable).
+    uint256 internal constant SCALE18 = 1e18;
+
+    // Position layout (two storage slots):
+    //   slot 1: raw(96) + lockEpochs(40) + expiryEpoch(40) + identityId(72) = 248 bits
+    //   slot 2: multiplier18(64) + lastClaimedEpoch(64)                    = 128 bits
+    // `multiplier18` is 1e18-scaled; max tier 6e18 fits comfortably in uint64.
+    // `lastClaimedEpoch` is a Chronos epoch number; uint64 holds ~5.8e11 years.
     struct Position {
         uint96 raw;
         uint40 lockEpochs;
         uint40 expiryEpoch;
-        uint8 multiplier;
         uint72 identityId;
-        uint256 lastClaimedEpoch;
+        uint64 multiplier18;
+        uint64 lastClaimedEpoch;
     }
 
     event PositionCreated(
@@ -26,13 +36,13 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint96 raw,
         uint40 lockEpochs,
         uint40 expiryEpoch,
-        uint8 multiplier
+        uint64 multiplier18
     );
     event PositionRelocked(
         uint256 indexed tokenId,
         uint40 newLockEpochs,
         uint40 newExpiryEpoch,
-        uint8 newMultiplier
+        uint64 newMultiplier18
     );
     event PositionRedelegated(
         uint256 indexed tokenId,
@@ -40,7 +50,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint72 indexed newIdentityId
     );
     event PositionDeleted(uint256 indexed tokenId);
-    event LastClaimedEpochUpdated(uint256 indexed tokenId, uint256 epoch);
+    event LastClaimedEpochUpdated(uint256 indexed tokenId, uint64 epoch);
     event EffectiveStakeFinalized(uint256 startEpoch, uint256 endEpoch);
     event NodeEffectiveStakeFinalized(uint72 indexed identityId, uint256 startEpoch, uint256 endEpoch);
 
@@ -79,13 +89,13 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint72 identityId,
         uint96 raw,
         uint40 lockEpochs,
-        uint8 multiplier
+        uint64 multiplier18
     ) external onlyContracts {
         require(identityId != 0, "Zero node");
         require(positions[tokenId].raw == 0, "Position exists");
         require(raw > 0, "Zero raw");
-        require(multiplier >= 1, "Bad multiplier");
-        require(lockEpochs > 0 || multiplier == 1, "Lock0 must be 1x");
+        require(multiplier18 >= SCALE18, "Bad multiplier");
+        require(lockEpochs > 0 || multiplier18 == SCALE18, "Lock0 must be 1x");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         uint40 expiryEpoch = lockEpochs == 0 ? 0 : uint40(currentEpoch) + lockEpochs;
@@ -94,19 +104,20 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             raw: raw,
             lockEpochs: lockEpochs,
             expiryEpoch: expiryEpoch,
-            multiplier: multiplier,
             identityId: identityId,
-            lastClaimedEpoch: currentEpoch - 1
+            multiplier18: multiplier18,
+            lastClaimedEpoch: uint64(currentEpoch - 1)
         });
 
-        // Apply diff: full effective stake enters at currentEpoch
-        int256 initialEffective = int256(uint256(raw)) * int256(uint256(multiplier));
+        // Apply diff: full effective stake (raw * multiplier18 / 1e18) enters at currentEpoch
+        int256 initialEffective = (int256(uint256(raw)) * int256(uint256(multiplier18))) / int256(SCALE18);
         effectiveStakeDiff[currentEpoch] += initialEffective;
         nodeEffectiveStakeDiff[identityId][currentEpoch] += initialEffective;
 
-        // On expiry, the multiplier boost drops away; principal remains at 1x
-        if (lockEpochs > 0 && multiplier > 1) {
-            int256 expiryDelta = int256(uint256(raw)) * int256(uint256(multiplier - 1));
+        // On expiry, the multiplier boost drops away; principal remains at 1x.
+        // boost = raw * (multiplier18 - 1e18) / 1e18
+        if (lockEpochs > 0 && multiplier18 > SCALE18) {
+            int256 expiryDelta = (int256(uint256(raw)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
             effectiveStakeDiff[expiryEpoch] -= expiryDelta;
             nodeEffectiveStakeDiff[identityId][expiryEpoch] -= expiryDelta;
         }
@@ -116,22 +127,22 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
         }
 
-        emit PositionCreated(tokenId, identityId, raw, lockEpochs, expiryEpoch, multiplier);
+        emit PositionCreated(tokenId, identityId, raw, lockEpochs, expiryEpoch, multiplier18);
     }
 
     function updateOnRelock(
         uint256 tokenId,
         uint40 newLockEpochs,
-        uint8 newMultiplier
+        uint64 newMultiplier18
     ) external onlyContracts {
         Position storage pos = positions[tokenId];
         require(pos.raw > 0, "No position");
         require(newLockEpochs > 0, "Zero lock");
-        // 1x is the post-expiry rest state — re-committing at 1x would leave
-        // lockEpochs/expiryEpoch non-zero while the diff curve stays flat,
-        // a drift that downstream reward math cannot distinguish from a real
-        // boosted lock. Force every relock to carry an actual multiplier.
-        require(newMultiplier >= 2, "Bad multiplier");
+        // 1x (= SCALE18) is the post-expiry rest state — re-committing at 1x
+        // would leave lockEpochs/expiryEpoch non-zero while the diff curve
+        // stays flat, a drift downstream reward math cannot distinguish from
+        // a real boosted lock. Force every relock to carry an actual boost.
+        require(newMultiplier18 > SCALE18, "Bad multiplier");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         // Relock is a post-expiry re-commit: prior lock must be done (or never existed)
@@ -140,8 +151,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint96 raw = pos.raw;
         uint72 identityId = pos.identityId;
 
-        // Position is currently at raw*1 (permanent, post-expiry). Lift to raw*newMultiplier.
-        int256 boost = int256(uint256(raw)) * int256(uint256(newMultiplier - 1));
+        // Position is currently at raw*1 (permanent, post-expiry). Lift to raw*newMultiplier18.
+        // boost = raw * (newMultiplier18 - SCALE18) / SCALE18
+        int256 boost = (int256(uint256(raw)) * int256(uint256(newMultiplier18) - SCALE18)) / int256(SCALE18);
         effectiveStakeDiff[currentEpoch] += boost;
         nodeEffectiveStakeDiff[identityId][currentEpoch] += boost;
 
@@ -151,14 +163,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         pos.expiryEpoch = newExpiry;
         pos.lockEpochs = newLockEpochs;
-        pos.multiplier = newMultiplier;
+        pos.multiplier18 = newMultiplier18;
 
         if (currentEpoch > 1) {
             _finalizeEffectiveStakeUpTo(currentEpoch - 1);
             _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
         }
 
-        emit PositionRelocked(tokenId, newLockEpochs, pos.expiryEpoch, newMultiplier);
+        emit PositionRelocked(tokenId, newLockEpochs, pos.expiryEpoch, newMultiplier18);
     }
 
     function updateOnRedelegate(uint256 tokenId, uint72 newIdentityId) external onlyContracts {
@@ -172,11 +184,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         uint96 raw = pos.raw;
         uint40 expiryEpoch = pos.expiryEpoch;
-        uint8 multiplier = pos.multiplier;
+        uint64 multiplier18 = pos.multiplier18;
         bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
 
         // Effective stake contribution that must transfer per-node RIGHT NOW
-        uint256 effectiveNow = stillBoosted ? uint256(raw) * uint256(multiplier) : uint256(raw);
+        // = raw * (boosted ? multiplier18 : SCALE18) / SCALE18
+        uint256 effectiveNow = stillBoosted
+            ? (uint256(raw) * uint256(multiplier18)) / SCALE18
+            : uint256(raw);
 
         // Per-node diff move only; global totals unchanged
         int256 signedEffectiveNow = int256(effectiveNow);
@@ -185,7 +200,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         // Pending expiry drop must also follow the position
         if (stillBoosted) {
-            int256 expiryDelta = int256(uint256(raw)) * int256(uint256(multiplier - 1));
+            int256 expiryDelta = (int256(uint256(raw)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
             // cancel old subtraction
             nodeEffectiveStakeDiff[oldIdentityId][expiryEpoch] += expiryDelta;
             // install on new node
@@ -202,7 +217,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         emit PositionRedelegated(tokenId, oldIdentityId, newIdentityId);
     }
 
-    function setLastClaimedEpoch(uint256 tokenId, uint256 epoch) external onlyContracts {
+    function setLastClaimedEpoch(uint256 tokenId, uint64 epoch) external onlyContracts {
         require(positions[tokenId].raw > 0, "No position");
         positions[tokenId].lastClaimedEpoch = epoch;
         emit LastClaimedEpochUpdated(tokenId, epoch);
@@ -216,9 +231,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint96 raw = pos.raw;
         uint72 identityId = pos.identityId;
         uint40 expiryEpoch = pos.expiryEpoch;
-        uint8 multiplier = pos.multiplier;
+        uint64 multiplier18 = pos.multiplier18;
         bool stillBoosted = expiryEpoch != 0 && currentEpoch < expiryEpoch;
-        uint256 effectiveNow = stillBoosted ? uint256(raw) * uint256(multiplier) : uint256(raw);
+        uint256 effectiveNow = stillBoosted
+            ? (uint256(raw) * uint256(multiplier18)) / SCALE18
+            : uint256(raw);
 
         // Remove contribution from currentEpoch onward
         int256 signedEffectiveNow = int256(effectiveNow);
@@ -227,7 +244,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         // Cancel the pending expiry subtraction so it does not fire after delete
         if (stillBoosted) {
-            int256 expiryDelta = int256(uint256(raw)) * int256(uint256(multiplier - 1));
+            int256 expiryDelta = (int256(uint256(raw)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
             effectiveStakeDiff[expiryEpoch] += expiryDelta;
             nodeEffectiveStakeDiff[identityId][expiryEpoch] += expiryDelta;
         }
@@ -260,7 +277,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         for (uint256 e = lastFinalizedEpoch + 1; e <= epoch; e++) {
             simulated += effectiveStakeDiff[e];
         }
-        if (simulated < 0) return 0;
+        // Unify policy with the mutate path (`_finalizeEffectiveStakeUpTo`):
+        // a negative running total signals ledger corruption and is an
+        // unrecoverable invariant break. Revert even from this view so RPC
+        // clients see the failure instead of silently reading a fabricated 0.
+        require(simulated >= 0, "Negative total");
         return uint256(simulated);
     }
 
@@ -275,7 +296,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         for (uint256 e = lastFinalized + 1; e <= epoch; e++) {
             simulated += nodeEffectiveStakeDiff[identityId][e];
         }
-        if (simulated < 0) return 0;
+        require(simulated >= 0, "Negative node total");
         return uint256(simulated);
     }
 
@@ -295,12 +316,26 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // O(currentEpoch - lastFinalizedEpoch) simulate path into a single
     // write by calling these before reading getTotalEffectiveStakeAtEpoch /
     // getNodeEffectiveStakeAtEpoch across a long dormant window.
+    //
+    // Only past epochs may be finalized: finalizing the current or a future
+    // epoch would crystallize diff[currentEpoch] before in-flight mutators
+    // finished writing to it, leaving every subsequent read stuck on a stale
+    // cached value. Mirrors `ContextGraphValueStorage.finalizeCGValueUpTo`.
+    //
+    // TODO(phase-2-followup): both this contract and
+    // `ContextGraphValueStorage._finalize*UpTo` backfill from epoch 1 when
+    // `lastFinalized == 0`. On a long-dormant deployment the first mutator
+    // will loop through every zero-diff epoch and can run out of gas. Fix
+    // should be applied symmetrically across both storage contracts in a
+    // separate followup rather than diverging one of them here.
 
     function finalizeEffectiveStakeUpTo(uint256 epoch) external onlyContracts {
+        require(epoch < chronos.getCurrentEpoch(), "Future or current epoch");
         _finalizeEffectiveStakeUpTo(epoch);
     }
 
     function finalizeNodeEffectiveStakeUpTo(uint72 identityId, uint256 epoch) external onlyContracts {
+        require(epoch < chronos.getCurrentEpoch(), "Future or current epoch");
         _finalizeNodeEffectiveStakeUpTo(identityId, epoch);
     }
 
