@@ -6,6 +6,7 @@ import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
   computePublishACKDigest,
+  computePublishPublisherDigest,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -252,12 +253,19 @@ describe('V10 Publish E2E', () => {
 
     expect(ackSignatures).toHaveLength(3);
 
+    // Exercise the real H5 + N26 publisher-digest helper so the mock-adapter
+    // round-trip stays byte-aligned with the production path. The mock
+    // adapter does not verify publisherSignature on its own, so without
+    // this we'd be silently round-tripping arbitrary bytes.
     const pubSig = ethers.Signature.from(
       await publisherWallet.signMessage(
-        ethers.getBytes(ethers.solidityPackedKeccak256(
-          ['uint72', 'bytes32'],
-          [1, ethers.hexlify(merkleRoot)],
-        )),
+        computePublishPublisherDigest(
+          TEST_CHAIN_ID,
+          TEST_KAV10_ADDR,
+          1n,
+          cgIdBigInt,
+          merkleRoot,
+        ),
       ),
     );
 

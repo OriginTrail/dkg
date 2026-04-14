@@ -14,12 +14,24 @@ function uint256ToBytes(value: bigint): Uint8Array {
 }
 
 /**
- * Compute the ACK digest that core nodes sign to attest data integrity.
+ * LEGACY 2-field / 6-field ACK digest used by the **verify-proposal** flow
+ * (`verify-proposal-handler.ts`, `verify-collector.ts`). NOT used by the
+ * V10 publish path — see `computePublishACKDigest` below for the
+ * H5-prefixed 8-field layout that matches `KnowledgeAssetsV10.sol:362-373`.
  *
- * V10 6-field: keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
+ * This function has two shapes kept for backward compatibility:
+ *   - 2-field: `keccak256(abi.encodePacked(contextGraphId, merkleRoot))`
+ *     when `kaCount` is omitted.
+ *   - 6-field: `keccak256(abi.encodePacked(contextGraphId, merkleRoot,
+ *     kaCount, byteSize, epochs, tokenAmount))` when all extra fields
+ *     are supplied.
  *
- * This function computes the inner digest (before EIP-191 prefix).
- * The EIP-191 prefix is applied by the signing function (e.g. ethers signMessage).
+ * Neither shape carries the chain/contract domain separation that the
+ * V10 publish digest requires. Any V10 publish-path signer MUST use
+ * `computePublishACKDigest` instead.
+ *
+ * Returns the inner digest only; the EIP-191 prefix is applied by the
+ * signing function (e.g. `ethers.Wallet.signMessage`).
  *
  * @param contextGraphId - The uint256 context graph identifier
  * @param merkleRoot - The 32-byte merkle root of the triple set

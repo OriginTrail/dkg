@@ -3985,12 +3985,16 @@ export class DKGAgent {
       stagingQuads?: Uint8Array,
       epochs?: number,
       tokenAmount?: bigint,
+      swmGraphId?: string,
+      subGraphName?: string,
     ) => {
       // Fail loud on non-numeric or zero CG ids: V10 publish requires a real
       // on-chain context graph and the contract rejects `cgId == 0` with
       // `ZeroContextGraphId`. Matches the same guard in dkg-publisher and
       // storage-ack-handler so ACK signers, ACK verifiers, and the chain
-      // submitter all agree on the legal domain.
+      // submitter all agree on the legal domain. `contextGraphId` here is
+      // the TARGET on-chain id — `swmGraphId` (optional) is the source SWM
+      // graph name and is NOT required to be numeric.
       let cgIdBigInt: bigint;
       try {
         cgIdBigInt = BigInt(contextGraphId);
@@ -4011,15 +4015,10 @@ export class DKGAgent {
         ? await chain.getMinimumRequiredSignatures()
         : undefined;
 
-      // H5 prefix inputs — both must come from the chain adapter so that
+      // H5 prefix inputs — both come from the chain adapter so that
       // publisher-side digest construction matches what core-node handlers
-      // produced on their side.
-      if (typeof chain.getEvmChainId !== 'function' || typeof chain.getKnowledgeAssetsV10Address !== 'function') {
-        throw new Error(
-          'V10 ACK collection requires a chain adapter exposing getEvmChainId() and ' +
-          'getKnowledgeAssetsV10Address(); current adapter is not V10-capable.',
-        );
-      }
+      // produced on their side. These are required for any V10 path; the
+      // adapter must implement them.
       const chainIdBig = await chain.getEvmChainId();
       const kav10Address = await chain.getKnowledgeAssetsV10Address();
 
@@ -4038,6 +4037,8 @@ export class DKGAgent {
         stagingQuads,
         epochs,
         tokenAmount,
+        swmGraphId,
+        subGraphName,
       });
       return result.acks;
     };

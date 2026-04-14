@@ -774,6 +774,12 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+    // Deliberately tolerant of `contextGraphId === 0n`. The real EVM
+    // adapter rejects that at `evm-adapter.ts:createKnowledgeAssetsV10`
+    // pre-tx, which is the authoritative fail-loud boundary. The mock is
+    // used by ~680 unit tests that publish with descriptive CG-name
+    // strings and rely on the silent `0n` fallback to exercise the data
+    // flow without migrating every fixture to on-chain numeric ids.
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }

@@ -1017,17 +1017,36 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    // Identifier split for V10 publishes.
+    //
+    //   `contextGraphId` (outer) = the SWM graph id the publisher reads
+    //     data from (e.g. "devnet-test" or "42").
+    //   `options.publishContextGraphId` (optional) = the TARGET on-chain
+    //     numeric CG id that the ACK digest + publishDirect tx use.
+    //
+    // Remap flow: `publishFromSharedMemory("devnet-test", { subContextGraphId: "42" })`
+    //   → swmGraphId = "devnet-test", target CG id = 42. Peers read SWM at
+    //   "devnet-test" and sign the ACK against on-chain id 42.
+    //
+    // Direct flow: `dkg publish "42"` → both are "42"; no remap.
+    //
+    // The previous code force-picked `contextGraphId` whenever
+    // `isPublishFromSharedMemory` was true, which made the ACK digest and
+    // the on-chain tx see the SOURCE name (not a number) in the remap
+    // flow → `BigInt()` threw → silent 0n → evm-adapter fail-loud →
+    // ZeroContextGraphId. Always prefer the explicit target override.
+    const v10CgDomain = options.publishContextGraphId ?? contextGraphId;
+    const swmGraphId = contextGraphId;
+
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        const ackDomain = isPublishFromSharedMemory
-          ? contextGraphId
-          : (options.publishContextGraphId ?? contextGraphId);
         v10ACKs = await options.v10ACKProvider(
-          kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
+          kcMerkleRoot, v10CgDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
           publishEpochs, precomputedTokenAmount,
+          swmGraphId, options.subGraphName,
         );
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
@@ -1040,19 +1059,16 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
-    // Resolve the on-chain context graph id once for the whole V10 block so
-    // the self-sign ACK digest (below) and the publisher digest (in the
-    // chain-submit block) see the same bigint. Non-numeric CG names resolve
-    // to 0n here — the V10 contract rejects `contextGraphId == 0` with
+    // Resolve the target CG id bigint once for the whole V10 block so the
+    // self-sign ACK digest (below) and the publisher digest (in the chain-
+    // submit block) see the same value. Non-numeric domains resolve to 0n
+    // here — the V10 contract rejects `contextGraphId == 0` with
     // `ZeroContextGraphId`, so the authoritative fail-loud lives at the EVM
     // adapter boundary (`evm-adapter.ts:createKnowledgeAssetsV10` pre-tx
     // check) and at the core-node `storage-ack-handler.ts`. Keeping the
     // publisher-side resolution soft lets mock adapters and integration
     // tests that publish with descriptive SWM CG names continue to exercise
     // the data-flow path without needing per-test fixture gymnastics.
-    const v10CgDomain = isPublishFromSharedMemory
-      ? contextGraphId
-      : (options.publishContextGraphId ?? contextGraphId);
     let v10CgId: bigint;
     try {
       v10CgId = BigInt(v10CgDomain);
@@ -1063,15 +1079,19 @@ export class DKGPublisher implements Publisher {
     // Numeric EVM chainId + kav10Address are needed by BOTH the self-sign ACK
     // digest and the publisher digest (H5 prefix). Fetch them once; the
     // adapter field `this.chain.chainId` is a namespaced string like
-    // `evm:31337` and is not directly parseable with `BigInt()`.
+    // `evm:31337` and is not directly parseable with `BigInt()`. Wrap in
+    // try/catch so non-V10-capable adapters (e.g. `NoChainAdapter`, whose
+    // stubs throw) do not crash the publish path — they simply leave
+    // both values undefined, the self-sign fallback stays skipped, and
+    // the publish goes tentative.
     let v10ChainId: bigint | undefined;
     let v10KavAddress: string | undefined;
-    if (
-      typeof this.chain.getEvmChainId === 'function' &&
-      typeof this.chain.getKnowledgeAssetsV10Address === 'function'
-    ) {
+    try {
       v10ChainId = await this.chain.getEvmChainId();
       v10KavAddress = await this.chain.getKnowledgeAssetsV10Address();
+    } catch {
+      v10ChainId = undefined;
+      v10KavAddress = undefined;
     }
 
     // Self-sign ACK as last resort: single-node mode (no provider), or when

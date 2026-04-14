@@ -128,6 +128,16 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
+  /**
+   * Minimal view binding to `PaymasterManager.validPaymasters(address)`.
+   * Used by `createKnowledgeAssetsV10` to decide whether a non-zero
+   * paymaster address is whitelisted by the contract. When true, the
+   * contract calls `paymaster.coverCost(tokenAmount)` instead of pulling
+   * TRAC from `msg.sender` — the adapter can skip approval. When false
+   * (or resolution fails), the contract falls back to `msg.sender` and
+   * the adapter must approve TRAC from the operational signer.
+   */
+  paymasterManager?: Contract;
 }
 
 /**
@@ -236,6 +246,25 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
+    }
+
+    // PaymasterManager is only used to check whether a non-zero paymaster
+    // passed to `publishDirect` is whitelisted, so the adapter can decide
+    // whether to approve TRAC from the operational signer. Read-only — bind
+    // to `provider` not `signer`.
+    try {
+      const paymasterManagerAddress: string = await this.contracts.hub.getContractAddress('PaymasterManager');
+      if (paymasterManagerAddress !== ethers.ZeroAddress) {
+        this.contracts.paymasterManager = new Contract(
+          paymasterManagerAddress,
+          ['function validPaymasters(address) view returns (bool)'],
+          this.provider,
+        );
+      }
+    } catch {
+      // PaymasterManager not registered in Hub — conservative fallback: the
+      // adapter always approves when a non-zero paymaster is passed, which
+      // is correct behavior on chains where whitelist enforcement is absent.
     }
 
     const tokenAddress: string = await this.contracts.hub.getContractAddress('Token');
@@ -1173,11 +1202,33 @@ export class EVMChainAdapter implements ChainAdapter {
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 
-    // publishDirect pulls TRAC from msg.sender when paymaster is zero.
-    // Approve the adapter's signer → KAV10 for the required amount.
-    // When a paymaster is set, the paymaster handles the token flow — the
-    // adapter does not approve on the caller's behalf.
-    if (this.contracts.token && params.paymaster === ethers.ZeroAddress) {
+    // Approval policy for TRAC →  KAV10.
+    //
+    //   KnowledgeAssetsV10._publishDirect (KnowledgeAssetsV10.sol:613-628):
+    //     if (paymasterManager.validPaymasters(paymaster)) {
+    //       IPaymaster(paymaster).coverCost(tokenAmount);
+    //     } else {
+    //       // falls back to pulling TRAC from msg.sender
+    //       token.transferFrom(msg.sender, stakingStorage, tokenAmount);
+    //     }
+    //
+    // So the contract pulls from msg.sender whenever the paymaster is NOT
+    // whitelisted, regardless of whether it's zero or a random address.
+    // Approve from the operational signer in every case EXCEPT when the
+    // paymaster is non-zero AND `validPaymasters(paymaster)` returns true.
+    let needsApproval = true;
+    if (params.paymaster !== ethers.ZeroAddress && this.contracts.paymasterManager) {
+      try {
+        const whitelisted: boolean = await this.contracts.paymasterManager.validPaymasters(params.paymaster);
+        needsApproval = !whitelisted;
+      } catch {
+        // PaymasterManager query failed (transient RPC, ABI mismatch) —
+        // stay safe and approve anyway. A redundant allowance is cheap; a
+        // missing allowance reverts the publish.
+      }
+    }
+
+    if (this.contracts.token && needsApproval) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
       const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {

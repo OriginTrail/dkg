@@ -302,11 +302,14 @@ function createV10ACKProviderForPublisher(
     stagingQuads,
     epochs,
     tokenAmount,
+    swmGraphId,
+    subGraphName,
   ) => {
     // Fail loud on non-numeric or zero CG ids. V10 publish requires a real
     // on-chain context graph; `ZeroContextGraphId` at
-    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. The old silent
-    // `cgIdBigInt = 0n` fallback produced ACKs the contract rejected anyway.
+    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. `contextGraphId`
+    // here is the TARGET on-chain numeric id; `swmGraphId` (optional) is
+    // the source SWM graph name and is NOT required to be numeric.
     let cgIdBigInt: bigint;
     try {
       cgIdBigInt = BigInt(contextGraphId);
@@ -345,6 +348,8 @@ function createV10ACKProviderForPublisher(
       stagingQuads,
       epochs,
       tokenAmount,
+      swmGraphId,
+      subGraphName,
     });
     return result.acks;
   };

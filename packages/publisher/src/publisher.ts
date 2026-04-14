@@ -24,7 +24,8 @@ export type ReceiverSignatureProvider = (
 
 /**
  * V10 core node ACK signature collected via /dkg/10.0.0/storage-ack.
- * Spec §9.0.3: ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ * Spec §9.0.3: ACK = EIP-191(computePublishACKDigest(chainId, kav10Address,
+ *   contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
  */
 export interface V10CoreNodeACK {
   peerId: string;
@@ -36,8 +37,15 @@ export interface V10CoreNodeACK {
 /**
  * Callback that collects V10 StorageACKs from 3 core nodes.
  * Called AFTER merkle root computation, BEFORE on-chain tx.
- * stagingQuads: optional N-Quads bytes to send inline to core nodes
- * so they can verify the merkle root without needing SWM pre-positioning.
+ *
+ * Identifier split (remap support): `contextGraphId` is the TARGET on-chain
+ * numeric CG id that the ACK digest and the on-chain tx use. `swmGraphId`
+ * (optional) is the SOURCE graph where the data lives in SWM — peers load
+ * quads from `<swmGraphId>` but sign the ACK over `<contextGraphId>`. When
+ * omitted, peers fall back to `contextGraphId` for both.
+ *
+ * stagingQuads: optional N-Quads bytes to send inline to core nodes so
+ * they can verify the merkle root without needing SWM pre-positioning.
  */
 export type V10ACKProvider = (
   merkleRoot: Uint8Array,
@@ -48,6 +56,8 @@ export type V10ACKProvider = (
   stagingQuads?: Uint8Array,
   epochs?: number,
   tokenAmount?: bigint,
+  swmGraphId?: string,
+  subGraphName?: string,
 ) => Promise<V10CoreNodeACK[]>;
 
 /**

@@ -16,7 +16,13 @@ export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
   signerWallet: ethers.Wallet;
-  contextGraphSharedMemoryUri: (cgId: string) => string;
+  /**
+   * Resolves the SWM graph URI for a given (sourceGraphId, subGraphName).
+   * Accepts an optional `subGraphName` so the handler can locate data
+   * stored under `.../<cgId>/<subGraphName>/_shared_memory` when the
+   * publisher is writing into a sub-graph partition.
+   */
+  contextGraphSharedMemoryUri: (cgId: string, subGraphName?: string) => string;
   /**
    * Numeric EVM chain id (e.g. 31337n for hardhat). Part of the H5 prefix
    * on the V10 ACK digest — without this the signature will not match the
@@ -63,12 +69,22 @@ export class StorageACKHandler {
     }
 
     const intent = decodePublishIntent(data);
+    // `cgId` is the TARGET on-chain numeric id used by the ACK digest and
+    // the publishDirect tx. `swmGraphId` (optional, from the remap flow)
+    // is the SOURCE graph where data lives in SWM. When absent, fall back
+    // to `cgId` so direct-publish flows keep working unchanged.
     const cgId = intent.contextGraphId;
+    const swmGraphId = intent.swmGraphId && intent.swmGraphId.length > 0
+      ? intent.swmGraphId
+      : cgId;
+    const subGraphName = intent.subGraphName && intent.subGraphName.length > 0
+      ? intent.subGraphName
+      : undefined;
     const merkleRoot = intent.merkleRoot instanceof Uint8Array
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
 
-    const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
+    const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
     let swmQuads: Quad[];
 
