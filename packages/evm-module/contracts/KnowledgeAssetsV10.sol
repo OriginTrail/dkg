@@ -7,7 +7,6 @@ import {EpochStorage} from "./storage/EpochStorage.sol";
 import {PaymasterManager} from "./storage/PaymasterManager.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
-import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
@@ -48,7 +47,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ParanetsRegistry public paranetsRegistry;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
     Chronos public chronos;
-    ShardingTableStorage public shardingTableStorage;
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
@@ -78,7 +76,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
         chronos = Chronos(hub.getContractAddress("Chronos"));
-        shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
