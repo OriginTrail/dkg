@@ -248,6 +248,83 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     }
 
     // ========================================================================
+    // Entry points (Phase 5 stubs — S2..S7 fill in)
+    // ========================================================================
+    //
+    // These stubs revert `"NotImplemented"` so the Phase 5 S1 scaffold
+    // compiles cleanly and deploys green without committing to a
+    // partial behavior. Each is owned by a downstream subagent:
+    //
+    //   S2 — createConviction (Flow A atomic)
+    //   S3 — relock
+    //   S4 — redelegate
+    //   S5 — requestWithdrawal / processWithdrawal
+    //   S6 — claimRewards (stubbed TRAC transfer, Phase 11 finishes it)
+    //   S7 — convertToNFT (V8 → V10 migration, 7-step atomic)
+    //
+    // Do NOT add partial logic here — subagents assume a clean revert
+    // surface as their starting point.
+
+    /// @notice S2 — Mint a fresh NFT-backed staking position on `identityId`
+    ///         with `amount` TRAC locked for `lockEpochs` epochs.
+    /// @dev `pure` stub modifier silences "can be restricted to pure" warning;
+    ///      S2 will drop the modifier when wiring up state mutations.
+    function createConviction(
+        uint72 /* identityId */,
+        uint96 /* amount */,
+        uint8 /* lockEpochs */
+    ) external pure returns (uint256 /* tokenId */) {
+        revert("NotImplemented");
+    }
+
+    /// @notice S3 — Post-expiry re-commit of an existing position to a new
+    ///         lock tier. Raw stake unchanged; multiplier + expiry shift.
+    /// @dev `pure` stub modifier — S3 drops it when adding state reads.
+    function relock(uint256 /* tokenId */, uint8 /* newLockEpochs */) external pure {
+        revert("NotImplemented");
+    }
+
+    /// @notice S4 — Move a position from its current node to `newIdentityId`.
+    ///         Per-node effective stake moves; global totals invariant.
+    /// @dev `pure` stub modifier — S4 drops it when adding state reads.
+    function redelegate(uint256 /* tokenId */, uint72 /* newIdentityId */) external pure {
+        revert("NotImplemented");
+    }
+
+    /// @notice S5 — Start the 15-day withdrawal timer for a post-expiry
+    ///         position. Caller must own the NFT.
+    /// @dev `pure` stub modifier — S5 drops it when adding state reads.
+    function requestWithdrawal(uint256 /* tokenId */) external pure {
+        revert("NotImplemented");
+    }
+
+    /// @notice S5 — After `WITHDRAWAL_DELAY` has elapsed, refund TRAC to
+    ///         the owner and burn the NFT.
+    /// @dev `pure` stub modifier — S5 drops it when adding state reads.
+    function processWithdrawal(uint256 /* tokenId */) external pure {
+        revert("NotImplemented");
+    }
+
+    /// @notice S6 — Walk unclaimed epochs, accumulate reward, update
+    ///         `lastClaimedEpoch`. Phase 5 accrues bookkeeping only;
+    ///         Phase 11 wires the actual TRAC transfer.
+    /// @dev `pure` stub modifier — S6 drops it when adding state reads.
+    function claimRewards(uint256 /* tokenId */) external pure returns (uint96 /* amount */) {
+        revert("NotImplemented");
+    }
+
+    /// @notice S7 — Atomic V8 → V10 migration: burn the caller's V8
+    ///         address-keyed delegation on `identityId` and mint a fresh
+    ///         V10 NFT-backed position at the specified `lockEpochs` tier.
+    /// @dev `pure` stub modifier — S7 drops it when adding state mutations.
+    function convertToNFT(
+        uint72 /* identityId */,
+        uint8 /* lockEpochs */
+    ) external pure returns (uint256 /* tokenId */) {
+        revert("NotImplemented");
+    }
+
+    // ========================================================================
     // ERC-721 overrides — accrued-interest transfer model (Phase 5 Q8)
     // ========================================================================
     //
