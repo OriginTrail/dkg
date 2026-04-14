@@ -2900,6 +2900,95 @@ describe('Staking contract', function () {
     );
   });
 
+  it('_recordStake: replaying the same tokenId reverts with TokenIdAlreadyRecorded and accounting stays consistent', async () => {
+    // V10 model: each NFT is an immutable create-once position. A caller bug
+    // that re-submits the same tokenId must not double-count nodeStake /
+    // totalStake while overwriting the delegator base. Without the freshness
+    // guard, the second call would write delegatorBase = secondAmount but
+    // node total = firstAmount + secondAmount — accounting off by exactly
+    // firstAmount. This test locks that guard and also asserts that the
+    // revert leaves the first record untouched.
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const firstAmount = 1_000n;
+    const totalBefore = await StakingStorage.getTotalStake();
+
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](7n, identityId, firstAmount, 12);
+
+    // Replay — same tokenId on the same node — must revert.
+    await expect(
+      Staking.connect(nftSigner)[
+        '_recordStake'
+      ](7n, identityId, 9_999n, 6),
+    )
+      .to.be.revertedWithCustomError(Staking, 'TokenIdAlreadyRecorded')
+      .withArgs(7n, identityId);
+
+    // First record intact, no leak from the reverted replay.
+    expect(
+      await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(7n)),
+    ).to.equal(firstAmount);
+    expect(await StakingStorage.getNodeStake(identityId)).to.equal(firstAmount);
+    expect(await StakingStorage.getTotalStake()).to.equal(
+      totalBefore + firstAmount,
+    );
+  });
+
+  it('_recordStake: baselines delegatorLastSettled to the current nodeEpochScorePerStake (score-earned-before-NFT safety)', async () => {
+    // Without calling _prepareForStakeChange before writing the fresh stake,
+    // a later reward claim on this NFT would read
+    // delegatorLastSettledNodeEpochScorePerStake = 0 and collect score the
+    // node earned before the NFT existed. This test reproduces the scenario
+    // (bump the node's score-per-stake index first, THEN mint the NFT) and
+    // asserts the baseline is set at mint time so the claim window starts
+    // from "now", not from zero. Mirrors the existing V8 zero-stake-restake
+    // regression earlier in this file (search "🪫 zero-stake restake bumps
+    // index without adding score") — same mechanism, NFT-keyed.
+    const { identityId } = await createProfile();
+    const nftSigner = accounts[5];
+    await impersonateHubContract('DKGStakingConvictionNFT', nftSigner);
+
+    const epoch = await Chronos.getCurrentEpoch();
+
+    // Advance the node's score-per-stake index before the NFT is minted.
+    // accounts[0] is the hub owner so it can call onlyContracts setters.
+    const advancedIndex = 1_234n * 10n ** 18n; // 1e18-scaled, arbitrary
+    await RandomSamplingStorage.addToNodeEpochScorePerStake(
+      epoch,
+      identityId,
+      advancedIndex,
+    );
+
+    const minStake = await ParametersStorage.minimumStake();
+    await Staking.connect(nftSigner)[
+      '_recordStake'
+    ](42n, identityId, minStake, 12);
+
+    // Fresh NFT's delegatorLastSettled must equal the node's current index,
+    // not 0. That makes (nodeIndex_end - delegatorLastSettled) at claim time
+    // count only the score earned AFTER this NFT was minted.
+    const settled =
+      await RandomSamplingStorage.getDelegatorLastSettledNodeEpochScorePerStake(
+        epoch,
+        identityId,
+        tokenIdKey(42n),
+      );
+    expect(settled).to.equal(advancedIndex);
+
+    // And no score was credited to the NFT for the pre-mint period.
+    expect(
+      await RandomSamplingStorage.getEpochNodeDelegatorScore(
+        epoch,
+        identityId,
+        tokenIdKey(42n),
+      ),
+    ).to.equal(0n);
+  });
+
   it('_recordStake: multiple tokenIds for same (delegator, node) pair are independent', async () => {
     const { identityId } = await createProfile();
     const nftSigner = accounts[5];

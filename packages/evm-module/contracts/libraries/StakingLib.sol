@@ -37,4 +37,9 @@ library StakingLib {
     // V10 two-layer staking wire: `_recordStake` is gated so that only the
     // DKGStakingConvictionNFT contract (per Hub registration) can invoke it.
     error OnlyConvictionNFT();
+
+    // V10 two-layer staking wire: `_recordStake` expects a fresh tokenId per
+    // call. This guards against replays that would otherwise double-count
+    // node/total stake while overwriting the delegator base for the tokenId.
+    error TokenIdAlreadyRecorded(uint256 tokenId, uint72 identityId);
 }

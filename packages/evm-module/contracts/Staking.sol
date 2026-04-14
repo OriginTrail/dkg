@@ -1017,13 +1017,41 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
         StakingStorage ss = stakingStorage;
         bytes32 delegatorKey = bytes32(tokenId);
 
+        // Freshness invariant: reject replays of the same tokenId on this
+        // node. V10 treats each NFT as an immutable create-once position
+        // (Phase 0d removed the legacy `increaseStake` top-up path as a
+        // gaming vector — every additional stake must be a new NFT with
+        // its own conviction commitment). Without this guard, a caller
+        // bug that re-entered `_recordStake` with the same tokenId would
+        // double-count `nodeStake`/`totalStake` via the `+= amount` write
+        // while `setDelegatorStakeBase` overwrote the delegator base back
+        // to the latest amount, corrupting accounting by the inflated
+        // delta. Phase 5's NFT contract is expected to mint unique
+        // tokenIds; this defensive check enforces the invariant at the
+        // Staking entry regardless.
+        if (ss.getDelegatorStakeBase(identityId, delegatorKey) != 0) {
+            revert StakingLib.TokenIdAlreadyRecorded(tokenId, identityId);
+        }
+
         uint96 maxStake = parametersStorage.maximumStake();
         uint96 totalNodeStakeAfter = ss.getNodeStake(identityId) + amount;
         if (totalNodeStakeAfter > maxStake) {
             revert StakingLib.MaximumStakeExceeded(maxStake);
         }
 
-        // Fresh NFT position — no prior delegator-key state to settle.
+        // Baseline the fresh delegator key (bytes32(tokenId)) at the node's
+        // current score-per-stake index for the current epoch. Without
+        // this, a later reward claim on this NFT would start from the
+        // zero-initialised `delegatorLastSettledNodeEpochScorePerStake`
+        // and collect score the node earned *before* this NFT ever
+        // existed. `_prepareForStakeChange` takes the `stakeBase == 0`
+        // fast-path for fresh keys: it bumps
+        // `delegatorLastSettledNodeEpochScorePerStake` to the current
+        // node index and returns without mutating any score totals —
+        // matching exactly what V8 `stake()` already does for first-time
+        // address-keyed delegators.
+        _prepareForStakeChange(chronos.getCurrentEpoch(), identityId, delegatorKey);
+
         ss.setDelegatorStakeBase(identityId, delegatorKey, amount);
         ss.setNodeStake(identityId, totalNodeStakeAfter);
         ss.increaseTotalStake(amount);
