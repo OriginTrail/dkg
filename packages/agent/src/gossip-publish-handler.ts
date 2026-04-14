@@ -100,10 +100,11 @@ export class GossipPublishHandler {
       // Drop any _meta quads from gossip — _meta state (allowlists, registration
       // status, curator) is security-critical and must only propagate via the
       // authenticated sync protocol, not unauthenticated gossip.
-      // Match both raw `/_meta` suffix and percent-encoded variants.
+      // Match both raw `/_meta` suffix and common percent-encoded variants.
+      // Avoid decodeURIComponent which throws on malformed encoding.
       const filteredQuads = quads.filter(q => {
         const g = q.graph;
-        return !g.endsWith('/_meta') && !decodeURIComponent(g).endsWith('/_meta');
+        return !g.endsWith('/_meta') && !g.endsWith('%2F_meta') && !g.endsWith('%2f_meta');
       });
       let normalized = filteredQuads.map(q => ({ ...q, graph: dataGraph }));
 
