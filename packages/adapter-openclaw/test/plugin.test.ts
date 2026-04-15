@@ -1459,6 +1459,82 @@ describe('DkgNodePlugin', () => {
     });
   });
 
+  describe('context-graph cache filter on subscribed + non-system (Codex B51)', () => {
+    it('caches only entries with subscribed=true AND isSystem=false', async () => {
+      // B51: `agent.listContextGraphs()` returns every known CG —
+      // including system paranets (ontology, agents registry) and
+      // discovered-but-not-subscribed graphs. The cache is the
+      // needs_clarification availability list AND the B42 / B46 / B48
+      // subscribed-project allowlist for `dkg_memory_import`, so
+      // including non-subscribed or system entries would advertise
+      // targets the node has not joined. The refresh now filters on
+      // both flags.
+      const fetchFn = vi.fn(async (input: any, _init?: any) => {
+        const url = typeof input === 'string' ? input : input?.url ?? '';
+        if (url.includes('/api/status')) {
+          return new Response(JSON.stringify({ peerId: 'peer-b51' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.includes('/api/context-graph/list')) {
+          return new Response(
+            JSON.stringify({
+              contextGraphs: [
+                // Valid: subscribed and non-system → cached
+                { id: 'research-subscribed', subscribed: true, isSystem: false },
+                // System paranet → filtered out
+                { id: 'ontology', subscribed: true, isSystem: true },
+                // Discovered but not subscribed → filtered out
+                { id: 'research-unsubscribed', subscribed: false, isSystem: false },
+                // Reserved graph name → filtered out (pre-existing guard)
+                { id: 'agent-context', subscribed: true, isSystem: false },
+                // Another valid entry → cached
+                { id: 'research-second', subscribed: true, isSystem: false },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = fetchFn as any;
+
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+
+      try {
+        plugin.register({
+          config: {},
+          registrationMode: 'full' as const,
+          registerTool: () => {},
+          registerHook: () => {},
+          registerMemoryCapability: () => {},
+          on: () => {},
+          logger: { info: () => {}, warn: () => {}, debug: () => {} },
+        } as unknown as OpenClawPluginApi);
+
+        // Drain the register-time refresh.
+        for (let i = 0; i < 50; i++) await Promise.resolve();
+
+        const resolver = (plugin as any).memorySessionResolver;
+        const cached = resolver.listAvailableContextGraphs();
+        // Only the two subscribed + non-system entries, in the order
+        // the daemon returned them (reserved name and the others
+        // filtered).
+        expect(cached).toEqual(['research-subscribed', 'research-second']);
+      } finally {
+        await plugin.stop();
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
   describe('context-graph cache refresh in-flight promise sharing (Codex B49)', () => {
     // B49: `refreshMemoryResolverState` used to gate concurrent calls
     // with a boolean that returned immediately while a background
@@ -1488,8 +1564,15 @@ describe('DkgNodePlugin', () => {
         if (url.includes('/api/context-graph/list')) {
           listCallCount++;
           await listGate;
+          // B51: the refresh now filters on `subscribed: true` and
+          // `!isSystem`, so the mock entry has to carry both flags to
+          // end up in the cache.
           return new Response(
-            JSON.stringify({ contextGraphs: [{ id: 'research-b49-fresh' }] }),
+            JSON.stringify({
+              contextGraphs: [
+                { id: 'research-b49-fresh', subscribed: true, isSystem: false },
+              ],
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }

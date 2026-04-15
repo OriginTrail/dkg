@@ -363,6 +363,52 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
     expect(memoryManager.publishSession).not.toHaveBeenCalled();
   });
+
+  // Codex Bug B52: the legacy `/api/memory/import` endpoint was retired
+  // in the openclaw-dkg-primary-memory workstream. Rather than let
+  // external callers fall through to the generic 404 (wire-level
+  // contract break with no migration signal), the route serves a 410
+  // Gone stub that names the two replacements — the adapter's
+  // `dkg_memory_import` tool and the daemon's
+  // `POST /api/assertion/:name/write` direct route. Mirrors the B38
+  // pattern for the session-publication routes above.
+  it('returns 410 Gone for POST /api/memory/import with migration pointers (Codex B52)', async () => {
+    const { req, url } = createMockReq({
+      method: 'POST',
+      path: '/api/memory/import',
+      body: JSON.stringify({ text: 'anything', source: 'claude' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    const { res, state } = createMockRes();
+
+    const handled = await handleNodeUIRequest(
+      req,
+      res,
+      url,
+      {} as any,
+      '.',
+      undefined,
+      undefined,
+      undefined,
+      undefined, // memoryManager intentionally undefined — the stub doesn't need it
+      undefined,
+    );
+
+    expect(handled).toBe(true);
+    expect(state.statusCode).toBe(410);
+    const body = parseJsonBody(state.body);
+    expect(body).toMatchObject({
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
+    });
+    expect(body.reason).toMatch(/V9 relic|LLM API keys|sidecar graph/i);
+    expect(Array.isArray(body.replacements)).toBe(true);
+    expect(body.replacements.length).toBeGreaterThanOrEqual(2);
+    // Both replacement surfaces must be named explicitly.
+    const replacementNames = body.replacements.map((r: any) => r.name ?? r.path ?? '');
+    expect(replacementNames.join(' ')).toMatch(/dkg_memory_import/);
+    expect(replacementNames.join(' ')).toMatch(/\/api\/assertion\/:name\/write/);
+  });
 });
 
 // --- /api/node-log tail behavior ---

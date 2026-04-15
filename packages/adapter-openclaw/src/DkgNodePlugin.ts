@@ -617,7 +617,24 @@ export class DkgNodePlugin {
               : typeof entry?.contextGraphId === 'string'
                 ? entry.contextGraphId
                 : undefined;
-            if (id && id !== 'agent-context') ids.push(id);
+            if (!id || id === 'agent-context') continue;
+            // B51: `agent.listContextGraphs()` returns every context graph
+            // the node knows about — including system paranets (ontology,
+            // agents registry) and non-subscribed discovered graphs. This
+            // cache is the `needs_clarification` availability list AND the
+            // B42 / B46 / B48 subscribed-project allowlist for
+            // `dkg_memory_import`, so including non-subscribed or system
+            // entries would let the tool advertise or accept a target the
+            // node has not actually joined. `createAssertion` /
+            // `writeAssertion` against an unsubscribed graph would then
+            // fail at the daemon layer, producing a confusing late error
+            // instead of the structured clarification we return upstream.
+            // Filter on `subscribed === true` AND `!isSystem` — the two
+            // flags the agent's listing already provides per
+            // `packages/agent/src/dkg-agent.ts:3541-3600`.
+            if (entry?.subscribed !== true) continue;
+            if (entry?.isSystem === true) continue;
+            ids.push(id);
           }
           this.availableContextGraphCache = ids;
           // B23: record the successful-populate wall-clock time so the

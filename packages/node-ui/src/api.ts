@@ -487,12 +487,43 @@ export async function handleNodeUIRequest(
     });
   }
 
-  // POST /api/memory/import was retired as part of the
+  // B52: POST /api/memory/import was retired as part of the
   // openclaw-dkg-primary-memory work. It was a V9 relic that required LLM
   // API keys on the node and wrote dkg:ImportedMemory ad-hoc types into a
-  // throwaway sidecar graph. Callers should use the adapter's
-  // dkg_memory_import tool (DkgMemoryPlugin) or direct
-  // /api/assertion/:name/write against a real context graph.
+  // throwaway sidecar graph. Rather than let existing callers fall
+  // through to the generic 404 (wire-level contract break with no
+  // migration signal), serve a 410 Gone stub that names the two
+  // replacements so external CLI scripts, MCP servers, and local agents
+  // see a clear migration pointer. Mirrors the B38 pattern for the
+  // session-publication routes above.
+  if (req.method === 'POST' && path === '/api/memory/import') {
+    return json(res, 410, {
+      error: 'POST /api/memory/import is retired in v1',
+      errorCode: 'memory_import_endpoint_retired_v1',
+      reason:
+        'This endpoint was a V9 relic that required LLM API keys on the node and wrote ' +
+        'ad-hoc `dkg:ImportedMemory` triples into a throwaway sidecar graph. It was retired ' +
+        'as part of the openclaw-dkg-primary-memory workstream.',
+      replacements: [
+        {
+          surface: 'adapter tool',
+          name: 'dkg_memory_import',
+          description:
+            'Agent-callable tool registered by `DkgMemoryPlugin` on the OpenClaw side. ' +
+            'Writes a memory into a project context graph\'s `memory` Working Memory assertion.',
+        },
+        {
+          surface: 'daemon HTTP route',
+          method: 'POST',
+          path: '/api/assertion/:name/write',
+          description:
+            'Direct V10 WM assertion write route on the daemon. Use when writing from ' +
+            'a non-OpenClaw caller (CLI, external agent, MCP server) that already has a ' +
+            'resolved context graph id and peer identity.',
+        },
+      ],
+    });
+  }
 
   if (req.method === 'GET' && path === '/api/memory/stats' && memoryManager) {
     try {
