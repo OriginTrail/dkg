@@ -172,6 +172,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error MaxStakeExceeded();
     error SameIdentity();
     error ProfileDoesNotExist();
+    // Phase 5 review fix — the `claim` walker accumulates `rewardTotal` in
+    // uint256 and casts to uint96 to pass to ConvictionStakingStorage /
+    // StakingStorage. A sufficiently large per-epoch score injection (or
+    // a long enough walk window) could overflow the cast and silently
+    // truncate the reward. We hard-fail instead.
+    error RewardOverflow();
     // Phase 5 SV10-withdrawal — defense-in-depth guard against a direct caller
     // racing past the NFT wrapper's `ownerOf` check with a never-minted tokenId.
     // The wrapper gate (`ownerOf` reverts on non-minted) makes this unreachable
@@ -1147,6 +1153,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
             return;
         }
+
+        // Bounds check before the uint96 narrowings below. The walker
+        // accumulates in uint256 to keep the per-epoch (effStake *
+        // scorePerStake36) intermediate from wrapping, but every storage
+        // call below takes uint96. Hard-fail on overflow rather than
+        // silently truncating the reward.
+        if (rewardTotal > type(uint96).max) revert RewardOverflow();
 
         // 1. Bank the reward into the split-bucket rewards accumulator.
         //    `increaseRewards` updates `pos.rewards` and the conviction-layer

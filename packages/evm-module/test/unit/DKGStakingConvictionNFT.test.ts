@@ -1917,6 +1917,41 @@ describe('@unit DKGStakingConvictionNFT', () => {
     });
 
     // -----------------------------------------------------------------
+    // Bounds check — rewardTotal cast guard
+    // -----------------------------------------------------------------
+
+    it('reverts RewardOverflow when accumulated reward exceeds uint96 max', async () => {
+      const { identityId } = await createProfile();
+      // We need to push `rewardTotal` past `type(uint96).max` (~7.92e28)
+      // through the Phase 5 stub formula:
+      //    rewardTotal = effStake * scorePerStake36 / 1e18
+      // Pre-expiry effStake at 6x for `amount` raw is `amount * 6`. To
+      // hit ~8e28, set amount large and crank scorePerStake36.
+      // amount * 6 * scorePerStake36 / 1e18 > 2^96
+      //   amount = 1e22 (10000 TRAC)
+      //   effStake = 6e22
+      //   need scorePerStake36 > 2^96 * 1e18 / 6e22 ≈ 1.32e15
+      // Round up generously to make the overshoot unambiguous: 1e21.
+      const amount = hre.ethers.parseEther('10000'); // 1e22
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      await advanceEpochs(1);
+
+      // Inject a huge per-epoch score-per-stake. The Phase 5 stub formula
+      // yields rewardTotal = 6e22 * 1e21 / 1e18 = 6e25. Still under 2^96
+      // (~7.92e28), so nudge it higher.
+      // 6e22 * 1e25 / 1e18 = 6e29 > 2^96 — that overflows.
+      const scorePerStake36 = 10n ** 25n;
+      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+
+      await expect(
+        NFT.connect(accounts[0]).claim(0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'RewardOverflow');
+    });
+
+    // -----------------------------------------------------------------
     // Integration — claim then withdraw the claimed rewards
     // -----------------------------------------------------------------
 
