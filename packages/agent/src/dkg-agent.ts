@@ -39,6 +39,7 @@ import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  hashAgentToken,
   type AgentKeyRecord,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
@@ -375,13 +376,18 @@ export class DKGAgent {
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
-    // Load registered agents from triple store; auto-register default if none exist
+    // Load registered agents from triple store; auto-register default if none exist.
+    // loadAgentsFromStore restores defaultAgentAddress from the persisted
+    // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
     await this.loadAgentsFromStore();
     if (this.localAgents.size === 0) {
       await this.autoRegisterDefaultAgent();
     }
     if (!this.defaultAgentAddress && this.localAgents.size > 0) {
-      this.defaultAgentAddress = this.localAgents.values().next().value!.agentAddress;
+      // Fallback: no persisted marker — pick first and persist for next boot
+      const first = this.localAgents.values().next().value!;
+      this.defaultAgentAddress = first.agentAddress;
+      await this.markDefaultAgent(first.agentAddress).catch(() => {});
     }
 
     this.router = new ProtocolRouter(this.node);
@@ -1499,6 +1505,7 @@ export class DKGAgent {
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
     await this.persistAgentToStore(record);
+    await this.saveToKeystore(record);
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Registered agent "${name}" (${record.mode}) → ${record.agentAddress}`);
@@ -1554,7 +1561,7 @@ export class DKGAgent {
       { subject: agentUri, predicate: SCHEMA_NAME, object: `"${escapeSparqlLiteral(record.name)}"`, graph },
       { subject: agentUri, predicate: `${DKG}agentAddress`, object: `"${record.agentAddress}"`, graph },
       { subject: agentUri, predicate: `${DKG}agentMode`, object: `"${record.mode}"`, graph },
-      { subject: agentUri, predicate: `${DKG}agentAuthToken`, object: `"${record.authToken}"`, graph },
+      { subject: agentUri, predicate: `${DKG}agentAuthTokenHash`, object: `"${hashAgentToken(record.authToken)}"`, graph },
       { subject: agentUri, predicate: `${DKG}createdAt`, object: `"${record.createdAt}"`, graph },
     ];
     if (record.publicKey) {
@@ -1573,56 +1580,98 @@ export class DKGAgent {
   private async loadAgentsFromStore(): Promise<void> {
     const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
     const DKG = 'https://dkg.network/ontology#';
+
+    // Load raw tokens and custodial keys from the on-disk keystore
+    const keystore = await this.loadKeystore();
+
     const sparql = `
-      SELECT ?agent ?name ?address ?mode ?token ?publicKey ?framework ?createdAt WHERE {
+      SELECT ?agent ?name ?address ?mode ?tokenHash ?legacyToken ?publicKey ?framework ?createdAt ?isDefault WHERE {
         GRAPH <${graph}> {
           ?agent a <${DKG}Agent> ;
                  <https://schema.org/name> ?name ;
                  <${DKG}agentAddress> ?address ;
-                 <${DKG}agentMode> ?mode ;
-                 <${DKG}agentAuthToken> ?token .
+                 <${DKG}agentMode> ?mode .
+          OPTIONAL { ?agent <${DKG}agentAuthTokenHash> ?tokenHash }
+          OPTIONAL { ?agent <${DKG}agentAuthToken> ?legacyToken }
           OPTIONAL { ?agent <${DKG}publicKey> ?publicKey }
           OPTIONAL { ?agent <https://dkg.origintrail.io/skill#framework> ?framework }
           OPTIONAL { ?agent <${DKG}createdAt> ?createdAt }
+          OPTIONAL { ?agent <${DKG}isDefaultAgent> ?isDefault }
         }
       }
     `;
+    let markedDefaultAddr: string | undefined;
+    const needsMigration: AgentKeyRecord[] = [];
     try {
       const result = await this.store.query(sparql);
       if (result.type !== 'bindings') return;
       const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
       for (const row of result.bindings) {
+        const addr = strip(row['address']);
+        const ksEntry = keystore[addr.toLowerCase()];
+        const legacyToken = strip(row['legacyToken']);
+
+        // Token resolution: prefer keystore file → legacy plaintext → empty
+        let authToken = ksEntry?.authToken ?? '';
+        if (!authToken && legacyToken) {
+          authToken = legacyToken;
+        }
+
         const record: AgentKeyRecord = {
-          agentAddress: strip(row['address']),
+          agentAddress: addr,
           publicKey: strip(row['publicKey']) || '',
           name: strip(row['name']),
           framework: strip(row['framework']) || undefined,
           mode: strip(row['mode']) as 'custodial' | 'self-sovereign',
-          authToken: strip(row['token']),
+          authToken,
           createdAt: strip(row['createdAt']) || '',
         };
-        // Restore private key for custodial agents from operational wallet keys
-        // (private keys are intentionally not persisted to the triple store)
+
+        // Restore private key: prefer keystore file, fall back to operational keys
         if (record.mode === 'custodial' && !record.privateKey) {
-          const opKeys = this.config.chainConfig?.operationalKeys;
-          if (opKeys?.length) {
-            for (const key of opKeys) {
-              try {
-                const w = new ethers.Wallet(key);
-                if (w.address.toLowerCase() === record.agentAddress.toLowerCase()) {
-                  record.privateKey = key;
-                  break;
-                }
-              } catch { /* skip invalid keys */ }
+          if (ksEntry?.privateKey) {
+            record.privateKey = ksEntry.privateKey;
+          } else {
+            const opKeys = this.config.chainConfig?.operationalKeys;
+            if (opKeys?.length) {
+              for (const key of opKeys) {
+                try {
+                  const w = new ethers.Wallet(key);
+                  if (w.address.toLowerCase() === record.agentAddress.toLowerCase()) {
+                    record.privateKey = key;
+                    break;
+                  }
+                } catch { /* skip invalid keys */ }
+              }
             }
           }
         }
+
         this.localAgents.set(record.agentAddress, record);
-        this.agentTokenIndex.set(record.authToken, record.agentAddress);
+        if (record.authToken) {
+          this.agentTokenIndex.set(record.authToken, record.agentAddress);
+        }
+
+        if (strip(row['isDefault']) === 'true') {
+          markedDefaultAddr = record.agentAddress;
+        }
+
+        // Schedule migration: plaintext token in RDF but no keystore entry yet
+        if (legacyToken && !ksEntry?.authToken) {
+          needsMigration.push(record);
+        }
+      }
+      if (markedDefaultAddr) {
+        this.defaultAgentAddress = markedDefaultAddr;
       }
       if (this.localAgents.size > 0) {
         const ctx = createOperationContext('system');
         this.log.info(ctx, `Loaded ${this.localAgents.size} registered agent(s) from store`);
+      }
+      // Migrate legacy plaintext tokens: save to keystore, replace RDF with hash
+      for (const rec of needsMigration) {
+        await this.saveToKeystore(rec);
+        await this.migrateTokenToHash(rec);
       }
     } catch {
       // Graph may not exist yet on first boot
@@ -1647,9 +1696,129 @@ export class DKGAgent {
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
     this.defaultAgentAddress = record.agentAddress;
     await this.persistAgentToStore(record);
+    await this.markDefaultAgent(record.agentAddress);
+    await this.saveToKeystore(record);
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent keystore — secrets kept out of queryable RDF
+  // ---------------------------------------------------------------------------
+
+  private keystorePath(): string | null {
+    if (!this.config.dataDir) return null;
+    return `${this.config.dataDir}/agent-keystore.json`;
+  }
+
+  private async loadKeystore(): Promise<Record<string, { authToken?: string; privateKey?: string }>> {
+    const ksPath = this.keystorePath();
+    if (!ksPath) return {};
+    try {
+      const { readFile } = await import('node:fs/promises');
+      const raw = await readFile(ksPath, 'utf-8');
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveToKeystore(record: AgentKeyRecord): Promise<void> {
+    const ksPath = this.keystorePath();
+    if (!ksPath) return;
+    try {
+      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
+      const { dirname } = await import('node:path');
+      let existing: Record<string, { authToken?: string; privateKey?: string }> = {};
+      try {
+        const raw = await readFile(ksPath, 'utf-8');
+        existing = JSON.parse(raw);
+      } catch { /* first write */ }
+      existing[record.agentAddress.toLowerCase()] = {
+        authToken: record.authToken,
+        ...(record.privateKey ? { privateKey: record.privateKey } : {}),
+      };
+      await mkdir(dirname(ksPath), { recursive: true });
+      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+      await chmod(ksPath, 0o600);
+    } catch {
+      // Non-fatal — agent still works, just won't survive restart
+    }
+  }
+
+  /**
+   * One-time migration: replace a legacy plaintext agentAuthToken triple
+   * with an agentAuthTokenHash triple so future SPARQL queries never
+   * reveal the raw token.
+   */
+  private async migrateTokenToHash(record: AgentKeyRecord): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const DKG = 'https://dkg.network/ontology#';
+    const agentUri = `did:dkg:agent:${record.agentAddress}`;
+    try {
+      await this.store.delete([{
+        subject: agentUri,
+        predicate: `${DKG}agentAuthToken`,
+        object: `"${record.authToken}"`,
+        graph,
+      }]);
+      await this.store.insert([{
+        subject: agentUri,
+        predicate: `${DKG}agentAuthTokenHash`,
+        object: `"${hashAgentToken(record.authToken)}"`,
+        graph,
+      }]);
+      const ctx = createOperationContext('system');
+      this.log.info(ctx, `Migrated plaintext auth token to hash for agent ${record.agentAddress}`);
+    } catch {
+      // Non-fatal — old token remains readable until next migration attempt
+    }
+  }
+
+  /**
+   * Persist an explicit default-agent marker in the triple store so the
+   * default agent is deterministic across restarts (independent of SPARQL
+   * result ordering).
+   */
+  private async markDefaultAgent(agentAddress: string): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const DKG = 'https://dkg.network/ontology#';
+    // Clear any existing default marker
+    try {
+      const existing = await this.store.query(
+        `SELECT ?agent WHERE { GRAPH <${graph}> { ?agent <${DKG}isDefaultAgent> "true" } }`,
+      );
+      if (existing.type === 'bindings') {
+        for (const row of existing.bindings) {
+          const agentUri = row['agent'];
+          if (agentUri) {
+            await this.store.delete([{
+              subject: agentUri, predicate: `${DKG}isDefaultAgent`, object: `"true"`, graph,
+            }]);
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    const agentUri = `did:dkg:agent:${agentAddress}`;
+    await this.store.insert([{
+      subject: agentUri, predicate: `${DKG}isDefaultAgent`, object: `"true"`, graph,
+    }]);
+  }
+
+  /**
+   * Check whether any locally registered agent is the curator/creator
+   * of the given context graph.
+   */
+  async isCuratorOf(contextGraphId: string): Promise<boolean> {
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) return false;
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (owner === selfDid) return true;
+    for (const addr of this.localAgents.keys()) {
+      if (owner === `did:dkg:agent:${addr}`) return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -2875,22 +3044,13 @@ export class DKGAgent {
     }
 
     const owner = await this.getContextGraphOwner(contextGraphId);
-    const selfDid = `did:dkg:agent:${this.peerId}`;
-    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
-    const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
     if (!owner) {
       throw new Error(
         `Context graph "${contextGraphId}" has no known creator. ` +
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    const callerIsOwner = (callerDid && owner === callerDid) || owner === selfDid || owner === selfAgentDid;
-    if (!callerIsOwner) {
-      throw new Error(
-        `Only the context graph creator can manage invitations. ` +
-        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
-      );
-    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage invitations');
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const paranetUri = paranetDataGraphUri(contextGraphId);
@@ -2935,22 +3095,13 @@ export class DKGAgent {
     }
 
     const owner = await this.getContextGraphOwner(contextGraphId);
-    const selfDid = `did:dkg:agent:${this.peerId}`;
-    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
-    const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
     if (!owner) {
       throw new Error(
         `Context graph "${contextGraphId}" has no known creator. ` +
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    const callerIsOwner = (callerDid && owner === callerDid) || owner === selfDid || owner === selfAgentDid;
-    if (!callerIsOwner) {
-      throw new Error(
-        `Only the context graph creator can manage participants. ` +
-        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
-      );
-    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage participants');
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const paranetUri = paranetDataGraphUri(contextGraphId);
@@ -4714,6 +4865,40 @@ export class DKGAgent {
   private async getCclPolicyByUri(policyUri: string, opts: { includeBody?: boolean } = {}): Promise<CclPolicyRecord | null> {
     const records = await this.listCclPolicies({ includeBody: opts.includeBody });
     return records.find(record => record.policyUri === policyUri) ?? null;
+  }
+
+  /**
+   * Verify that the caller is the owner of a context graph. When an explicit
+   * callerAgentAddress is provided (agent-level token), only that identity is
+   * checked — no fallback to node-level identities. This prevents non-owner
+   * agents on the same node from piggybacking on the node's default agent.
+   *
+   * Legacy fallback (peerId / defaultAgentAddress) only applies when no
+   * explicit caller is known (node-level token / backward compat).
+   */
+  private assertCallerIsOwner(owner: string, callerAgentAddress: string | undefined, action: string): void {
+    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+
+    let authorized: boolean;
+    if (callerDid) {
+      // Explicit caller: check only their DID.
+      // Also allow through if the caller is the default agent and the owner
+      // is stored under the legacy peerId-based DID (pre-agent-model CGs).
+      authorized = owner === callerDid ||
+        (callerAgentAddress === this.defaultAgentAddress && owner === selfDid);
+    } else {
+      // No explicit caller (node-level token): allow any local identity
+      authorized = owner === selfDid ||
+        [...this.localAgents.keys()].some(addr => owner === `did:dkg:agent:${addr}`);
+    }
+
+    if (!authorized) {
+      throw new Error(
+        `Only the context graph creator can ${action}. ` +
+        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
+      );
+    }
   }
 
   private async assertParanetOwner(paranetId: string): Promise<void> {

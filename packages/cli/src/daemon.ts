@@ -5969,7 +5969,7 @@ async function handleRequest(
       }
       agent.verifyJoinRequest(contextGraphId, agentAddress, timestamp, signature);
 
-      const isCurator = await agent.contextGraphExists(contextGraphId);
+      const isCurator = await agent.isCuratorOf(contextGraphId);
       if (isCurator) {
         await agent.storePendingJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
         return jsonResponse(res, 200, { ok: true, status: 'pending', delivered: 'local' });

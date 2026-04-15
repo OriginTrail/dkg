@@ -1890,7 +1890,6 @@ export class DKGPublisher implements Publisher {
     });
     await this.store.insert(lifecycleQuads);
 
-    const metaGraph = contextGraphMetaUri(contextGraphId);
     await this.store.insert([{
       subject: graphUri,
       predicate: 'http://dkg.io/ontology/memoryLayer',

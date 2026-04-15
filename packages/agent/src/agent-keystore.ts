@@ -13,7 +13,7 @@
  */
 
 import { ethers } from 'ethers';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 
 export interface AgentKeyRecord {
   agentAddress: string;
@@ -32,6 +32,16 @@ export interface AgentKeyRecord {
  */
 export function generateAgentToken(): string {
   return `dkg_at_${randomBytes(32).toString('base64url')}`;
+}
+
+/**
+ * One-way SHA-256 hash of an agent token for safe persistence.
+ * The raw token is returned to the caller once at registration;
+ * only this hash is stored in the triple store so SPARQL queries
+ * never reveal bearer credentials.
+ */
+export function hashAgentToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 /**
