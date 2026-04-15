@@ -55,9 +55,10 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
 
 export async function deployContracts(rpcUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    const hardhatBin = path.join(EVM_MODULE_DIR, 'node_modules', '.bin', 'hardhat');
     const proc = spawn(
-      'npx',
-      ['hardhat', 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
+      hardhatBin,
+      ['deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
       {
         cwd: EVM_MODULE_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -282,21 +283,28 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   const rpcUrl = `http://127.0.0.1:${port}`;
 
   let stderrOutput = '';
+  let stdoutOutput = '';
+  const hardhatBin = path.join(EVM_MODULE_DIR, 'node_modules', '.bin', 'hardhat');
   const hardhatProcess = spawn(
-    'npx',
-    ['hardhat', 'node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
+    hardhatBin,
+    ['node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
     {
       cwd: EVM_MODULE_DIR,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
     },
   );
+  hardhatProcess.stdout?.on('data', (d) => { stdoutOutput += d.toString(); });
   hardhatProcess.stderr?.on('data', (d) => { stderrOutput += d.toString(); });
 
-  const ready = await waitForNode(rpcUrl, 15_000);
+  const startupTimeout = process.env.CI ? 60_000 : 15_000;
+  const ready = await waitForNode(rpcUrl, startupTimeout);
   if (!ready) {
     hardhatProcess.kill('SIGTERM');
-    throw new Error(`Hardhat node failed to start on port ${port} within 15s.\nstderr: ${stderrOutput}`);
+    throw new Error(
+      `Hardhat node failed to start on port ${port} within ${startupTimeout / 1000}s.\n` +
+      `stderr: ${stderrOutput}\nstdout: ${stdoutOutput}`,
+    );
   }
 
   const provider = new JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
