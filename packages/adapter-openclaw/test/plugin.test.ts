@@ -134,6 +134,9 @@ describe('DkgNodePlugin', () => {
         id: 'openclaw',
         enabled: true,
         transport: { kind: 'openclaw-channel' },
+        capabilities: {
+          semanticEnrichment: false,
+        },
         manifest: {
           packageName: '@origintrail-official/dkg-adapter-openclaw',
           setupEntry: './setup-entry.mjs',
@@ -150,6 +153,7 @@ describe('DkgNodePlugin', () => {
         localChat: true,
         connectFromUi: true,
         dkgPrimaryMemory: true,
+        semanticEnrichment: false,
       });
       expect(readyBody.manifest).toEqual({
         packageName: '@origintrail-official/dkg-adapter-openclaw',

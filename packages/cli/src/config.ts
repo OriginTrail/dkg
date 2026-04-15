@@ -84,6 +84,7 @@ export interface LocalAgentIntegrationCapabilities {
   dkgPrimaryMemory?: boolean;
   wmImportPipeline?: boolean;
   nodeServedSkill?: boolean;
+  semanticEnrichment?: boolean;
 }
 
 export interface LocalAgentIntegrationTransport {

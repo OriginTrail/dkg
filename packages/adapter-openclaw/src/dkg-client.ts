@@ -36,6 +36,7 @@ export interface LocalAgentIntegrationCapabilities {
   wmImportPipeline?: boolean;
   nodeServedSkill?: boolean;
   chatAttachments?: boolean;
+  semanticEnrichment?: boolean;
 }
 
 export interface LocalAgentIntegrationTransport {

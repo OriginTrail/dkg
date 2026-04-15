@@ -727,6 +727,7 @@ interface LocalAgentIntegrationRecord {
     dkgPrimaryMemory?: boolean;
     wmImportPipeline?: boolean;
     nodeServedSkill?: boolean;
+    semanticEnrichment?: boolean;
   };
   transport?: {
     kind?: string;

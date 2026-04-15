@@ -387,6 +387,11 @@ export class DkgChannelPlugin {
     return store.uiContextGraphId;
   }
 
+  supportsSemanticEnrichment(): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    return worker?.getRuntimeProbe().supported === true;
+  }
+
   /**
    * Run `fn` inside an AsyncLocalStorage-scoped dispatch context so that
    * any `getSessionProjectContextGraphId` call issued from inside `fn`

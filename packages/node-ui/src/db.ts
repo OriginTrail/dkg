@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_SEMANTIC_ENRICHMENT_LEASE_MS = 5 * 60_000;
 const DEFAULT_SEMANTIC_ENRICHMENT_RETRY_BASE_MS = 1_000;
@@ -245,6 +245,18 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 8) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS extraction_status_snapshots (
+          assertion_uri TEXT PRIMARY KEY,
+          record_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_extraction_status_snapshots_updated_at
+          ON extraction_status_snapshots(updated_at);
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
 
     const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
@@ -266,6 +278,7 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
     this.db.exec(`DELETE FROM semantic_enrichment_events WHERE updated_at < ${cutoff} AND status IN ('completed', 'dead_letter')`);
+    this.db.exec(`DELETE FROM extraction_status_snapshots WHERE updated_at < ${cutoff}`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
   }
 
@@ -1144,6 +1157,34 @@ export class DashboardDB {
     return now + this.getSemanticEnrichmentRetryDelayMs(attempts);
   }
 
+  // --- Extraction-status snapshots ---
+
+  getExtractionStatusSnapshot(assertionUri: string): ExtractionStatusSnapshotRow | undefined {
+    return this.db.prepare(
+      'SELECT * FROM extraction_status_snapshots WHERE assertion_uri = ?',
+    ).get(assertionUri) as ExtractionStatusSnapshotRow | undefined;
+  }
+
+  upsertExtractionStatusSnapshot(snapshot: {
+    assertion_uri: string;
+    record_json: string;
+    updated_at: number;
+  }): void {
+    this.stmt('upsertExtractionStatusSnapshot', `
+      INSERT INTO extraction_status_snapshots (assertion_uri, record_json, updated_at)
+      VALUES (@assertion_uri, @record_json, @updated_at)
+      ON CONFLICT(assertion_uri) DO UPDATE SET
+        record_json = excluded.record_json,
+        updated_at = excluded.updated_at
+    `).run(snapshot);
+  }
+
+  deleteExtractionStatusSnapshot(assertionUri: string): void {
+    this.stmt('deleteExtractionStatusSnapshot', `
+      DELETE FROM extraction_status_snapshots WHERE assertion_uri = ?
+    `).run(assertionUri);
+  }
+
   // --- Logs ---
 
   insertLog(entry: {
@@ -1531,6 +1572,12 @@ export interface SemanticEnrichmentHealthRow {
   expired_lease_count: number;
   oldest_pending_created_at: number | null;
   next_pending_at: number | null;
+}
+
+export interface ExtractionStatusSnapshotRow {
+  assertion_uri: string;
+  record_json: string;
+  updated_at: number;
 }
 
 export interface SpendingPeriod {

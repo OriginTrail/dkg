@@ -17,6 +17,7 @@ import {
   notifyLocalAgentIntegrationWake,
   canQueueLocalAgentSemanticEnrichment,
   queueLocalAgentSemanticEnrichmentBestEffort,
+  normalizeOntologyQuadObjectInput,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
@@ -299,6 +300,9 @@ describe('local agent semantic wake helper', () => {
         localAgentIntegrations: {
           openclaw: {
             enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
             transport: {
               kind: 'openclaw-channel',
               wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
@@ -435,6 +439,16 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
+  it('requires an explicit semantic-enrichment capability signal before queueing work', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+        },
+      },
+    }), 'openclaw')).toBe(false);
+  });
+
   it('still persists the semantic event when OpenClaw is enabled but wake transport metadata is temporarily unavailable', () => {
     const dashDb = {
       getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
@@ -452,6 +466,9 @@ describe('best-effort semantic enqueue helper', () => {
         localAgentIntegrations: {
           openclaw: {
             enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
           },
         },
       }),
@@ -479,6 +496,9 @@ describe('best-effort semantic enqueue helper', () => {
       localAgentIntegrations: {
         openclaw: {
           enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
         },
       },
     }), 'openclaw')).toBe(true);
@@ -504,6 +524,9 @@ describe('best-effort semantic enqueue helper', () => {
         localAgentIntegrations: {
           openclaw: {
             enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
             transport: {
               kind: 'openclaw-channel',
               wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
@@ -537,6 +560,19 @@ describe('best-effort semantic enqueue helper', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('Failed to enqueue chat turn test'),
     );
+  });
+});
+
+describe('ontology write object normalization', () => {
+  it('rejects malformed quoted RDF literals', () => {
+    expect(normalizeOntologyQuadObjectInput('\"unterminated')).toBeUndefined();
+    expect(normalizeOntologyQuadObjectInput('\"value\"^^<not a valid iri>')).toBeUndefined();
+  });
+
+  it('preserves valid RDF terms and quotes plain text values', () => {
+    expect(normalizeOntologyQuadObjectInput('https://schema.org/Person')).toBe('https://schema.org/Person');
+    expect(normalizeOntologyQuadObjectInput('\"Alice\"@en')).toBe('\"Alice\"@en');
+    expect(normalizeOntologyQuadObjectInput('schema.org')).toBe('\"schema.org\"');
   });
 });
 

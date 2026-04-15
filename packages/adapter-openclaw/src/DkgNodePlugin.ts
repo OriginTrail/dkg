@@ -35,7 +35,7 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
-const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
+const OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES = {
   localChat: true,
   chatAttachments: true,
   connectFromUi: true,
@@ -149,6 +149,13 @@ export class DkgNodePlugin {
   private peerIdDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Cached API handle used by `ensureNodePeerId` for logging. Set on register. */
   private memoryResolverApi: OpenClawPluginApi | null = null;
+
+  private buildOpenClawCapabilities() {
+    return {
+      ...OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES,
+      semanticEnrichment: this.channelPlugin?.supportsSemanticEnrichment() === true,
+    } as const;
+  }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
    * list of subscribed context graphs for the write-path clarification
@@ -512,7 +519,7 @@ export class DkgNodePlugin {
       enabled: true,
       description: 'Connect a local OpenClaw agent through the DKG node.',
       transport: this.buildOpenClawTransport(existing?.transport, api),
-      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      capabilities: this.buildOpenClawCapabilities(),
       manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
       setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
       metadata,

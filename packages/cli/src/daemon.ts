@@ -1726,6 +1726,7 @@ function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationC
     'dkgPrimaryMemory',
     'wmImportPipeline',
     'nodeServedSkill',
+    'semanticEnrichment',
   ];
   for (const key of keys) {
     if (typeof input[key] === 'boolean') capabilities[key] = input[key];
@@ -2161,7 +2162,8 @@ export function canQueueLocalAgentSemanticEnrichment(
   integrationId: string,
 ): boolean {
   const integration = getLocalAgentIntegration(config, integrationId);
-  return integration?.enabled === true;
+  return integration?.enabled === true
+    && integration.capabilities?.semanticEnrichment === true;
 }
 
 export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
@@ -3134,6 +3136,21 @@ function isSafeSemanticObjectInput(value: string): boolean {
   }
 }
 
+export function normalizeOntologyQuadObjectInput(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (isSafeIri(trimmed)) return trimmed;
+  if (trimmed.startsWith('"')) {
+    try {
+      assertSafeRdfTerm(trimmed);
+      return trimmed;
+    } catch {
+      return undefined;
+    }
+  }
+  return JSON.stringify(trimmed);
+}
+
 function normalizeSemanticTripleInputs(raw: unknown): SemanticTripleInput[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   if (raw.length === 0) return [];
@@ -3167,14 +3184,76 @@ function parseSemanticEnrichmentEventPayload(raw: string): SemanticEnrichmentEve
   }
 }
 
+function parseExtractionStatusSnapshotRecord(raw: string): ExtractionStatusRecord | undefined {
+  try {
+    const parsed = JSON.parse(raw) as ExtractionStatusRecord;
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    if (parsed.status !== 'in_progress'
+      && parsed.status !== 'completed'
+      && parsed.status !== 'skipped'
+      && parsed.status !== 'failed') {
+      return undefined;
+    }
+    if (typeof parsed.fileHash !== 'string' || !parsed.fileHash.trim()) return undefined;
+    if (typeof parsed.detectedContentType !== 'string' || !parsed.detectedContentType.trim()) return undefined;
+    if (parsed.pipelineUsed !== null && typeof parsed.pipelineUsed !== 'string') return undefined;
+    if (typeof parsed.tripleCount !== 'number' || !Number.isFinite(parsed.tripleCount) || parsed.tripleCount < 0) {
+      return undefined;
+    }
+    if (typeof parsed.startedAt !== 'string' || !parsed.startedAt.trim()) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function setPersistedExtractionStatusRecord(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
+  assertionUri: string,
+  record: ExtractionStatusRecord,
+): void {
+  setExtractionStatusRecord(extractionStatus, assertionUri, record);
+  dashDb.upsertExtractionStatusSnapshot({
+    assertion_uri: assertionUri,
+    record_json: JSON.stringify(record),
+    updated_at: Date.now(),
+  });
+}
+
+function getHydratedExtractionStatusRecord(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
+  assertionUri: string,
+): ExtractionStatusRecord | undefined {
+  const current = getExtractionStatusRecord(extractionStatus, assertionUri);
+  if (current) return current;
+  const snapshot = dashDb.getExtractionStatusSnapshot(assertionUri);
+  if (!snapshot) return undefined;
+  const parsed = parseExtractionStatusSnapshotRecord(snapshot.record_json);
+  if (!parsed) return undefined;
+  setExtractionStatusRecord(extractionStatus, assertionUri, parsed);
+  return parsed;
+}
+
+function deletePersistedExtractionStatusRecord(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
+  assertionUri: string,
+): void {
+  extractionStatus.delete(assertionUri);
+  dashDb.deleteExtractionStatusSnapshot(assertionUri);
+}
+
 function updateExtractionStatusSemanticDescriptor(
   extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
   assertionUri: string,
   descriptor: SemanticEnrichmentDescriptor,
 ): void {
-  const current = getExtractionStatusRecord(extractionStatus, assertionUri);
+  const current = getHydratedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);
   if (!current) return;
-  setExtractionStatusRecord(extractionStatus, assertionUri, {
+  setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, {
     ...current,
     semanticEnrichment: {
       eventId: descriptor.eventId,
@@ -4351,7 +4430,7 @@ async function handleRequest(
         : 0;
     if (eventPayload?.kind === 'file_import') {
       const descriptor = semanticEnrichmentDescriptorFromRow(row, semanticTripleCount);
-      updateExtractionStatusSemanticDescriptor(extractionStatus, eventPayload.assertionUri, descriptor);
+      updateExtractionStatusSemanticDescriptor(extractionStatus, dashDb, eventPayload.assertionUri, descriptor);
       return jsonResponse(res, 200, { completed: true, semanticEnrichment: descriptor });
     }
     return jsonResponse(res, 200, {
@@ -4397,6 +4476,7 @@ async function handleRequest(
     if (updated && eventPayload?.kind === 'file_import') {
       updateExtractionStatusSemanticDescriptor(
         extractionStatus,
+        dashDb,
         eventPayload.assertionUri,
         semanticEnrichmentDescriptorFromRow(updated),
       );
@@ -4510,7 +4590,7 @@ async function handleRequest(
     }
     const descriptor = semanticEnrichmentDescriptorFromRow(updated, semanticTripleCount);
     if (eventPayload.kind === 'file_import') {
-      updateExtractionStatusSemanticDescriptor(extractionStatus, eventPayload.assertionUri, descriptor);
+      updateExtractionStatusSemanticDescriptor(extractionStatus, dashDb, eventPayload.assertionUri, descriptor);
     }
     return jsonResponse(res, completed ? 200 : 409, {
       applied: !alreadyApplied && triples.length > 0,
@@ -5078,9 +5158,10 @@ async function handleRequest(
       if (!isSafeIri(subject) || !isSafeIri(predicate)) {
         return jsonResponse(res, 400, { error: 'Ontology quad subject/predicate must be safe IRIs' });
       }
-      const object = objectRaw.startsWith('"') || isSafeIri(objectRaw)
-        ? objectRaw
-        : JSON.stringify(objectRaw);
+      const object = normalizeOntologyQuadObjectInput(objectRaw);
+      if (!object) {
+        return jsonResponse(res, 400, { error: 'Ontology quad object must be a safe IRI, valid RDF literal, or plain text' });
+      }
       normalizedQuads.push({
         subject,
         predicate,
@@ -5094,7 +5175,8 @@ async function handleRequest(
       written: normalizedQuads.length,
       graph: ontologyGraph,
       deprecated: {
-        replacementEndpoint: 'POST /api/context-graph/{id}/ontology',
+        currentEndpoint: 'POST /api/context-graph/{id}/_ontology/write',
+        plannedReplacementEndpoint: 'POST /api/context-graph/{id}/ontology',
       },
     });
   }
@@ -5298,7 +5380,7 @@ async function handleRequest(
         assertionName,
         subGraphName,
       );
-      extractionStatus.delete(assertionUri);
+      deletePersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (
@@ -5512,7 +5594,7 @@ async function handleRequest(
           }),
         );
       const recordInProgressExtraction = (): void => {
-        setExtractionStatusRecord(extractionStatus, assertionUri, {
+        setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, {
           status: "in_progress",
           fileHash: fileStoreEntry.keccak256,
           detectedContentType,
@@ -5539,7 +5621,7 @@ async function handleRequest(
           startedAt,
           completedAt: new Date().toISOString(),
         };
-        setExtractionStatusRecord(extractionStatus, assertionUri, failedRecord);
+        setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, failedRecord);
         return failedRecord;
       };
       const respondWithFailedExtraction = (
@@ -5611,8 +5693,9 @@ async function handleRequest(
           startedAt,
           completedAt: new Date().toISOString(),
         };
-        setExtractionStatusRecord(
+        setPersistedExtractionStatusRecord(
           extractionStatus,
+          dashDb,
           assertionUri,
           skippedRecord,
         );
@@ -6202,8 +6285,9 @@ async function handleRequest(
         startedAt,
         completedAt: new Date().toISOString(),
       };
-      setExtractionStatusRecord(
+      setPersistedExtractionStatusRecord(
         extractionStatus,
+        dashDb,
         assertionUri,
         completedRecord,
       );
@@ -6232,6 +6316,7 @@ async function handleRequest(
       if (semanticEnrichment) {
         updateExtractionStatusSemanticDescriptor(
           extractionStatus,
+          dashDb,
           assertionUri,
           semanticEnrichment,
         );
@@ -6295,7 +6380,7 @@ async function handleRequest(
       assertionName,
       subGraphName,
     );
-    const record = getExtractionStatusRecord(extractionStatus, assertionUri);
+    const record = getHydratedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);
     if (!record) {
       return jsonResponse(res, 404, {
         error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,

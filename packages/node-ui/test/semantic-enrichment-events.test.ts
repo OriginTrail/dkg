@@ -235,4 +235,34 @@ describe('DashboardDB — semantic enrichment events', () => {
     expect(db.getSemanticEnrichmentEvent('pending-old')).toBeDefined();
     expect(db.getSemanticEnrichmentEvent('leased-old')).toBeDefined();
   });
+
+  it('stores extraction-status snapshots for restart-safe semantic polling', () => {
+    db.upsertExtractionStatusSnapshot({
+      assertion_uri: 'did:dkg:context-graph:cg/assertion/peer/roadmap',
+      record_json: JSON.stringify({
+        status: 'completed',
+        fileHash: 'keccak256:file-1',
+        detectedContentType: 'text/markdown',
+        pipelineUsed: 'text/markdown',
+        tripleCount: 7,
+        startedAt: '2026-04-15T12:00:00.000Z',
+        completedAt: '2026-04-15T12:00:01.000Z',
+        semanticEnrichment: {
+          eventId: 'evt-1',
+          status: 'pending',
+          semanticTripleCount: 0,
+          updatedAt: '2026-04-15T12:00:01.000Z',
+        },
+      }),
+      updated_at: 1_234,
+    });
+
+    expect(db.getExtractionStatusSnapshot('did:dkg:context-graph:cg/assertion/peer/roadmap')).toMatchObject({
+      assertion_uri: 'did:dkg:context-graph:cg/assertion/peer/roadmap',
+      updated_at: 1_234,
+    });
+
+    db.deleteExtractionStatusSnapshot('did:dkg:context-graph:cg/assertion/peer/roadmap');
+    expect(db.getExtractionStatusSnapshot('did:dkg:context-graph:cg/assertion/peer/roadmap')).toBeUndefined();
+  });
 });
