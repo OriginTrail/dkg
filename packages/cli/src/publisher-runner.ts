@@ -229,8 +229,13 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       const publishOptionsWithACKs = v10ACKProvider
         ? { ...publishOptions, v10ACKProvider }
         : publishOptions;
-      const chain = (publisher as unknown as { chain?: { createKnowledgeAssetsV10?: unknown } }).chain;
-      if (chain && typeof chain.createKnowledgeAssetsV10 === 'function' && !publishOptionsWithACKs.v10ACKProvider) {
+      // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
+      // signal) rather than probing for `createKnowledgeAssetsV10`. Since the
+      // interface made the method required, `NoChainAdapter` now implements
+      // it as a throwing stub, so a `typeof === 'function'` probe would
+      // mis-route no-chain mode into the V10 ACK-gated path and crash.
+      const chain = (publisher as unknown as { chain?: { isV10Ready?: () => boolean } }).chain;
+      if (chain?.isV10Ready?.() && !publishOptionsWithACKs.v10ACKProvider) {
         throw new Error(
           'Async publisher cannot publish to a V10 ACK-gated chain without a v10ACKProvider. ' +
           'Use the synchronous agent publish path or add ACK collection support to the async runtime.',
@@ -270,13 +275,22 @@ function createV10ACKProviderForPublisher(
   if (!transport) return undefined;
   const chain = (publisher as unknown as {
     chain?: {
-      createKnowledgeAssetsV10?: unknown;
+      isV10Ready?: () => boolean;
       verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
       getMinimumRequiredSignatures?: () => Promise<number>;
+      getEvmChainId?: () => Promise<bigint>;
+      getKnowledgeAssetsV10Address?: () => Promise<string>;
     };
   }).chain;
-  if (!chain || typeof chain.createKnowledgeAssetsV10 !== 'function') return undefined;
+  // `isV10Ready()` is the authoritative capability gate — rejects
+  // NoChainAdapter (returns false) and unresolved EVM adapters.
+  if (!chain?.isV10Ready?.()) return undefined;
   if (typeof chain.verifyACKIdentity !== 'function') return undefined;
+  // The H5 prefix requires both a numeric chain id AND the deployed KAV10
+  // address. Without them the collector cannot build a digest that matches
+  // what core-node handlers sign, so refuse to hand back a provider at all.
+  if (typeof chain.getEvmChainId !== 'function') return undefined;
+  if (typeof chain.getKnowledgeAssetsV10Address !== 'function') return undefined;
 
   const collector = new ACKCollector({
     gossipPublish: transport.gossipPublish,
@@ -295,16 +309,40 @@ function createV10ACKProviderForPublisher(
     stagingQuads,
     epochs,
     tokenAmount,
+    swmGraphId,
+    subGraphName,
   ) => {
+    // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
+    // a real on-chain context graph; `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. Reject `<= 0n`
+    // rather than `=== 0n` so `BigInt("-1") === -1n` is caught here instead
+    // of dying in ethers' uint256 encoder inside the evm-adapter.
+    // `contextGraphId` here is the TARGET on-chain numeric id; `swmGraphId`
+    // (optional) is the source SWM graph name and is NOT required to be
+    // numeric.
     let cgIdBigInt: bigint;
     try {
       cgIdBigInt = BigInt(contextGraphId);
     } catch {
-      cgIdBigInt = 0n;
+      throw new Error(
+        `Async V10 publish requires a numeric on-chain context graph id; ` +
+        `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (cgIdBigInt <= 0n) {
+      throw new Error(
+        `Async V10 publish requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
+        `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
     }
     const requiredACKs = typeof chain.getMinimumRequiredSignatures === 'function'
       ? await chain.getMinimumRequiredSignatures()
       : undefined;
+    // Both values are guaranteed present here by the adapter-capability
+    // check at the top of this factory — re-resolving on every publish
+    // keeps the provider agnostic to hot adapter swaps.
+    const chainIdBig = await chain.getEvmChainId!();
+    const kav10Address = await chain.getKnowledgeAssetsV10Address!();
     const result = await collector.collect({
       merkleRoot,
       contextGraphId: cgIdBigInt,
@@ -314,10 +352,14 @@ function createV10ACKProviderForPublisher(
       isPrivate: false,
       kaCount,
       rootEntities,
+      chainId: chainIdBig,
+      kav10Address,
       requiredACKs,
       stagingQuads,
       epochs,
       tokenAmount,
+      swmGraphId,
+      subGraphName,
     });
     return result.acks;
   };

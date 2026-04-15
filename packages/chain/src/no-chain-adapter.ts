@@ -12,6 +12,7 @@ import type {
   ChainEvent,
   EventFilter,
   CreateContextGraphParams,
+  V10PublishDirectParams,
 } from './chain-adapter.js';
 
 function noChain(): never {
@@ -43,4 +44,14 @@ export class NoChainAdapter implements ChainAdapter {
   async createContextGraph(_params: CreateContextGraphParams): Promise<TxResult> { noChain(); }
   async submitToContextGraph(_kcId: string, _contextGraphId: string): Promise<TxResult> { noChain(); }
   async revealContextGraphMetadata(_contextGraphId: string, _name: string, _description: string): Promise<TxResult> { noChain(); }
+  async createKnowledgeAssetsV10(_params: V10PublishDirectParams): Promise<OnChainPublishResult> { noChain(); }
+  async getKnowledgeAssetsV10Address(): Promise<string> { noChain(); }
+  async getEvmChainId(): Promise<bigint> { noChain(); }
+
+  // Authoritative V10 capability gate — no-chain mode is never V10 ready.
+  // The createKnowledgeAssetsV10 / getEvmChainId / getKnowledgeAssetsV10Address
+  // methods above exist only so TypeScript sees the interface as satisfied;
+  // `isV10Ready() === false` keeps all four-call-site probes routing
+  // publishes into tentative/off-chain mode instead of the throwing stubs.
+  isV10Ready(): boolean { return false; }
 }

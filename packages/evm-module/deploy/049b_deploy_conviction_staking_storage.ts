@@ -3,10 +3,10 @@ import { DeployFunction } from 'hardhat-deploy/types';
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   await hre.helpers.deploy({
-    newContractName: 'MigratorV10Staking',
+    newContractName: 'ConvictionStakingStorage',
   });
 };
 
 export default func;
-func.tags = ['MigratorV10Staking', 'v10'];
-func.dependencies = ['Hub', 'DelegatorsInfo'];
+func.tags = ['ConvictionStakingStorage', 'v10'];
+func.dependencies = ['Hub', 'Chronos'];

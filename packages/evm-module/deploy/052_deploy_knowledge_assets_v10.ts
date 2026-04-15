@@ -13,14 +13,19 @@ func.dependencies = [
   'Hub',
   'KnowledgeCollectionStorage',
   'Chronos',
-  'ShardingTableStorage',
   'ParametersStorage',
   'IdentityStorage',
   'PaymasterManager',
-  'PublishingConvictionAccount',
+  'StakingStorage',
   'ParanetKnowledgeCollectionsRegistry',
   'ParanetKnowledgeMinersRegistry',
   'ParanetsRegistry',
   'AskStorage',
   'EpochStorage',
+  // V10 Phase 8 dependencies — `KnowledgeAssetsV10.initialize()` reverts
+  // ZeroAddressDependency for any of these missing from Hub at init time.
+  'ContextGraphStorage',
+  'ContextGraphs',
+  'ContextGraphValueStorage',
+  'DKGPublishingConvictionNFT',
 ];

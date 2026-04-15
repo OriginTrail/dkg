@@ -1101,18 +1101,37 @@ contextGraphCmd
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
   .option('-d, --description <desc>', 'Description of the context graph')
   .option('--invite <peer...>', 'Invite peers (allowlist for curated CGs)')
+  .option('--private', 'Create a private local-only context graph')
+  .option(
+    '--participant-identity-id <id>',
+    'Participant identity ID to include for private access control (repeatable)',
+    (value, previous: string[] = []) => [...previous, value],
+    [],
+  )
+  .option('--required-signatures <n>', 'Required signatures threshold for participant-based context graphs')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createContextGraph(id, opts.name ?? id, opts.description, opts.invite);
-      console.log(`Context graph created (free, P2P):`);
+      const participantIdentityIds = (opts.participantIdentityId as string[] | undefined) ?? [];
+      const result = await client.createContextGraph(id, opts.name ?? id, opts.description, {
+        private: !!opts.private,
+        participantIdentityIds,
+        requiredSignatures: opts.requiredSignatures != null ? Number(opts.requiredSignatures) : undefined,
+      }, opts.invite as string[] | undefined);
+      console.log(`Context graph created:`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
-      console.log(`  Auto-subscribed to GossipSub topic.`);
+      console.log(`  ${opts.private ? 'Private local-only graph created.' : 'Auto-subscribed to GossipSub topic.'}`);
       if (opts.invite?.length) {
         console.log(`  Invited ${opts.invite.length} peer(s) via allowlist.`);
+      }
+      if (opts.private && participantIdentityIds.length > 0) {
+        console.log(`  Participants: ${participantIdentityIds.join(', ')}`);
+      }
+      if (opts.requiredSignatures != null) {
+        console.log(`  Required signatures: ${opts.requiredSignatures}`);
       }
       console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verified Memory).`);
 

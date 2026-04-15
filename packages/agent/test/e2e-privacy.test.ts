@@ -9,7 +9,14 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri, SYSTEM_PARANETS, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { generateKCMetadata, computeTripleHashV10, computeFlatKCRootV10, type KAMetadata } from '@origintrail-official/dkg-publisher';
+import {
+  generateKCMetadata,
+  computeTripleHashV10,
+  computeFlatKCRootV10,
+  TripleStoreAsyncLiftPublisher,
+  AsyncLiftRunner,
+  type KAMetadata,
+} from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
 /** Insert data quads AND matching meta quads so sync's data/meta guard passes. */
@@ -45,6 +52,8 @@ const MATRIX_PUBLIC_SWM_ENTITY = 'urn:e2e:matrix:public:swm:1';
 const MATRIX_PUBLIC_DATA_ENTITY = 'urn:e2e:matrix:public:data:1';
 const MATRIX_PRIVATE_SWM_ENTITY = 'urn:e2e:matrix:private:swm:1';
 const MATRIX_PRIVATE_DATA_ENTITY = 'urn:e2e:matrix:private:data:1';
+const GUARDIAN_PARANET = 'GuardianTest';
+const GUARDIAN_SWM_ENTITY = 'urn:e2e:guardian:swm:1';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -618,4 +627,163 @@ describe('Participant IDs stored in meta graph (not ontology)', () => {
     expect(participants).toContain(idA);
     expect(participants).toContain(42n);
   }, 30000);
+});
+
+describe('Private context graph late join sync (3 nodes)', () => {
+  let curator: DKGAgent;
+  let syncerA: DKGAgent;
+  let syncerB: DKGAgent;
+  let walletA: ethers.Wallet;
+  let walletB: ethers.Wallet;
+  let walletC: ethers.Wallet;
+
+  afterAll(async () => {
+    try { await curator?.stop(); } catch { /* */ }
+    try { await syncerA?.stop(); } catch { /* */ }
+    try { await syncerB?.stop(); } catch { /* */ }
+  });
+
+  it('syncs invited private graph data for an early and a late participant via real DKG sync/query flows', async () => {
+    walletA = ethers.Wallet.createRandom();
+    walletB = ethers.Wallet.createRandom();
+    walletC = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainB.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletB.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainC.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletC.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    curator = await DKGAgent.create({ name: 'GuardianCurator', listenPort: 0, chainAdapter: chainA });
+    syncerA = await DKGAgent.create({ name: 'GuardianSyncerA', listenPort: 0, chainAdapter: chainB });
+    syncerB = await DKGAgent.create({ name: 'GuardianSyncerB', listenPort: 0, chainAdapter: chainC });
+
+    await curator.start();
+    await syncerA.start();
+    await syncerB.start();
+    await sleep(800);
+
+    const addrCurator = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await syncerA.connectTo(addrCurator);
+    await sleep(500);
+
+    const idA = 11n;
+    const idB = 12n;
+    const idC = 13n;
+    (chainA as any).identities.set(walletA.address, idA);
+    (chainA as any).identities.set(walletB.address, idB);
+    (chainA as any).identities.set(walletC.address, idC);
+    (chainB as any).identities.set(walletB.address, idB);
+    (chainC as any).identities.set(walletC.address, idC);
+
+    await curator.createContextGraph({
+      id: GUARDIAN_PARANET,
+      name: 'GuardianTest',
+      description: 'Curator plus invited participants',
+      private: true,
+      participantIdentityIds: [idA, idB, idC],
+    });
+
+    await syncerA.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    const shareResult = await curator.share(GUARDIAN_PARANET, [
+      { subject: GUARDIAN_SWM_ENTITY, predicate: 'http://schema.org/text', object: '"Guardian shared memory"', graph: '' },
+      { subject: GUARDIAN_SWM_ENTITY, predicate: 'http://schema.org/author', object: '"curator"', graph: '' },
+    ], { localOnly: true });
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((curator as any).store, {
+      publishExecutor: async ({ publishOptions }) => (curator as any).publisher.publish(publishOptions),
+    });
+    const runner = new AsyncLiftRunner({
+      publisher: asyncPublisher,
+      walletIds: ['guardian-wallet'],
+      pollIntervalMs: 100,
+      errorBackoffMs: 100,
+    });
+    await asyncPublisher.lift({
+      swmId: shareResult.shareOperationId,
+      shareOperationId: shareResult.shareOperationId,
+      roots: [GUARDIAN_SWM_ENTITY],
+      contextGraphId: GUARDIAN_PARANET,
+      namespace: 'guardian',
+      scope: 'shared-memory',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:guardian:owner' },
+    });
+    await runner.start();
+
+    try {
+      const waitForJob = async (timeoutMs: number) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const jobs = await asyncPublisher.list();
+          const job = jobs[0];
+          if (job?.status === 'finalized' || job?.status === 'included') return job;
+          if (job?.status === 'failed') throw new Error(`Async publish job failed: ${job.failure?.message ?? 'unknown failure'}`);
+          await sleep(100);
+        }
+        throw new Error('Timed out waiting for async publish job finalization');
+      };
+
+      const finalizedJob = await waitForJob(10_000);
+      expect(finalizedJob.status === 'finalized' || finalizedJob.status === 'included').toBe(true);
+
+      const earlyDataSync = await syncerA.syncContextGraphFromConnectedPeers(GUARDIAN_PARANET, {
+        includeSharedMemory: true,
+      });
+      expect(earlyDataSync.dataSynced).toBeGreaterThan(0);
+      expect(earlyDataSync.sharedMemorySynced).toBeGreaterThan(0);
+
+      const earlyDurable = await syncerA.query(
+        `SELECT ?s ?text WHERE { ?s <http://schema.org/text> ?text }`,
+        { contextGraphId: GUARDIAN_PARANET },
+      );
+      expect(earlyDurable.bindings.length).toBe(1);
+      expect(earlyDurable.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+
+      const earlySwm = await syncerA.query(
+        `SELECT ?text WHERE { <${GUARDIAN_SWM_ENTITY}> <http://schema.org/text> ?text }`,
+        { contextGraphId: GUARDIAN_PARANET, graphSuffix: '_shared_memory' },
+      );
+      expect(earlySwm.bindings.length).toBe(1);
+      expect(earlySwm.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+
+      await syncerB.connectTo(addrCurator);
+      await sleep(500);
+      await syncerB.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+      const lateSync = await syncerB.syncContextGraphFromConnectedPeers(GUARDIAN_PARANET, {
+        includeSharedMemory: true,
+      });
+      expect(lateSync.dataSynced).toBeGreaterThan(0);
+      expect(lateSync.sharedMemorySynced).toBeGreaterThan(0);
+
+      const lateDurable = await syncerB.query(
+        `SELECT ?s ?text WHERE { ?s <http://schema.org/text> ?text }`,
+        { contextGraphId: GUARDIAN_PARANET },
+      );
+      expect(lateDurable.bindings.length).toBe(1);
+      expect(lateDurable.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+
+      const lateSwm = await syncerB.query(
+        `SELECT ?text WHERE { <${GUARDIAN_SWM_ENTITY}> <http://schema.org/text> ?text }`,
+        { contextGraphId: GUARDIAN_PARANET, graphSuffix: '_shared_memory' },
+      );
+      expect(lateSwm.bindings.length).toBe(1);
+      expect(lateSwm.bindings[0]?.['text']).toBe('"Guardian shared memory"');
+    } finally {
+      await runner.stop();
+    }
+  }, 45000);
 });

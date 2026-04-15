@@ -21,31 +21,18 @@ import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { join, dirname, resolve } from "node:path";
-import { existsSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { ethers } from "ethers";
-import { enrichEvmError } from "@origintrail-official/dkg-chain";
-import { DKGAgent, loadOpWallets } from "@origintrail-official/dkg-agent";
-import {
-  computeNetworkId,
-  createOperationContext,
-  DKGEvent,
-  Logger,
-  PayloadTooLargeError,
-  GET_VIEWS,
-  validateSubGraphName,
-  validateAssertionName,
-  validateContextGraphId,
-  isSafeIri,
-  contextGraphSharedMemoryUri,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
-} from "@origintrail-official/dkg-core";
-import {
-  findReservedSubjectPrefix,
-  isSkolemizedUri,
-} from "@origintrail-official/dkg-publisher";
+import { join, dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { ethers } from 'ethers';
+import { join, dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { ethers } from 'ethers';
+import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -544,6 +531,20 @@ async function runDaemonInner(
     );
   }
 
+  const mockIdentityId = chainBase?.type === 'mock' && chainBase.mockIdentityId != null
+    ? BigInt(chainBase.mockIdentityId)
+    : undefined;
+  const mockChainAdapter = chainBase?.type === 'mock'
+    ? (() => {
+        const signerAddress = opWallets.wallets[0]?.address;
+        const adapter = new MockChainAdapter(chainBase.chainId ?? 'mock:31337', signerAddress);
+        if (signerAddress && mockIdentityId != null) {
+          adapter.seedIdentity(signerAddress, mockIdentityId);
+        }
+        return adapter;
+      })()
+    : undefined;
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: "DKG",
@@ -554,20 +555,17 @@ async function runDaemonInner(
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     syncContextGraphs: syncContextGraphs,
-    storeConfig: config.store
-      ? {
-          backend: config.store.backend,
-          options: config.store.options,
-        }
-      : undefined,
-    chainConfig: chainBase
-      ? {
-          rpcUrl: chainBase.rpcUrl,
-          hubAddress: chainBase.hubAddress,
-          operationalKeys: opWallets.wallets.map((w) => w.privateKey),
-          chainId: chainBase.chainId,
-        }
-      : undefined,
+    storeConfig: config.store ? {
+      backend: config.store.backend,
+      options: config.store.options,
+    } : undefined,
+    chainAdapter: mockChainAdapter,
+    chainConfig: chainBase ? {
+      rpcUrl: chainBase.rpcUrl,
+      hubAddress: chainBase.hubAddress,
+      operationalKeys: opWallets.wallets.map((w) => w.privateKey),
+      chainId: chainBase.chainId,
+    } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
   });
 
@@ -4006,17 +4004,21 @@ async function handleRequest(
   }
 
   // POST /api/context-graph/create — on-chain context graph creation (V10)
-  // When the body has `participantIdentityIds`, this is the on-chain multisig creation.
-  // Otherwise, fall through to the context-graph-style create handler below.
+  // When the body has `participantIdentityIds` but no local create metadata (`id`/`name`),
+  // treat it as the on-chain multisig creation flow. Otherwise, handle it as the
+  // free/local context-graph create flow below.
   if (req.method === "POST" && path === "/api/context-graph/create") {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    if (Array.isArray(parsed.participantIdentityIds)) {
-      const { participantIdentityIds, requiredSignatures } = parsed;
-      if (typeof requiredSignatures !== "number") {
-        return jsonResponse(res, 400, {
-          error: "Missing requiredSignatures (number)",
-        });
+    const isLocalCreate = typeof parsed.id === 'string' && typeof parsed.name === 'string';
+    if (Array.isArray(parsed.participantIdentityIds) && !isLocalCreate) {
+      const { participantIdentityIds } = parsed;
+      const isPrivateLocalOnly = parsed.private === true;
+      const requiredSignatures = typeof parsed.requiredSignatures === 'number'
+        ? parsed.requiredSignatures
+        : (isPrivateLocalOnly ? 1 : undefined);
+      if (typeof requiredSignatures !== 'number') {
+        return jsonResponse(res, 400, { error: 'Missing requiredSignatures (number)' });
       }
       if (!Number.isInteger(requiredSignatures) || requiredSignatures < 1) {
         return jsonResponse(res, 400, {
@@ -4078,13 +4080,22 @@ async function handleRequest(
       }
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description } = parsed;
+    const { id, name, description, allowedPeers } = parsed;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
       return jsonResponse(res, 400, { error: "Invalid context graph id" });
     try {
-      await agent.createContextGraph({ id, name, description });
+      await agent.createContextGraph({
+        id,
+        name,
+        description,
+        ...(allowedPeers ? { allowedPeers } : {}),
+        ...(parsed.private === true ? { private: true } : {}),
+        ...(Array.isArray(parsed.participantIdentityIds)
+          ? { participantIdentityIds: parsed.participantIdentityIds.map((v: string | number) => BigInt(v)) }
+          : {}),
+      });
     } catch (err: any) {
       const msg = err?.message ?? "";
       if (

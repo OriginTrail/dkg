@@ -27,6 +27,16 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "NoEligibleContextGraph",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NoEligibleKnowledgeCollection",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",
@@ -52,6 +62,62 @@
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "knowledgeCollectionId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "chunkId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "activeProofPeriodStartBlock",
+        "type": "uint256"
+      }
+    ],
+    "name": "ChallengeGenerated",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_KC_RETRIES",
+    "outputs": [
+      {
+        "internalType": "uint8",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [],
@@ -104,6 +170,32 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "contextGraphStorage",
+    "outputs": [
+      {
+        "internalType": "contract ContextGraphStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "contextGraphValueStorage",
+    "outputs": [
+      {
+        "internalType": "contract ContextGraphValueStorage",
         "name": "",
         "type": "address"
       }
@@ -286,6 +378,40 @@
         "internalType": "contract ParametersStorage",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "seed",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "targetEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "previewChallengeForSeed",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "cgId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "kcId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "chunkId",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",

@@ -412,6 +412,16 @@ async function setupTestEnvironment(): Promise<{
   );
 
   await contracts.hub.setContractAddress('HubOwner', accounts.owner.address);
+  // Phase 10 — opt this fixture into the auto-bridge in `kc-helpers.ts`. The
+  // helper reads `Hub.getContractAddress("TestStorageOperator")` and, when
+  // present, transparently registers each freshly-published KC into a default
+  // open Context Graph and seeds its per-epoch value so the new
+  // `RandomSampling.createChallenge` picker has eligible state to draw from.
+  // signers[150] is well above the highest test-account index in this file.
+  await contracts.hub.setContractAddress(
+    'TestStorageOperator',
+    signers[150].address,
+  );
 
   // Mint tokens for all participants
   for (const delegator of [
@@ -3112,7 +3122,6 @@ describe(`Delegator Scoring`, function () {
 
       // Partial withdrawal of 25 TRAC
       const withdrawalAmount = toTRAC(25);
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, withdrawalAmount);
@@ -3523,7 +3532,6 @@ describe(`Delegator Scoring`, function () {
 
       // Step 3: withdraw(10) - triggers first settlement
       const withdrawAmount = toTRAC(10);
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, withdrawAmount);
@@ -3654,7 +3662,6 @@ describe(`Delegator Scoring`, function () {
         node1Id,
         d1Key,
       );
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, totalStake);
@@ -3712,7 +3719,6 @@ describe(`Delegator Scoring`, function () {
         .stake(node1Id, stakeAmount);
 
       // Step 2: requestWithdrawal(all) - NO proof yet
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, stakeAmount);
@@ -3974,7 +3980,6 @@ describe(`Delegator Scoring`, function () {
         .stake(node1Id, stakeAmount);
 
       // Step 2: withdrawAll
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, stakeAmount);
@@ -4204,7 +4209,6 @@ describe(`Delegator Scoring`, function () {
         .stake(node1Id, initialStake);
 
       const withdrawAmount = toTRAC(70);
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, withdrawAmount);
@@ -4727,7 +4731,6 @@ describe(`Delegator Scoring`, function () {
       );
 
       // Step 2: One withdraws all
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, stake1);
@@ -5160,7 +5163,6 @@ describe(`Delegator Scoring`, function () {
         .stake(node1Id, initialStake);
 
       // Step 2: Withdraw all stake
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, initialStake);
@@ -5293,7 +5295,6 @@ describe(`Delegator Scoring`, function () {
         .submitProof(chunks[chunkId], proof);
 
       // Step 2: Withdraw all stake
-      await contracts.delegatorsInfo.setDelegatorLock(node1Id, accounts.delegator1.address, 0, 0);
       await contracts.staking
         .connect(accounts.delegator1)
         .requestWithdrawal(node1Id, initialStake);

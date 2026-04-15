@@ -190,7 +190,7 @@ export interface ConvictionAccountInfo {
 
 // ----- V10 publish types -----
 
-export interface V10PublishParams {
+export interface V10PublishDirectParams {
   publishOperationId: string;
   contextGraphId: bigint;
   merkleRoot: Uint8Array;
@@ -199,8 +199,13 @@ export interface V10PublishParams {
   epochs: number;
   tokenAmount: bigint;
   isImmutable: boolean;
+  /**
+   * Paymaster address. `ethers.ZeroAddress` means the caller pays TRAC
+   * directly. Non-zero means the paymaster covers the cost. The adapter
+   * splits this field out of the struct and passes it as the second
+   * argument to `KnowledgeAssetsV10.publishDirect(PublishParams, paymaster)`.
+   */
   paymaster: string;
-  convictionAccountId: bigint;
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
@@ -339,8 +344,15 @@ export interface ChainAdapter {
   verify?(params: VerifyParams): Promise<TxResult>;
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
-  // V10 publish (KnowledgeAssetsV10 contract — writes to KnowledgeCollectionStorage)
-  createKnowledgeAssetsV10?(params: V10PublishParams): Promise<OnChainPublishResult>;
+  /**
+   * V10 publish (KnowledgeAssetsV10 contract — writes to
+   * KnowledgeCollectionStorage). Required on every adapter that claims
+   * V10 capability; paired with `getKnowledgeAssetsV10Address()` and
+   * `getEvmChainId()` below so authors of out-of-tree adapters get a
+   * compile-time failure instead of a runtime regression when they
+   * implement the tx submission but forget the digest-prefix getters.
+   */
+  createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult>;
 
   /** Read minimumRequiredSignatures from ParametersStorage. Used by ACKCollector. */
   getMinimumRequiredSignatures?(): Promise<number>;
@@ -368,8 +380,35 @@ export interface ChainAdapter {
   /** V10 update (works with KnowledgeCollectionStorage). */
   updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
 
-  /** Whether V10 contract is deployed and ready (KnowledgeAssetsV10 resolved). */
-  isV10Ready?(): boolean;
+  /**
+   * Whether this adapter supports V10 publish paths. Required — this is
+   * the authoritative runtime capability gate for V10. Adapters that
+   * cannot publish (NoChainAdapter, offline adapters) MUST return false so
+   * callers never route into throwing stubs. EVM adapters return true only
+   * after `KnowledgeAssetsV10` is actually resolved on-chain.
+   *
+   * Runtime probes across the repo use `chain.isV10Ready?.()` (falsy =>
+   * not V10); making it required tightens the TypeScript side without
+   * breaking the defensive runtime optional-call style.
+   */
+  isV10Ready(): boolean;
+
+  /**
+   * Returns the deployed address of `KnowledgeAssetsV10` on this chain.
+   * Required — the publisher uses it to build the H5-prefixed publish
+   * digests, and any adapter that implements `createKnowledgeAssetsV10`
+   * must also implement this so the digest inputs match the on-chain
+   * contract that will verify them. Throws if the contract is not deployed.
+   */
+  getKnowledgeAssetsV10Address(): Promise<string>;
+
+  /**
+   * Returns the numeric EVM chain id (e.g. 31337n for hardhat). Distinct
+   * from `chainId` above, which is namespaced (`evm:31337`, `mock:31337`)
+   * and not directly parseable with `BigInt()`. Required — used by the
+   * publisher to build the H5-prefixed publish digests.
+   */
+  getEvmChainId(): Promise<bigint>;
 
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;

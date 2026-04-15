@@ -95,7 +95,7 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe('tentative');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     const accessHandler = new AccessHandler(storeA, bus);
@@ -106,14 +106,71 @@ describe('Access Protocol', () => {
     const routerB = new ProtocolRouter(nodeB);
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     // accessClient is bound to nodeB (requester); nodeA.peerId is the remote provider target.
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
     expect(accessResult.quads.length).toBe(0);
     expect(accessResult.rejectionReason).toContain('owner-only');
+  }, 20000);
+
+  it('publishes private data without leaking it to public storage and still serves it to the owner', async () => {
+    const { nodeA, nodeB } = await setupTwoNodes();
+
+    const storeA = new OxigraphStore();
+    const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
+
+    expect(result.status).toBe('tentative');
+    expect(result.kaManifest[0].privateTripleCount).toBe(2);
+
+    const publicResult = await storeA.query(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${GRAPH}> {
+          ?s ?p ?o .
+          FILTER(?p IN (<http://ex.org/apiKey>, <http://ex.org/credentials>))
+        }
+      }
+    `);
+    expect(publicResult.type).toBe('bindings');
+    expect(publicResult.type === 'bindings' ? publicResult.bindings : []).toHaveLength(0);
+
+    const kcUal = result.ual;
+    const kaUal = `${result.ual}/1`;
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+    const metaResult = await storeA.query(`
+      SELECT ?policy ?publisher WHERE {
+        GRAPH <${metaGraph}> {
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/accessPolicy> ?policy }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/publisherPeerId> ?publisher }
+        }
+      }
+    `);
+    expect(metaResult.type).toBe('bindings');
+    expect(metaResult.type === 'bindings' ? metaResult.bindings : []).toEqual([
+      {
+        policy: '"ownerOnly"',
+        publisher: `"${nodeB.peerId}"`,
+      },
+    ]);
+
+    const accessHandler = new AccessHandler(storeA, bus);
+    const routerA = new ProtocolRouter(nodeA);
+    routerA.register(PROTOCOL_ACCESS, accessHandler.handler);
+
+    const keypairB = await generateEd25519Keypair();
+    const routerB = new ProtocolRouter(nodeB);
+    const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
+
+    const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
+
+    expect(accessResult.granted).toBe(true);
+    expect(accessResult.rejectionReason).toBeUndefined();
+    expect(accessResult.quads).toHaveLength(2);
+    expect(accessResult.quads.map((quad) => quad.predicate).sort()).toEqual([
+      'http://ex.org/apiKey',
+      'http://ex.org/credentials',
+    ]);
   }, 20000);
 
   it('denies access when KA does not exist', async () => {
@@ -152,8 +209,7 @@ describe('Access Protocol', () => {
     const routerB = new ProtocolRouter(nodeB);
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
@@ -166,9 +222,8 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    const onChain = result.onChainResult!;
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const kaUal = `${result.ual}/1`;
+    const kcUal = result.ual;
     const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
 
     await storeA.insert([
@@ -196,8 +251,7 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    const onChain = result.onChainResult!;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const kcUal = result.ual;
     const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/accessPolicy', object: '"ownerOnly"', graph: metaGraph },
@@ -213,7 +267,7 @@ describe('Access Protocol', () => {
     const routerB = new ProtocolRouter(nodeB);
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);
@@ -237,15 +291,14 @@ describe('Access Protocol', () => {
     const routerB = new ProtocolRouter(nodeB);
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
-    const onChain = result.onChainResult!;
-    const kcUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
+    const kcUal = result.ual;
     const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     await storeA.delete([
       { subject: kcUal, predicate: 'http://dkg.io/ontology/publisherPeerId', object: `"${nodeA.peerId}"`, graph: metaGraph },
       { subject: kcUal, predicate: 'http://www.w3.org/ns/prov#wasAttributedTo', object: `"${nodeA.peerId}"`, graph: metaGraph },
     ]);
 
-    const kaUal = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const kaUal = `${result.ual}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, kaUal);
 
     expect(accessResult.granted).toBe(false);

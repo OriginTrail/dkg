@@ -8,5 +8,5 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 };
 
 export default func;
-func.tags = ['ContextGraphs', 'v9'];
-func.dependencies = ['Hub', 'ContextGraphStorage', 'IdentityStorage', 'KnowledgeAssetsStorage'];
+func.tags = ['ContextGraphs', 'v10'];
+func.dependencies = ['Hub', 'ContextGraphStorage'];

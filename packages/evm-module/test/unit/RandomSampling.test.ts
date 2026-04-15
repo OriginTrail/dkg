@@ -1,6 +1,7 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
+import { ethers } from 'ethers';
 import hre from 'hardhat';
 
 import {
@@ -21,6 +22,8 @@ import {
   ParametersStorage,
   KnowledgeCollectionStorage,
   Profile,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
 } from '../../typechain';
 
 type RandomSamplingFixture = {
@@ -37,6 +40,8 @@ type RandomSamplingFixture = {
   EpochStorage: EpochStorage;
   ParametersStorage: ParametersStorage;
   KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  ContextGraphStorage: ContextGraphStorage;
+  ContextGraphValueStorage: ContextGraphValueStorage;
   Profile: Profile;
 };
 
@@ -56,6 +61,8 @@ describe('@unit RandomSampling', () => {
   let EpochStorage: EpochStorage;
   let ParametersStorage: ParametersStorage;
   let KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  let ContextGraphStorage: ContextGraphStorage;
+  let ContextGraphValueStorage: ContextGraphValueStorage;
   let Profile: Profile;
 
   async function deployRandomSamplingFixture(): Promise<RandomSamplingFixture> {
@@ -74,6 +81,8 @@ describe('@unit RandomSampling', () => {
       'AskStorage',
       'DelegatorsInfo',
       'RandomSamplingStorage',
+      'ContextGraphValueStorage',
+      'ContextGraphStorage',
       'RandomSampling',
       'Profile',
     ]);
@@ -111,6 +120,21 @@ describe('@unit RandomSampling', () => {
         'KnowledgeCollectionStorage',
       );
     Profile = await hre.ethers.getContract<Profile>('Profile');
+    ContextGraphStorage = await hre.ethers.getContract<ContextGraphStorage>(
+      'ContextGraphStorage',
+    );
+    ContextGraphValueStorage =
+      await hre.ethers.getContract<ContextGraphValueStorage>(
+        'ContextGraphValueStorage',
+      );
+
+    // Register a sentinel signer as a Hub contract so Phase 10 weighted-
+    // selection tests can call `onlyContracts` methods on ContextGraphStorage /
+    // ContextGraphValueStorage / KnowledgeCollectionStorage directly, without
+    // routing through the production facades (ContextGraphs, KnowledgeCollection).
+    // Must run after HubOwner is set so `setContractAddress` passes the auth
+    // check. Safe for existing tests because accounts[19] is never used elsewhere.
+    await Hub.setContractAddress('TestStorageOperator', accounts[19].address);
 
     return {
       accounts,
@@ -126,6 +150,8 @@ describe('@unit RandomSampling', () => {
       EpochStorage,
       ParametersStorage,
       KnowledgeCollectionStorage,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
       Profile,
     };
   }
@@ -152,6 +178,8 @@ describe('@unit RandomSampling', () => {
       EpochStorage,
       ParametersStorage,
       KnowledgeCollectionStorage,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
       Profile,
     } = await loadFixture(deployRandomSamplingFixture));
   });
@@ -770,6 +798,406 @@ describe('@unit RandomSampling', () => {
       const statusAtInvalid = await RandomSampling.getActiveProofPeriodStatus();
       // eslint-disable-next-line @typescript-eslint/no-unused-expressions
       expect(statusAtInvalid.isValid).to.be.false;
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Phase 10 — value-weighted challenge generation
+  // ---------------------------------------------------------------------------
+  //
+  // These tests exercise the two-level weighted draw added to
+  // `_generateChallenge`:
+  //   Step 1 — pick a CG weighted by its per-epoch TRAC value at the current
+  //            epoch, excluding curated ("private") and inactive CGs.
+  //   Step 2 — pick a KC uniformly at random from the chosen CG's KC list and
+  //            retry up to MAX_KC_RETRIES on expired KCs.
+  //
+  // We deploy ContextGraphStorage + ContextGraphValueStorage in an extended
+  // fixture, register a test signer as a Hub contract so it can seed state
+  // directly, and drive the weighted picker via the read-only helper
+  // `previewChallengeForSeed(seed)`. The helper makes distribution regression
+  // feasible (10k draws in milliseconds, no block mining, no state reset).
+  // ---------------------------------------------------------------------------
+  describe('Phase 10 — value-weighted challenge generation', () => {
+    const CURATED_POLICY = 0; // curated → counts as "private" for Phase 10
+    const OPEN_POLICY = 1;
+    const TEST_KC_BYTE_SIZE = 128n;
+
+    /** Hub sentinel — registered as a "contract" in `deployRandomSamplingFixture`
+     *  so it can bypass the production facades and call `onlyContracts`
+     *  methods on storage contracts directly. */
+    let opSigner: SignerWithAddress;
+
+    beforeEach(() => {
+      opSigner = accounts[19];
+    });
+
+    /**
+     * Create a Context Graph via the storage directly and return its id.
+     * Policy: 0 = curated (private for Phase 10), 1 = open.
+     */
+    async function createCG(publishPolicy: number): Promise<bigint> {
+      const owner = accounts[1].address;
+      const authority =
+        publishPolicy === CURATED_POLICY
+          ? accounts[2].address
+          : ethers.ZeroAddress;
+      const tx = await ContextGraphStorage.connect(opSigner).createContextGraph(
+        owner,
+        [10n, 20n, 30n], // hosting nodes (sorted, non-zero, distinct)
+        [], // no participant agents
+        2, // requiredSignatures
+        0, // metadataBatchId
+        publishPolicy,
+        authority,
+        0, // publishAuthorityAccountId
+      );
+      await tx.wait();
+      return ContextGraphStorage.getLatestContextGraphId();
+    }
+
+    /**
+     * Seed a KC directly on KnowledgeCollectionStorage and register it to the
+     * given CG. Returns the new KC id. `endEpoch` controls the expiry — pass
+     * `currentEpoch - 1` to create an already-expired KC.
+     */
+    async function createKC(cgId: bigint, endEpoch: bigint): Promise<bigint> {
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      const startEpoch = currentEpoch;
+      const createTx = await KnowledgeCollectionStorage.connect(
+        opSigner,
+      ).createKnowledgeCollection(
+        opSigner.address, // publisher
+        'phase-10-test-op',
+        ethers.keccak256(
+          ethers.toUtf8Bytes(
+            `phase-10-kc-${cgId}-${Date.now()}-${Math.random()}`,
+          ),
+        ),
+        1, // knowledgeAssetsAmount (mintKnowledgeAssetsTokens requires >=1)
+        TEST_KC_BYTE_SIZE,
+        startEpoch,
+        endEpoch,
+        0, // tokenAmount
+        false, // isImmutable
+      );
+      const receipt = await createTx.wait();
+      // Parse kc id from the KnowledgeCollectionCreated event.
+      const iface = KnowledgeCollectionStorage.interface;
+      const topic = iface.getEvent('KnowledgeCollectionCreated')!.topicHash;
+      const log = receipt!.logs.find((l) => l.topics[0] === topic);
+      if (!log) {
+        throw new Error('KnowledgeCollectionCreated event not found');
+      }
+      const parsed = iface.parseLog(log as unknown as {
+        topics: string[];
+        data: string;
+      })!;
+      const kcId = parsed.args[0] as bigint;
+      await ContextGraphStorage.connect(opSigner).registerKCToContextGraph(
+        cgId,
+        kcId,
+      );
+      return kcId;
+    }
+
+    /**
+     * Allocate `value` TRAC to `cgId` spread evenly across `lifetime` epochs
+     * starting at the current epoch via ContextGraphValueStorage.
+     */
+    async function seedCGValue(
+      cgId: bigint,
+      value: bigint,
+      lifetime = 1n,
+    ): Promise<void> {
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      await ContextGraphValueStorage.connect(opSigner).addCGValueForEpochRange(
+        cgId,
+        currentEpoch,
+        lifetime,
+        value,
+      );
+    }
+
+    /**
+     * Derive a caller-supplied test seed with the same shape as the on-chain
+     * entropy mix so we can inspect distribution behaviour without actually
+     * mining blocks. The contract's internal seed is derived identically from
+     * block state + msg.sender, but the public preview helper accepts an
+     * arbitrary bytes32 so tests can enumerate draws deterministically.
+     */
+    function testSeed(i: number): string {
+      return ethers.keccak256(
+        ethers.solidityPacked(['string', 'uint256'], ['phase10-draw-', i]),
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — Happy path: a single public CG with one active KC is always
+    // selected regardless of the draw seed.
+    // -----------------------------------------------------------------------
+    it('picks the only public CG when it is the only eligible graph', async () => {
+      const cgId = await createCG(OPEN_POLICY);
+      const endEpoch = (await Chronos.getCurrentEpoch()) + 5n;
+      const kcId = await createKC(cgId, endEpoch);
+      await seedCGValue(cgId, 1_000n);
+
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      const chunkByteSize = await RandomSamplingStorage.CHUNK_BYTE_SIZE();
+      const expectedMaxChunk = TEST_KC_BYTE_SIZE / BigInt(chunkByteSize); // 4
+
+      for (let i = 0; i < 10; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          currentEpoch,
+        );
+        expect(preview.cgId).to.equal(cgId);
+        expect(preview.kcId).to.equal(kcId);
+        // KC byte size (128) > chunk byte size (32), so chunkId is drawn from
+        // the rotated KC seed in [0, byteSize/chunkSize) = [0, 4).
+        expect(preview.chunkId).to.be.lessThan(expectedMaxChunk);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 2 — Edge: no eligible value at all (no CGs or every CG is curated)
+    // => revert with NoEligibleContextGraph.
+    // -----------------------------------------------------------------------
+    it('reverts NoEligibleContextGraph when only curated CGs hold value', async () => {
+      const curatedCgId = await createCG(CURATED_POLICY);
+      const endEpoch = (await Chronos.getCurrentEpoch()) + 5n;
+      await createKC(curatedCgId, endEpoch);
+      await seedCGValue(curatedCgId, 5_000n);
+
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      await expect(
+        RandomSampling.previewChallengeForSeed(testSeed(0), currentEpoch),
+      ).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleContextGraph',
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 3 — Private CG coexists with a public CG: private must be excluded
+    // and the public CG must win 100% of draws.
+    // -----------------------------------------------------------------------
+    it('excludes curated CGs and always picks the public CG', async () => {
+      const curatedCg = await createCG(CURATED_POLICY);
+      const openCg = await createCG(OPEN_POLICY);
+
+      const endEpoch = (await Chronos.getCurrentEpoch()) + 5n;
+      await createKC(curatedCg, endEpoch);
+      const openKc = await createKC(openCg, endEpoch);
+
+      // Private CG holds 10x the value of the public CG. Weighting would
+      // prefer the private one by naive ratio, so this test asserts the
+      // read-time exclusion filter.
+      await seedCGValue(curatedCg, 10_000n);
+      await seedCGValue(openCg, 1_000n);
+
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      for (let i = 0; i < 25; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          currentEpoch,
+        );
+        expect(preview.cgId).to.equal(openCg);
+        expect(preview.kcId).to.equal(openKc);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 4 — CG with only expired KCs: MAX_KC_RETRIES are exhausted and the
+    // picker reverts with NoEligibleKnowledgeCollection (the whole challenge
+    // is skipped — node retries next proof period).
+    // -----------------------------------------------------------------------
+    it('reverts NoEligibleKnowledgeCollection when every KC in the CG has expired', async () => {
+      const cgId = await createCG(OPEN_POLICY);
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      // Create a KC that is still live, seed value, then advance Chronos far
+      // enough that the KC has expired by the time we generate the challenge.
+      // The CG's value ledger is finalized only up to currentEpoch-1, so the
+      // per-epoch view must still report non-zero at the new current epoch
+      // (so the picker reaches the KC draw step and fails there).
+      const endEpoch = currentEpoch + 1n;
+      await createKC(cgId, endEpoch);
+      // Give the CG value for a long lifetime so it remains weighted after
+      // the epoch advance.
+      await seedCGValue(cgId, 10_000n, 20n);
+
+      // Advance Chronos past the KC's endEpoch.
+      const epochLength = await Chronos.epochLength();
+      await time.increase(Number(epochLength) * 5);
+      const newEpoch = await Chronos.getCurrentEpoch();
+      expect(newEpoch).to.be.greaterThan(endEpoch);
+
+      await expect(
+        RandomSampling.previewChallengeForSeed(testSeed(0), newEpoch),
+      ).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleKnowledgeCollection',
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 5 — Distribution regression: 3 public CGs weighted 70/20/10 should
+    // be picked at those ratios over many draws. Using the read-only preview
+    // helper with per-draw seeds makes this both deterministic and fast.
+    // -----------------------------------------------------------------------
+    it('distribution converges to 70/20/10 over 10,000 draws', async () => {
+      const cgA = await createCG(OPEN_POLICY);
+      const cgB = await createCG(OPEN_POLICY);
+      const cgC = await createCG(OPEN_POLICY);
+
+      const endEpoch = (await Chronos.getCurrentEpoch()) + 100n;
+      await createKC(cgA, endEpoch);
+      await createKC(cgB, endEpoch);
+      await createKC(cgC, endEpoch);
+
+      // Raw value values become per-epoch contributions of 7000 / 2000 / 1000.
+      await seedCGValue(cgA, 7_000n);
+      await seedCGValue(cgB, 2_000n);
+      await seedCGValue(cgC, 1_000n);
+
+      const DRAWS = 10_000;
+      const counts: Record<string, number> = { A: 0, B: 0, C: 0 };
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      for (let i = 0; i < DRAWS; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          currentEpoch,
+        );
+        if (preview.cgId === cgA) counts.A++;
+        else if (preview.cgId === cgB) counts.B++;
+        else if (preview.cgId === cgC) counts.C++;
+        else throw new Error(`unexpected cgId ${preview.cgId}`);
+      }
+
+      // ±5% absolute tolerance around the 70/20/10 expectation (i.e. A in
+      // [6500, 7500], B in [1500, 2500], C in [500, 1500]). The test seed
+      // space has no drift — this is tight enough to catch a broken walker
+      // without being flaky on a well-mixed hash stream.
+      expect(counts.A).to.be.greaterThan(6500).and.lessThan(7500);
+      expect(counts.B).to.be.greaterThan(1500).and.lessThan(2500);
+      expect(counts.C).to.be.greaterThan(500).and.lessThan(1500);
+    }).timeout(120_000);
+
+    // -----------------------------------------------------------------------
+    // Test 6 — Inactive (deactivated) CGs must be excluded even if they
+    // currently hold value. Exercises the second branch of the read-time
+    // filter beyond the curated-policy check.
+    // -----------------------------------------------------------------------
+    it('excludes deactivated CGs from the weighted draw', async () => {
+      const deactivated = await createCG(OPEN_POLICY);
+      const activeCg = await createCG(OPEN_POLICY);
+
+      const endEpoch = (await Chronos.getCurrentEpoch()) + 5n;
+      await createKC(deactivated, endEpoch);
+      const activeKc = await createKC(activeCg, endEpoch);
+
+      await seedCGValue(deactivated, 10_000n);
+      await seedCGValue(activeCg, 1_000n);
+
+      // Deactivate the richer CG — it must be skipped during the walk.
+      await ContextGraphStorage.connect(opSigner)
+        .deactivateContextGraph(deactivated);
+
+      const currentEpoch = await Chronos.getCurrentEpoch();
+      for (let i = 0; i < 15; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          currentEpoch,
+        );
+        expect(preview.cgId).to.equal(activeCg);
+        expect(preview.kcId).to.equal(activeKc);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 7 — Plan invariant (v10 plan lines 713–714): a CG's per-epoch
+    // contribution must auto-decay to zero once its seeded lifetime expires,
+    // and the picker must then auto-exclude it. The KC is deliberately kept
+    // live beyond the seed lifetime so the only driver of auto-exclusion is
+    // the value decay in ContextGraphValueStorage — not KC expiry.
+    // -----------------------------------------------------------------------
+    it('auto-excludes a CG whose seed lifetime has expired (per-epoch contribution decays to zero)', async () => {
+      const cgId = await createCG(OPEN_POLICY);
+      const startEpoch = await Chronos.getCurrentEpoch();
+      const seedLifetime = 5n;
+      // KC outlives the seed so auto-exclusion can only be driven by
+      // ContextGraphValueStorage's per-epoch decay.
+      await createKC(cgId, startEpoch + 100n);
+      await seedCGValue(cgId, 10_000n, seedLifetime);
+
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(cgId, startEpoch),
+      ).to.be.greaterThan(0n);
+
+      const epochLength = await Chronos.epochLength();
+      await time.increase(Number(epochLength) * Number(seedLifetime + 1n));
+      const newEpoch = await Chronos.getCurrentEpoch();
+      expect(newEpoch).to.be.greaterThan(startEpoch + seedLifetime);
+
+      // Storage-level invariant: per-epoch contribution decayed to zero.
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(cgId, newEpoch),
+      ).to.equal(0n);
+
+      // Picker-level invariant: adjustedTotal == 0 → revert.
+      await expect(
+        RandomSampling.previewChallengeForSeed(testSeed(0), newEpoch),
+      ).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleContextGraph',
+      );
+    });
+
+    // -----------------------------------------------------------------------
+    // Test 8 — Plan invariant (v10 plan line 713): an "empty" CG (per-epoch
+    // contribution = 0 post-expiry) must never be selected even when it
+    // originally held 10× the nominal value, provided a still-active CG
+    // coexists. Proves the weighted walk respects per-epoch decay — a live
+    // low-value CG beats a "rich" decayed CG.
+    // -----------------------------------------------------------------------
+    it('never selects a CG whose seed has decayed while a live neighbor exists', async () => {
+      const expiredCg = await createCG(OPEN_POLICY);
+      const activeCg = await createCG(OPEN_POLICY);
+      const startEpoch = await Chronos.getCurrentEpoch();
+      const shortLifetime = 5n;
+      const longLifetime = 100n;
+
+      // Both KCs live past the advance so picker exclusion is driven only
+      // by value decay, not KC expiry.
+      await createKC(expiredCg, startEpoch + longLifetime);
+      const activeKc = await createKC(activeCg, startEpoch + longLifetime);
+
+      // Expired CG: 10× the nominal TRAC but a 5-epoch lifetime.
+      // Active  CG: 1/10 the nominal TRAC but a 100-epoch lifetime.
+      await seedCGValue(expiredCg, 10_000n, shortLifetime);
+      await seedCGValue(activeCg, 1_000n, longLifetime);
+
+      const epochLength = await Chronos.epochLength();
+      await time.increase(Number(epochLength) * Number(shortLifetime + 1n));
+      const newEpoch = await Chronos.getCurrentEpoch();
+
+      // Storage invariant: expired decayed to zero, active still > 0.
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(expiredCg, newEpoch),
+      ).to.equal(0n);
+      expect(
+        await ContextGraphValueStorage.getCGValueAtEpoch(activeCg, newEpoch),
+      ).to.be.greaterThan(0n);
+
+      // Picker invariant: every draw lands on the active CG.
+      for (let i = 0; i < 20; i++) {
+        const preview = await RandomSampling.previewChallengeForSeed(
+          testSeed(i),
+          newEpoch,
+        );
+        expect(preview.cgId).to.equal(activeCg);
+        expect(preview.kcId).to.equal(activeKc);
+      }
     });
   });
 });

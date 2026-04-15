@@ -22,7 +22,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishParams,
+  V10PublishDirectParams,
   V10UpdateKCParams,
 } from './chain-adapter.js';
 
@@ -81,6 +81,17 @@ export class MockChainAdapter implements ChainAdapter {
     this.identities.set(key, id);
     this.pushEvent('IdentityRegistered', { identityId: id.toString() });
     return id;
+  }
+
+  /**
+   * Test helper: seed a deterministic identity for an address in this in-memory adapter.
+   * Used by black-box daemon tests that need stable participant IDs across processes.
+   */
+  seedIdentity(address: string, identityId: bigint): void {
+    this.identities.set(address, identityId);
+    if (identityId >= this.nextIdentityId) {
+      this.nextIdentityId = identityId + 1n;
+    }
   }
 
   // --- V9 UAL-based methods ---
@@ -762,7 +773,24 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
-  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+  async getKnowledgeAssetsV10Address(): Promise<string> {
+    // 20 valid hex bytes — callers use this solely to build publish digests,
+    // never to send a real transaction, so any stable address works. Picked
+    // to be visually distinct from `0x0...0` so log-diffing is easier.
+    return '0x000000000000000000000000000000000000c10a';
+  }
+
+  async getEvmChainId(): Promise<bigint> {
+    return 31337n;
+  }
+
+  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+    // Deliberately tolerant of `contextGraphId === 0n`. The real EVM
+    // adapter rejects that at `evm-adapter.ts:createKnowledgeAssetsV10`
+    // pre-tx, which is the authoritative fail-loud boundary. The mock is
+    // used by ~680 unit tests that publish with descriptive CG-name
+    // strings and rely on the silent `0n` fallback to exercise the data
+    // flow without migrating every fixture to on-chain numeric ids.
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }
@@ -793,7 +821,7 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endKAId.toString(),
       isImmutable: params.isImmutable,
       contextGraphId: params.contextGraphId.toString(),
-      convictionAccountId: params.convictionAccountId.toString(),
+      paymaster: params.paymaster,
     });
 
     const result = this.txResult(true);

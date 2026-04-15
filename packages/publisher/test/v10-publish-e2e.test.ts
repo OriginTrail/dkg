@@ -5,18 +5,25 @@ import { computeFlatKCRootV10 as computeFlatKCRoot, computeFlatKCRootV10, comput
 import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
-  computeACKDigest,
+  computePublishACKDigest,
+  computePublishPublisherDigest,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
+
+// Test H5 prefix inputs. Production fail-loud rejects non-numeric / zero
+// CG ids in both the collector and the handler, so the fixture uses a
+// plain numeric id.
+const TEST_CHAIN_ID = 31337n;
+const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
 describe('V10 Publish E2E', () => {
-  const contextGraphId = 'my-research-project';
-  const cgIdBigInt = 0n;
+  const contextGraphId = '42';
+  const cgIdBigInt = 42n;
   const swmGraphUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
   const publishQuads: Quad[] = [
@@ -33,52 +40,10 @@ describe('V10 Publish E2E', () => {
 
   const publisherWallet = ethers.Wallet.createRandom();
 
-  it('full V10 publish flow: merkle → ACK collection → verification', async () => {
-    // Phase 1: Publisher computes V10 merkle root
-    const merkleRoot = computeFlatKCRoot(publishQuads, []);
-    expect(merkleRoot).toBeInstanceOf(Uint8Array);
-    expect(merkleRoot.length).toBe(32);
-
-    // Phase 2: Each core node independently verifies and signs
-    const coreNodeResponses = await Promise.all(
-      coreWallets.map(async (wallet, idx) => {
-        // Core node recomputes merkle root from its SWM copy
-        const localRoot = computeFlatKCRoot(publishQuads, []);
-        expect(Buffer.from(localRoot).equals(Buffer.from(merkleRoot))).toBe(true);
-
-        // Core node signs ACK: digest uses 0n for non-numeric context graph id strings.
-        const digest = computeACKDigest(cgIdBigInt, merkleRoot);
-        const sig = ethers.Signature.from(await wallet.signMessage(digest));
-
-        return {
-          peerId: `core-node-${idx}`,
-          signatureR: ethers.getBytes(sig.r),
-          signatureVS: ethers.getBytes(sig.yParityAndS),
-          nodeIdentityId: BigInt(idx + 1),
-          address: wallet.address,
-        };
-      }),
-    );
-
-    expect(coreNodeResponses).toHaveLength(3);
-
-    // Phase 3: Publisher verifies each ACK via ecrecover
-    for (const ack of coreNodeResponses) {
-      const digest = computeACKDigest(cgIdBigInt, merkleRoot);
-      const prefixedHash = ethers.hashMessage(digest);
-      const recovered = ethers.recoverAddress(prefixedHash, {
-        r: ethers.hexlify(ack.signatureR),
-        yParityAndS: ethers.hexlify(ack.signatureVS),
-      });
-      expect(recovered.toLowerCase()).toBe(ack.address.toLowerCase());
-    }
-
-    // All 3 ACKs are on the same merkle root — ready for chain TX
-    const ackRs = coreNodeResponses.map(a => ethers.hexlify(a.signatureR));
-    const ackVSs = coreNodeResponses.map(a => ethers.hexlify(a.signatureVS));
-    expect(ackRs).toHaveLength(3);
-    expect(ackVSs).toHaveLength(3);
-  });
+  // The earlier "full V10 publish flow" test was removed here: it manually
+  // signed via the legacy 2-field `computeACKDigest`, which the production
+  // path no longer uses. The round-trip below is the real end-to-end check
+  // against the H5-prefixed 8-field digest via the real handler + collector.
 
   it('StorageACKHandler + ACKCollector round-trip', async () => {
     const merkleRoot = computeFlatKCRoot(publishQuads, []);
@@ -114,6 +79,8 @@ describe('V10 Publish E2E', () => {
         signerWallet: wallet,
         contextGraphSharedMemoryUri: (cgId: string) =>
           `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
       };
       const eventBus = {
         emit: vi.fn(),
@@ -147,12 +114,25 @@ describe('V10 Publish E2E', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities,
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     });
 
     expect(result.acks).toHaveLength(3);
 
-    // Verify each collected ACK can be recovered to the core node's address
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot, 1, BigInt(publishQuads.length * 100));
+    // Verify each collected ACK can be recovered to the core node's address.
+    // The handler signs the 8-field H5-prefixed digest via computePublishACKDigest
+    // in storage-ack-handler.ts; this reference must match byte-for-byte.
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      merkleRoot,
+      1n,
+      BigInt(publishQuads.length * 100),
+      1n,
+      0n,
+    );
     const prefixedHash = ethers.hashMessage(digest);
 
     for (let i = 0; i < 3; i++) {
@@ -221,7 +201,10 @@ describe('V10 Publish E2E', () => {
   it('StorageACK encodes and decodes correctly', async () => {
     const merkleRoot = computeFlatKCRootV10(publishQuads, []);
     const wallet = coreWallets[0];
-    const digest = computeACKDigest(cgIdBigInt, merkleRoot);
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID, TEST_KAV10_ADDR, cgIdBigInt, merkleRoot,
+      1n, BigInt(publishQuads.length * 100), 1n, 0n,
+    );
     const sig = ethers.Signature.from(await wallet.signMessage(digest));
 
     const encoded = encodeStorageACK({
@@ -255,7 +238,10 @@ describe('V10 Publish E2E', () => {
 
     const ackSignatures = await Promise.all(
       coreWallets.map(async (wallet, idx) => {
-        const digest = computeACKDigest(cgIdBigInt, merkleRoot);
+        const digest = computePublishACKDigest(
+          TEST_CHAIN_ID, TEST_KAV10_ADDR, cgIdBigInt, merkleRoot,
+          BigInt(publishQuads.length), BigInt(publishQuads.length * 100), 2n, 50n,
+        );
         const sig = ethers.Signature.from(await wallet.signMessage(digest));
         return {
           identityId: BigInt(idx + 1),
@@ -267,12 +253,19 @@ describe('V10 Publish E2E', () => {
 
     expect(ackSignatures).toHaveLength(3);
 
+    // Exercise the real H5 + N26 publisher-digest helper so the mock-adapter
+    // round-trip stays byte-aligned with the production path. The mock
+    // adapter does not verify publisherSignature on its own, so without
+    // this we'd be silently round-tripping arbitrary bytes.
     const pubSig = ethers.Signature.from(
       await publisherWallet.signMessage(
-        ethers.getBytes(ethers.solidityPackedKeccak256(
-          ['uint72', 'bytes32'],
-          [1, ethers.hexlify(merkleRoot)],
-        )),
+        computePublishPublisherDigest(
+          TEST_CHAIN_ID,
+          TEST_KAV10_ADDR,
+          1n,
+          cgIdBigInt,
+          merkleRoot,
+        ),
       ),
     );
 
@@ -286,7 +279,6 @@ describe('V10 Publish E2E', () => {
       tokenAmount: 50n,
       isImmutable: false,
       paymaster: ethers.ZeroAddress,
-      convictionAccountId: 0n,
       publisherNodeIdentityId: 1n,
       publisherSignature: {
         r: ethers.getBytes(pubSig.r),

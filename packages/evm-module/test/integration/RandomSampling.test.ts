@@ -28,6 +28,8 @@ import {
   ShardingTable,
   ParametersStorage,
   Ask,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
 } from '../../typechain';
 import { createKnowledgeCollection } from '../helpers/kc-helpers';
 import { sqrt } from '../helpers/math-helpers';
@@ -80,6 +82,8 @@ type RandomSamplingFixture = {
   ShardingTable: ShardingTable;
   ParametersStorage: ParametersStorage;
   Ask: Ask;
+  ContextGraphStorage: ContextGraphStorage;
+  ContextGraphValueStorage: ContextGraphValueStorage;
 };
 
 /**
@@ -182,6 +186,15 @@ describe('@integration RandomSampling', () => {
   let ParametersStorage: ParametersStorage;
   let ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
   let ParanetKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
+  let ContextGraphStorage: ContextGraphStorage;
+  let ContextGraphValueStorage: ContextGraphValueStorage;
+  // Phase 10's value-weighted picker requires every challengeable KC to live
+  // inside a CG with non-zero per-epoch value at the current epoch. The V8
+  // publishing flow used here does not yet wire up CG-side state (Phase 8
+  // owns that — separate worktree). Bridging is handled transparently by
+  // the auto-bridge in `kc-helpers.ts`, which fires whenever the fixture has
+  // registered a `TestStorageOperator` Hub contract — see the
+  // `setContractAddress("TestStorageOperator", ...)` call in the fixture.
 
   // Deploy all contracts, set the HubOwner and necessary accounts. Returns the RandomSamplingFixture
   async function deployRandomSamplingFixture(): Promise<RandomSamplingFixture> {
@@ -197,6 +210,8 @@ describe('@integration RandomSampling', () => {
       'DelegatorsInfo',
       'Profile',
       'RandomSamplingStorage',
+      'ContextGraphValueStorage',
+      'ContextGraphStorage',
       'RandomSampling',
       'ParanetKnowledgeMinersRegistry',
       'ParanetKnowledgeCollectionsRegistry',
@@ -209,6 +224,12 @@ describe('@integration RandomSampling', () => {
 
     // Set hub owner
     await Hub.setContractAddress('HubOwner', accounts[0].address);
+    // Register a sentinel signer as a Hub contract so the integration tests
+    // can call `onlyContracts` methods on ContextGraphStorage and
+    // ContextGraphValueStorage directly to bridge V8-published KCs into a
+    // default CG with non-zero per-epoch value (the input the Phase 10
+    // picker reads).
+    await Hub.setContractAddress('TestStorageOperator', accounts[19].address);
 
     // Get contract instances
     KnowledgeCollection = await hre.ethers.getContract<KnowledgeCollection>(
@@ -255,6 +276,13 @@ describe('@integration RandomSampling', () => {
     RandomSamplingStorage = await hre.ethers.getContract<RandomSamplingStorage>(
       'RandomSamplingStorage',
     );
+    ContextGraphStorage = await hre.ethers.getContract<ContextGraphStorage>(
+      'ContextGraphStorage',
+    );
+    ContextGraphValueStorage =
+      await hre.ethers.getContract<ContextGraphValueStorage>(
+        'ContextGraphValueStorage',
+      );
 
     // Now initialize RandomSampling manually if needed
     // This might not be necessary if initialization happens automatically in the deployment
@@ -282,6 +310,8 @@ describe('@integration RandomSampling', () => {
       ShardingTable,
       ParametersStorage,
       Ask,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
     };
   }
 
@@ -309,6 +339,8 @@ describe('@integration RandomSampling', () => {
       ShardingTable,
       ParametersStorage,
       Ask,
+      ContextGraphStorage,
+      ContextGraphValueStorage,
     } = await loadFixture(deployRandomSamplingFixture));
   });
 
@@ -746,16 +778,19 @@ describe('@integration RandomSampling', () => {
       );
       await Ask.connect(accounts[0]).recalculateActiveSet();
 
-      // Ensure no KCs are created or they are expired (by default none are created here)
-
-      // Attempt to create challenge
+      // Ensure no KCs are created or they are expired (by default none are
+      // created here). With Phase 10's value-weighted picker the absence of
+      // any non-curated, active CG with non-zero per-epoch value surfaces as
+      // a `NoEligibleContextGraph` custom-error revert, replacing the V8
+      // string `"No knowledge collections exist"`.
       const createTx = RandomSampling.connect(
         publishingNode.operational,
       ).createChallenge();
 
       // Verification
-      await expect(createTx).to.be.revertedWith(
-        'No knowledge collections exist',
+      await expect(createTx).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleContextGraph',
       );
     });
 
@@ -893,9 +928,15 @@ describe('@integration RandomSampling', () => {
         publishingNode.operational,
       ).createChallenge();
 
-      // Verification: Expect revert with the specific message
-      await expect(createTx).to.be.revertedWith(
-        'Failed to find a knowledge collection that is active in the current epoch',
+      // Verification: with Phase 10 the bound CG still holds value (the
+      // bridge seeds a 100-epoch lifetime), so the picker walks into it,
+      // finds the only KC has expired, exhausts MAX_KC_RETRIES, and reverts
+      // with `NoEligibleKnowledgeCollection`. The V8 string
+      // `"Failed to find a knowledge collection that is active in the current epoch"`
+      // came from the now-deleted BFS picker.
+      await expect(createTx).to.be.revertedWithCustomError(
+        RandomSampling,
+        'NoEligibleKnowledgeCollection',
       );
     });
   });
@@ -1704,431 +1745,11 @@ describe('@integration RandomSampling', () => {
     });
   });
 
-  describe('Optimized Knowledge Collection Search', () => {
-    let publishingNode: {
-      operational: SignerWithAddress;
-      admin: SignerWithAddress;
-    };
-    let publishingNodeIdentityId: number;
-    let receivingNodes: {
-      operational: SignerWithAddress;
-      admin: SignerWithAddress;
-    }[];
-    let receivingNodesIdentityIds: number[];
-    let kcCreator: SignerWithAddress;
-    let deps: {
-      accounts: SignerWithAddress[];
-      Profile: Profile;
-      Token: Token;
-      Staking: Staking;
-      Ask: Ask;
-      KnowledgeCollection: KnowledgeCollection;
-    };
-
-    beforeEach(async () => {
-      // Setup nodes
-      kcCreator = getDefaultKCCreator(accounts);
-      const minStake = await ParametersStorage.minimumStake();
-      const nodeAsk = 200000000000000000n; // 0.2 ETH
-
-      deps = {
-        accounts,
-        Profile,
-        Token,
-        Staking,
-        Ask,
-        KnowledgeCollection,
-      };
-
-      ({ node: publishingNode, identityId: publishingNodeIdentityId } =
-        await setupNodeWithStakeAndAsk(1, minStake, nodeAsk, deps));
-
-      receivingNodes = [];
-      receivingNodesIdentityIds = [];
-      for (let i = 0; i < 5; i++) {
-        const { node, identityId } = await setupNodeWithStakeAndAsk(
-          i + 10,
-          minStake,
-          nodeAsk,
-          deps,
-        );
-        receivingNodes.push(node);
-        receivingNodesIdentityIds.push(identityId);
-      }
-    });
-
-    it('Should find active knowledge collections when mix of active and expired collections exist', async () => {
-      const initialEpoch = await Chronos.getCurrentEpoch();
-
-      // Create 20 knowledge collections with different expiration epochs
-      const collections = [];
-
-      // Create 15 collections that expire in epoch 1 (will be expired)
-      for (let i = 0; i < 15; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, so expires after current epoch + duration + 1
-        );
-        collections.push({ id: i + 1, active: false });
-      }
-
-      // Create 5 collections that expire in epoch 10 (will be active)
-      for (let i = 15; i < 20; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `active-operation-${i}`,
-          10,
-          1000,
-          10, // epochsDuration = 10, so expires after current epoch + duration + 1
-        );
-        collections.push({ id: i + 1, active: true });
-      }
-
-      // Advance to epoch 5 (so first 15 collections are expired, last 5 are active)
-      for (let epoch = Number(initialEpoch); epoch < 5; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      expect(currentEpoch).to.be.gte(5n, 'Should be in epoch 5 or later');
-
-      // Verify which collections are active/expired
-      for (const collection of collections) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(
-          collection.id,
-        );
-        const isActive = currentEpoch <= endEpoch;
-        if (collection.active) {
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          expect(isActive).to.equal(true);
-        } else {
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          expect(isActive).to.be.false;
-        }
-      }
-
-      // Create challenge multiple times to verify it finds active collections
-      const foundCollections = new Set<number>();
-      const maxAttempts = 20; // Try multiple times to test randomness and consistency
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // Move to next proof period to allow new challenge
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        // Verify the found collection is one of the active ones
-        expect([16, 17, 18, 19, 20]).to.include(
-          Number(challenge.knowledgeCollectionId),
-        );
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Mark challenge as solved to allow next challenge
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Verify that the algorithm found at least 2 different active collections (shows it's working properly)
-      expect(foundCollections.size).to.be.gte(
-        2,
-        'Should find multiple different active collections',
-      );
-    });
-
-    it('Should revert when all knowledge collections are expired', async () => {
-      // Create 3 knowledge collections that expire in epoch 1
-      for (let i = 0; i < 3; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, expires after epoch 1
-        );
-      }
-
-      // Advance to epoch 5 (all collections expired)
-      for (let epoch = 1; epoch < 5; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Verify all collections are expired
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      for (let kcId = 1; kcId <= 3; kcId++) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(kcId);
-        expect(currentEpoch).to.be.gt(endEpoch, `KC ${kcId} should be expired`);
-      }
-
-      // Attempt to create challenge should revert
-      await expect(
-        RandomSampling.connect(publishingNode.operational).createChallenge(),
-      ).to.be.revertedWith(
-        'Failed to find a knowledge collection that is active in the current epoch',
-      );
-    });
-
-    it('Should work efficiently with single active collection among many expired ones', async () => {
-      // Create 9 expired collections
-      for (let i = 0; i < 9; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `expired-operation-${i}`,
-          10,
-          1000,
-          1, // epochsDuration = 1, expires after epoch 1
-        );
-      }
-
-      // Create 1 active collection (will be KC #10)
-      await createKnowledgeCollection(
-        kcCreator,
-        publishingNode,
-        publishingNodeIdentityId,
-        receivingNodes,
-        receivingNodesIdentityIds,
-        deps,
-        merkleRoot,
-        'active-operation',
-        10,
-        1000,
-        10, // epochsDuration = 10, active for longer
-      );
-
-      // Advance to epoch 4 (first 9 expired, last 1 active)
-      for (let epoch = 1; epoch < 4; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Verify only the last collection is active
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      for (let kcId = 1; kcId <= 9; kcId++) {
-        const endEpoch = await KnowledgeCollectionStorage.getEndEpoch(kcId);
-        expect(currentEpoch).to.be.gt(endEpoch, `KC ${kcId} should be expired`);
-      }
-
-      const activeKcEndEpoch = await KnowledgeCollectionStorage.getEndEpoch(10);
-      expect(currentEpoch).to.be.lte(
-        activeKcEndEpoch,
-        'KC 10 should be active',
-      );
-
-      // Create challenge should find the active collection
-      await RandomSampling.connect(
-        publishingNode.operational,
-      ).createChallenge();
-      const challenge = await RandomSamplingStorage.getNodeChallenge(
-        publishingNodeIdentityId,
-      );
-
-      expect(challenge.knowledgeCollectionId).to.equal(
-        10n,
-        'Should find the only active collection',
-      );
-    });
-
-    it('Should demonstrate randomness by finding different collections over multiple attempts', async () => {
-      // Create 5 active knowledge collections
-      for (let i = 0; i < 5; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `active-operation-${i}`,
-          10,
-          1000,
-          10, // All active for 10 epochs
-        );
-      }
-
-      const foundCollections = new Set<number>();
-      const maxAttempts = 15;
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        // Move to next proof period
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        // All collections should be active
-        expect(challenge.knowledgeCollectionId).to.be.gte(1n);
-        expect(challenge.knowledgeCollectionId).to.be.lte(5n);
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Mark as solved for next iteration
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Should find at least 3 different collections (demonstrates randomness)
-      expect(foundCollections.size).to.be.gte(
-        3,
-        `Should find multiple collections for randomness. Found: ${Array.from(foundCollections)}`,
-      );
-    });
-
-    it('Should handle edge case with collections at different positions in the range', async () => {
-      // Create specific pattern: active-expired-active-expired-active
-      const patterns = [
-        { active: true, duration: 10 }, // KC 1: active
-        { active: false, duration: 1 }, // KC 2: expired
-        { active: true, duration: 10 }, // KC 3: active
-        { active: false, duration: 1 }, // KC 4: expired
-        { active: true, duration: 10 }, // KC 5: active
-      ];
-
-      for (let i = 0; i < patterns.length; i++) {
-        await createKnowledgeCollection(
-          kcCreator,
-          publishingNode,
-          publishingNodeIdentityId,
-          receivingNodes,
-          receivingNodesIdentityIds,
-          deps,
-          merkleRoot,
-          `pattern-operation-${i}`,
-          10,
-          1000,
-          patterns[i].duration,
-        );
-      }
-
-      // Advance to epoch 4 (expired ones are expired, active ones are active)
-      for (let epoch = 1; epoch < 4; epoch++) {
-        const timeUntilNextEpoch = await Chronos.timeUntilNextEpoch();
-        await time.increase(Number(timeUntilNextEpoch) + 5);
-      }
-
-      // Test multiple challenges to ensure it finds active collections (1, 3, 5)
-      const foundCollections = new Set<number>();
-
-      for (let attempt = 0; attempt < 10; attempt++) {
-        const duration =
-          await RandomSampling.getActiveProofingPeriodDurationInBlocks();
-        for (let i = 0; i < Number(duration); i++) {
-          await hre.network.provider.send('evm_mine');
-        }
-
-        await RandomSampling.connect(
-          publishingNode.operational,
-        ).createChallenge();
-        const challenge = await RandomSamplingStorage.getNodeChallenge(
-          publishingNodeIdentityId,
-        );
-
-        foundCollections.add(Number(challenge.knowledgeCollectionId));
-
-        // Should only find active collections (1, 3, 5)
-        expect([1, 3, 5]).to.include(Number(challenge.knowledgeCollectionId));
-
-        // Mark as solved for next iteration
-        const solvedChallenge = {
-          knowledgeCollectionId: challenge.knowledgeCollectionId,
-          chunkId: challenge.chunkId,
-          knowledgeCollectionStorageContract:
-            challenge.knowledgeCollectionStorageContract,
-          epoch: challenge.epoch,
-          activeProofPeriodStartBlock: challenge.activeProofPeriodStartBlock,
-          proofingPeriodDurationInBlocks:
-            challenge.proofingPeriodDurationInBlocks,
-          solved: true,
-        };
-        await RandomSamplingStorage.setNodeChallenge(
-          publishingNodeIdentityId,
-          solvedChallenge,
-        );
-      }
-
-      // Should find multiple active collections from the pattern
-      expect(foundCollections.size).to.be.gte(
-        2,
-        'Should find multiple active collections from the alternating pattern',
-      );
-
-      // Verify it never found expired collections (2, 4)
-      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-      expect(foundCollections.has(2)).to.be.false;
-      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-      expect(foundCollections.has(4)).to.be.false;
-    });
-  });
+  // The legacy "Optimized Knowledge Collection Search" describe block tested
+  // the V8 BFS picker (`_findActiveKnowledgeCollection`) and was removed as
+  // part of Phase 10. Picker behaviour is now exercised by the Phase 10
+  // unit tests in `test/unit/RandomSampling.test.ts`, including a 10K-draw
+  // distribution regression.
 
   describe('Node scoring', () => {
     let nodeIdCounter = 100; // Start from high index to avoid conflicts with other tests

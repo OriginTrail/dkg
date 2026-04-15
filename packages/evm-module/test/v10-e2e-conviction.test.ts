@@ -18,14 +18,18 @@ import {
   KnowledgeCollectionStorage,
   EpochStorage,
   AskStorage,
+  ContextGraphs,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
+  DKGPublishingConvictionNFT,
 } from '../typechain';
-import { signMessage } from './helpers/kc-helpers';
 import { createProfile, createProfiles } from './helpers/profile-helpers';
 import {
   getDefaultPublishingNode,
   getDefaultReceivingNodes,
   getDefaultKCCreator,
 } from './helpers/setup-helpers';
+import { buildPublishParams, DEFAULT_CHAIN_ID } from './helpers/v10-kc-helpers';
 
 const SCALE18 = 10n ** 18n;
 
@@ -44,6 +48,10 @@ type E2EFixture = {
   KnowledgeCollectionStorage: KnowledgeCollectionStorage;
   EpochStorage: EpochStorage;
   AskStorage: AskStorage;
+  ContextGraphs: ContextGraphs;
+  ContextGraphStorage: ContextGraphStorage;
+  ContextGraphValueStorage: ContextGraphValueStorage;
+  PublishingConvictionNFT: DKGPublishingConvictionNFT;
 };
 
 async function deployE2EFixture(): Promise<E2EFixture> {
@@ -61,7 +69,13 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     'ParanetKnowledgeCollectionsRegistry',
     'ParanetKnowledgeMinersRegistry',
     'ParanetsRegistry',
-    'MigratorV10Staking',
+    // V10 Phase 8 stack — required by the new `KnowledgeAssetsV10.initialize()`
+    // fail-fast Hub lookups (commit e89ecb75). Flow 3 (V10 publish via NFT)
+    // depends on the full V10 stack being deployed in the same fixture.
+    'ContextGraphStorage',
+    'ContextGraphs',
+    'ContextGraphValueStorage',
+    'DKGPublishingConvictionNFT',
   ]);
 
   const accounts = await hre.ethers.getSigners();
@@ -84,49 +98,12 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     KnowledgeCollectionStorage: await hre.ethers.getContract<KnowledgeCollectionStorage>('KnowledgeCollectionStorage'),
     EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
     AskStorage: await hre.ethers.getContract<AskStorage>('AskStorage'),
-  };
-}
-
-async function getV10SignaturesData(
-  publishingNode: { operational: SignerWithAddress; admin: SignerWithAddress },
-  publisherIdentityId: number,
-  receivingNodes: { operational: SignerWithAddress; admin: SignerWithAddress }[],
-  contextGraphId: bigint,
-  knowledgeAssetsAmount: number = 10,
-  byteSize: number = 1000,
-  merkleRoot: string = ethers.keccak256(ethers.toUtf8Bytes('test-merkle-root')),
-  epochs: number = 2,
-  tokenAmount: bigint = ethers.parseEther('100'),
-) {
-  const publisherMessageHash = ethers.solidityPackedKeccak256(
-    ['uint256', 'uint72', 'bytes32'],
-    [contextGraphId, publisherIdentityId, merkleRoot],
-  );
-
-  const { r: publisherR, vs: publisherVS } = await signMessage(
-    publishingNode.operational,
-    publisherMessageHash,
-  );
-
-  const ackDigest = ethers.solidityPackedKeccak256(
-    ['uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
-    [contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize, epochs, tokenAmount],
-  );
-
-  const receiverRs = [];
-  const receiverVSs = [];
-  for (const node of receivingNodes) {
-    const { r, vs } = await signMessage(node.operational, ackDigest);
-    receiverRs.push(r);
-    receiverVSs.push(vs);
-  }
-
-  return {
-    merkleRoot,
-    publisherR,
-    publisherVS,
-    receiverRs,
-    receiverVSs,
+    ContextGraphs: await hre.ethers.getContract<ContextGraphs>('ContextGraphs'),
+    ContextGraphStorage: await hre.ethers.getContract<ContextGraphStorage>('ContextGraphStorage'),
+    ContextGraphValueStorage: await hre.ethers.getContract<ContextGraphValueStorage>('ContextGraphValueStorage'),
+    PublishingConvictionNFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>(
+      'DKGPublishingConvictionNFT',
+    ),
   };
 }
 
@@ -193,65 +170,6 @@ describe('V10 E2E Conviction System', function () {
 
       const multiplier = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
       expect(multiplier).to.equal(SCALE18);
-    });
-
-    it('upgrades to 6-epoch conviction lock (3.5x multiplier)', async () => {
-      await Staking.connect(staker).stake(identityId, STAKE_AMOUNT);
-
-      const multiplierBefore = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
-      expect(multiplierBefore).to.equal(SCALE18);
-
-      // stakeWithLock requires addedStake > 0, so add 1 wei to upgrade the lock tier
-      await Staking.connect(staker).stakeWithLock(identityId, 1, 6);
-
-      const multiplierAfter = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
-      expect(multiplierAfter).to.equal(35n * SCALE18 / 10n);
-    });
-
-    it('reverts withdrawal while lock is active', async () => {
-      await Staking.connect(staker).stakeWithLock(identityId, STAKE_AMOUNT, 6);
-
-      await expect(
-        Staking.connect(staker).requestWithdrawal(identityId, STAKE_AMOUNT),
-      ).to.be.revertedWithCustomError(Staking, 'ConvictionLockActive');
-    });
-
-    it('full lifecycle: stake → lock → wait → withdraw', async () => {
-      await Staking.connect(staker).stakeWithLock(identityId, STAKE_AMOUNT, 6);
-
-      const [lockEpochs, lockStartEpoch] = await DelegatorsInfo.getDelegatorLock(identityId, staker.address);
-      expect(lockEpochs).to.equal(6);
-
-      // Advance time past lock expiry (6 epochs), claiming rewards each epoch
-      const epochLength = await Chronos.epochLength();
-      for (let i = 0; i < 7; i++) {
-        await time.increase(epochLength);
-        const epoch = await Chronos.getCurrentEpoch();
-        try {
-          await Staking.connect(staker).claimDelegatorRewards(identityId, epoch - 1n, staker.address);
-        } catch (err: any) {
-          expect(err.message).to.include('No rewards');
-        }
-      }
-
-      const currentEpoch = await Chronos.getCurrentEpoch();
-      expect(currentEpoch).to.be.greaterThanOrEqual(lockStartEpoch + lockEpochs);
-
-      await Staking.connect(staker).requestWithdrawal(identityId, STAKE_AMOUNT);
-
-      const delegatorKey = ethers.keccak256(ethers.solidityPacked(['address'], [staker.address]));
-      const [withdrawalAmount, , releaseTimestamp] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        delegatorKey,
-      );
-      expect(withdrawalAmount).to.equal(STAKE_AMOUNT);
-
-      await time.increaseTo(releaseTimestamp);
-      const balanceBefore = await Token.balanceOf(staker.address);
-      await Staking.connect(staker).finalizeWithdrawal(identityId);
-      const balanceAfter = await Token.balanceOf(staker.address);
-
-      expect(balanceAfter - balanceBefore).to.equal(STAKE_AMOUNT);
     });
 
     it('verifies all conviction multiplier tiers', async () => {
@@ -350,210 +268,247 @@ describe('V10 E2E Conviction System', function () {
       ).to.be.revertedWithCustomError(PCA, 'NotAccountAdmin');
     });
 
-    it('publishes a knowledge asset through conviction account', async () => {
-      await PCA.connect(publisher).createAccount(LOCK_AMOUNT, LOCK_EPOCHS);
-      await PCA.connect(publisher).addAuthorizedKey(1, accounts[9].address);
-
-      const CONTEXT_GRAPH_ID = 0n;
-      const STAKE_AMOUNT = ethers.parseEther('50000');
-
-      const publishingNode = getDefaultPublishingNode(accounts);
-      const receivingNodes = getDefaultReceivingNodes(accounts);
-      const kcCreator = getDefaultKCCreator(accounts);
-
-      const { identityId: publisherIdentityId } = await createProfile(ProfileContract, publishingNode);
-      await Token.mint(publishingNode.operational.address, STAKE_AMOUNT);
-      await Token.connect(publishingNode.operational).approve(await Staking.getAddress(), STAKE_AMOUNT);
-      await Staking.connect(publishingNode.operational).stake(publisherIdentityId, STAKE_AMOUNT);
-
-      const receiverProfiles = await createProfiles(ProfileContract, receivingNodes);
-      const receiverIds = receiverProfiles.map((p) => p.identityId);
-      for (let i = 0; i < receivingNodes.length; i++) {
-        await Token.mint(receivingNodes[i].operational.address, STAKE_AMOUNT);
-        await Token.connect(receivingNodes[i].operational).approve(await Staking.getAddress(), STAKE_AMOUNT);
-        await Staking.connect(receivingNodes[i].operational).stake(receiverProfiles[i].identityId, STAKE_AMOUNT);
-      }
-
-      const tokenAmount = ethers.parseEther('100');
-      const sig = await getV10SignaturesData(
-        publishingNode,
-        publisherIdentityId,
-        receivingNodes,
-        CONTEXT_GRAPH_ID,
-      );
-
-      await Token.connect(kcCreator).increaseAllowance(KAV10.getAddress(), tokenAmount);
-
-      const tx = await KAV10.connect(kcCreator).createKnowledgeAssets(
-        'e2e-conviction-publish',
-        CONTEXT_GRAPH_ID,
-        sig.merkleRoot,
-        10,
-        1000,
-        2,
-        tokenAmount,
-        false,
-        ethers.ZeroAddress,
-        1,
-        publisherIdentityId,
-        sig.publisherR,
-        sig.publisherVS,
-        receiverIds,
-        sig.receiverRs,
-        sig.receiverVSs,
-      );
-
-      const receipt = await tx.wait();
-      expect(receipt!.status).to.equal(1);
-    });
+    // Legacy V9 PublishingConvictionAccount flows end here. The V10 publish
+    // pipeline (via DKGPublishingConvictionNFT + KnowledgeAssetsV10) is
+    // exercised as a separate Flow 3 below — the legacy PCA and the new
+    // NFT are independent contracts and the tests no longer share state.
   });
 
   // ========================================================================
-  // Flow 3: V8→V10 Migration
+  // Flow 3: V10 Publish via Conviction NFT + Context Graphs
+  //
+  // Closes Codex BLOCKER 2 — no dedicated end-to-end test covered the full
+  // V10 publish pipeline spanning:
+  //   1. Conviction NFT account creation (createAccount: TRAC flows directly
+  //      into StakingStorage, full committedTRAC distributed to EpochStorage
+  //      across the 12-epoch lock window)
+  //   2. Agent registration (agentToAccountId reverse map written)
+  //   3. Context Graph creation (open policy, no curator)
+  //   4. Publish via `publish(PublishParams)` — conviction path
+  //   5. Authorization via ContextGraphs.isAuthorizedPublisher using the
+  //      PAYING principal (msg.sender), NOT the recovered node signer (N17)
+  //   6. Auto-resolve via agentToAccountId inside coverPublishingCost (N8)
+  //   7. KC registered in KCS with msg.sender as the publisher of record
+  //      (commit 41be7c71 — KA tokens minted to the paying agent, so the
+  //      N16 ERC-1155 balanceOf gate works on follow-up updates)
+  //   8. Atomic CG binding via ContextGraphs.registerKnowledgeCollection
+  //      (kcToContextGraph[kcId] == cgId, contextGraphKCList[cgId] includes
+  //      kcId) (N20)
+  //   9. CG value ledger written via
+  //      ContextGraphValueStorage.addCGValueForEpochRange (N20, Phase 1)
+  //  10. Double-count guard: staker pool delta across the publish window
+  //      is EXACTLY ZERO (Phase 1+6+8 critical invariant — T1.1 covers the
+  //      same check from the unit fixture; this e2e test re-verifies it
+  //      through the legacy-PCA fixture to make sure the two coexist)
+  //  11. KC retrieval through the KCS public reader
   // ========================================================================
-  describe('Flow 3: V8→V10 Migration via MigratorV10Staking', function () {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let Migrator: any;
-    let oldDelegatorsInfo: DelegatorsInfo;
-    let newDelegatorsInfo: DelegatorsInfo;
+  describe('Flow 3: V10 Publish via Conviction NFT + Context Graphs', function () {
+    const COMMITTED_TRAC = ethers.parseEther('50000'); // 20% discount tier
+    const MIN_STAKE = ethers.parseEther('50000');
+    const STAKER_SHARD_ID = 1n;
+
+    let NFT: DKGPublishingConvictionNFT;
+    let CGFacade: ContextGraphs;
+    let CGS: ContextGraphStorage;
+    let CGV: ContextGraphValueStorage;
+    let EpochStorageContract: EpochStorage;
+
+    let kav10Address: string;
 
     beforeEach(async () => {
-      Migrator = await hre.ethers.getContract('MigratorV10Staking');
-
-      // Deploy two fresh DelegatorsInfo instances to simulate old (V8) and new (V10).
-      // The "old" one acts as V8 (no lock fields used), the "new" one is the V10 target.
-      const hubAddress = await Hub.getAddress();
-      const DelegatorsInfoFactory = await hre.ethers.getContractFactory('DelegatorsInfo');
-
-      oldDelegatorsInfo = (await DelegatorsInfoFactory.deploy(hubAddress)) as DelegatorsInfo;
-      await oldDelegatorsInfo.waitForDeployment();
-
-      newDelegatorsInfo = (await DelegatorsInfoFactory.deploy(hubAddress)) as DelegatorsInfo;
-      await newDelegatorsInfo.waitForDeployment();
-
-      // Register old and new DelegatorsInfo in Hub so they can be initialized
-      await Hub.setContractAddress('OldDelegatorsInfo', await oldDelegatorsInfo.getAddress());
-      await Hub.setContractAddress('NewDelegatorsInfo', await newDelegatorsInfo.getAddress());
-
-      // Register MigratorV10Staking and the new DelegatorsInfo as Hub contracts
-      // so the migrator can call onlyContracts setters on the new instance
-      await Hub.setContractAddress('MigratorV10Staking', await Migrator.getAddress());
-
-      await Migrator.setOldDelegatorsInfo(await oldDelegatorsInfo.getAddress());
-      await Migrator.setNewDelegatorsInfo(await newDelegatorsInfo.getAddress());
+      hre.helpers.resetDeploymentsJson();
+      const fixture = await loadFixture(deployE2EFixture);
+      ({
+        accounts,
+        Token,
+        Chronos,
+        ParametersStorage,
+        KnowledgeCollectionStorage,
+      } = fixture);
+      ProfileContract = fixture.Profile;
+      Staking = fixture.Staking;
+      StakingStorage = fixture.StakingStorage;
+      KAV10 = fixture.KnowledgeAssetsV10;
+      NFT = fixture.PublishingConvictionNFT;
+      CGFacade = fixture.ContextGraphs;
+      CGS = fixture.ContextGraphStorage;
+      CGV = fixture.ContextGraphValueStorage;
+      EpochStorageContract = fixture.EpochStorage;
+      kav10Address = await KAV10.getAddress();
     });
 
-    it('migrates delegator state from old to new DelegatorsInfo', async () => {
-      const identityId = 1;
-      const delegator1 = accounts[3].address;
-      const delegator2 = accounts[4].address;
+    it('end-to-end: createAccount → createContextGraph → publish → atomic bind → CG value written → double-count-free', async () => {
+      // ---- Step 0: Set up publishing + receiving nodes (profiles + stake) ----
+      const publishingNode = getDefaultPublishingNode(accounts);
+      const receivingNodes = getDefaultReceivingNodes(accounts);
+      const { identityId: publisherIdentityId } = await createProfile(
+        ProfileContract,
+        publishingNode,
+      );
+      const receiverProfiles = await createProfiles(ProfileContract, receivingNodes);
+      const receiverIdentityIds = receiverProfiles.map((p) => p.identityId);
 
-      // Populate old DelegatorsInfo with V8-style state.
-      // We need to impersonate a Hub-registered contract to call onlyContracts setters.
-      const stakingAddress = (await hre.ethers.getContract('Staking')).target.toString();
-      const stakingSigner = await hre.ethers.getImpersonatedSigner(stakingAddress);
-      await hre.network.provider.send('hardhat_setBalance', [
-        stakingAddress,
-        '0x' + ethers.parseEther('1.0').toString(16),
-      ]);
+      // Stake all nodes so `_verifySignature`'s stake gate passes.
+      await Token.mint(publishingNode.operational.address, MIN_STAKE);
+      await Token.connect(publishingNode.operational).approve(
+        await Staking.getAddress(),
+        MIN_STAKE,
+      );
+      await Staking.connect(publishingNode.operational).stake(publisherIdentityId, MIN_STAKE);
+      for (let i = 0; i < receivingNodes.length; i++) {
+        await Token.mint(receivingNodes[i].operational.address, MIN_STAKE);
+        await Token.connect(receivingNodes[i].operational).approve(
+          await Staking.getAddress(),
+          MIN_STAKE,
+        );
+        await Staking.connect(receivingNodes[i].operational).stake(
+          receiverProfiles[i].identityId,
+          MIN_STAKE,
+        );
+      }
 
-      await oldDelegatorsInfo.connect(stakingSigner).addDelegator(identityId, delegator1);
-      await oldDelegatorsInfo.connect(stakingSigner).addDelegator(identityId, delegator2);
-      await oldDelegatorsInfo.connect(stakingSigner).setLastClaimedEpoch(identityId, delegator1, 5);
-      await oldDelegatorsInfo.connect(stakingSigner).setDelegatorRollingRewards(identityId, delegator1, 1000);
-      await oldDelegatorsInfo.connect(stakingSigner).setHasEverDelegatedToNode(identityId, delegator1, true);
-      await oldDelegatorsInfo.connect(stakingSigner).setLastStakeHeldEpoch(identityId, delegator1, 3);
-      await oldDelegatorsInfo.connect(stakingSigner).setNetNodeEpochRewards(identityId, 1, 5000);
-      await oldDelegatorsInfo.connect(stakingSigner).setIsOperatorFeeClaimedForEpoch(identityId, 1, true);
+      // ---- Step 1: Conviction NFT account creation ----
+      //
+      // The NFT's `createAccount` pulls `committedTRAC` from msg.sender into
+      // StakingStorage directly (fail-closed transferFrom) and writes the
+      // full amount across the 12-epoch lock window via
+      // `EpochStorage.addTokensToEpochRange`. The contract NEVER holds TRAC.
+      const creator = getDefaultKCCreator(accounts);
+      await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
+      await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
-      // Run migration
-      await Migrator.migrateNode(identityId, 1, 3);
+      const stakingStorageBalanceBefore = await Token.balanceOf(
+        await StakingStorage.getAddress(),
+      );
+      await NFT.connect(creator).createAccount(COMMITTED_TRAC);
+      const accountId = await NFT.totalSupply();
+      expect(accountId).to.equal(1n);
 
-      // Verify delegator state was copied
-      expect(await newDelegatorsInfo.isNodeDelegator(identityId, delegator1)).to.be.true;
-      expect(await newDelegatorsInfo.isNodeDelegator(identityId, delegator2)).to.be.true;
-      expect(await newDelegatorsInfo.getLastClaimedEpoch(identityId, delegator1)).to.equal(5);
-      expect(await newDelegatorsInfo.getDelegatorRollingRewards(identityId, delegator1)).to.equal(1000);
-      expect(await newDelegatorsInfo.hasEverDelegatedToNode(identityId, delegator1)).to.be.true;
-      expect(await newDelegatorsInfo.getLastStakeHeldEpoch(identityId, delegator1)).to.equal(3);
-      expect(await newDelegatorsInfo.getNetNodeEpochRewards(identityId, 1)).to.equal(5000);
-      expect(await newDelegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, 1)).to.be.true;
+      // createAccount side-effects:
+      // - TRAC moved publisher → StakingStorage
+      expect(await Token.balanceOf(await StakingStorage.getAddress())).to.equal(
+        stakingStorageBalanceBefore + COMMITTED_TRAC,
+      );
+      // - NFT minted to creator
+      expect(await NFT.ownerOf(accountId)).to.equal(creator.address);
 
-      // Conviction lock fields default to 0 for migrated delegators
-      const [lockEpochs, lockStartEpoch] = await newDelegatorsInfo.getDelegatorLock(identityId, delegator1);
-      expect(lockEpochs).to.equal(0);
-      expect(lockStartEpoch).to.equal(0);
-    });
+      // ---- Step 2: Agent registration (creator self-registers as own agent) ----
+      await NFT.connect(creator).registerAgent(accountId, creator.address);
+      expect(await NFT.agentToAccountId(creator.address)).to.equal(accountId);
 
-    it('migrated staker can upgrade to conviction lock', async () => {
-      const identityId = 1;
-      const delegator = accounts[3].address;
+      // ---- Step 3: Context Graph creation (open policy) ----
+      await CGFacade.connect(creator).createContextGraph(
+        [10n, 20n, 30n], // hosting nodes
+        [],                // participant agents
+        2,                 // requiredSignatures
+        0,                 // metadataBatchId
+        1,                 // publishPolicy = open (any non-zero publisher auth'd)
+        ethers.ZeroAddress,
+        0,                 // publishAuthorityAccountId
+      );
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(cgId).to.equal(1n);
+      // N17 sanity: open CG authorizes the paying principal (creator).
+      expect(await CGFacade.isAuthorizedPublisher(cgId, creator.address)).to.be.true;
 
-      const stakingAddress = (await hre.ethers.getContract('Staking')).target.toString();
-      const stakingSigner = await hre.ethers.getImpersonatedSigner(stakingAddress);
-      await hre.network.provider.send('hardhat_setBalance', [
-        stakingAddress,
-        '0x' + ethers.parseEther('1.0').toString(16),
-      ]);
-
-      await oldDelegatorsInfo.connect(stakingSigner).addDelegator(identityId, delegator);
-      await Migrator.migrateNode(identityId, 1, 1);
-
-      // Verify lock is 0 after migration
-      const [lockBefore] = await newDelegatorsInfo.getDelegatorLock(identityId, delegator);
-      expect(lockBefore).to.equal(0);
-
-      // Simulate a stakeWithLock by directly setting lock on new DelegatorsInfo
-      // (In production, the Staking contract would call setDelegatorLock)
-      const migratorAddress = await Migrator.getAddress();
-      const migratorSigner = await hre.ethers.getImpersonatedSigner(migratorAddress);
-      await hre.network.provider.send('hardhat_setBalance', [
-        migratorAddress,
-        '0x' + ethers.parseEther('1.0').toString(16),
-      ]);
-
+      // ---- Step 4: Snapshot staker pool across publish window BEFORE publish ----
+      //
+      // Conviction-path publish MUST NOT write to EpochStorage — Phase 6
+      // createAccount already wrote the full allowance. This pool snapshot
+      // captures the post-createAccount baseline; the post-publish snapshot
+      // must match it exactly (delta == 0 per epoch).
       const currentEpoch = await Chronos.getCurrentEpoch();
-      await newDelegatorsInfo.connect(migratorSigner).setDelegatorLock(
-        identityId,
-        delegator,
-        6,
-        currentEpoch,
-      );
+      const tokenAmount = ethers.parseEther('1000');
+      const epochs = 2;
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('flow3-merkle'));
+      const poolsBefore: bigint[] = [];
+      for (let i = 0n; i <= BigInt(epochs); i++) {
+        poolsBefore.push(
+          await EpochStorageContract.getEpochPool(STAKER_SHARD_ID, currentEpoch + i),
+        );
+      }
 
-      const [lockAfter, startAfter] = await newDelegatorsInfo.getDelegatorLock(identityId, delegator);
-      expect(lockAfter).to.equal(6);
-      expect(startAfter).to.equal(currentEpoch);
+      // ---- Step 5: Build V10 publish params (N26 + H5 + post-BLOCKER-1 ACK) ----
+      const p = await buildPublishParams({
+        chainId: DEFAULT_CHAIN_ID,
+        kav10Address,
+        publishingNode,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        contextGraphId: cgId,
+        merkleRoot,
+        knowledgeAssetsAmount: 10,
+        byteSize: 1000,
+        epochs,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'flow3-op',
+      });
 
-      // Verify conviction multiplier tier via pure function on Staking
-      const multiplier = await Staking.convictionMultiplier(6);
-      expect(multiplier).to.equal(35n * SCALE18 / 10n);
-    });
+      // ---- Step 6: publish() (conviction path) ----
+      const tx = await KAV10.connect(creator).publish(p);
+      const receipt = await tx.wait();
+      expect(receipt!.status).to.equal(1);
 
-    it('migrates epoch reward claim flags via migrateEpochRewardsClaimed', async () => {
-      const identityId = 1;
-      const delegator = accounts[3].address;
-      const delegatorKey = ethers.keccak256(ethers.solidityPacked(['address'], [delegator]));
-
-      const stakingAddress = (await hre.ethers.getContract('Staking')).target.toString();
-      const stakingSigner = await hre.ethers.getImpersonatedSigner(stakingAddress);
-      await hre.network.provider.send('hardhat_setBalance', [
-        stakingAddress,
-        '0x' + ethers.parseEther('1.0').toString(16),
-      ]);
-
-      await oldDelegatorsInfo.connect(stakingSigner).addDelegator(identityId, delegator);
-      await oldDelegatorsInfo.connect(stakingSigner).setHasDelegatorClaimedEpochRewards(
-        2,
-        identityId,
-        delegatorKey,
-        true,
-      );
-
-      await Migrator.migrateEpochRewardsClaimed(2, identityId, [delegator]);
-
+      // ---- Step 7: KC registered in KCS; publisher of record is msg.sender ----
+      const kcId = 1n;
+      const meta = await KnowledgeCollectionStorage.getKnowledgeCollectionMetadata(kcId);
+      // meta[3] = byteSize, meta[4] = startEpoch, meta[5] = endEpoch, meta[6] = tokenAmount
+      expect(meta[3]).to.equal(1000n);
+      expect(meta[4]).to.equal(currentEpoch);
+      expect(meta[5]).to.equal(currentEpoch + BigInt(epochs));
+      expect(meta[6]).to.equal(tokenAmount);
+      // The publisher-of-record on the latest merkle root is the PAYING AGENT
+      // (commit 41be7c71). This is what enables the N16 ERC-1155 balanceOf
+      // gate to work on follow-up updates.
+      const latestPublisher =
+        await KnowledgeCollectionStorage.getLatestMerkleRootPublisher(kcId);
+      expect(latestPublisher).to.equal(creator.address);
+      // ERC-1155 KA tokens minted to msg.sender. A follow-up `update` would
+      // pass the `balanceOf(msg.sender, kcRange) > 0` gate.
+      const maxSize = await KnowledgeCollectionStorage.KNOWLEDGE_COLLECTION_MAX_SIZE();
+      const startTokenId = (kcId - 1n) * maxSize + 1n;
+      const stopTokenId = startTokenId + 10n; // knowledgeAssetsAmount = 10
       expect(
-        await newDelegatorsInfo.hasDelegatorClaimedEpochRewards(2, identityId, delegatorKey),
-      ).to.be.true;
+        await KnowledgeCollectionStorage['balanceOf(address,uint256,uint256)'](
+          creator.address,
+          startTokenId,
+          stopTokenId,
+        ),
+      ).to.be.gt(0n);
+
+      // ---- Step 8: Atomic CG binding written ----
+      expect(await CGS.kcToContextGraph(kcId)).to.equal(cgId);
+
+      // ---- Step 9: CG value ledger written ----
+      //
+      // `addCGValueForEpochRange(cgId, currentEpoch, epochs, tokenAmount)`
+      // writes a positive diff at currentEpoch; reading at currentEpoch
+      // yields tokenAmount/epochs (integer division). The value is non-zero.
+      const cgValueNow = await CGV.getCurrentCGValue(cgId);
+      expect(cgValueNow).to.equal(tokenAmount / BigInt(epochs));
+
+      // ---- Step 10: Double-count guard — pool deltas all zero ----
+      for (let i = 0n; i <= BigInt(epochs); i++) {
+        const after = await EpochStorageContract.getEpochPool(
+          STAKER_SHARD_ID,
+          currentEpoch + i,
+        );
+        const delta = after - poolsBefore[Number(i)];
+        expect(delta, `epoch +${i} delta must be 0 (double-count guard)`).to.equal(0n);
+      }
+
+      // ---- Step 11: KC retrieval via public reader ----
+      const retrievedKc = await KnowledgeCollectionStorage.getKnowledgeCollection(kcId);
+      expect(retrievedKc.byteSize).to.equal(1000n);
+      expect(retrievedKc.startEpoch).to.equal(currentEpoch);
+      expect(retrievedKc.endEpoch).to.equal(currentEpoch + BigInt(epochs));
+      expect(retrievedKc.tokenAmount).to.equal(tokenAmount);
+      expect(retrievedKc.merkleRoots.length).to.equal(1);
+      expect(retrievedKc.merkleRoots[0].merkleRoot).to.equal(merkleRoot);
+      expect(retrievedKc.merkleRoots[0].publisher).to.equal(creator.address);
     });
   });
+
 });

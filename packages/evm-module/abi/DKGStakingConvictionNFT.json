@@ -203,22 +203,6 @@
         "internalType": "uint256",
         "name": "positionId",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "expiresAtEpoch",
-        "type": "uint40"
-      }
-    ],
-    "name": "PositionExpired",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "positionId",
-        "type": "uint256"
       }
     ],
     "name": "PositionNotFound",
@@ -325,31 +309,6 @@
       }
     ],
     "name": "PositionCreated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "positionId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "addedAmount",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "newTotal",
-        "type": "uint96"
-      }
-    ],
-    "name": "PositionIncreased",
     "type": "event"
   },
   {
@@ -576,24 +535,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "positionId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "addedAmount",
-        "type": "uint96"
-      }
-    ],
-    "name": "increaseStake",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

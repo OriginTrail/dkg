@@ -128,6 +128,27 @@ describe('ApiClient', () => {
       expect(body.contextGraphId).toBe('my-paranet');
     });
 
+    it('createContextGraph() includes private and participant identity options when provided', async () => {
+      globalThis.fetch = mockFetchOk({ created: 'GuardianTest', uri: 'did:dkg:context-graph:GuardianTest' });
+      await client.createContextGraph('GuardianTest', 'Guardian Test', 'private graph', {
+        private: true,
+        participantIdentityIds: [11n, '12', 13],
+        requiredSignatures: 1,
+      });
+
+      const [url, opts] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/create`);
+      const body = JSON.parse(opts.body);
+      expect(body).toEqual({
+        id: 'GuardianTest',
+        name: 'Guardian Test',
+        description: 'private graph',
+        private: true,
+        participantIdentityIds: ['11', '12', '13'],
+        requiredSignatures: 1,
+      });
+    });
+
     it('publishCclPolicy() posts policy payload', async () => {
       globalThis.fetch = mockFetchOk({ policyUri: 'urn:policy', hash: 'sha256:abc', status: 'proposed' });
       await client.publishCclPolicy({ contextGraphId: 'ops', name: 'incident', version: '0.1.0', content: 'rules: []' });

@@ -60,7 +60,7 @@ contract Paymaster is Ownable(msg.sender) {
     }
 
     function coverCost(uint256 amount) external onlyAllowed {
-        _transferTokens(hub.getContractAddress("KnowledgeCollection"), amount);
+        _transferTokens(hub.getContractAddress("StakingStorage"), amount);
     }
 
     function _transferTokens(address to, uint256 amount) internal {

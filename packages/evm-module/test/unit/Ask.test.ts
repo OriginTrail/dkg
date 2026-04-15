@@ -122,7 +122,6 @@ describe('@unit Ask', () => {
     expect(weightedSum).to.equal(expectedWeighted);
 
     const partialWithdraw = hre.ethers.parseUnits('10000', 18);
-    await DelegatorsInfo.setDelegatorLock(identityId, accounts[2].address, 0, 0);
     await Staking.connect(accounts[2]).requestWithdrawal(
       identityId,
       partialWithdraw,

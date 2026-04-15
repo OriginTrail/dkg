@@ -18,6 +18,12 @@ export { canonicalize, hashTriple, hashTripleV10 } from './canonicalize.js';
 
 export { hexToBytes } from './oracle-verify.js';
 
-export { computeACKDigest, eip191Hash, uint256ToBytes } from './ack.js';
+export {
+  computeACKDigest,
+  computePublishACKDigest,
+  computePublishPublisherDigest,
+  eip191Hash,
+  uint256ToBytes,
+} from './ack.js';
 
 export { resolveRootEntities, type Quad as RootEntityQuad } from './root-entity.js';

@@ -98,42 +98,6 @@ contract KnowledgeCollectionStorage is
         uint96 tokenAmount,
         bool isImmutable
     ) external onlyContracts returns (uint256) {
-        return _createKnowledgeCollection(
-            publisher, publishOperationId, merkleRoot, knowledgeAssetsAmount,
-            byteSize, startEpoch, endEpoch, tokenAmount, isImmutable, bytes32(0)
-        );
-    }
-
-    function createKnowledgeCollectionWithDisclosureRoot(
-        address publisher,
-        string calldata publishOperationId,
-        bytes32 merkleRoot,
-        uint256 knowledgeAssetsAmount,
-        uint88 byteSize,
-        uint40 startEpoch,
-        uint40 endEpoch,
-        uint96 tokenAmount,
-        bool isImmutable,
-        bytes32 selectiveDisclosureMerkleRoot
-    ) external onlyContracts returns (uint256) {
-        return _createKnowledgeCollection(
-            publisher, publishOperationId, merkleRoot, knowledgeAssetsAmount,
-            byteSize, startEpoch, endEpoch, tokenAmount, isImmutable, selectiveDisclosureMerkleRoot
-        );
-    }
-
-    function _createKnowledgeCollection(
-        address publisher,
-        string calldata publishOperationId,
-        bytes32 merkleRoot,
-        uint256 knowledgeAssetsAmount,
-        uint88 byteSize,
-        uint40 startEpoch,
-        uint40 endEpoch,
-        uint96 tokenAmount,
-        bool isImmutable,
-        bytes32 selectiveDisclosureMerkleRoot
-    ) internal returns (uint256) {
         uint256 knowledgeCollectionId = ++_knowledgeCollectionsCounter;
 
         KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[knowledgeCollectionId];
@@ -144,9 +108,6 @@ contract KnowledgeCollectionStorage is
         kc.endEpoch = endEpoch;
         kc.tokenAmount = tokenAmount;
         kc.isImmutable = isImmutable;
-        if (selectiveDisclosureMerkleRoot != bytes32(0)) {
-            kc.selectiveDisclosureMerkleRoot = selectiveDisclosureMerkleRoot;
-        }
 
         unchecked {
             _totalTokenAmount += tokenAmount;
@@ -194,10 +155,64 @@ contract KnowledgeCollectionStorage is
         kc.byteSize = byteSize;
         kc.tokenAmount = tokenAmount;
 
+        // Burn with an empty list is a no-op (the inner for-loop over
+        // tokenIds skips when length == 0). Mint with amount == 0 was
+        // previously unconditionally dispatched to `_mintWithoutCheck`,
+        // which reverts `MintZeroQuantity` on zero — blocking true
+        // metadata-only updates (delta == 0, no mint, no burn) that the
+        // KnowledgeAssetsV10 update flow explicitly documents as
+        // supported. Guard the mint call so metadata-only rotations work
+        // end-to-end. See Codex review round 2, finding 6.
         burnKnowledgeAssetsTokens(id, publisher, knowledgeAssetsToBurn);
-        mintKnowledgeAssetsTokens(id, publisher, mintKnowledgeAssetsAmount);
+        if (mintKnowledgeAssetsAmount > 0) {
+            mintKnowledgeAssetsTokens(id, publisher, mintKnowledgeAssetsAmount);
+        }
 
         emit KnowledgeCollectionUpdated(id, updateOperationId, merkleRoot, byteSize, tokenAmount);
+    }
+
+    /// @notice Lightweight update-path metadata — scalar fields only + the
+    /// pre-update merkle-root count. Intended for callers (e.g.
+    /// `KnowledgeAssetsV10._executeUpdateCore`) that need the state
+    /// summary but NOT the full history arrays.
+    ///
+    /// Problem: `getKnowledgeCollectionMetadata` performs a full
+    /// storage → memory struct copy, which walks every entry of
+    /// `merkleRoots[]` and `burned[]`. Because both arrays grow
+    /// monotonically on every update, the memory cost (and thus gas
+    /// cost) of calling that getter from the update path itself scales
+    /// linearly — actually super-linearly due to EVM memory-expansion
+    /// quadratic term — with the number of prior updates. A KC with
+    /// thousands of historical entries eventually becomes un-updatable.
+    ///
+    /// This getter returns only the scalar slots and the merkle-root
+    /// chain length (as a plain `uint256`), so the update path's gas
+    /// cost is constant regardless of history.
+    ///
+    /// Codex review round 3 finding 1.
+    function getKnowledgeCollectionUpdateContext(
+        uint256 id
+    )
+        external
+        view
+        returns (
+            uint256 merkleRootsCount,
+            uint256 minted,
+            uint88 byteSize,
+            uint40 endEpoch,
+            uint96 tokenAmount,
+            bool isImmutable
+        )
+    {
+        KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[id];
+        return (
+            kc.merkleRoots.length,
+            kc.minted,
+            kc.byteSize,
+            kc.endEpoch,
+            kc.tokenAmount,
+            kc.isImmutable
+        );
     }
 
     function getKnowledgeCollectionMetadata(
@@ -321,14 +336,6 @@ contract KnowledgeCollectionStorage is
         knowledgeCollections[id].merkleRoots.pop();
 
         emit KnowledgeCollectionMerkleRootRemoved(id, latestMerkleRoot);
-    }
-
-    function getSelectiveDisclosureMerkleRoot(uint256 id) external view returns (bytes32) {
-        return knowledgeCollections[id].selectiveDisclosureMerkleRoot;
-    }
-
-    function setSelectiveDisclosureMerkleRoot(uint256 id, bytes32 root) external onlyContracts {
-        knowledgeCollections[id].selectiveDisclosureMerkleRoot = root;
     }
 
     function getMinted(uint256 id) external view returns (uint256) {
@@ -565,7 +572,16 @@ contract KnowledgeCollectionStorage is
             for (uint256 i = 0; i < tokenIds.length; i++) {
                 uint256 tokenId = tokenIds[i];
 
-                if (startTokenId <= tokenId && tokenId < startTokenId + kc.minted) {
+                // Burn-range gate. The valid range for KC `id` is
+                // [startTokenId, startTokenId + kc.minted). Revert when the
+                // caller passes a token OUTSIDE that range — otherwise an
+                // update on KC X with a burn list that names token IDs
+                // belonging to KC Y would burn KC Y's tokens against KC X's
+                // burn counter (cross-KC accounting corruption). The
+                // condition was previously inverted, causing both legitimate
+                // same-KC burns to revert and cross-KC burns to sneak
+                // through. See Codex review round 2, finding 7.
+                if (tokenId < startTokenId || tokenId >= startTokenId + kc.minted) {
                     revert KnowledgeCollectionLib.NotPartOfKnowledgeCollection(id, tokenId);
                 }
 

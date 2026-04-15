@@ -3,7 +3,7 @@ import type { EventBus } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
   encodeStorageACK,
-  computeACKDigest,
+  computePublishACKDigest,
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
@@ -16,7 +16,24 @@ export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
   signerWallet: ethers.Wallet;
-  contextGraphSharedMemoryUri: (cgId: string) => string;
+  /**
+   * Resolves the SWM graph URI for a given (sourceGraphId, subGraphName).
+   * Accepts an optional `subGraphName` so the handler can locate data
+   * stored under `.../<cgId>/<subGraphName>/_shared_memory` when the
+   * publisher is writing into a sub-graph partition.
+   */
+  contextGraphSharedMemoryUri: (cgId: string, subGraphName?: string) => string;
+  /**
+   * Numeric EVM chain id (e.g. 31337n for hardhat). Part of the H5 prefix
+   * on the V10 ACK digest — without this the signature will not match the
+   * publisher's or the on-chain contract's expectation.
+   */
+  chainId: bigint;
+  /**
+   * Deployed address of `KnowledgeAssetsV10` on the handler's chain. Part
+   * of the H5 prefix on the V10 ACK digest.
+   */
+  kav10Address: string;
 }
 
 /**
@@ -26,7 +43,9 @@ export interface StorageACKHandlerConfig {
  * 1. Verify this node is a core node
  * 2. Verify the data exists in SWM
  * 3. Recompute the merkle root from SWM triples
- * 4. Sign ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ * 4. Sign ACK = EIP-191(computePublishACKDigest(chainId, kav10Address, cgId,
+ *    merkleRoot, kaCount, byteSize, epochs, tokenAmount)) — the H5-prefixed
+ *    8-field digest. Matches KnowledgeAssetsV10.sol:362-373 byte-for-byte.
  * 5. Return StorageACK via the P2P stream response
  */
 export class StorageACKHandler {
@@ -50,12 +69,22 @@ export class StorageACKHandler {
     }
 
     const intent = decodePublishIntent(data);
+    // `cgId` is the TARGET on-chain numeric id used by the ACK digest and
+    // the publishDirect tx. `swmGraphId` (optional, from the remap flow)
+    // is the SOURCE graph where data lives in SWM. When absent, fall back
+    // to `cgId` so direct-publish flows keep working unchanged.
     const cgId = intent.contextGraphId;
+    const swmGraphId = intent.swmGraphId && intent.swmGraphId.length > 0
+      ? intent.swmGraphId
+      : cgId;
+    const subGraphName = intent.subGraphName && intent.subGraphName.length > 0
+      ? intent.subGraphName
+      : undefined;
     const merkleRoot = intent.merkleRoot instanceof Uint8Array
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
 
-    const swmGraphUri = this.config.contextGraphSharedMemoryUri(cgId);
+    const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
     let swmQuads: Quad[];
 
@@ -155,18 +184,46 @@ export class StorageACKHandler {
       ? BigInt(intent.publicByteSize)
       : BigInt(Number(intent.publicByteSize));
 
-    // Derive numeric CG ID the same way the publisher does.
+    // Derive numeric CG ID the same way the publisher does. Fail loud on
+    // non-numeric or non-positive ids — the V10 contract rejects
+    // `contextGraphId == 0` with `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379`, so signing an ACK against CG 0 (or a
+    // negative id from `BigInt("-1")`, which would die later in the
+    // evm-adapter's uint256 encoder) would just produce a signature the
+    // contract rejects downstream. Refuse the PublishIntent here with a
+    // clear error so the publisher sees the failure on the P2P stream.
     let contextGraphIdBigInt: bigint;
     try {
       contextGraphIdBigInt = BigInt(cgId);
     } catch {
-      contextGraphIdBigInt = 0n;
+      throw new Error(
+        `StorageACK: V10 publish requires a numeric on-chain context graph id; ` +
+        `got '${cgId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (contextGraphIdBigInt <= 0n) {
+      throw new Error(
+        `StorageACK: V10 publish requires a positive on-chain context graph id; ` +
+        `got ${contextGraphIdBigInt}. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
     }
     const intentEpochs = (typeof intent.epochs === 'number' && intent.epochs > 0) ? intent.epochs : 1;
     const intentTokenAmount = intent.tokenAmountStr
       ? BigInt(intent.tokenAmountStr)
       : 0n;
-    const digest = computeACKDigest(contextGraphIdBigInt, merkleRoot, verifiedKACount, verifiedByteSize, intentEpochs, intentTokenAmount);
+    // H5-prefixed ACK digest matching KnowledgeAssetsV10.sol:362-373. `chainId`
+    // and `kav10Address` are threaded in via StorageACKHandlerConfig at
+    // construction time from the node's chain adapter.
+    const digest = computePublishACKDigest(
+      this.config.chainId,
+      this.config.kav10Address,
+      contextGraphIdBigInt,
+      merkleRoot,
+      BigInt(verifiedKACount),
+      verifiedByteSize,
+      BigInt(intentEpochs),
+      intentTokenAmount,
+    );
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

@@ -19,6 +19,8 @@ import {AskStorage} from "./storage/AskStorage.sol";
 import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
+import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
+import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
 import {ICustodian} from "./interfaces/ICustodian.sol";
 import {HubLib} from "./libraries/HubLib.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -27,6 +29,13 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
     string private constant _VERSION = "1.0.0";
     uint256 public constant SCALE18 = 1e18;
+
+    /// @notice Maximum number of in-CG resamples when the picker hits an
+    ///         expired KC during Phase 10 weighted challenge generation.
+    ///         Exhausting this budget reverts with `NoEligibleKnowledgeCollection`
+    ///         so the node skips the current proof period and retries on the
+    ///         next one (see {_pickWeightedChallenge}).
+    uint8 public constant MAX_KC_RETRIES = 10;
 
     IdentityStorage public identityStorage;
     RandomSamplingStorage public randomSamplingStorage;
@@ -39,8 +48,33 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     DelegatorsInfo public delegatorsInfo;
     ParametersStorage public parametersStorage;
     ShardingTableStorage public shardingTableStorage;
+    ContextGraphStorage public contextGraphStorage;
+    ContextGraphValueStorage public contextGraphValueStorage;
 
     error MerkleRootMismatchError(bytes32 computedMerkleRoot, bytes32 expectedMerkleRoot);
+    /// @notice Thrown by `_generateChallenge` when no public, active CG holds
+    ///         non-zero per-epoch value at the current epoch — i.e. there is
+    ///         nothing eligible to challenge against. The caller's transaction
+    ///         reverts and the node retries on the next proof period.
+    error NoEligibleContextGraph();
+    /// @notice Thrown by `_generateChallenge` when the chosen CG's KC list is
+    ///         empty or all sampled KCs are expired after `MAX_KC_RETRIES`
+    ///         attempts. Same retry-next-period semantics as above.
+    error NoEligibleKnowledgeCollection();
+
+    /// @notice Emitted when {createChallenge} produces a new challenge for a
+    ///         node. Off-chain consumers (node UI, indexers) use the indexed
+    ///         `cgId` to know which Context Graph the challenge targets — this
+    ///         information is intentionally NOT stored on the Challenge struct
+    ///         to keep its on-chain footprint unchanged.
+    event ChallengeGenerated(
+        uint72 indexed identityId,
+        uint256 indexed contextGraphId,
+        uint256 indexed knowledgeCollectionId,
+        uint256 chunkId,
+        uint256 epoch,
+        uint256 activeProofPeriodStartBlock
+    );
 
     /**
      * @dev Constructor initializes the contract with essential parameters for random sampling
@@ -90,6 +124,11 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
+        // Phase 10 — value-weighted challenge generation. ContextGraphStorage is
+        // an asset storage (ERC-721 NFT registry), ContextGraphValueStorage is a
+        // regular hub contract.
+        contextGraphStorage = ContextGraphStorage(hub.getAssetStorageAddress("ContextGraphStorage"));
+        contextGraphValueStorage = ContextGraphValueStorage(hub.getContractAddress("ContextGraphValueStorage"));
     }
 
     /**
@@ -272,142 +311,228 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Internal function to generate a new random challenge for a node
-     * Uses blockchain properties (block hash, difficulty, timestamp, gas price) for randomness
-     * Selects a random active knowledge collection and chunk within it
-     * Creates challenge with current epoch and active proof period information
-     * @param originalSender The original caller address for randomness seed
-     * @return challenge The generated challenge struct
+     * @dev Generates a new value-weighted challenge for a node.
+     *
+     * Phase 10 — value-weighted CG selection (replaces V8 uniform-random KC pick).
+     * Uses blockchain properties (block hash, difficulty, timestamp, gas price)
+     * for randomness, picks a Context Graph weighted by its per-epoch TRAC
+     * value at the current epoch, and then picks a KC uniformly at random
+     * within that CG.
+     *
+     * Read-time exclusion (NOT a write-time filter): curated ("private") CGs
+     * and deactivated CGs are skipped during both the adjusted-total
+     * accumulation and the cumulative walk. Phase 8 writes to
+     * `ContextGraphValueStorage` unconditionally because it ships earlier;
+     * filtering at read time keeps Phase 10 isolated and reversible without
+     * touching the publish path.
+     *
+     * ## Open Risks (documented for V11+ — out of scope for Phase 10)
+     *
+     * - Weighting decay (cumulative drift): `cgValueCumulative` is per-epoch
+     *   (not lifetime-cumulative) via the diff/cumulative pattern in
+     *   `ContextGraphValueStorage`, so expired KCs auto-decay after their
+     *   active window. Correct by design — no Phase 10 action.
+     * - KC-level gaming: within a CG, KC selection is uniform — not
+     *   value-weighted. Skipping one high-value KC in a 100-KC CG costs only
+     *   1% of challenges, not proportional to that KC's TRAC share. Accepted
+     *   per `V10_CONTRACTS_REDESIGN_v2.md` §"Known limitation — KC-level
+     *   gaming". CG-level weighting is the primary defense.
+     * - Gas scaling: linear scan over all CGs is O(N) per challenge. Fine up
+     *   to ~1K CGs (~2.1M gas). Fenwick tree (BIT) deferred to V10.x.
+     * - Sync grace period / node publishing timing: out of scope.
+     *
+     * @param originalSender Original caller address used for randomness seed.
+     * @return challenge The generated challenge struct (signature-compatible
+     *         with V8 — `submitProof` does not need to know the cgId).
      */
     function _generateChallenge(address originalSender) internal returns (RandomSamplingLib.Challenge memory) {
-        uint256 knowledgeCollectionsCount = knowledgeCollectionStorage.getLatestKnowledgeCollectionId();
-        if (knowledgeCollectionsCount == 0) {
-            revert("No knowledge collections exist");
-        }
-
-        bytes32 pseudoRandomVariable = keccak256(
-            abi.encodePacked(
-                block.difficulty,
-                blockhash(block.number - ((block.difficulty % 256) + 1)), // +1 to avoid blockhash(block.number) situation
-                originalSender,
-                block.timestamp,
-                tx.gasprice,
-                uint8(1) // sector = 1 by default
-            )
-        );
+        bytes32 baseSeed = _deriveChallengeSeed(originalSender);
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
-        // Optimized binary search approach for finding active knowledge collection
-        uint256 knowledgeCollectionId = _findActiveKnowledgeCollection(
-            pseudoRandomVariable,
-            1,
-            knowledgeCollectionsCount,
-            currentEpoch
-        );
+        (uint256 cgId, uint256 kcId, uint256 chunkId) = _pickWeightedChallenge(baseSeed, currentEpoch);
 
-        if (knowledgeCollectionId == 0) {
-            revert("Failed to find a knowledge collection that is active in the current epoch");
-        }
-
-        uint88 kcByteSize = knowledgeCollectionStorage.getByteSize(knowledgeCollectionId);
-        if (kcByteSize == 0) {
-            revert("Knowledge collection byte size is 0");
-        }
-
-        uint256 chunkId;
-        uint256 chunkByteSize = randomSamplingStorage.CHUNK_BYTE_SIZE();
-        // KC with byteSize < chunkByteSize will always have chunkId = 0
-        if (kcByteSize > chunkByteSize) {
-            chunkId = uint256(pseudoRandomVariable) % (kcByteSize / chunkByteSize);
-        }
+        uint72 identityId = identityStorage.getIdentityId(originalSender);
+        uint256 startBlock = updateAndGetActiveProofPeriodStartBlock();
+        emit ChallengeGenerated(identityId, cgId, kcId, chunkId, currentEpoch, startBlock);
 
         return
             RandomSamplingLib.Challenge(
-                knowledgeCollectionId,
+                kcId,
                 chunkId,
                 address(knowledgeCollectionStorage),
                 currentEpoch,
-                updateAndGetActiveProofPeriodStartBlock(),
+                startBlock,
                 getActiveProofingPeriodDurationInBlocks(),
                 false
             );
     }
 
     /**
-     * @dev Internal function to find an active knowledge collection using breadth-first search
-     * Uses BFS with a queue-based approach to efficiently search for collections that are
-     * still active (current epoch <= collection's end epoch)
-     * Splits ranges recursively and uses randomness to select from each range
-     * Limits iterations to prevent infinite loops and ensures gas efficiency
-     * @param randomSeed Random seed for picking a collection from current range
-     * @param start Start of the range (inclusive) - collection ID range to search
-     * @param end End of the range (inclusive) - collection ID range to search
-     * @param currentEpoch Current epoch to check collection activity against
-     * @return knowledgeCollectionId ID of an active knowledge collection, or 0 if none found
+     * @dev Builds the per-call randomness seed from block state + caller. Same
+     *      entropy mix as the V8 implementation — kept identical to preserve
+     *      seed quality across the Phase 10 upgrade.
      */
-    function _findActiveKnowledgeCollection(
-        bytes32 randomSeed,
-        uint256 start,
-        uint256 end,
+    function _deriveChallengeSeed(address originalSender) internal view returns (bytes32) {
+        return
+            keccak256(
+                abi.encodePacked(
+                    block.difficulty,
+                    blockhash(block.number - ((block.difficulty % 256) + 1)),
+                    originalSender,
+                    block.timestamp,
+                    tx.gasprice,
+                    uint8(1) // sector = 1 by default
+                )
+            );
+    }
+
+    /**
+     * @dev Read-only public preview of {_pickWeightedChallenge}. Lets nodes
+     *      and indexers simulate a draw for an arbitrary seed without writing
+     *      to storage; tests use it to drive distribution regression with
+     *      deterministic per-draw seeds and no block-mining.
+     *
+     *      Because this view shares the underlying picker with the production
+     *      path, any change to the weighted-selection logic is reflected in
+     *      both call sites — no test-only drift.
+     *
+     * @param seed       The 32-byte seed to draw against. Production callers
+     *                   should pass a high-entropy hash; tests pass deterministic
+     *                   per-iteration seeds for distribution analysis.
+     * @param targetEpoch Epoch to read CG values at. Pass `chronos.getCurrentEpoch()`
+     *                   for the live picker semantics.
+     * @return cgId      Selected Context Graph id.
+     * @return kcId      Selected Knowledge Collection id within that CG.
+     * @return chunkId   Selected chunk index within the KC.
+     */
+    function previewChallengeForSeed(
+        bytes32 seed,
+        uint256 targetEpoch
+    ) external view returns (uint256 cgId, uint256 kcId, uint256 chunkId) {
+        return _pickWeightedChallenge(seed, targetEpoch);
+    }
+
+    /**
+     * @dev Two-step weighted draw: pick a Context Graph weighted by per-epoch
+     *      TRAC value, then pick a KC uniformly at random within that CG with
+     *      bounded resampling on expired KCs.
+     *
+     *      Step 1 — Walk all CGs once to compute the adjusted total (sum of
+     *      `getCGValueAtEpoch` over CGs that are both active and non-curated).
+     *      `ContextGraphValueStorage.getTotalValueAtEpoch` would be cheaper
+     *      but it includes private CGs unconditionally; the adjusted total
+     *      MUST exclude them at read time. Walk again with a running cumulative
+     *      to pick the first eligible CG whose cumulative > r. Linear scan is
+     *      gas-acceptable up to ~1K CGs per V10_CONTRACTS_REDESIGN_v2 §"Gas
+     *      scaling" — Fenwick tree is the V10.x upgrade path.
+     *
+     *      Step 2 — Pick a KC at a random index in `_contextGraphKCList[cgId]`
+     *      (via `getContextGraphKCAt` so we copy a single element instead of
+     *      the full list). Resample up to `MAX_KC_RETRIES` if the picked KC
+     *      has expired (`endEpoch < currentEpoch`). Uses a fresh seed each
+     *      attempt via `keccak256(seed, attempt)`.
+     *
+     *      Step 3 — Compute the chunk index as in V8: `seed % (byteSize /
+     *      chunkByteSize)`, or 0 if the KC is smaller than one chunk.
+     *
+     *      Reverts:
+     *      - {NoEligibleContextGraph}        adjustedTotal == 0 (no public,
+     *                                        active CG holds value).
+     *      - {NoEligibleKnowledgeCollection} CG has an empty KC list, or
+     *                                        every retry hit an expired KC.
+     */
+    function _pickWeightedChallenge(
+        bytes32 seed,
         uint256 currentEpoch
-    ) internal view returns (uint256) {
-        // Queue using fixed array - [start1, end1, start2, end2, ...]
-        uint256[100] memory queue; // Can hold 50 ranges max
-        uint8 queueStart = 0; // Front of queue
-        uint8 queueEnd = 0; // Back of queue
-
-        // Push initial range
-        queue[queueEnd++] = start;
-        queue[queueEnd++] = end;
-
-        bytes32 currentRandom = randomSeed;
-        uint8 iterations = 0;
-
-        while (queueStart < queueEnd && iterations < 50) {
-            // Pop range from front of queue (BFS behavior)
-            uint256 currentStart = queue[queueStart++];
-            uint256 currentEnd = queue[queueStart++];
-
-            // Pick random collection from current range
-            uint256 randomKcId = currentStart + (uint256(currentRandom) % (currentEnd - currentStart + 1));
-
-            // Check if this collection is active
-            if (currentEpoch <= knowledgeCollectionStorage.getEndEpoch(randomKcId)) {
-                return randomKcId;
-            }
-
-            // If single element and not active, continue to next range
-            if (currentStart == currentEnd) {
-                currentRandom = keccak256(abi.encodePacked(currentRandom));
-                unchecked {
-                    iterations++;
-                }
+    ) internal view returns (uint256 cgId, uint256 kcId, uint256 chunkId) {
+        // ---- Step 1a: compute adjusted total over eligible CGs only. ----
+        uint256 cgCount = contextGraphStorage.getLatestContextGraphId();
+        uint256 adjustedTotal;
+        for (uint256 i = 1; i <= cgCount; i++) {
+            if (!_isCGEligible(i)) {
                 continue;
             }
-
-            // Split range and push both halves to back of queue (BFS order)
-            uint256 mid = currentStart + (currentEnd - currentStart) / 2;
-
-            if (queueEnd < 96) {
-                // Leave room for both ranges
-                // Always push left half first, then right half (consistent BFS)
-                if (currentStart <= mid) {
-                    queue[queueEnd++] = currentStart;
-                    queue[queueEnd++] = mid;
-                }
-                if (mid + 1 <= currentEnd) {
-                    queue[queueEnd++] = mid + 1;
-                    queue[queueEnd++] = currentEnd;
-                }
-            }
-
-            currentRandom = keccak256(abi.encodePacked(currentRandom));
-            unchecked {
-                iterations++;
-            }
+            adjustedTotal += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
+        }
+        if (adjustedTotal == 0) {
+            revert NoEligibleContextGraph();
         }
 
-        return 0; // No active collection found
+        // ---- Step 1b: walk eligible CGs and pick the one straddling r. ----
+        uint256 r = uint256(seed) % adjustedTotal;
+        uint256 running;
+        for (uint256 i = 1; i <= cgCount; i++) {
+            if (!_isCGEligible(i)) {
+                continue;
+            }
+            running += contextGraphValueStorage.getCGValueAtEpoch(i, currentEpoch);
+            if (running > r) {
+                cgId = i;
+                break;
+            }
+        }
+        // Defensive: adjustedTotal > 0 guarantees at least one eligible CG
+        // contributed a positive weight, so the loop above must have set cgId.
+        // Reaching this branch means the per-epoch read drifted between
+        // the two passes (impossible from a `view` call — eligibility and
+        // values are deterministic for a fixed `currentEpoch`).
+        if (cgId == 0) {
+            revert NoEligibleContextGraph();
+        }
+
+        // ---- Step 2: pick a KC inside the chosen CG with bounded retries. ----
+        uint256 kcCount = contextGraphStorage.getContextGraphKCCount(cgId);
+        if (kcCount == 0) {
+            // Eligible CG exists but holds no registered KCs; treat the same
+            // as an all-expired CG (skip and retry next period).
+            revert NoEligibleKnowledgeCollection();
+        }
+        uint256 pickedKcId;
+        bytes32 kcSeed = seed;
+        for (uint8 attempt = 0; attempt < MAX_KC_RETRIES; attempt++) {
+            kcSeed = keccak256(abi.encodePacked(kcSeed, attempt));
+            uint256 idx = uint256(kcSeed) % kcCount;
+            uint256 candidate = contextGraphStorage.getContextGraphKCAt(cgId, idx);
+            if (knowledgeCollectionStorage.getEndEpoch(candidate) >= currentEpoch) {
+                pickedKcId = candidate;
+                break;
+            }
+        }
+        if (pickedKcId == 0) {
+            revert NoEligibleKnowledgeCollection();
+        }
+        kcId = pickedKcId;
+
+        // ---- Step 3: compute the chunk index identically to V8. ----
+        uint88 kcByteSize = knowledgeCollectionStorage.getByteSize(kcId);
+        if (kcByteSize == 0) {
+            // V8 used a verbose string here; surfacing as a custom error
+            // would change the ABI; keep the string for parity.
+            revert("Knowledge collection byte size is 0");
+        }
+        uint256 chunkByteSize = randomSamplingStorage.CHUNK_BYTE_SIZE();
+        if (kcByteSize > chunkByteSize) {
+            // Use the rotated kcSeed so chunk picks within a CG don't degenerate
+            // when many KCs share the same byte size.
+            chunkId = uint256(kcSeed) % (uint256(kcByteSize) / chunkByteSize);
+        }
+    }
+
+    /**
+     * @dev True iff the CG is active AND non-curated. Curated CGs are
+     *      treated as private for Phase 10 random sampling and excluded
+     *      from the weighted draw at read time. See `_generateChallenge`
+     *      NatSpec for the rationale (Phase 8 already ships unconditional
+     *      writes to `ContextGraphValueStorage`).
+     */
+    function _isCGEligible(uint256 contextGraphId) internal view returns (bool) {
+        if (!contextGraphStorage.isContextGraphActive(contextGraphId)) {
+            return false;
+        }
+        if (contextGraphStorage.getIsCurated(contextGraphId)) {
+            return false;
+        }
+        return true;
     }
 
     /**
