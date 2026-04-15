@@ -6031,16 +6031,29 @@ async function handleRequest(
     }
   }
 
-  // POST /api/context-graph/{id}/sign-join — sign a join request as this node's agent
+  // POST /api/context-graph/{id}/sign-join — sign a join request and forward to curator via P2P
   const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
   if (req.method === "POST" && signJoinMatch) {
     const contextGraphId = decodeURIComponent(signJoinMatch[1]);
     try {
-      const requestAgentAddress = agent.resolveAgentAddress(
+      const callerAddress = agent.resolveAgentAddress(
         extractBearerToken(req.headers.authorization),
       );
-      const signed = await agent.signJoinRequest(contextGraphId, requestAgentAddress);
-      return jsonResponse(res, 200, signed);
+      const signed = await agent.signJoinRequest(contextGraphId, callerAddress);
+      const { delivered, errors } = await agent.forwardJoinRequest(
+        signed.contextGraphId,
+        signed.agentAddress,
+        signed.signature,
+        signed.timestamp,
+        agent.nodeName,
+      );
+      return jsonResponse(res, 200, {
+        ok: true,
+        ...signed,
+        delivered,
+        ...(errors.length > 0 ? { errors } : {}),
+        status: delivered > 0 ? 'sent' : 'no-curator-found',
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 400, { error: msg });

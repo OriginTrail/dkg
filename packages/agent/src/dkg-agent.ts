@@ -2643,7 +2643,9 @@ export class DKGAgent {
           graph: cgMetaGraph,
         });
       }
-      // Auto-include creator's agent address
+    }
+    // Auto-include creator in allowlist for curated/private CGs
+    if (isCurated || opts.private) {
       const creatorAddr = opts.callerAgentAddress ?? this.defaultAgentAddress;
       if (creatorAddr) {
         quads.push({
