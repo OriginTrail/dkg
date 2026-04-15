@@ -5,9 +5,12 @@
  * and provides helpers for staking, token minting, and signing.
  */
 import { ChildProcess, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { ethers, JsonRpcProvider, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import path from 'node:path';
+
+const require = createRequire(import.meta.url);
 
 export const EVM_MODULE_DIR = path.resolve(import.meta.dirname, '../../evm-module');
 export const HARDHAT_CHAIN_ID = 31337;
@@ -55,10 +58,12 @@ export async function waitForNode(url: string, timeoutMs = 30_000): Promise<bool
 
 export async function deployContracts(rpcUrl: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const hardhatBin = path.join(EVM_MODULE_DIR, 'node_modules', '.bin', 'hardhat');
+    const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
+      paths: [EVM_MODULE_DIR],
+    });
     const proc = spawn(
-      hardhatBin,
-      ['deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
+      process.execPath,
+      [hardhatCli, 'deploy', '--network', 'localhost', '--config', 'hardhat.node.config.ts'],
       {
         cwd: EVM_MODULE_DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -284,10 +289,14 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
 
   let stderrOutput = '';
   let stdoutOutput = '';
-  const hardhatBin = path.join(EVM_MODULE_DIR, 'node_modules', '.bin', 'hardhat');
+  let processExitCode: number | null = null;
+
+  const hardhatCli = require.resolve('hardhat/internal/cli/bootstrap', {
+    paths: [EVM_MODULE_DIR],
+  });
   const hardhatProcess = spawn(
-    hardhatBin,
-    ['node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
+    process.execPath,
+    [hardhatCli, 'node', '--port', String(port), '--config', 'hardhat.node.config.ts'],
     {
       cwd: EVM_MODULE_DIR,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -296,6 +305,8 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   );
   hardhatProcess.stdout?.on('data', (d) => { stdoutOutput += d.toString(); });
   hardhatProcess.stderr?.on('data', (d) => { stderrOutput += d.toString(); });
+  hardhatProcess.on('exit', (code) => { processExitCode = code; });
+  hardhatProcess.on('error', (err) => { stderrOutput += `\nspawn error: ${err.message}`; });
 
   const startupTimeout = process.env.CI ? 60_000 : 15_000;
   const ready = await waitForNode(rpcUrl, startupTimeout);
@@ -303,6 +314,8 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
     hardhatProcess.kill('SIGTERM');
     throw new Error(
       `Hardhat node failed to start on port ${port} within ${startupTimeout / 1000}s.\n` +
+      `hardhatCli: ${hardhatCli}\n` +
+      `exitCode: ${processExitCode}\n` +
       `stderr: ${stderrOutput}\nstdout: ${stdoutOutput}`,
     );
   }
