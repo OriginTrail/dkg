@@ -99,6 +99,29 @@ describe('DashboardDB — semantic enrichment events', () => {
     expect(reclaimedByNextWorker!.attempts).toBe(2);
   });
 
+  it('dead-letters expired leases that have already exhausted max attempts', () => {
+    insertEvent({
+      id: 'semantic-event-exhausted',
+      idempotency_key: 'semantic-event-exhausted',
+      status: 'leased',
+      attempts: 3,
+      max_attempts: 3,
+      lease_owner: 'worker-a',
+      lease_expires_at: 1_500,
+      next_attempt_at: 1_000,
+    } as Partial<typeof baseEvent> & { lease_owner: string; lease_expires_at: number });
+
+    const reclaimed = db.reclaimExpiredSemanticEnrichmentEvents(2_000);
+    expect(reclaimed).toBe(1);
+
+    const row = db.getSemanticEnrichmentEvent('semantic-event-exhausted');
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('dead_letter');
+    expect(row!.lease_owner).toBeNull();
+    expect(row!.lease_expires_at).toBeNull();
+    expect(db.getRunnableSemanticEnrichmentEvents(2_000)).toHaveLength(0);
+  });
+
   it('schedules a retry with backoff when failure remains under max attempts', () => {
     insertEvent({ max_attempts: 3 });
 
@@ -163,6 +186,49 @@ describe('DashboardDB — semantic enrichment events', () => {
       overdue_pending_count: 0,
       expired_lease_count: 0,
     });
+  });
+
+  it('can dead-letter all active semantic events when the worker becomes unavailable', () => {
+    insertEvent({
+      id: 'semantic-event-pending',
+      idempotency_key: 'semantic-event-pending',
+    });
+    insertEvent({
+      id: 'semantic-event-leased',
+      idempotency_key: 'semantic-event-leased',
+      status: 'leased',
+      attempts: 1,
+      lease_owner: 'worker-a',
+      lease_expires_at: 2_000,
+    } as Partial<typeof baseEvent> & { lease_owner: string; lease_expires_at: number });
+
+    const rows = db.deadLetterActiveSemanticEnrichmentEvents(3_000, 'semantic worker unavailable');
+
+    expect(rows.map((row) => row.id).sort()).toEqual(['semantic-event-leased', 'semantic-event-pending']);
+    expect(db.getSemanticEnrichmentEvent('semantic-event-pending')).toMatchObject({
+      status: 'dead_letter',
+      last_error: 'semantic worker unavailable',
+    });
+    expect(db.getSemanticEnrichmentEvent('semantic-event-leased')).toMatchObject({
+      status: 'dead_letter',
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: 'semantic worker unavailable',
+    });
+  });
+
+  it('does not claim pending rows that have already reached max attempts', () => {
+    insertEvent({
+      id: 'semantic-event-maxed-pending',
+      idempotency_key: 'semantic-event-maxed-pending',
+      attempts: 3,
+      max_attempts: 3,
+      next_attempt_at: 1_000,
+    });
+
+    expect(db.getRunnableSemanticEnrichmentEvents(1_000)).toHaveLength(0);
+    expect(db.claimNextRunnableSemanticEnrichmentEvent(1_000, 'worker-a')).toBeUndefined();
+    expect(db.getSemanticEnrichmentEvent('semantic-event-maxed-pending')?.status).toBe('pending');
   });
 
   it('prunes completed and dead-letter events but keeps active rows', () => {

@@ -994,15 +994,71 @@ export class DashboardDB {
   }
 
   reclaimExpiredSemanticEnrichmentEvents(now: number): number {
-    return this.stmt('reclaimExpiredSemanticEnrichmentEvents', `
-      UPDATE semantic_enrichment_events
-      SET status = 'pending',
-          lease_owner = NULL,
-          lease_expires_at = NULL,
-          next_attempt_at = ?,
-          updated_at = ?
-      WHERE status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
-    `).run(now, now, now).changes;
+    const tx = this.db.transaction((reclaimNow: number) => {
+      const deadLettered = this.db.prepare(`
+        UPDATE semantic_enrichment_events
+        SET status = 'dead_letter',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            updated_at = ?
+        WHERE status = 'leased'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+          AND attempts >= max_attempts
+      `).run(reclaimNow, reclaimNow).changes;
+
+      const reclaimed = this.stmt('reclaimExpiredSemanticEnrichmentEvents', `
+        UPDATE semantic_enrichment_events
+        SET status = 'pending',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            next_attempt_at = ?,
+            updated_at = ?
+        WHERE status = 'leased'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+          AND attempts < max_attempts
+      `).run(reclaimNow, reclaimNow, reclaimNow).changes;
+
+      return deadLettered + reclaimed;
+    });
+
+    return tx(now);
+  }
+
+  deadLetterActiveSemanticEnrichmentEvents(
+    updatedAt: number,
+    lastError: string,
+  ): SemanticEnrichmentEventRow[] {
+    const tx = this.db.transaction((ts: number, error: string) => {
+      const rows = this.db.prepare(`
+        SELECT * FROM semantic_enrichment_events
+        WHERE status IN ('pending', 'leased')
+        ORDER BY created_at ASC, id ASC
+      `).all() as SemanticEnrichmentEventRow[];
+      if (rows.length === 0) return [] as SemanticEnrichmentEventRow[];
+
+      this.db.prepare(`
+        UPDATE semantic_enrichment_events
+        SET status = 'dead_letter',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error = ?,
+            updated_at = ?
+        WHERE status IN ('pending', 'leased')
+      `).run(error, ts);
+
+      return rows.map((row) => ({
+        ...row,
+        status: 'dead_letter' as const,
+        lease_owner: null,
+        lease_expires_at: null,
+        last_error: error,
+        updated_at: ts,
+      }));
+    });
+
+    return tx(updatedAt, lastError);
   }
 
   claimNextRunnableSemanticEnrichmentEvent(
@@ -1016,7 +1072,7 @@ export class DashboardDB {
       const candidate = this.db.prepare(`
         SELECT id
         FROM semantic_enrichment_events
-        WHERE status = 'pending' AND next_attempt_at <= ?
+        WHERE status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
         ORDER BY next_attempt_at ASC, created_at ASC, id ASC
         LIMIT 1
       `).get(claimNow) as { id: string } | undefined;
@@ -1030,7 +1086,7 @@ export class DashboardDB {
             lease_expires_at = ?,
             updated_at = ?,
             last_error = NULL
-        WHERE id = ? AND status = 'pending' AND next_attempt_at <= ?
+        WHERE id = ? AND status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
       `).run(owner, claimNow + ttlMs, claimNow, candidate.id, claimNow);
       if (updated.changes === 0) return undefined;
       return this.getSemanticEnrichmentEvent(candidate.id);
@@ -1095,7 +1151,7 @@ export class DashboardDB {
   getRunnableSemanticEnrichmentEvents(now: number, limit = 10): SemanticEnrichmentEventRow[] {
     return this.db.prepare(`
       SELECT * FROM semantic_enrichment_events
-      WHERE status = 'pending' AND next_attempt_at <= ?
+      WHERE status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
       ORDER BY next_attempt_at ASC, created_at ASC, id ASC
       LIMIT ?
     `).all(now, limit) as SemanticEnrichmentEventRow[];

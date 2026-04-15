@@ -1609,6 +1609,7 @@ const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationD
       dkgPrimaryMemory: true,
       wmImportPipeline: true,
       nodeServedSkill: true,
+      semanticEnrichment: true,
     },
     manifest: {
       packageName: '@origintrail-official/dkg-adapter-openclaw',
@@ -3263,6 +3264,26 @@ function updateExtractionStatusSemanticDescriptor(
       ...(descriptor.lastError ? { lastError: descriptor.lastError } : {}),
     },
   });
+}
+
+function deadLetterUnavailableOpenClawSemanticEvents(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  dashDb: DashboardDB,
+  reason: string,
+  updatedAt = Date.now(),
+): number {
+  const rows = dashDb.deadLetterActiveSemanticEnrichmentEvents(updatedAt, reason);
+  for (const row of rows) {
+    const payload = parseSemanticEnrichmentEventPayload(row.payload_json);
+    if (payload?.kind !== 'file_import') continue;
+    updateExtractionStatusSemanticDescriptor(
+      extractionStatus,
+      dashDb,
+      payload.assertionUri,
+      semanticEnrichmentDescriptorFromRow(row),
+    );
+  }
+  return rows.length;
 }
 
 function buildChatSemanticEventPayload(args: {
@@ -6797,6 +6818,16 @@ async function handleRequest(
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
       const integration = updateLocalAgentIntegration(config, id, parsed);
+      if (
+        normalizedId === 'openclaw'
+        && (integration.enabled !== true || integration.capabilities.semanticEnrichment === false)
+      ) {
+        deadLetterUnavailableOpenClawSemanticEvents(
+          extractionStatus,
+          dashDb,
+          'OpenClaw semantic enrichment is unavailable on this runtime',
+        );
+      }
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {

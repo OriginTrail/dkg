@@ -235,8 +235,17 @@ function isQuotedLiteral(value: string): boolean {
   return value.startsWith('"');
 }
 
-function toObjectTerm(value: string): string {
+function unwrapBracketedIri(value: string): string {
   const trimmed = value.trim();
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    const inner = trimmed.slice(1, -1).trim();
+    if (isIriLike(inner)) return inner;
+  }
+  return trimmed;
+}
+
+function toObjectTerm(value: string): string {
+  const trimmed = unwrapBracketedIri(value);
   if (!trimmed) return '';
   if (isIriLike(trimmed) || isQuotedLiteral(trimmed)) return trimmed;
   return JSON.stringify(trimmed);
@@ -248,8 +257,8 @@ function normalizeTriples(raw: unknown): SemanticTripleInput[] {
   const triples: SemanticTripleInput[] = [];
   for (const entry of raw) {
     if (!isRecord(entry)) continue;
-    const subject = typeof entry.subject === 'string' ? entry.subject.trim() : '';
-    const predicate = typeof entry.predicate === 'string' ? entry.predicate.trim() : '';
+    const subject = typeof entry.subject === 'string' ? unwrapBracketedIri(entry.subject) : '';
+    const predicate = typeof entry.predicate === 'string' ? unwrapBracketedIri(entry.predicate) : '';
     const object = typeof entry.object === 'string' ? toObjectTerm(entry.object) : '';
     if (!isIriLike(subject) || !isIriLike(predicate) || !object) continue;
     const key = `${subject}\u0000${predicate}\u0000${object}`;
@@ -576,7 +585,7 @@ export class SemanticEnrichmentWorker {
       'You are an expert semantic extraction subagent for a DKG graph.',
       'Goal: produce as many grounded, semantically useful triples as the source directly supports while staying faithful to the provided ontology guidance.',
       'Return JSON only. Do not wrap the answer in markdown fences.',
-      'Schema: {"triples":[{"subject":"<IRI>","predicate":"<IRI>","object":"<IRI or quoted N-Triples literal>"}]}',
+      'Schema: {"triples":[{"subject":"scheme:prefixed-iri","predicate":"scheme:prefixed-iri","object":"scheme:prefixed-iri or quoted N-Triples literal"}]}',
       'Core rules:',
       ...this.buildSharedPromptGuidance().map((line) => `- ${line}`),
       '',
@@ -599,7 +608,7 @@ export class SemanticEnrichmentWorker {
 
   private buildSharedPromptGuidance(): string[] {
     return [
-      'Use only safe IRIs for subject and predicate.',
+      'Use only safe bare scheme-prefixed IRIs for subject and predicate. Do not wrap IRIs in angle brackets.',
       'For literal objects, return the object field as a JSON string containing a quoted N-Triples literal. Examples: `\\"Acme\\"` and `\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>`.',
       'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
       'Extend the existing graph in place and reuse the provided source URIs, message URIs, root entities, and attachment/file URIs whenever relevant.',

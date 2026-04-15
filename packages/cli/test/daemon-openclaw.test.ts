@@ -439,11 +439,24 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
-  it('requires an explicit semantic-enrichment capability signal before queueing work', () => {
+  it('treats the built-in OpenClaw definition as semantic-capable once the integration is enabled', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
         openclaw: {
           enabled: true,
+        },
+      },
+    }), 'openclaw')).toBe(true);
+  });
+
+  it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: false,
+          },
         },
       },
     }), 'openclaw')).toBe(false);

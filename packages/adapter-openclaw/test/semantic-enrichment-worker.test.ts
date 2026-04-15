@@ -210,7 +210,13 @@ describe('SemanticEnrichmentWorker', () => {
     expect(deleteSession).toHaveBeenCalledTimes(1);
     expect(run.mock.calls[0]?.[0]?.message).toContain('Return JSON only. Do not wrap the answer in markdown fences.');
     expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Schema: {"triples":[{"subject":"scheme:prefixed-iri","predicate":"scheme:prefixed-iri","object":"scheme:prefixed-iri or quoted N-Triples literal"}]}',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
       'Do not emit provenance triples; the storage layer adds provenance and extractedFrom links automatically.',
+    );
+    expect(run.mock.calls[0]?.[0]?.message).toContain(
+      'Use only safe bare scheme-prefixed IRIs for subject and predicate. Do not wrap IRIs in angle brackets.',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
       'For literal objects, return the object field as a JSON string containing a quoted N-Triples literal. Examples: `\\"Acme\\"` and `\\"2026-04-15T00:00:00Z\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>`.',
@@ -373,6 +379,87 @@ describe('SemanticEnrichmentWorker', () => {
       'evt-malformed-output',
       worker.getWorkerInstanceId(),
       expect.stringContaining('non-JSON output'),
+    );
+  });
+
+  it('normalizes angle-bracket-wrapped IRIs from subagent output before appending triples', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-bracketed-iris',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-bracketed-iris',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-bracketed-iris',
+            userMessage: 'Link Alice to Acme.',
+            assistantReply: 'Done.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-bracketed-iris',
+        status: 'completed',
+        semanticTripleCount: 1,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-bracketed-iris' }),
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({
+            messages: [
+              {
+                role: 'assistant',
+                text: '{"triples":[{"subject":"<urn:dkg:chat:turn:turn-bracketed-iris>","predicate":"<https://schema.org/about>","object":"<https://schema.org/Person>"}]}',
+              },
+            ],
+          }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-bracketed-iris',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(append).toHaveBeenCalledWith(
+      'evt-bracketed-iris',
+      worker.getWorkerInstanceId(),
+      [
+        {
+          subject: 'urn:dkg:chat:turn:turn-bracketed-iris',
+          predicate: 'https://schema.org/about',
+          object: 'https://schema.org/Person',
+        },
+      ],
     );
   });
 
