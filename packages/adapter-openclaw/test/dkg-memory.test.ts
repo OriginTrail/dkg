@@ -492,4 +492,63 @@ describe('buildDkgMemoryRuntime', () => {
     expect(cfg.kind).toBe('dkg');
     expect(cfg.agentContextGraph).toBe(AGENT_CONTEXT_GRAPH);
   });
+
+  it('returns { manager: null, error } when the node peer ID probe has not yet landed (B12)', async () => {
+    // B12: before constructing the manager, the factory must resolve an
+    // effective agent address (session-scoped or default). If neither is
+    // available — typically because the daemon /api/status probe has not
+    // yet completed — returning a live manager would turn every WM read
+    // into a silently-caught query-engine throw (`agentAddress is required
+    // for the working-memory view`). Instead surface "backend not ready"
+    // via the null-manager contract path so upstream uses its fallback.
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => undefined,
+      getDefaultAgentAddress: () => undefined,
+      listAvailableContextGraphs: () => [],
+    };
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const runtime = buildDkgMemoryRuntime(client, resolver, logger as any);
+
+    const result = await runtime.getMemorySearchManager({ sessionKey: 'test-session' });
+    expect(result.manager).toBeNull();
+    expect(result.error).toContain('peer ID not yet available');
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('prefers session-scoped agentAddress over the default when constructing the manager (B12)', async () => {
+    // When the lazy re-probe hasn't landed but a session-scoped address is
+    // stamped on the dispatch, the factory must still construct a live
+    // manager using the session-scoped path rather than falling through
+    // to the null-manager branch.
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => ({ agentAddress: 'did:dkg:agent:session-specific' }),
+      getDefaultAgentAddress: () => undefined,
+      listAvailableContextGraphs: () => [],
+    };
+    const runtime = buildDkgMemoryRuntime(client, resolver);
+
+    const result = await runtime.getMemorySearchManager({ sessionKey: 'scoped-session' });
+    expect(result.manager).toBeInstanceOf(DkgMemorySearchManager);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('constructs a live manager from the default peer ID when no session stamp exists (B12 recovery path)', async () => {
+    // After the lazy re-probe completes, subsequent dispatches should see
+    // a cached default address and get a live manager back — even when no
+    // session-scoped stamp is present. This exercises the "default only"
+    // branch of the resolvedAgentAddress fallback.
+    const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    const resolver: DkgMemorySessionResolver = {
+      getSession: () => undefined,
+      getDefaultAgentAddress: () => 'did:dkg:agent:probed',
+      listAvailableContextGraphs: () => [],
+    };
+    const runtime = buildDkgMemoryRuntime(client, resolver);
+
+    const result = await runtime.getMemorySearchManager({ sessionKey: 'recovered-session' });
+    expect(result.manager).toBeInstanceOf(DkgMemorySearchManager);
+    expect(result.error).toBeUndefined();
+  });
 });

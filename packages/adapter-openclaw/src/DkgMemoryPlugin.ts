@@ -265,6 +265,29 @@ export function buildDkgMemoryRuntime(
       // rather than propagating a construction throw. See FAIL #3 from
       // openclaw-runtime's contract audit. Any exception while constructing
       // the DkgMemorySearchManager is surfaced as a non-fatal null result.
+      //
+      // B12: Pre-check the effective agent address BEFORE constructing the
+      // manager. The query engine rejects working-memory reads without an
+      // `agentAddress` (see packages/query/src/dkg-query-engine.ts:47-48),
+      // so a manager handed back without a resolvable peer ID would turn
+      // every early-turn search into a silently-caught throw and return
+      // `[]` — indistinguishable from "no memories found" to the upstream
+      // recall caller. Surface "backend not ready" via the null-manager
+      // contract path instead so upstream uses its documented fallback.
+      // `getDefaultAgentAddress()` also fires a best-effort lazy re-probe
+      // (see B9's `ensureNodePeerId` wiring in DkgNodePlugin), so the
+      // next dispatch recovers once the probe lands.
+      const sessionAgentAddress = resolver.getSession(request.sessionKey)?.agentAddress;
+      const defaultAgentAddress = resolver.getDefaultAgentAddress();
+      const resolvedAgentAddress = sessionAgentAddress ?? defaultAgentAddress;
+      if (!resolvedAgentAddress) {
+        const error = 'peer ID not yet available — retry next dispatch';
+        logger?.warn?.(
+          `[dkg-memory] getMemorySearchManager returning null: ${error}. ` +
+          'Upstream will use its fallback path; lazy re-probe has been scheduled.',
+        );
+        return { manager: null, error };
+      }
       try {
         const manager = new DkgMemorySearchManager({
           client,
@@ -327,9 +350,12 @@ export class DkgMemoryPlugin {
         'Record a memory into a project\'s DKG Working Memory. ' +
         'Use this to persist a fact, decision, or note that should be retrievable later ' +
         'from the same project\'s context graph. ' +
-        'Parameters: `text` (required), `contextGraphId` (optional — name of the target project CG; ' +
-        'if omitted, the currently UI-selected project CG is used; if neither is available, ' +
-        'returns a structured clarification request so the agent can ask the user which project to use). ' +
+        'Parameters: `text` (required), `contextGraphId` (required in practice — name of the target ' +
+        'project CG; if omitted, this tool returns a structured `needs_clarification` response listing ' +
+        'the available context graphs so the agent can ask the user which project to use). ' +
+        'Note: implicit UI-selected project CG resolution is not available in v1 because the upstream ' +
+        'tool execute contract (`execute(toolCallId, params)`) provides no per-call session context; ' +
+        'tracked as a follow-up for when upstream exposes a session-scoped dispatch hook. ' +
         'Subgraph-scoped writes are intentionally not supported in v1: the query engine at ' +
         'dkg-query-engine.ts:120-124 throws when `subGraphName` is combined with view-based routing, ' +
         'which would make subgraph-scoped writes silently unreadable through `view: working-memory`. ' +
@@ -340,7 +366,9 @@ export class DkgMemoryPlugin {
           text: { type: 'string', description: 'Memory content to store.' },
           contextGraphId: {
             type: 'string',
-            description: 'Optional target project context graph id.',
+            description:
+              'Target project context graph id. Required in practice — if omitted, the tool returns ' +
+              'a `needs_clarification` response listing available context graphs.',
           },
         },
         required: ['text'],
