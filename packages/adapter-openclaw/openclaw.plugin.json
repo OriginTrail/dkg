@@ -19,19 +19,10 @@
           "enabled": {
             "type": "boolean",
             "default": false,
-            "description": "Enable DKG memory tools and file-watcher sync"
-          },
-          "memoryDir": {
-            "type": "string",
-            "description": "Override watched memory directory"
-          },
-          "watchDebounceMs": {
-            "type": "number",
-            "default": 1500,
-            "description": "File watcher debounce interval (ms)"
+            "description": "Register the DKG memory-slot capability (slot-backed recall via registerMemoryCapability) and the dkg_memory_import write tool on attach."
           }
         },
-        "description": "DKG memory integration"
+        "description": "DKG memory integration. Memory now flows exclusively through api.registerMemoryCapability for slot-backed recall reads and through the dkg_memory_import tool for explicit per-project writes; the retired memoryDir / watchDebounceMs / file-watcher-sync configuration surface is no longer accepted."
       },
       "channel": {
         "type": "object",

@@ -27,8 +27,21 @@ interface MockApi extends OpenClawPluginApi {
 }
 
 function makeApi(): MockApi {
+  // By default, stamp the workspace config to name adapter-openclaw as
+  // the memory-slot owner. This represents a fully-migrated modern
+  // gateway (post setup) where the slot is elected correctly. Tests that
+  // need to simulate the pre-migration state (modern gateway API
+  // available but slot still unset / pointing elsewhere) can override
+  // this by reassigning `api.config` before calling `plugin.register`.
+  // See Codex Bug B25.
   return {
-    config: {},
+    config: {
+      plugins: {
+        slots: {
+          memory: 'adapter-openclaw',
+        },
+      },
+    },
     registerTool: vi.fn(),
     registerHook: vi.fn(),
     on: vi.fn(),
@@ -90,10 +103,14 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
-  it('registers dkg_memory_import as a conventional tool (not dkg_memory_search) on a modern gateway', () => {
-    // On a modern gateway the memory slot routes reads, so
-    // `dkg_memory_search` MUST NOT be registered — it would compete with
-    // the slot router. See B7: legacy fallback only.
+  it('registers dkg_memory_import as a conventional tool (not dkg_memory_search) on a modern gateway where this adapter owns the memory slot', () => {
+    // On a fully-migrated modern gateway — registerMemoryCapability is
+    // available AND `plugins.slots.memory` elects this adapter — the
+    // memory slot routes reads, so `dkg_memory_search` MUST NOT be
+    // registered (it would compete with the slot router). The default
+    // `makeApi` mock now stamps both conditions via its `config.plugins.slots.memory`
+    // field. See Codex Bug B7 (original introduction) and B25 (scoping
+    // the suppression to actual slot ownership).
     const api = makeApi();
     plugin.register(api);
 
@@ -101,6 +118,66 @@ describe('DkgMemoryPlugin.register', () => {
     const toolNames = calls.map((c: any) => c[0].name);
     expect(toolNames).toContain('dkg_memory_import');
     expect(toolNames).not.toContain('dkg_memory_search');
+  });
+
+  it('keeps the dkg_memory_search compat tool when the gateway is modern but slot election has NOT happened (Codex B25)', () => {
+    // B25: the earlier `includeLegacySearchTool: !slotRegistered` logic
+    // suppressed the compat tool whenever `api.registerMemoryCapability`
+    // existed. But slot election is a separate setup-time step that
+    // writes `plugins.slots.memory = "adapter-openclaw"` to the workspace
+    // config. On upgrade, an install can end up with a modern gateway
+    // (API available) but a stale slot config (slot unset or pointing
+    // at another plugin) — in that window, slot-backed recall doesn't
+    // route through this adapter, so dropping the compat tool would
+    // leave agents with no recall path at all. The fix gates suppression
+    // on ACTUAL slot ownership: only drop the compat tool when both the
+    // capability was registered AND the workspace config names this
+    // adapter as the memory-slot owner.
+    const api = makeApi();
+    // Simulate a gateway that supports registerMemoryCapability but
+    // whose workspace config does NOT yet name this adapter as the
+    // memory-slot owner (stale post-upgrade state, pre-setup-rerun).
+    api.config = {
+      plugins: {
+        slots: {
+          // Slot is pointing elsewhere — some other plugin, or undefined,
+          // or a stale literal. The B25 guard must treat any non-match
+          // as "not our slot" and keep the compat tool.
+          memory: 'some-other-memory-plugin',
+        },
+      },
+    };
+    plugin.register(api);
+
+    const toolNames = api.registerTool.mock.calls.map((c: any) => c[0].name);
+    expect(toolNames).toContain('dkg_memory_import');
+    expect(toolNames).toContain('dkg_memory_search');
+    // The capability WAS registered — the gateway supports the slot
+    // contract, it's just not elected to us.
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    // A warning should have been logged so operators notice the
+    // misconfiguration and rerun setup.
+    expect(api.logger.warn).toHaveBeenCalled();
+    const warnMsgs = (api.logger.warn as any).mock.calls
+      .map((c: any[]) => String(c[0]))
+      .filter((m: string) => m.includes('plugins.slots.memory'));
+    expect(warnMsgs.length).toBeGreaterThan(0);
+  });
+
+  it('keeps the dkg_memory_search compat tool when plugins.slots.memory is entirely unset on a modern gateway (Codex B25)', () => {
+    // Belt-and-suspenders for the bare-config case — a modern gateway
+    // whose workspace config has no `plugins.slots` section at all
+    // (fresh install that hasn't run setup yet, or old config predating
+    // the slot schema). The B25 guard must still fall through to the
+    // compat tool.
+    const api = makeApi();
+    api.config = {}; // no plugins, no slots
+    plugin.register(api);
+
+    const toolNames = api.registerTool.mock.calls.map((c: any) => c[0].name);
+    expect(toolNames).toContain('dkg_memory_import');
+    expect(toolNames).toContain('dkg_memory_search');
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
   });
 
   it('also registers dkg_memory_search as a compat tool when api.registerMemoryCapability is missing', () => {

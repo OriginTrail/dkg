@@ -356,7 +356,50 @@ export class DkgMemoryPlugin {
   register(api: OpenClawPluginApi): void {
     this.api = api;
     const slotRegistered = this.registerCapability(api);
-    this.registerTools(api, { includeLegacySearchTool: !slotRegistered });
+    // B25: "slot registered" is a local signal (did we call
+    // `api.registerMemoryCapability`?) — it does NOT prove that this
+    // adapter actually owns the memory slot in the gateway's config.
+    // Slot election is a separate setup-time step that writes
+    // `plugins.slots.memory = "adapter-openclaw"` to the workspace
+    // config. On upgrade, an install can end up with a modern gateway
+    // (registerMemoryCapability available) but a stale slot config
+    // (slot unset or pointing at another plugin) — in that window, the
+    // slot-backed recall path doesn't route through us, so suppressing
+    // the compat `dkg_memory_search` tool would leave agents with no
+    // recall surface at all. Gate the suppression on ACTUAL slot
+    // ownership: only drop the compat tool when both the capability was
+    // registered AND the workspace config names this adapter as the
+    // memory-slot owner. Otherwise keep the compat tool around as a
+    // safety net, log a warning so operators notice the misconfiguration
+    // and rerun setup to finish migration.
+    const slotOwnedByThisAdapter = this.isMemorySlotOwnedByThisAdapter(api);
+    if (slotRegistered && !slotOwnedByThisAdapter) {
+      api.logger.warn?.(
+        '[dkg-memory] Modern gateway supports registerMemoryCapability but ' +
+        '`plugins.slots.memory` is not set to "adapter-openclaw" in the workspace ' +
+        'config — slot-backed recall will not route through this adapter. ' +
+        'Rerunning `dkg setup` (or re-electing the adapter into the memory slot) ' +
+        'will fix this. Keeping the compatibility `dkg_memory_search` tool ' +
+        'registered as a safety net so agents still have a recall path.',
+      );
+    }
+    const includeLegacySearchTool = !slotRegistered || !slotOwnedByThisAdapter;
+    this.registerTools(api, { includeLegacySearchTool });
+  }
+
+  /**
+   * Read the workspace-config memory-slot owner from `api.config`. Returns
+   * `true` only when the slot is explicitly pointing at this adapter's
+   * plugin id (`"adapter-openclaw"`, matching the manifest and the value
+   * setup.ts writes during slot election). Any other result — unset slot,
+   * slot pointing at another plugin, or malformed config — returns
+   * `false` and is treated as "not our slot" by the fallback-tool gate.
+   */
+  private isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
+    const config = (api as any)?.config as Record<string, unknown> | undefined;
+    const plugins = config?.plugins as Record<string, unknown> | undefined;
+    const slots = plugins?.slots as Record<string, unknown> | undefined;
+    return slots?.memory === 'adapter-openclaw';
   }
 
   /** Re-register tools into a new registry without recreating state. */

@@ -1077,12 +1077,22 @@ describe('DkgNodePlugin', () => {
 
     const fullRuntimeTools: OpenClawTool[] = [];
     const fullRuntimeApi: OpenClawPluginApi = {
-      config: {},
+      // Fully-migrated modern gateway: registerMemoryCapability exists
+      // AND `plugins.slots.memory` elects this adapter. Both conditions
+      // are required for Codex Bug B25's slot-ownership check to pass
+      // and suppress the compat `dkg_memory_search` tool — otherwise
+      // the compat tool is retained as a safety net.
+      config: {
+        plugins: {
+          slots: {
+            memory: 'adapter-openclaw',
+          },
+        },
+      } as any,
       registrationMode: 'full',
       registerTool: (tool) => fullRuntimeTools.push(tool),
       registerHook: () => {},
-      // Modern gateway: memory slot is available. Without this, B7 would
-      // register the legacy compat dkg_memory_search tool here.
+      // Modern gateway: memory slot contract is available.
       registerMemoryCapability: () => {},
       on: () => {},
       logger: {},
