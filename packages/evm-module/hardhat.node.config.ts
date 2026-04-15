@@ -39,7 +39,7 @@ const config: HardhatUserConfig = {
       saveDeployments: false,
       mining: {
         auto: true,
-        interval: [3000, 5000],
+        interval: 0,
       },
     },
     base_sepolia_dev: {
