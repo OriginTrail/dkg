@@ -500,7 +500,20 @@ export class DkgMemoryPlugin {
             query: { type: 'string', description: 'Search terms.' },
             maxResults: {
               type: 'number',
-              description: 'Maximum number of results to return (default 10).',
+              description: 'Maximum number of results to return (default 10). Alias: `limit`.',
+            },
+            // B32: The retired pre-workstream `dkg_memory_search` tool used
+            // `limit` as the parameter name. Old callers / prompts still
+            // pass `limit` on the compat path, and dropping it silently
+            // falls back to the default cap of 10 — a silent regression
+            // from the contract the compat tool is supposed to preserve.
+            // Accept `limit` here as a documented alias; the handler
+            // prefers `maxResults` when both are present.
+            limit: {
+              type: 'number',
+              description:
+                'Deprecated alias for `maxResults`, preserved for legacy tool-call compatibility ' +
+                'on older gateways. `maxResults` takes precedence when both are supplied.',
             },
             minScore: {
               type: 'number',
@@ -548,7 +561,13 @@ export class DkgMemoryPlugin {
     // here so `{ maxResults: '5' }` is accepted the same way as
     // `{ maxResults: 5 }`. Reject NaN / non-finite values by falling back
     // to the default (undefined → search manager defaults).
-    const maxResults = coerceFiniteNumber(params.maxResults);
+    //
+    // B32: The retired tool used `limit` as the parameter name; legacy
+    // callers still pass it on the compat path. Accept both names with
+    // `maxResults` taking precedence when both are supplied, so new
+    // callers are not penalized but old prompts keep working.
+    const maxResults =
+      coerceFiniteNumber(params.maxResults) ?? coerceFiniteNumber(params.limit);
     const minScore = coerceFiniteNumber(params.minScore);
 
     // B15: Preflight the agent address the same way `getMemorySearchManager`

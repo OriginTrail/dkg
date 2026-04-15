@@ -487,6 +487,71 @@ describe('DkgMemoryPlugin.register', () => {
     expect(opts).toEqual({ maxResults: 7, minScore: 0.25 });
   });
 
+  it('dkg_memory_search compat tool accepts the legacy `limit` parameter as an alias for maxResults (Codex B32)', async () => {
+    // B32: The retired pre-workstream `dkg_memory_search` tool used
+    // `limit` as the parameter name. Older prompts and tool callers on
+    // the legacy-gateway path still pass `limit`. The compat tool must
+    // honor that name (in addition to the new `maxResults`) or those
+    // callers silently fall back to the default cap of 10 — a silent
+    // regression from the contract this compat tool is supposed to
+    // preserve.
+    const searchSpy = vi.spyOn(DkgMemorySearchManager.prototype, 'search').mockResolvedValue([]);
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    await searchTool.execute('call-1', { query: 'alpha beta', limit: 25 });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    const opts = searchSpy.mock.calls[0][1];
+    expect(opts?.maxResults).toBe(25);
+  });
+
+  it('dkg_memory_search compat tool prefers maxResults over limit when both are provided (Codex B32)', async () => {
+    // When a caller supplies both the new `maxResults` and the legacy
+    // `limit` alias, the new name wins. Otherwise a progressive-
+    // enhancement caller that starts sending both during a migration
+    // would see its new value ignored.
+    const searchSpy = vi.spyOn(DkgMemorySearchManager.prototype, 'search').mockResolvedValue([]);
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    await searchTool.execute('call-1', { query: 'alpha beta', maxResults: 7, limit: 99 });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    const opts = searchSpy.mock.calls[0][1];
+    expect(opts?.maxResults).toBe(7);
+  });
+
+  it('dkg_memory_search compat tool accepts stringified `limit` alias (Codex B18 + B32)', async () => {
+    // Combination guard for the two compat shims: stringified numeric
+    // values (B18) AND the `limit` alias (B32). Legacy serializers on
+    // older gateways can emit both at once.
+    const searchSpy = vi.spyOn(DkgMemorySearchManager.prototype, 'search').mockResolvedValue([]);
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    await searchTool.execute('call-1', { query: 'alpha beta', limit: '42' });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    const opts = searchSpy.mock.calls[0][1];
+    expect(opts?.maxResults).toBe(42);
+  });
+
   it('dkg_memory_search compat tool falls back to default when stringified params are non-numeric (Codex B18)', async () => {
     // Non-numeric strings like `{ maxResults: "none" }` must not crash
     // or produce NaN. They should fall through to `undefined` so the
