@@ -4140,8 +4140,8 @@ async function handleRequest(
     if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
       return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
     }
-    if (accessPolicy !== undefined && typeof accessPolicy !== 'number') {
-      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number (0=open, 1=private)' });
+    if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
+      return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
     try {
       const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });

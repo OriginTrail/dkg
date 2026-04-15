@@ -769,10 +769,17 @@ export class DKGAgent {
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
-      // _meta graphs arrive via authenticated sync, so all previously
-      // unsynced subscriptions can now be considered meta-synced.
+      // Only flip metaSynced for CGs whose _meta was actually fetched
+      // during this sync (i.e., those in the sync scope). Chain-discovered
+      // CGs added with trackSyncScope: false are NOT in scope and their
+      // _meta hasn't arrived yet.
+      const syncScope = new Set<string>([
+        SYSTEM_PARANETS.AGENTS,
+        SYSTEM_PARANETS.ONTOLOGY,
+        ...(this.config.syncContextGraphs ?? []),
+      ]);
       for (const [id, sub] of this.subscribedContextGraphs) {
-        if (sub.metaSynced === false) {
+        if (sub.metaSynced === false && syncScope.has(id)) {
           sub.metaSynced = true;
         }
       }
@@ -2185,6 +2192,16 @@ export class DKGAgent {
       );
       const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
       resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+
+      // A CG created with allowedPeers but no explicit accessPolicy stores
+      // "public" in the ontology graph. Detect the allowlist and promote to
+      // private so the on-chain policy matches the curator's intent.
+      if (resolvedAccessPolicy === 0) {
+        const peers = await this.getContextGraphAllowedPeers(id);
+        if (peers !== null && peers.length > 0) {
+          resolvedAccessPolicy = 1;
+        }
+      }
     }
 
     let onChainId: string;
@@ -3995,7 +4012,7 @@ export class DKGAgent {
         name,
         subscribed: true,
         synced: true,
-        metaSynced: true,
+        metaSynced: false,
         onChainId: existing?.onChainId,
       });
 
@@ -4003,7 +4020,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed (metaSynced pending)`);
       discovered++;
     }
 
