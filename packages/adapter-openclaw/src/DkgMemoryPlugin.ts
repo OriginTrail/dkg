@@ -115,7 +115,15 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     const sessionKey = options?.sessionKey ?? this.deps.sessionKey;
 
     const session = this.deps.resolver.getSession(sessionKey);
-    const agentAddress = session?.agentAddress ?? this.deps.resolver.getDefaultAgentAddress();
+    const rawAgentAddress = session?.agentAddress ?? this.deps.resolver.getDefaultAgentAddress();
+    // B43: Normalize to the raw peer-ID form for WM view routing. The
+    // daemon's query engine uses the raw peer ID (not the DID form)
+    // when constructing assertion-graph URIs for `view: 'working-memory'`
+    // reads. Resolver implementations are not contractually required
+    // to strip the `did:dkg:agent:` prefix, so we do it here at the
+    // consumption boundary. `toAgentPeerId` is a no-op on already-raw
+    // inputs, so passing a raw peer ID through the resolver still works.
+    const agentAddress = rawAgentAddress ? toAgentPeerId(rawAgentAddress) : undefined;
     const projectContextGraphId = session?.projectContextGraphId;
 
     // B28: Preflight the agent address BEFORE firing WM queries. The query
@@ -674,6 +682,47 @@ export class DkgMemoryPlugin {
       });
     }
 
+    // B42: Validate the resolved context graph against known boundaries
+    // BEFORE triggering `createAssertion`/`writeAssertion`. The underlying
+    // client only validates the string shape, so without this check a
+    // typo or stale project id would silently create an orphaned
+    // assertion graph, and reserved system graphs like `agent-context`
+    // (which backs the chat-turns WM assertion) could be targeted even
+    // though this tool is supposed to be project-scoped.
+    //
+    // Two checks:
+    //   (1) Reject reserved system graph names explicitly. `agent-context`
+    //       is the only one in v1, but any future reserved name added to
+    //       the block-list will be rejected here before it can be
+    //       corrupted by a user-memory write.
+    //   (2) When the subscribed-CG cache is populated, reject any
+    //       `contextGraphId` that is not in the list. We only enforce
+    //       this when the cache is non-empty so that a clean install
+    //       whose probe has not yet populated the cache does not have
+    //       every write falsely rejected. The cache lazy-refreshes on
+    //       read (B17 + B23), so once the probe lands subsequent writes
+    //       see the current subscription set.
+    if (resolvedCg === AGENT_CONTEXT_GRAPH) {
+      return toolError(
+        `Cannot write memories to the reserved '${AGENT_CONTEXT_GRAPH}' context graph. ` +
+        'That graph is owned by the adapter for chat-turn persistence. ' +
+        'Pass an explicit project `contextGraphId` for the target project.',
+      );
+    }
+    const availableCgs = this.resolver.listAvailableContextGraphs();
+    if (availableCgs.length > 0 && !availableCgs.includes(resolvedCg)) {
+      return toolJson({
+        status: 'needs_clarification',
+        reason:
+          `Context graph '${resolvedCg}' is not in the subscribed project list. ` +
+          'This is usually a typo or a stale project id from a deleted subscription.',
+        availableContextGraphs: availableCgs,
+        guidance:
+          'Pass one of the available contextGraphIds listed above, or ask the user to ' +
+          `subscribe to '${resolvedCg}' first if that project genuinely exists.`,
+      });
+    }
+
     // Resolve the agent address for provenance. If the node peer ID probe
     // has not yet completed (daemon down, /api/status failed, early
     // dispatch), fail the write with a retryable clarification rather
@@ -709,11 +758,17 @@ export class DkgMemoryPlugin {
 
     const memoryUri = `urn:dkg:memory:item:${crypto.randomUUID()}`;
     const nowIso = new Date().toISOString();
+    // B43: Always build the `schema:creator` value via `toAgentDid`
+    // so consumers that pass either a raw peer ID or a pre-DID-formed
+    // address get a well-formed canonical DID. Without this, a DID-
+    // form input would be double-prefixed into
+    // `did:dkg:agent:did:dkg:agent:<peerId>`, which would match no
+    // real agent and produce unusable provenance.
     const quads = [
       { subject: memoryUri, predicate: RDF_TYPE, object: `${NS.schema}Thing`, graph: '' },
       { subject: memoryUri, predicate: `${NS.schema}description`, object: JSON.stringify(text), graph: '' },
       { subject: memoryUri, predicate: `${NS.schema}dateCreated`, object: `"${nowIso}"^^<${XSD_DATETIME}>`, graph: '' },
-      { subject: memoryUri, predicate: `${NS.schema}creator`, object: `did:dkg:agent:${agentAddress}`, graph: '' },
+      { subject: memoryUri, predicate: `${NS.schema}creator`, object: toAgentDid(agentAddress), graph: '' },
     ];
 
     try {
@@ -761,6 +816,36 @@ function extractBindings(result: any): any[] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The DKG V10 agent identity shows up in two representations in this
+ * package — the daemon's working-memory view routing uses the raw peer
+ * ID (an alphanumeric/hex node fingerprint) for assertion-graph URI
+ * scoping, while provenance triples (e.g. `schema:creator`) use the
+ * canonical `did:dkg:agent:<peerId>` DID form. A consumer that passes
+ * either representation into the resolver / tool surface must have
+ * both forms normalized before being used at each site — otherwise
+ * a DID-form input gets double-prefixed into
+ * `did:dkg:agent:did:dkg:agent:...` for the creator triple, or the
+ * WM view routing looks in an assertion graph scoped to a literal DID
+ * string and finds nothing. Normalize once at the boundary and use
+ * the correct form at each consumption site. Codex Bug B43.
+ */
+const AGENT_DID_PREFIX = 'did:dkg:agent:';
+
+/** Return the raw peer-ID form used for WM view routing. */
+function toAgentPeerId(agentAddress: string): string {
+  return agentAddress.startsWith(AGENT_DID_PREFIX)
+    ? agentAddress.slice(AGENT_DID_PREFIX.length)
+    : agentAddress;
+}
+
+/** Return the canonical `did:dkg:agent:<peerId>` DID form used in provenance triples. */
+function toAgentDid(agentAddress: string): string {
+  return agentAddress.startsWith(AGENT_DID_PREFIX)
+    ? agentAddress
+    : `${AGENT_DID_PREFIX}${agentAddress}`;
 }
 
 /**

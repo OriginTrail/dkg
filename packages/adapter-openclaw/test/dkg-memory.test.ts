@@ -64,13 +64,22 @@ function makeResolver(
     defaultAgentAddress?: string | null;
   },
 ): DkgMemorySessionResolver {
+  // B43: Resolver fixtures provide a RAW peer-ID form by default,
+  // mirroring the real `DkgNodePlugin.memorySessionResolver` which
+  // returns `this.nodePeerId` (populated from the daemon's
+  // `/api/status.peerId` field as a raw peer identifier). The
+  // consumption sites (`DkgMemorySearchManager.search` for WM routing,
+  // `handleImport` for the `schema:creator` triple) normalize through
+  // `toAgentPeerId` / `toAgentDid` at their respective boundaries,
+  // so overrides that pass a DID-form address exercise the
+  // normalization guard defensively.
   const pending = overrides?.defaultAgentAddress === null;
   const defaultAgentAddress = pending
     ? undefined
-    : overrides?.defaultAgentAddress ?? overrides?.agentAddress ?? 'did:dkg:agent:test';
+    : overrides?.defaultAgentAddress ?? overrides?.agentAddress ?? 'peer-test';
   const sessionAgentAddress = pending
     ? undefined
-    : overrides?.agentAddress ?? 'did:dkg:agent:test';
+    : overrides?.agentAddress ?? 'peer-test';
   return {
     getSession: () => ({
       projectContextGraphId: overrides?.projectContextGraphId,
@@ -712,6 +721,171 @@ describe('DkgMemoryPlugin.register', () => {
     expect(querySpy).not.toHaveBeenCalled();
   });
 
+  it('dkg_memory_import rejects the reserved agent-context graph with a tool-level error (Codex B42)', async () => {
+    // B42: `agent-context` is reserved for the adapter's chat-turns WM
+    // assertion. Writing user memories into it would corrupt the
+    // chat-persistence graph, so the tool rejects that target
+    // explicitly even if the caller passes it in `contextGraphId`.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+    const api = makeApi();
+    plugin.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'malicious write attempt',
+      contextGraphId: 'agent-context',
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toMatch(/reserved|agent-context/i);
+    // Neither daemon call fired — the reservation guard runs before
+    // createAssertion / writeAssertion.
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('dkg_memory_import rejects contextGraphIds not in the subscribed list when the cache is populated (Codex B42)', async () => {
+    // B42: when the subscribed-CG cache is non-empty, typo'd or stale
+    // project ids must be rejected before they can create orphaned
+    // assertion graphs. Returns a needs_clarification with the
+    // actual available list so the agent can self-correct.
+    const createSpy = vi.spyOn(client, 'createAssertion');
+    const writeSpy = vi.spyOn(client, 'writeAssertion');
+    const api = makeApi();
+    const pluginWithSubs = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ available: ['research-x', 'research-y'] }),
+    );
+    pluginWithSubs.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'some memory',
+      contextGraphId: 'research-typo',
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload.reason).toMatch(/not in the subscribed|typo|stale/i);
+    expect(payload.availableContextGraphs).toEqual(['research-x', 'research-y']);
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('dkg_memory_import accepts contextGraphIds that are in the subscribed list (Codex B42)', async () => {
+    // Positive case for B42: a valid project id in the subscribed list
+    // passes through the guard and reaches createAssertion / writeAssertion.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+    const pluginWithSubs = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ available: ['research-x', 'research-y'] }),
+    );
+    pluginWithSubs.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    const result = await importTool.execute('call-1', {
+      text: 'valid memory',
+      contextGraphId: 'research-y',
+    });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('stored');
+    expect(createSpy).toHaveBeenCalledWith('research-y', PROJECT_MEMORY_ASSERTION);
+    expect(writeSpy.mock.calls[0][0]).toBe('research-y');
+  });
+
+  it('dkg_memory_import normalizes a DID-form agentAddress from the resolver and emits a single-prefix creator triple (Codex B43)', async () => {
+    // B43: The resolver contract does not enforce whether agentAddress
+    // comes through as a raw peer id or as a `did:dkg:agent:<peerId>`
+    // DID. A consumer passing a DID-form address must NOT produce a
+    // double-prefixed `did:dkg:agent:did:dkg:agent:...` creator triple,
+    // which would match no real agent.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+    // Resolver passes a DID-form address into the handler — e.g. a
+    // consumer that normalized upstream, or a future wiring that
+    // stores the DID form in session state.
+    const pluginWithDidResolver = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ agentAddress: 'did:dkg:agent:peer-abc123' }),
+    );
+    pluginWithDidResolver.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    await importTool.execute('call-1', {
+      text: 'provenance test',
+      contextGraphId: 'research-x',
+    });
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const quads = writeSpy.mock.calls[0][2] as Array<{ predicate: string; object: string }>;
+    const creatorQuad = quads.find((q) => q.predicate.endsWith('creator'));
+    expect(creatorQuad).toBeDefined();
+    // Exactly one `did:dkg:agent:` prefix — not two.
+    expect(creatorQuad!.object).toBe('did:dkg:agent:peer-abc123');
+    expect(creatorQuad!.object).not.toContain('did:dkg:agent:did:dkg:agent:');
+  });
+
+  it('dkg_memory_import emits a well-formed creator triple when the resolver provides a raw peer id (Codex B43)', async () => {
+    // Negative test complement of the DID-form case: raw peer id input
+    // also produces a single-prefix DID creator triple.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+    const api = makeApi();
+    const pluginWithRawResolver = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ agentAddress: 'peer-abc123' }),
+    );
+    pluginWithRawResolver.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    await importTool.execute('call-1', {
+      text: 'raw peer id test',
+      contextGraphId: 'research-x',
+    });
+
+    const quads = writeSpy.mock.calls[0][2] as Array<{ predicate: string; object: string }>;
+    const creatorQuad = quads.find((q) => q.predicate.endsWith('creator'));
+    expect(creatorQuad!.object).toBe('did:dkg:agent:peer-abc123');
+  });
+
+  it('DkgMemorySearchManager.search strips the did:dkg:agent: prefix when the resolver returns a DID-form address (Codex B43)', async () => {
+    // B43 for the WM read path: the daemon's query engine uses the raw
+    // peer-ID form for assertion-graph URI scoping when `view: 'working-memory'`.
+    // A DID-form input from the resolver must be normalized to the raw
+    // form before being passed to `client.query`, otherwise the read
+    // looks in an assertion graph scoped to a literal DID string and
+    // finds nothing.
+    const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+    const manager = new DkgMemorySearchManager({
+      client,
+      resolver: makeResolver({ agentAddress: 'did:dkg:agent:peer-readtest' }),
+    });
+
+    await manager.search('hello world');
+
+    expect(querySpy).toHaveBeenCalled();
+    const opts = querySpy.mock.calls[0][1]!;
+    expect(opts.agentAddress).toBe('peer-readtest');
+  });
+
   it('dkg_memory_import rejects empty text with a tool-level error', async () => {
     const api = makeApi();
     plugin.register(api);
@@ -791,7 +965,12 @@ describe('DkgMemorySearchManager', () => {
       expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
       expect(opts.view).toBe('working-memory');
       expect(opts.assertionName).toBe(CHAT_TURNS_ASSERTION);
-      expect(opts.agentAddress).toBe('did:dkg:agent:test');
+      // B43: WM view routing uses the raw peer-ID form. The fixture
+      // provides a raw peer id (`peer-test`), which is passed through
+      // to the query engine as-is — consumers that pass DID-form
+      // addresses through the resolver would be normalized by
+      // `toAgentPeerId` at the consumption site.
+      expect(opts.agentAddress).toBe('peer-test');
     });
 
     it('issues two parallel /api/query calls when a project CG is resolved', async () => {
