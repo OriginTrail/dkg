@@ -49,7 +49,16 @@ const OPENCLAW_LOCAL_AGENT_MANIFEST = {
   packageName: '@origintrail-official/dkg-adapter-openclaw',
   setupEntry: './setup-entry.mjs',
 } as const;
-const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
+/**
+ * Base delay before the first retry of `syncLocalAgentIntegrationState`
+ * after a failed daemon fetch. The retry is exponential — each failure
+ * doubles the previous wait, capped at `LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS`.
+ * First delay is 5 s (not 1 s) so a cold daemon has a useful grace window
+ * before the first retry fires.
+ */
+const LOCAL_AGENT_STATE_RETRY_BASE_DELAY_MS = 5_000;
+/** Cap on the retry delay growth. 60 s matches typical cold-start windows. */
+const LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS = 60_000;
 
 /**
  * Codex B66: upper bound on the number of directory entries walked by the
@@ -132,6 +141,28 @@ export class DkgNodePlugin {
   private warnedLegacyGameConfig = false;
   private warnedLegacyMemoryFileWatcherConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Retry attempt counter for `scheduleLocalAgentIntegrationRetry`. Used to
+   * compute the exponential-backoff delay (`base * 2^attempt`, capped).
+   * Reset to 0 on a successful `syncLocalAgentIntegrationState` call so
+   * subsequent transient failures start from the base delay again.
+   */
+  private localAgentIntegrationRetryAttempt = 0;
+  /**
+   * Last reason string logged by the retry loop, used to dedup identical
+   * warnings. One `warn` per distinct transition; repeats with the same
+   * reason are logged at `debug` level instead (typically silent at
+   * default log level). On success we emit one `info` line so operators
+   * see the recovery.
+   */
+  private lastLocalAgentIntegrationWarnReason: string | null = null;
+  /**
+   * Most recent error message captured by `loadStoredOpenClawIntegration`.
+   * Written at the catch site, read by the retry dedup logic in
+   * `syncLocalAgentIntegrationState`. Null when there is no pending
+   * failure or after a successful load.
+   */
+  private lastLocalAgentIntegrationLoadError: string | null = null;
   private nodePeerId: string | undefined;
   /**
    * In-flight handle for the node peer ID probe, used to debounce
@@ -268,7 +299,17 @@ export class DkgNodePlugin {
     const setupOnly = registrationMode === 'setup-only';
     const setupRuntime = registrationMode === 'setup-runtime';
     const cliMetadataOnly = registrationMode === 'cli-metadata';
-    const lightweightRuntime = setupOnly || setupRuntime;
+    // `setup-runtime` IS a runtime mode: the OpenClaw gateway loads the
+    // adapter during its own setup phase and immediately accepts turns
+    // through the channel module, so integration modules must come up
+    // at that point. Only `setup-only` and `cli-metadata` are true
+    // metadata-only modes that skip integration wiring. The memory
+    // slot's `DkgMemoryPlugin.register` is pure wiring (no network I/O
+    // at register time) and the runtime factory's B12 null-manager
+    // fallback handles "peer ID not yet available" gracefully on first
+    // dispatch, so registering the slot early is safe even when the
+    // daemon is not yet healthy.
+    const runtimeEnabled = fullRuntime || setupRuntime;
 
     // Only expose the DKG agent tool surface during full runtime.
     if (fullRuntime) {
@@ -284,8 +325,8 @@ export class DkgNodePlugin {
     // Subsequent multi-phase calls should upgrade missing integrations without
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
-      this.registerIntegrationModules(api, { enableFullRuntime: fullRuntime });
-      if (fullRuntime || setupRuntime) {
+      this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
       return;
@@ -299,9 +340,9 @@ export class DkgNodePlugin {
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
     // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: !lightweightRuntime });
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
 
-    if (fullRuntime || setupRuntime) {
+    if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);
     }
   }
@@ -322,7 +363,7 @@ export class DkgNodePlugin {
     }
 
     if (!opts?.enableFullRuntime) {
-      api.logger.info?.('[dkg] Lightweight OpenClaw registration — skipping full-runtime memory capture integrations');
+      api.logger.info?.('[dkg] Metadata-only OpenClaw registration — skipping memory-slot integration');
       return;
     }
 
@@ -369,10 +410,20 @@ export class DkgNodePlugin {
 
   private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
     if (this.localAgentIntegrationRetryTimer) return;
+    // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped). On every
+    // successful sync `localAgentIntegrationRetryAttempt` resets to 0
+    // so transient failures after a healthy period start from the
+    // base delay again rather than inheriting the old cadence.
+    const attempt = this.localAgentIntegrationRetryAttempt;
+    const delay = Math.min(
+      LOCAL_AGENT_STATE_RETRY_BASE_DELAY_MS * 2 ** attempt,
+      LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS,
+    );
+    this.localAgentIntegrationRetryAttempt = attempt + 1;
     this.localAgentIntegrationRetryTimer = setTimeout(() => {
       this.localAgentIntegrationRetryTimer = null;
       void this.syncLocalAgentIntegrationState(api, registrationMode);
-    }, LOCAL_AGENT_STATE_RETRY_DELAY_MS);
+    }, delay);
   }
 
   private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
@@ -489,13 +540,47 @@ export class DkgNodePlugin {
   }
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+    // Skip the retry loop entirely when the adapter has no runtime
+    // integrations to sync. The stored-integration fetch is a no-op for
+    // metadata-only loads and used to burn a 1 Hz warn loop on cold
+    // daemons for no operator benefit.
+    const anyIntegrationEnabled =
+      this.config.memory?.enabled === true || this.config.channel?.enabled === true;
+    if (!anyIntegrationEnabled) {
+      return;
+    }
+
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
-      api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      // Log dedup: emit exactly one `warn` per distinct failure reason,
+      // then downgrade repeats of the same reason to `debug` (silent at
+      // default log level) until either the reason changes or the load
+      // succeeds. Prevents a cold daemon from flooding the gateway log
+      // with identical lines on every retry tick.
+      const reason = this.lastLocalAgentIntegrationLoadError ?? 'fetch failed';
+      const retryMessage =
+        '[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state' +
+        ` (reason: ${reason})`;
+      if (this.lastLocalAgentIntegrationWarnReason !== reason) {
+        api.logger.warn?.(retryMessage);
+        this.lastLocalAgentIntegrationWarnReason = reason;
+      } else {
+        api.logger.debug?.(retryMessage);
+      }
       this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
       return;
     }
+    // Successful load — reset dedup + retry counter and log recovery once
+    // if we were previously retrying, so operators see the transition.
     this.clearLocalAgentIntegrationRetry();
+    if (this.localAgentIntegrationRetryAttempt > 0) {
+      api.logger.info?.(
+        `[dkg] Stored OpenClaw integration state loaded after ${this.localAgentIntegrationRetryAttempt} retry attempt(s)`,
+      );
+    }
+    this.localAgentIntegrationRetryAttempt = 0;
+    this.lastLocalAgentIntegrationWarnReason = null;
+    this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
@@ -566,9 +651,20 @@ export class DkgNodePlugin {
 
   private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
     try {
-      return await this.client.getLocalAgentIntegration('openclaw');
+      const result = await this.client.getLocalAgentIntegration('openclaw');
+      // Clear any stale error from an earlier failed attempt so the
+      // retry dedup logic in `syncLocalAgentIntegrationState` can
+      // distinguish a fresh failure reason from the previous one.
+      this.lastLocalAgentIntegrationLoadError = null;
+      return result;
     } catch (err: any) {
-      api.logger.warn?.(`[dkg] Failed to load stored OpenClaw integration state: ${err.message}`);
+      const reason = typeof err?.message === 'string' && err.message.length > 0 ? err.message : String(err);
+      this.lastLocalAgentIntegrationLoadError = reason;
+      // Emit the underlying fetch error at `debug` level on every
+      // attempt (silent at default log level). The caller in
+      // `syncLocalAgentIntegrationState` emits the one operator-visible
+      // warn with dedup semantics.
+      api.logger.debug?.(`[dkg] Failed to load stored OpenClaw integration state: ${reason}`);
       return undefined;
     }
   }

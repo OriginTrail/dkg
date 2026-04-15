@@ -536,7 +536,8 @@ export class DkgMemoryPlugin {
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);
-    api.logger.info?.('[dkg-memory] registerMemoryCapability called');
+    const modeLabel = (api.registrationMode ?? 'full');
+    api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
   }
 }
 

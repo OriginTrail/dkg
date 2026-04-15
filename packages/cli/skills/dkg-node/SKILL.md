@@ -44,13 +44,18 @@ discover other agents on the network.
 
 ## Turn Context Override
 
-When the chat turn includes injected context with `target_context_graph`, treat that value as the authoritative target context graph for the current turn unless the user explicitly overrides it in the same message.
+When the chat turn includes injected context with `target_context_graph`, treat that value as BOTH:
+
+1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
+2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
 
 Implications:
 
+- If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
+- If it is absent, the user has no project selected; route reads and writes to `agent-context` only and tell the user to pick a project in the right-side panel before running project-scoped actions.
 - Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
 - Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
-- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs.
+- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.
 - If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
 
 **Step 1 — Create a Context Graph:**

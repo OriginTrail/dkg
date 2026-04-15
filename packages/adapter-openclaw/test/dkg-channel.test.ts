@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DkgChannelPlugin, CHANNEL_NAME } from '../src/DkgChannelPlugin.js';
+import { DkgChannelPlugin, CHANNEL_NAME, formatInboundTurnDiagnostic } from '../src/DkgChannelPlugin.js';
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
 
@@ -39,6 +39,100 @@ describe('DkgChannelPlugin', () => {
 
   it('should have channel name "dkg-ui"', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
+  });
+
+  describe('formatInboundTurnDiagnostic (live-validation follow-up)', () => {
+    // Diagnostic helper used by handleInboundHttp + handleInboundStreamHttp
+    // to give operators runtime ground truth on envelope stamping. Without
+    // this log line, a "can't see UI state" symptom from the agent is
+    // indistinguishable from a React-state bug, a daemon-proxy dropout,
+    // or an agent-interpretation issue. The formatter itself is pure so
+    // we unit-test it directly; the HTTP handler wiring that calls it is
+    // covered indirectly by existing processInbound/processInboundStream
+    // tests.
+
+    it('includes the correlation id, a present uiContextGraphId, and all context entry key=value pairs', () => {
+      const line = formatInboundTurnDiagnostic(
+        'corr-abc123',
+        'agent-memory',
+        [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'Agent Memory (agent-memory)' },
+        ],
+      );
+      expect(line).toContain('correlationId=corr-abc123');
+      expect(line).toContain('uiContextGraphId=agent-memory');
+      expect(line).toContain('contextEntries=1');
+      expect(line).toContain('target_context_graph=Agent Memory (agent-memory)');
+    });
+
+    it('renders the empty-envelope state with ∅ for uiContextGraphId and contextEntries=0', () => {
+      const line = formatInboundTurnDiagnostic('corr-empty', undefined, undefined);
+      expect(line).toContain('correlationId=corr-empty');
+      expect(line).toContain('uiContextGraphId=∅');
+      expect(line).toContain('contextEntries=0');
+      // Empty envelope must not render a context-entries summary block
+      // with dangling separators — the ` [key=value, ...]` suffix is
+      // suppressed when count is zero so operators can visually tell
+      // stamping is absent, not just empty. The `[dkg-channel]` prefix
+      // bracket is still present, so this is a tail-shape check.
+      expect(line).not.toMatch(/contextEntries=0 \[/);
+      expect(line.trim().endsWith('contextEntries=0')).toBe(true);
+    });
+
+    it('joins multiple context entries with a comma in the summary block', () => {
+      const line = formatInboundTurnDiagnostic(
+        'corr-multi',
+        'project-x',
+        [
+          { key: 'target_context_graph', label: 'Target context graph', value: 'Project X' },
+          { key: 'user_role', label: 'User role', value: 'owner' },
+        ],
+      );
+      expect(line).toContain('contextEntries=2');
+      expect(line).toContain('target_context_graph=Project X');
+      expect(line).toContain('user_role=owner');
+      expect(line).toMatch(/target_context_graph=Project X, user_role=owner/);
+    });
+
+    it('strips control characters from every echoed field to defeat log-injection (QA review follow-up)', () => {
+      // `normalizeChatContextEntry` only trims whitespace at parse time;
+      // full control-char sanitization happens later in the dispatch
+      // pipeline, AFTER this diagnostic log has already fired. So a
+      // crafted envelope with a newline embedded in a value, key,
+      // correlationId, or uiContextGraphId used to be able to inject a
+      // forged log line. The formatter now runs its own
+      // sanitizeDiagnosticField pass over every echoed field; this test
+      // pins down the contract. Bridge auth also gates this attack
+      // surface, but log integrity shouldn't be load-bearing on
+      // authorization.
+      const line = formatInboundTurnDiagnostic(
+        'corr-with\nnewline',
+        'project\r\nid',
+        [
+          { key: 'key\twith\ttabs', label: 'Label', value: 'foo\n[dkg-channel] FAKE LOG LINE: bar' },
+          { key: 'normal_key', label: 'Normal', value: 'contains\x00null\x7fdel' },
+        ],
+      );
+      // No raw control characters survive into the output — they are
+      // all replaced with spaces. The real log prefix
+      // `[dkg-channel] inbound turn:` must still appear exactly once,
+      // meaning no injected forged line broke the envelope across
+      // two lines. The bracket/literal text of the attempted injection
+      // DOES appear inside the sanitized summary (as data, not as a
+      // new log line), which is fine — the important invariant is
+      // that it is on the same physical line as the real prefix.
+      expect(line).not.toMatch(/[\u0000-\u001F\u007F]/);
+      expect((line.match(/\[dkg-channel\] inbound turn:/g) ?? []).length).toBe(1);
+      expect(line).toContain('correlationId=corr-with newline');
+      // \r\n → two spaces.
+      expect(line).toContain('uiContextGraphId=project  id');
+      // Tabs → spaces, newline → space. The attacker's payload is
+      // preserved as literal text inside the entry summary — that is
+      // fine, it is data not a new log line.
+      expect(line).toContain('key with tabs=foo [dkg-channel] FAKE LOG LINE: bar');
+      // Null + DEL → spaces.
+      expect(line).toContain('normal_key=contains null del');
+    });
   });
 
   it('should start bridge server immediately on register', async () => {

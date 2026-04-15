@@ -262,6 +262,67 @@ function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
   return { key, label, value };
 }
 
+/**
+ * Strip ASCII control characters (C0 + DEL) from a diagnostic-log field
+ * so a crafted envelope value cannot inject a forged log line via
+ * embedded `\n`, `\r`, or other control chars. Matches the same
+ * character range as `sanitizeChatContextEntries` (`[\u0000-\u001F\u007F]`)
+ * applied elsewhere in the dispatch path; this helper runs earlier,
+ * inside the diagnostic formatter, so the log integrity does not depend
+ * on upstream sanitization timing.
+ */
+function sanitizeDiagnosticField(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, ' ');
+}
+
+/**
+ * Format a one-line diagnostic describing the parsed envelope for an
+ * inbound chat turn. Used by `handleInboundHttp` and
+ * `handleInboundStreamHttp` to give operators runtime ground truth on
+ * whether the UI-selected project (`uiContextGraphId`) and the
+ * `contextEntries` the renderer sees are actually arriving at the
+ * adapter bridge. The log line is info-level because it is the only
+ * observable signal for the envelope-stamping chain between the UI
+ * dropdown and the agent body renderer; without it, operators have to
+ * guess whether a "can't see UI state" symptom is a UI React-state bug,
+ * a daemon-proxy dropout, or an agent-interpretation issue.
+ *
+ * Log-injection hardening: `normalizeChatContextEntry` only trims
+ * whitespace at parse time — it does NOT strip control characters.
+ * Full control-char sanitization (`sanitizeChatContextEntries`) happens
+ * later in `processInbound`/`processInboundStream`, AFTER this
+ * diagnostic log has already fired. So this formatter runs its own
+ * sanitization pass (`sanitizeDiagnosticField`) on every field it
+ * echoes — correlation id, `uiContextGraphId`, entry keys, entry
+ * values — to defeat a crafted envelope like
+ * `value: "foo\n[dkg-channel] FAKE LOG LINE: bar"` from injecting a
+ * forged log line. Bridge auth limits the reach of this attack to
+ * authorized callers anyway, but log integrity should not be
+ * load-bearing on authorization.
+ */
+export function formatInboundTurnDiagnostic(
+  correlationId: string,
+  uiContextGraphId: string | undefined,
+  contextEntries: ChatContextEntry[] | undefined,
+): string {
+  const safeCorrelationId = sanitizeDiagnosticField(correlationId);
+  const safeUiContextGraphId = uiContextGraphId === undefined
+    ? '∅'
+    : sanitizeDiagnosticField(uiContextGraphId);
+  const entryCount = contextEntries?.length ?? 0;
+  const entrySummary = entryCount > 0
+    ? ` [${contextEntries!
+        .map((entry) => `${sanitizeDiagnosticField(entry.key)}=${sanitizeDiagnosticField(entry.value)}`)
+        .join(', ')}]`
+    : '';
+  return (
+    '[dkg-channel] inbound turn: ' +
+    `correlationId=${safeCorrelationId}, ` +
+    `uiContextGraphId=${safeUiContextGraphId}, ` +
+    `contextEntries=${entryCount}${entrySummary}`
+  );
+}
+
 function normalizeChatContextEntries(raw: unknown): ChatContextEntry[] | undefined {
   if (raw == null) return undefined;
   if (!Array.isArray(raw)) return undefined;
@@ -1539,6 +1600,7 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
           return;
         }
+        this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
         const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries, uiContextGraphId });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1604,6 +1666,7 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
+      this.api?.logger.info?.(formatInboundTurnDiagnostic(correlationId, uiContextGraphId, contextEntries));
 
       // Write SSE headers
       res.writeHead(200, {
