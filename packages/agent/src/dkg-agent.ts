@@ -792,8 +792,10 @@ export class DKGAgent {
         if (payload.type === 'join-approved') {
           const { contextGraphId, agentAddress: approvedAddr } = payload;
           if (contextGraphId) {
-            const localAddr = await this.getDefaultAgentAddress();
-            if (approvedAddr && localAddr?.toLowerCase() !== approvedAddr.toLowerCase()) {
+            const isLocalAgent = approvedAddr && [...this.localAgents.keys()].some(
+              (addr) => addr.toLowerCase() === approvedAddr.toLowerCase(),
+            );
+            if (approvedAddr && !isLocalAgent) {
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
@@ -811,10 +813,18 @@ export class DKGAgent {
         if (!contextGraphId || !agentAddress || !signature || !timestamp) {
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
         }
-        // Only store if this node owns the CG
-        const exists = await this.contextGraphExists(contextGraphId);
-        if (!exists) {
+        // Only store if this node is the curator (creator) of the CG
+        const owner = await this.getContextGraphOwner(contextGraphId);
+        if (!owner) {
           return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+        }
+        const selfDid = `did:dkg:agent:${this.peerId}`;
+        const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
+        const isCurator = owner === selfDid ||
+          (selfAgentDid && owner === selfAgentDid) ||
+          [...this.localAgents.keys()].some((addr) => owner === `did:dkg:agent:${addr}`);
+        if (!isCurator) {
+          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
         }
         this.verifyJoinRequest(contextGraphId, agentAddress, timestamp, signature);
         await this.storePendingJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
@@ -2382,6 +2392,8 @@ export class DKGAgent {
     participantAgents?: string[];
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
+    /** Caller's agent address (resolved from token). Used for curator/creator triples. */
+    callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
@@ -2423,7 +2435,7 @@ export class DKGAgent {
     // Store registration status and curator in _meta
     quads.push(
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${this.peerId}`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`, graph: cgMetaGraph },
     );
 
     // Store peer allowlist for curated CGs (with validation)
@@ -2463,11 +2475,12 @@ export class DKGAgent {
         });
       }
       // Auto-include creator's agent address
-      if (this.defaultAgentAddress) {
+      const creatorAddr = opts.callerAgentAddress ?? this.defaultAgentAddress;
+      if (creatorAddr) {
         quads.push({
           subject: paranetUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-          object: `"${this.defaultAgentAddress}"`,
+          object: `"${creatorAddr}"`,
           graph: cgMetaGraph,
         });
       }
@@ -2849,7 +2862,7 @@ export class DKGAgent {
    * Invite an agent (by Ethereum address) to join an existing context graph.
    * Adds the agent to the local allowlist in `_meta`.
    */
-  async inviteAgentToContextGraph(contextGraphId: string, agentAddress: string): Promise<void> {
+  async inviteAgentToContextGraph(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
@@ -2863,6 +2876,7 @@ export class DKGAgent {
 
     const owner = await this.getContextGraphOwner(contextGraphId);
     const selfDid = `did:dkg:agent:${this.peerId}`;
+    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
     const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
     if (!owner) {
       throw new Error(
@@ -2870,10 +2884,11 @@ export class DKGAgent {
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    if (owner !== selfDid && owner !== selfAgentDid) {
+    const callerIsOwner = (callerDid && owner === callerDid) || owner === selfDid || owner === selfAgentDid;
+    if (!callerIsOwner) {
       throw new Error(
         `Only the context graph creator can manage invitations. ` +
-        `Creator=${owner}, current=${selfDid}`,
+        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
       );
     }
 
@@ -2907,7 +2922,7 @@ export class DKGAgent {
   /**
    * Remove an agent from a context graph's allowlist.
    */
-  async removeAgentFromContextGraph(contextGraphId: string, agentAddress: string): Promise<void> {
+  async removeAgentFromContextGraph(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
     const ctx = createOperationContext('system');
     const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
     if (!ethAddrRe.test(agentAddress)) {
@@ -2921,6 +2936,7 @@ export class DKGAgent {
 
     const owner = await this.getContextGraphOwner(contextGraphId);
     const selfDid = `did:dkg:agent:${this.peerId}`;
+    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
     const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
     if (!owner) {
       throw new Error(
@@ -2928,10 +2944,11 @@ export class DKGAgent {
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    if (owner !== selfDid && owner !== selfAgentDid) {
+    const callerIsOwner = (callerDid && owner === callerDid) || owner === selfDid || owner === selfAgentDid;
+    if (!callerIsOwner) {
       throw new Error(
         `Only the context graph creator can manage participants. ` +
-        `Creator=${owner}, current=${selfDid}`,
+        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
       );
     }
 
@@ -3095,7 +3112,7 @@ export class DKGAgent {
    * Approve a pending join request: verify the signature, add the agent
    * to the allowlist, and mark the request as approved.
    */
-  async approveJoinRequest(contextGraphId: string, agentAddress: string): Promise<void> {
+  async approveJoinRequest(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';
@@ -3128,7 +3145,7 @@ export class DKGAgent {
     }
 
     // Add agent to allowlist
-    await this.inviteAgentToContextGraph(contextGraphId, agentAddress);
+    await this.inviteAgentToContextGraph(contextGraphId, agentAddress, callerAgentAddress);
 
     // Mark request as approved
     await this.store.deleteByPattern({

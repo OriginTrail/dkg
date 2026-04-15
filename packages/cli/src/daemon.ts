@@ -4238,6 +4238,7 @@ async function handleRequest(
         allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
         allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
         accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
+        callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),
         ...(Array.isArray(parsed.participantIdentityIds)
           ? { participantIdentityIds: parsed.participantIdentityIds.map((v: string | number) => BigInt(v)) }
@@ -5915,7 +5916,7 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'agentAddress is required' });
     }
     try {
-      await agent.inviteAgentToContextGraph(contextGraphId, agentAddress);
+      await agent.inviteAgentToContextGraph(contextGraphId, agentAddress, requestAgentAddress);
       return jsonResponse(res, 200, { ok: true, contextGraphId, agentAddress });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5933,7 +5934,7 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'agentAddress is required' });
     }
     try {
-      await agent.removeAgentFromContextGraph(contextGraphId, agentAddress);
+      await agent.removeAgentFromContextGraph(contextGraphId, agentAddress, requestAgentAddress);
       return jsonResponse(res, 200, { ok: true, contextGraphId, agentAddress });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -6006,7 +6007,7 @@ async function handleRequest(
     try {
       const { agentAddress } = JSON.parse(body);
       if (!agentAddress) return jsonResponse(res, 400, { error: 'Missing agentAddress' });
-      await agent.approveJoinRequest(contextGraphId, agentAddress);
+      await agent.approveJoinRequest(contextGraphId, agentAddress, requestAgentAddress);
       return jsonResponse(res, 200, { ok: true, status: 'approved', agentAddress });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -6191,6 +6192,7 @@ async function handleRequest(
       id,
       name,
       description,
+      callerAgentAddress: requestAgentAddress,
       ...(Array.isArray(allowedAgents) ? { allowedAgents } : {}),
       ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
     });
