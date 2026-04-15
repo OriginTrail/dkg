@@ -587,6 +587,22 @@ describe('@unit DKGStakingConvictionNFT', () => {
         StakingV10Contract.connect(accounts[0]).relock(accounts[0].address, 0, 6),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
+
+    it('boundary: relock succeeds at exactly currentEpoch == pos.expiryEpoch', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      // 1-epoch lock at creation epoch C → expiryEpoch = C + 1. Advance
+      // exactly 1 epoch so currentEpoch == expiryEpoch — under the old
+      // `<=` check this would still revert as LockStillActive.
+      await advanceEpochs(1);
+
+      await NFT.connect(accounts[0]).relock(0, 6);
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.lockEpochs).to.equal(6);
+      expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
+    });
   });
 
   // =====================================================================
@@ -683,6 +699,23 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await expect(
         StakingV10Contract.connect(accounts[0]).redelegate(accounts[0].address, 0, toId),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+
+    it('reverts if a pending withdrawal exists (Phase 5 cancel-first UX)', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
+      await advanceEpochs(2); // post-expiry so createWithdrawal is allowed
+      await NFT.connect(accounts[0]).createWithdrawal(0, hre.ethers.parseEther('100'));
+
+      // Pending exists → redelegate must reject. Otherwise the cancel/
+      // finalize path would land on the OLD node after the position has
+      // moved, stranding the pending TRAC on the wrong identity.
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, toId),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalAlreadyRequested');
     });
 
     // -----------------------------------------------------------------
@@ -912,6 +945,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
   };
 
   describe('createWithdrawal (→ StakingV10.createWithdrawal)', () => {
+    // Phase 5 review fix — decrement-at-request model. `createWithdrawal`
+    // immediately decrements pos.raw / pos.rewards and the StakingStorage
+    // delegator/node/total stake. The pending-withdrawal slot lives on
+    // `ConvictionStakingStorage.pendingWithdrawals[tokenId]` (V10-native),
+    // NOT on `StakingStorage.withdrawals` (V8 legacy slot).
+
     it('reverts if not owner (non-owner caller)', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
@@ -973,7 +1012,24 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalAlreadyRequested');
     });
 
-    it('happy path pre-expiry: withdraws from rewards bucket only (raw still locked)', async () => {
+    it('boundary: post-expiry raw withdrawal succeeds at exactly currentEpoch == pos.expiryEpoch', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      // 1-epoch lock at creation epoch C → expiryEpoch = C + 1. Advance
+      // exactly 1 epoch so currentEpoch == expiryEpoch (the boundary the
+      // off-by-one fix targets — under the old `>` check this would still
+      // revert as InsufficientWithdrawable because withdrawable would be
+      // computed as `rewards`-only).
+      await advanceEpochs(1);
+      // Withdraw the full raw — must succeed at the boundary.
+      await NFT.connect(accounts[0]).createWithdrawal(0, amount);
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(amount);
+    });
+
+    it('happy path pre-expiry: rewards bucket decrements at request, raw untouched, pending stored in V10 storage', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -984,6 +1040,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const rewards = hre.ethers.parseEther('500');
       await injectRewards(0n, identityId, rewards);
 
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+
       const tx = await NFT.connect(accounts[0]).createWithdrawal(0, rewards);
       const blockNumber = (await tx.wait())!.blockNumber;
       const block = await hre.ethers.provider.getBlock(blockNumber);
@@ -993,32 +1052,70 @@ describe('@unit DKGStakingConvictionNFT', () => {
         .to.emit(StakingV10Contract, 'WithdrawalCreated')
         .withArgs(0n, rewards, expectedReleaseAt);
 
-      // Withdrawal is recorded under the V10 delegator key.
-      const [reqAmount, indexedOut, releaseAt] =
-        await StakingStorage.getDelegatorWithdrawalRequest(identityId, tokenIdKey(0));
-      expect(reqAmount).to.equal(rewards);
-      expect(indexedOut).to.equal(0n);
-      expect(releaseAt).to.equal(expectedReleaseAt);
+      // Pending recorded in V10-native storage with the raw vs. rewards split.
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(rewards);
+      expect(pending.rewardsPortion).to.equal(rewards); // pure rewards draw
+      expect(pending.releaseAt).to.equal(expectedReleaseAt);
+
+      // Position bucket immediately decremented: rewards 500 → 0, raw untouched.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.rewards).to.equal(0n);
+      expect(pos.raw).to.equal(amount);
+
+      // StakingStorage delegator base = composite (raw+rewards) - amount = amount
+      // node + total stake also dropped by `amount`.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(amount);
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(
+        nodeStakeBefore - rewards,
+      );
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore - rewards);
+
+      // V8 withdrawals slot is NOT touched by the V10 path.
+      const [v8Req] = await StakingStorage.getDelegatorWithdrawalRequest(
+        identityId,
+        tokenIdKey(0),
+      );
+      expect(v8Req).to.equal(0n);
     });
 
-    it('happy path post-expiry: withdraws from raw (rewards bucket empty)', async () => {
+    it('happy path post-expiry: raw bucket decrements at request, pending split tracks the draw', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2); // post-expiry → raw is withdrawable
 
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+
       const tx = await NFT.connect(accounts[0]).createWithdrawal(0, amount);
       await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
 
-      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        tokenIdKey(0),
+      // Pending stored in V10-native storage; rewardsPortion=0 since
+      // rewards bucket is empty — the entire draw is raw.
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(amount);
+      expect(pending.rewardsPortion).to.equal(0n);
+
+      // Raw drained immediately → 0.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(0n);
+      expect(pos.rewards).to.equal(0n);
+
+      // Delegator/node/total stake all dropped.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(0n);
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(
+        nodeStakeBefore - amount,
       );
-      expect(reqAmount).to.equal(amount);
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore - amount);
     });
 
-    it('happy path post-expiry: full drain amount = raw + rewards', async () => {
+    it('happy path post-expiry: full drain amount = raw + rewards splits across both buckets', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -1034,11 +1131,40 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const tx = await NFT.connect(accounts[0]).createWithdrawal(0, total);
       await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
 
-      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        tokenIdKey(0),
-      );
-      expect(reqAmount).to.equal(total);
+      // Pending: rewardsPortion = rewards (drained first), rest is raw.
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(total);
+      expect(pending.rewardsPortion).to.equal(rewards);
+
+      // Both buckets drained.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.raw).to.equal(0n);
+      expect(pos.rewards).to.equal(0n);
+    });
+
+    it('partial post-expiry split: amount > rewards drains rewards fully + raw for remainder', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      const rewards = hre.ethers.parseEther('300');
+      await injectRewards(0n, identityId, rewards);
+
+      await advanceEpochs(2); // post-expiry
+
+      // Withdraw 500: rewards 300 drained fully + raw drained for 200.
+      const withdrawAmount = hre.ethers.parseEther('500');
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(withdrawAmount);
+      expect(pending.rewardsPortion).to.equal(rewards); // 300
+
+      // Position post-decrement: rewards=0, raw=800.
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.rewards).to.equal(0n);
+      expect(pos.raw).to.equal(amount - hre.ethers.parseEther('200')); // 800
     });
 
     it('direct StakingV10.createWithdrawal call from non-NFT caller reverts via gate', async () => {
@@ -1058,6 +1184,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   describe('cancelWithdrawal (→ StakingV10.cancelWithdrawal)', () => {
+    // Phase 5 review fix — symmetric inverse of the new `createWithdrawal`.
+    // Restores pos.raw / pos.rewards, the StakingStorage delegator base,
+    // and the node/total stake to their pre-create state, then deletes the
+    // V10-native pending slot.
+
     it('reverts if not owner (non-owner caller)', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
@@ -1081,23 +1212,50 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
     });
 
-    it('happy path: clears pending request and emits WithdrawalCancelled', async () => {
+    it('happy path: symmetric restore — pos buckets, delegator base, node/total stake all back to pre-request', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
-      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
 
+      // Snapshot pre-request state.
+      const totalStakeBefore = await StakingStorage.getTotalStake();
+      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
+      const baseBefore = await StakingStorage.getDelegatorStakeBase(
+        identityId,
+        tokenIdKey(0),
+      );
+      const posBefore = await ConvictionStakingStorageContract.getPosition(0);
+
+      const withdrawAmount = hre.ethers.parseEther('400');
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      // Mid-state: everything dropped by withdrawAmount.
+      expect(await StakingStorage.getTotalStake()).to.equal(
+        totalStakeBefore - withdrawAmount,
+      );
+
+      // Cancel.
       const tx = await NFT.connect(accounts[0]).cancelWithdrawal(0);
       await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCancelled').withArgs(0n);
       await expect(tx).to.emit(NFT, 'WithdrawalCancelled').withArgs(0n);
 
-      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        tokenIdKey(0),
-      );
-      expect(reqAmount).to.equal(0n);
+      // Pending slot cleared.
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(0n);
+
+      // Position buckets restored byte-identical.
+      const posAfter = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfter.raw).to.equal(posBefore.raw);
+      expect(posAfter.rewards).to.equal(posBefore.rewards);
+
+      // StakingStorage delegator/node/total stake restored.
+      expect(
+        await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
+      ).to.equal(baseBefore);
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(nodeStakeBefore);
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore);
     });
 
     it('happy path: cancel allows a new withdrawal to be requested', async () => {
@@ -1112,11 +1270,37 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // A fresh request with a different amount succeeds now that the
       // WithdrawalAlreadyRequested guard is cleared.
       await NFT.connect(accounts[0]).createWithdrawal(0, 200n);
-      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        tokenIdKey(0),
-      );
-      expect(reqAmount).to.equal(200n);
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(200n);
+    });
+
+    it('happy path: cancel restores rewards bucket precisely (mixed split)', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+
+      // Inject 300 rewards before expiry.
+      const rewards = hre.ethers.parseEther('300');
+      await injectRewards(0n, identityId, rewards);
+
+      await advanceEpochs(2); // post-expiry
+
+      // Withdraw 500: 300 rewards + 200 raw.
+      const withdrawAmount = hre.ethers.parseEther('500');
+      await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      // Mid-state assertions: rewards drained fully, raw 800.
+      let pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.rewards).to.equal(0n);
+      expect(pos.raw).to.equal(amount - hre.ethers.parseEther('200')); // 800
+
+      // Cancel — both buckets must come back to their pre-request values
+      // via the rewardsPortion/raw split captured on the pending struct.
+      await NFT.connect(accounts[0]).cancelWithdrawal(0);
+      pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.rewards).to.equal(rewards); // 300 restored
+      expect(pos.raw).to.equal(amount); // 1000 restored
     });
 
     it('direct StakingV10.cancelWithdrawal call from non-NFT caller reverts via gate', async () => {
@@ -1133,6 +1317,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   describe('finalizeWithdrawal (→ StakingV10.finalizeWithdrawal)', () => {
+    // Phase 5 review fix — under the decrement-at-request model,
+    // `finalizeWithdrawal` ONLY transfers TRAC from the vault to the user
+    // and deletes the pending slot. The position buckets, delegator base,
+    // and node/total stake were all decremented at `createWithdrawal` time.
+    // Sharding-table maintenance also ran at create time.
+
     it('reverts if not owner (non-owner caller)', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
@@ -1171,71 +1361,78 @@ describe('@unit DKGStakingConvictionNFT', () => {
       ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalDelayPending');
     });
 
-    it('happy path partial raw withdrawal post-expiry: TRAC refunded, stake decremented, NFT alive', async () => {
+    it('happy path partial raw withdrawal post-expiry: TRAC refunded, position state unchanged at finalize, NFT alive', async () => {
       const { identityId } = await createProfile();
       const minStake = await ParametersStorage.minimumStake();
-      // Use minStake so the node enters the sharding table, then partially
-      // withdraw so nodeStake stays above minStake → sharding stays put.
+      // Use 2x minStake so the node enters the sharding table at stake
+      // time, then partially withdraw — stake stays above minStake so
+      // sharding state should not change (decremented at create time).
       const amount = minStake * 2n;
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2); // post-expiry
 
       const withdrawAmount = minStake / 2n;
+      // createWithdrawal does the heavy lifting: decrements pos.raw + node/
+      // total stake. After this call, position raw = amount - withdrawAmount,
+      // and the StakingStorage delegator/node/total all reflect the drop.
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      // Snapshot the post-create-decrement state so finalize can be tested
+      // as a "transfer + cleanup only" operation.
+      const totalStakeAfterCreate = await StakingStorage.getTotalStake();
+      const nodeStakeAfterCreate = await StakingStorage.getNodeStake(identityId);
+      const baseAfterCreate = await StakingStorage.getDelegatorStakeBase(
+        identityId,
+        tokenIdKey(0),
+      );
+      const posAfterCreate = await ConvictionStakingStorageContract.getPosition(0);
+
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-      // Crossing the 15-day delay advances Chronos by ~360 epochs; pre-
-      // finalize the dormant window so `decreaseRaw`'s in-mutator
-      // finalize is O(1) instead of gas-bombing past the tx cap.
+      // Crossing the 15-day delay advances Chronos by ~360 epochs. Under
+      // the new model, `finalizeWithdrawal` does not call any storage
+      // mutator with an in-mutator finalize loop, so the gas-bomb path
+      // does not apply to finalize itself. We still pre-finalize so an
+      // unrelated downstream view doesn't trip on the dormant window.
       await preFinalizeDormantEpochs(identityId);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
-      const totalStakeBefore = await StakingStorage.getTotalStake();
-      const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
 
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
       await expect(tx)
         .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, withdrawAmount, 0n);
+        .withArgs(0n, withdrawAmount);
 
       // TRAC returned to staker.
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
         stakerBalBefore + withdrawAmount,
       );
 
-      // Totals decremented.
-      expect(await StakingStorage.getTotalStake()).to.equal(
-        totalStakeBefore - withdrawAmount,
-      );
-      expect(await StakingStorage.getNodeStake(identityId)).to.equal(
-        nodeStakeBefore - withdrawAmount,
-      );
+      // Totals UNCHANGED at finalize — they were decremented at create time.
+      expect(await StakingStorage.getTotalStake()).to.equal(totalStakeAfterCreate);
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(nodeStakeAfterCreate);
 
-      // Delegator base: (raw+rewards) - withdrawn = amount - withdrawAmount.
+      // Delegator base also unchanged — already at the post-create value.
       expect(
         await StakingStorage.getDelegatorStakeBase(identityId, tokenIdKey(0)),
-      ).to.equal(amount - withdrawAmount);
+      ).to.equal(baseAfterCreate);
 
-      // Position mutated: raw drained by withdrawAmount (rewards bucket was empty).
+      // Position state is unchanged at finalize.
       const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount - withdrawAmount);
-      expect(pos.rewards).to.equal(0n);
-      // identityId preserved → position is still considered "existing".
+      expect(pos.raw).to.equal(posAfterCreate.raw);
+      expect(pos.rewards).to.equal(posAfterCreate.rewards);
       expect(pos.identityId).to.equal(identityId);
 
-      // NFT still alive (partial drain).
+      // NFT still alive (partial drain — pos.raw > 0).
       expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
-      // Withdrawal request cleared.
-      const [reqAmount] = await StakingStorage.getDelegatorWithdrawalRequest(
-        identityId,
-        tokenIdKey(0),
-      );
-      expect(reqAmount).to.equal(0n);
+      // V10 pending slot cleared.
+      const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
+      expect(pending.amount).to.equal(0n);
     });
 
-    it('happy path full drain post-expiry: NFT is burned, sharding table node removed', async () => {
+    it('happy path full drain post-expiry: NFT is burned, sharding-table removal happens at create time', async () => {
       const { identityId } = await createProfile();
       const minStake = await ParametersStorage.minimumStake();
       // Fund exactly minStake so a full drain drops nodeStake to 0 < minStake.
@@ -1250,8 +1447,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       await advanceEpochs(2); // post-expiry
       await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
+
+      // Sharding-table removal happens at CREATE time under the new model.
+      expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
+      // Node stake also drops at create time.
+      expect(await StakingStorage.getNodeStake(identityId)).to.equal(0n);
+
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
-      await preFinalizeDormantEpochs(identityId);
 
       await NFT.connect(accounts[0]).finalizeWithdrawal(0);
 
@@ -1262,13 +1464,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       );
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
 
-      // Node stake drained.
+      // Node stake still drained, sharding-table state still reflects removal.
       expect(await StakingStorage.getNodeStake(identityId)).to.equal(0n);
-      // Sharding table: node dropped below minStake → removed.
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
     });
 
-    it('happy path rewards-first draw pre-expiry: amount ≤ rewards drains rewards only, raw untouched', async () => {
+    it('happy path rewards-first draw pre-expiry: TRAC refunded, raw untouched throughout', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -1280,29 +1481,35 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Pre-expiry (12 epoch lock) — only rewards bucket is drainable.
       const withdrawAmount = hre.ethers.parseEther('200');
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      // Snapshot post-create state.
+      const posAfterCreate = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfterCreate.raw).to.equal(amount); // raw untouched
+      expect(posAfterCreate.rewards).to.equal(rewards - withdrawAmount); // 300
+
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await preFinalizeDormantEpochs(identityId);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
-      // rewardsDraw = 200, rawDraw = 0
       await expect(tx)
         .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, 0n, withdrawAmount);
+        .withArgs(0n, withdrawAmount);
 
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
         stakerBalBefore + withdrawAmount,
       );
 
+      // Position state at finalize is byte-identical to post-create state.
       const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount); // raw untouched, lock still active
-      expect(pos.rewards).to.equal(rewards - withdrawAmount);
+      expect(pos.raw).to.equal(posAfterCreate.raw); // still amount
+      expect(pos.rewards).to.equal(posAfterCreate.rewards); // 300
 
       // NFT still alive — position has raw > 0.
       expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
     });
 
-    it('happy path split draw post-expiry: amount > rewards drains rewards fully + raw for remainder', async () => {
+    it('happy path split draw post-expiry: TRAC refunded for full split amount', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -1318,18 +1525,31 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // raw drained for the remainder (200). Total = 500.
       const withdrawAmount = hre.ethers.parseEther('500');
       await NFT.connect(accounts[0]).createWithdrawal(0, withdrawAmount);
+
+      // Post-create state: rewards 0, raw 800.
+      const posAfterCreate = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfterCreate.rewards).to.equal(0n);
+      expect(posAfterCreate.raw).to.equal(amount - hre.ethers.parseEther('200'));
+
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await preFinalizeDormantEpochs(identityId);
 
+      const stakerBalBefore = await Token.balanceOf(accounts[0].address);
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
 
-      // Split: rawDraw = 500 - 300 = 200, rewardsDraw = 300.
+      // New event shape: single `amount`, not `(rawDraw, rewardsDraw)`.
       await expect(tx)
         .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, hre.ethers.parseEther('200'), rewards);
+        .withArgs(0n, withdrawAmount);
 
+      // TRAC refunded for the full split amount.
+      expect(await Token.balanceOf(accounts[0].address)).to.equal(
+        stakerBalBefore + withdrawAmount,
+      );
+
+      // Position state unchanged at finalize.
       const pos = await ConvictionStakingStorageContract.getPosition(0);
-      expect(pos.raw).to.equal(amount - hre.ethers.parseEther('200')); // 800 left
+      expect(pos.raw).to.equal(posAfterCreate.raw); // 800
       expect(pos.rewards).to.equal(0n);
 
       expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
@@ -1720,25 +1940,33 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const posAfterClaim = await ConvictionStakingStorageContract.getPosition(0);
       expect(posAfterClaim.rewards).to.equal(expectedReward);
 
-      // 2. createWithdrawal — pre-expiry, can only drain rewards.
+      // 2. createWithdrawal — pre-expiry, can only drain rewards. Under
+      //    the decrement-at-request model, this drains the rewards bucket
+      //    immediately (pos.rewards → 0) and decrements the delegator/
+      //    node/total stake by `expectedReward`.
       await NFT.connect(accounts[0]).createWithdrawal(0, expectedReward);
+      const posAfterCreate = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfterCreate.rewards).to.equal(0n);
+      expect(posAfterCreate.raw).to.equal(amount);
+
       // 3. Wait out the 15-day delay + pre-finalize the dormant window.
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await preFinalizeDormantEpochs(identityId);
 
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
 
-      // 4. finalizeWithdrawal — TRAC returned to staker.
+      // 4. finalizeWithdrawal — TRAC returned to staker (no further state
+      //    mutation; everything was decremented at create time).
       const tx = await NFT.connect(accounts[0]).finalizeWithdrawal(0);
       await expect(tx)
         .to.emit(StakingV10Contract, 'WithdrawalFinalized')
-        .withArgs(0n, 0n, expectedReward); // rawDraw=0, rewardsDraw=expectedReward
+        .withArgs(0n, expectedReward);
 
       expect(await Token.balanceOf(accounts[0].address)).to.equal(
         stakerBalBefore + expectedReward,
       );
 
-      // Position still alive (raw > 0), rewards drained to 0.
+      // Position state byte-identical to post-create.
       const posFinal = await ConvictionStakingStorageContract.getPosition(0);
       expect(posFinal.raw).to.equal(amount);
       expect(posFinal.rewards).to.equal(0n);

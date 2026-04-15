@@ -128,10 +128,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     event WithdrawalCancelled(uint256 indexed tokenId);
 
     /// @notice Emitted by `finalizeWithdrawal` after the delay elapses and
-    ///         TRAC is released back to the staker. `rawDraw` and
-    ///         `rewardsDraw` are the amounts drained from the raw and
-    ///         rewards buckets respectively.
-    event WithdrawalFinalized(uint256 indexed tokenId, uint96 rawDraw, uint96 rewardsDraw);
+    ///         TRAC is released back to the staker. `amount` is the total
+    ///         drain that was previously deducted from the position at
+    ///         `createWithdrawal` time (decrement-at-request model). The
+    ///         raw vs. rewards split is recorded in
+    ///         `ConvictionStakingStorage.PendingWithdrawal.rewardsPortion`
+    ///         at request time and consumed by `cancelWithdrawal`.
+    event WithdrawalFinalized(uint256 indexed tokenId, uint96 amount);
 
     /// @notice Emitted by `claim` after rewards are accrued into the
     ///         position's rewards bucket via
@@ -597,6 +600,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    cuts the revert distance by one cross-contract hop.
         if (oldIdentityId == newIdentityId) revert SameIdentity();
 
+        // 2b. Reject if a pending withdrawal exists. Under the
+        //     decrement-at-request model the pending TRAC is parked off the
+        //     position with `pos.identityId` as its only anchor — moving the
+        //     position to a new node would strand the cancel/finalize on
+        //     the old node (the cancel restore would also land on the wrong
+        //     node). The Phase 5 UX answer is "cancel first, then
+        //     redelegate"; the alternative (mint a new NFT on cancel to
+        //     handle cross-node restore) is deferred to a follow-up PR.
+        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
+        if (pending.amount != 0) revert WithdrawalAlreadyRequested();
+
         // 3. Destination profile must exist. Mirrors the `stake()` /
         //    `_recordStake` guard — without it the sharding-table insert
         //    below would happily register a ghost node at `sha256("")` for
@@ -721,38 +735,46 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      * @param tokenId  Target position.
      * @param amount   Amount to withdraw.
      *
-     * @dev Flow:
+     * @dev **Decrement-at-request model (Phase 5 review fix).** Unlike the
+     *      previous "deduct on finalize" form, this implementation immediately
+     *      removes the requested amount from the position's `raw`/`rewards`
+     *      buckets and the `StakingStorage` delegator/node/total stake. The
+     *      withdrawing TRAC stops earning rewards as soon as the user starts
+     *      the timer. `cancelWithdrawal` is the symmetric inverse;
+     *      `finalizeWithdrawal` only releases the TRAC.
+     *
+     *      Pending withdrawals live on the V10-native
+     *      `ConvictionStakingStorage.pendingWithdrawals[tokenId]` slot — NOT
+     *      the legacy V8 `StakingStorage.withdrawals` map. The V8 mapping is
+     *      untouched by Phase 5 and continues to serve the V8 address-keyed
+     *      flow.
+     *
+     *      Flow:
      *        1. `amount == 0` → `ZeroAmount` (defense-in-depth; the NFT
-     *           wrapper already rejects this path with its own
-     *           `ZeroAmount` error).
-     *        2. Read position; drained `(raw == 0 && rewards == 0)` →
-     *           `PositionNotFound` (unreachable through the wrapper —
-     *           burn-on-drain would have already taken the tokenId off
-     *           the NFT's books — but a defensive guard for correctness).
-     *        3. Compute `withdrawable`:
+     *           wrapper already rejects this path).
+     *        2. Read position; `identityId == 0` → `PositionNotFound`.
+     *        3. Reject if a pending withdrawal already exists on this
+     *           tokenId — one pending per NFT at a time.
+     *        4. Compute `withdrawable`:
      *              pre-expiry : pos.rewards
      *              post-expiry: pos.raw + pos.rewards
-     *           Strict `>` comparison against `amount` so a user can
-     *           always drain to the withdrawable cap exactly.
-     *        4. One pending withdrawal at a time per NFT — we forward to
-     *           `StakingStorage.getDelegatorWithdrawalRequest` and reject
-     *           if the amount slot is non-zero. The cancel path clears
-     *           this slot; a fresh `createWithdrawal` must wait for the
-     *           cancel or the finalize before re-arming.
-     *        5. Write a new withdrawal request under the V10-disjoint
-     *           `bytes32(tokenId)` key. `indexedOutAmount` stays 0 for
-     *           V10: the legacy reward-index bookkeeping lived in a
-     *           separate path the NFT flow does not inherit.
-     *        6. `releaseAt = block.timestamp + WITHDRAWAL_DELAY` is a
-     *           Unix timestamp, NOT an epoch number. The delay is a flat
-     *           15 days per Phase 5 Q6, regardless of lock state.
-     *
-     *      **No stake mutation at this stage** — the delegator base,
-     *      node stake, total stake, and the position's `raw`/`rewards`
-     *      all stay put until `finalizeWithdrawal`. This differs from
-     *      the V8 `Staking.requestWithdrawal` path which decrements at
-     *      request time; the V10 scope intentionally keeps the stake
-     *      "earning" through the delay window.
+     *           `expiryEpoch` is the FIRST unboosted epoch (`claim()` runs
+     *           the raw at 1x once `e >= expiryEpoch`), so the "lock
+     *           elapsed" check is `currentEpoch >= pos.expiryEpoch`.
+     *        5. Settle delegator score indices at `currentEpoch` BEFORE
+     *           mutating effective stake — same pattern as
+     *           stake/relock/redelegate.
+     *        6. Compute split: drain rewards first, raw for the remainder.
+     *           Decrement the conviction-side buckets immediately
+     *           (`decreaseRewards` / `decreaseRaw`).
+     *        7. Decrement `StakingStorage` delegator base
+     *           (`(raw + rewards) - amount`), node stake, and total stake.
+     *        8. Store the pending withdrawal in
+     *           `ConvictionStakingStorage.pendingWithdrawals[tokenId]` with
+     *           the rewards-portion split and the release timestamp.
+     *        9. Sharding-table maintenance: node may have dropped below
+     *           `minimumStake` after the decrement.
+     *       10. `Ask.recalculateActiveSet()`.
      */
     function createWithdrawal(
         address staker,
@@ -764,7 +786,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (amount == 0) revert ZeroAmount();
 
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
-        if (pos.raw == 0 && pos.rewards == 0) revert PositionNotFound();
+        if (pos.identityId == 0) revert PositionNotFound();
+
+        // One pending at a time per NFT — gates on the V10-native pending
+        // map, not the legacy V8 `StakingStorage.withdrawals` slot.
+        ConvictionStakingStorage.PendingWithdrawal memory existing = convictionStorage.getPendingWithdrawal(tokenId);
+        if (existing.amount != 0) revert WithdrawalAlreadyRequested();
 
         // Withdrawable:
         //   pre-expiry  : rewards only (raw is locked)
@@ -780,207 +807,46 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         }
         if (uint256(amount) > withdrawable) revert InsufficientWithdrawable();
 
-        // One pending withdrawal at a time per NFT.
+        // Settle delegator score indices BEFORE mutating any effective stake.
+        // `prepareForStakeChange` is `onlyContracts` on the V8 `Staking`
+        // contract — StakingV10 is Hub-registered so the call is authorized.
         bytes32 delegatorKey = bytes32(tokenId);
-        (uint96 existingAmount, , ) = stakingStorage.getDelegatorWithdrawalRequest(
-            pos.identityId,
-            delegatorKey
-        );
-        if (existingAmount != 0) revert WithdrawalAlreadyRequested();
-
-        uint256 releaseAt = block.timestamp + WITHDRAWAL_DELAY;
-        stakingStorage.createDelegatorWithdrawalRequest(
-            pos.identityId,
-            delegatorKey,
-            amount,
-            0,
-            releaseAt
-        );
-
-        emit WithdrawalCreated(tokenId, amount, uint64(releaseAt));
-    }
-
-    /**
-     * @notice Cancel a pending withdrawal before the delay elapses. Returns
-     *         the position to its pre-`createWithdrawal` state — the stake
-     *         side never moved, so the only work here is clearing the
-     *         withdrawal request slot.
-     *
-     * @dev `cancelWithdrawal` is the inverse of `createWithdrawal` and is
-     *      similarly stake-mutation-free. The position's raw / rewards /
-     *      effective-stake bookkeeping is never touched during the
-     *      create→cancel or create→finalize paths until the final
-     *      finalize step, so cancel has nothing to re-stake.
-     *
-     *      Reverts:
-     *        - `PositionNotFound` if `pos.identityId == 0`. Defense-in-
-     *          depth against a direct path that bypasses the NFT
-     *          wrapper's `ownerOf` check.
-     *        - `WithdrawalNotRequested` if no pending request exists for
-     *          this tokenId.
-     */
-    function cancelWithdrawal(
-        address staker,
-        uint256 tokenId
-    ) external onlyConvictionNFT {
-        staker; // unused — see NatSpec above.
-
-        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
-        // `identityId != 0` is the Phase 5 existence sentinel. A rewards-only
-        // position (raw == 0 after a prior partial finalize) is still valid
-        // here — the withdrawal state machine must let the user cancel any
-        // pending request regardless of the raw bucket's balance.
-        if (pos.identityId == 0) revert PositionNotFound();
-
-        bytes32 delegatorKey = bytes32(tokenId);
-        (uint96 existingAmount, , ) = stakingStorage.getDelegatorWithdrawalRequest(
-            pos.identityId,
-            delegatorKey
-        );
-        if (existingAmount == 0) revert WithdrawalNotRequested();
-
-        stakingStorage.deleteDelegatorWithdrawalRequest(pos.identityId, delegatorKey);
-
-        emit WithdrawalCancelled(tokenId);
-    }
-
-    /**
-     * @notice After `WITHDRAWAL_DELAY` has elapsed, drain the requested
-     *         amount from the position (rewards bucket first, then raw)
-     *         and transfer TRAC back to `staker`. Burns the NFT if the
-     *         position is fully drained.
-     * @param staker   Original NFT owner / caller. The NFT wrapper passes
-     *                 `msg.sender` directly — we trust it because the
-     *                 `ownerOf(tokenId) == msg.sender` check already ran.
-     * @param tokenId  Target position.
-     *
-     * @dev Flow:
-     *        1. Read position; `pos.identityId == 0` → `PositionNotFound`.
-     *        2. Read withdrawal request; `amount == 0` →
-     *           `WithdrawalNotRequested`. `block.timestamp < releaseAt` →
-     *           `WithdrawalDelayPending`.
-     *        3. Settle delegator score indices at `currentEpoch` BEFORE
-     *           mutating any effective-stake state. Mirrors the stake /
-     *           relock / redelegate pattern.
-     *        4. Compute split: drain rewards first, then raw.
-     *              rewardsDraw = min(reqAmount, pos.rewards)
-     *              rawDraw     = reqAmount - rewardsDraw
-     *        5. Forward the bucket decrements to ConvictionStakingStorage.
-     *           Each storage mutator owns its own effective-stake diff
-     *           propagation (decreaseRewards subtracts amount at 1x,
-     *           decreaseRaw subtracts amount*multiplier pre-expiry and
-     *           flat post-expiry, plus the expiry-delta shrink).
-     *        6. Update `StakingStorage` delegator base, node stake, and
-     *           total stake. The delegator base tracks `raw + rewards`
-     *           (see the critical decision note below) so the post-write
-     *           value is `(pos.raw + pos.rewards) - reqAmount`.
-     *        7. Transfer TRAC from the StakingStorage vault to `staker`.
-     *        8. Delete the withdrawal request slot.
-     *        9. Sharding-table maintenance: if `nodeStake` dropped below
-     *           `minimumStake` and the node was previously in the
-     *           sharding table, remove it. Mirror of the V8
-     *           `_removeNodeFromShardingTable` helper and the redelegate
-     *           pattern in this contract.
-     *       10. `Ask.recalculateActiveSet()` — the per-node stake delta
-     *           may have shifted the active-set composition.
-     *       11. Emit `WithdrawalFinalized(tokenId, rawDraw, rewardsDraw)`.
-     *
-     *      **No call to `ConvictionStakingStorage.deletePosition` on full
-     *      drain**: the split-bucket mutators `decreaseRaw` /
-     *      `decreaseRewards` handle the effective-stake diff on their own,
-     *      and `deletePosition` requires `pos.raw > 0` (it cannot be
-     *      called after a decreaseRaw that zeroed the principal). The
-     *      final state `raw==0, rewards==0, identityId!=0` is
-     *      functionally equivalent to deleted for the NFT layer's
-     *      burn-on-drain check — `DKGStakingConvictionNFT.finalizeWithdrawal`
-     *      reads `getPosition(tokenId)` and burns when both buckets are
-     *      zero, and no caller can reach the struct through the wrapper
-     *      once the NFT is burned. Leaving the dormant fields
-     *      (`lockEpochs`, `expiryEpoch`, `multiplier18`, `lastClaimedEpoch`)
-     *      in place is harmless because they are never read without a
-     *      corresponding NFT ownership check.
-     *
-     *      **Critical design decision: delegator base composition.**
-     *      `StakingStorage.delegatorStakeBase(id, bytes32(tokenId))`
-     *      tracks `raw + rewards` (the full composite per-delegator
-     *      balance), NOT `raw` alone. Precedent: Phase 4
-     *      `StakingV10.redelegate` writes
-     *      `setDelegatorStakeBase(newId, key, pos.raw + pos.rewards)` on
-     *      the destination bucket — a future SV10-claim must also
-     *      compound rewards into this base to stay consistent with the
-     *      redelegate precedent. Phase 4 `stake()` only ever writes the
-     *      principal (`amount`) because rewards are always zero at mint.
-     *      This finalize computes `newBase = (pos.raw + pos.rewards) -
-     *      reqAmount`, then `setDelegatorStakeBase(newBase)` to let
-     *      `_updateDelegatorActivity` handle the active→inactive
-     *      transition (removes the key from `delegatorNodes` on zero).
-     */
-    function finalizeWithdrawal(
-        address staker,
-        uint256 tokenId
-    ) external onlyConvictionNFT {
-        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
-        if (pos.identityId == 0) revert PositionNotFound();
-
-        bytes32 delegatorKey = bytes32(tokenId);
-        (uint96 reqAmount, , uint256 releaseAt) = stakingStorage.getDelegatorWithdrawalRequest(
-            pos.identityId,
-            delegatorKey
-        );
-        if (reqAmount == 0) revert WithdrawalNotRequested();
-        if (block.timestamp < releaseAt) revert WithdrawalDelayPending();
-
-        // 1. Settle score-per-stake indices at `currentEpoch` BEFORE mutating
-        //    effective-stake state. Same pattern as stake/relock/redelegate.
-        //    `prepareForStakeChange` is `onlyContracts` — StakingV10 is
-        //    Hub-registered so the call is authorized.
-        uint256 currentEpoch = chronos.getCurrentEpoch();
         staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
 
-        // 2. Compute split: drain rewards first, raw for the remainder.
-        //    `rewardsDraw` is capped at `pos.rewards`; `rawDraw` is always
-        //    `reqAmount - rewardsDraw` which is ≤ pos.raw by the earlier
-        //    withdrawable check in `createWithdrawal` (post-expiry check
-        //    bounds reqAmount to pos.raw+pos.rewards; pre-expiry bounds it
-        //    to pos.rewards, which makes rawDraw == 0 here).
-        uint96 rewardsDraw = reqAmount <= pos.rewards ? reqAmount : pos.rewards;
-        uint96 rawDraw = reqAmount - rewardsDraw;
+        // Compute split: drain rewards first, raw for the remainder. The
+        // earlier `withdrawable` check guarantees `rawDraw <= pos.raw`.
+        uint96 rewardsDraw = amount <= pos.rewards ? amount : pos.rewards;
+        uint96 rawDraw = amount - rewardsDraw;
 
-        // 3. Decrement ConvictionStakingStorage buckets. Each storage
-        //    mutator owns its own effective-stake diff — rewards at 1x,
-        //    raw at (stillBoosted ? multiplier : 1x) plus the
-        //    pending-expiry-delta shrink. Call sites guard on `amount > 0`
-        //    so a zero-value call is a no-op (emits a zero-amount event
-        //    and returns) — we preserve the same safety by gating here.
+        // Decrement `ConvictionStakingStorage` buckets IMMEDIATELY.
+        // `decreaseRewards` / `decreaseRaw` each own their own per-epoch
+        // effective-stake diff propagation.
         ConvictionStakingStorage cs = convictionStorage;
         if (rewardsDraw > 0) cs.decreaseRewards(tokenId, rewardsDraw);
         if (rawDraw > 0) cs.decreaseRaw(tokenId, rawDraw);
 
-        // 4. Decrement StakingStorage delegator base, node stake, total.
-        //    See NatSpec "delegator base composition" note — base tracks
-        //    raw + rewards. Writing 0 here triggers
-        //    `_updateDelegatorActivity(wasActive=true, isActive=false)`
-        //    which removes the delegator key from `delegatorNodes[key]`
-        //    and decrements the node's delegator count.
+        // Decrement `StakingStorage` delegator base to the new composite.
+        // The base tracks `raw + rewards`, so we write the post-decrement
+        // composite. Writing 0 here triggers
+        // `_updateDelegatorActivity(wasActive=true, isActive=false)` which
+        // removes the delegator key from `delegatorNodes[key]`.
         StakingStorage ss = stakingStorage;
-        uint96 newBase = (pos.raw + pos.rewards) - reqAmount;
+        uint96 newBase = (pos.raw + pos.rewards) - amount;
         ss.setDelegatorStakeBase(pos.identityId, delegatorKey, newBase);
-        ss.decreaseNodeStake(pos.identityId, reqAmount);
-        ss.decreaseTotalStake(reqAmount);
 
-        // 5. Transfer TRAC from the StakingStorage vault to the NFT owner.
-        //    The V8 Staking.finalizeWithdrawal uses the same vault path.
-        ss.transferStake(staker, reqAmount);
+        // Decrement node + total stake. The withdrawing TRAC no longer
+        // contributes to either total during the delay window — that is
+        // the point of the decrement-at-request model.
+        ss.decreaseNodeStake(pos.identityId, amount);
+        ss.decreaseTotalStake(amount);
 
-        // 6. Delete the withdrawal request slot — the request is now
-        //    satisfied and the NFT is free to arm a new one (if the
-        //    position still has raw or rewards to drain).
-        ss.deleteDelegatorWithdrawalRequest(pos.identityId, delegatorKey);
+        // Store the pending in V10-native storage.
+        uint64 releaseAt = uint64(block.timestamp + WITHDRAWAL_DELAY);
+        cs.createPendingWithdrawal(tokenId, amount, rewardsDraw, releaseAt);
 
-        // 7. Sharding-table maintenance. If the node's stake dropped below
-        //    `minimumStake`, it must be removed. Matches the V8
-        //    `_removeNodeFromShardingTable` pattern and the redelegate
-        //    logic in this contract.
+        // Sharding-table maintenance: node may have crossed below
+        // `minimumStake` after the decrement. Matches the
+        // `finalizeWithdrawal` / `redelegate` pattern.
         uint96 newNodeStake = ss.getNodeStake(pos.identityId);
         if (
             shardingTableStorage.nodeExists(pos.identityId) &&
@@ -989,11 +855,142 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             shardingTable.removeNode(pos.identityId);
         }
 
-        // 8. Active-set recalculation — the per-node stake delta may have
-        //    shifted the active set composition.
         ask.recalculateActiveSet();
 
-        emit WithdrawalFinalized(tokenId, rawDraw, rewardsDraw);
+        emit WithdrawalCreated(tokenId, amount, releaseAt);
+    }
+
+    /**
+     * @notice Cancel a pending withdrawal before the delay elapses. Restores
+     *         the position to its pre-`createWithdrawal` state — the inverse
+     *         of `createWithdrawal` under the decrement-at-request model.
+     * @param staker   Original NFT owner / caller (unused in the body —
+     *                 ownership is enforced at
+     *                 `DKGStakingConvictionNFT.cancelWithdrawal` via
+     *                 `ownerOf` before this function is ever reached; kept
+     *                 in the signature so every `onlyConvictionNFT` entry
+     *                 point shares the same call shape).
+     * @param tokenId  Target position.
+     *
+     * @dev Reverses every mutation `createWithdrawal` made in the same order:
+     *      1. Settle delegator score indices at `currentEpoch`.
+     *      2. Restore the conviction-side buckets via `increaseRewards` /
+     *         `increaseRaw`. The `rewardsPortion` field on the pending
+     *         struct records the original split — without it, a stale
+     *         `pos.rewards` snapshot at cancel time could land on the wrong
+     *         bucket if `claim()` had grown rewards in between.
+     *      3. Restore the `StakingStorage` delegator base composite.
+     *      4. Restore node + total stake.
+     *      5. Delete the pending slot.
+     *      6. Re-insert the node into the sharding table if the restore
+     *         pushed it back over `minimumStake`.
+     *
+     *      `pos.raw` / `pos.rewards` are read AFTER the create-time
+     *      decrement — they reflect the post-decrement state — so the
+     *      restored composite is `(pos.raw + pos.rewards) + pending.amount`.
+     */
+    function cancelWithdrawal(
+        address staker,
+        uint256 tokenId
+    ) external onlyConvictionNFT {
+        staker; // unused — see NatSpec above.
+
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        if (pos.identityId == 0) revert PositionNotFound();
+
+        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
+        if (pending.amount == 0) revert WithdrawalNotRequested();
+
+        // Settle delegator score indices BEFORE mutating effective stake.
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        bytes32 delegatorKey = bytes32(tokenId);
+        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+
+        // Restore the conviction-side buckets to their pre-create state.
+        // Re-use the rewardsPortion split captured at create time so a
+        // stale `pos.rewards` snapshot at cancel time can't reroute the
+        // restore through the wrong bucket.
+        uint96 rawPortion = pending.amount - pending.rewardsPortion;
+        ConvictionStakingStorage cs = convictionStorage;
+        if (pending.rewardsPortion > 0) cs.increaseRewards(tokenId, pending.rewardsPortion);
+        if (rawPortion > 0) cs.increaseRaw(tokenId, rawPortion);
+
+        // Restore `StakingStorage` delegator base composite. `pos` was read
+        // BEFORE the bucket restore so `(pos.raw + pos.rewards)` is the
+        // post-create-decrement value.
+        StakingStorage ss = stakingStorage;
+        uint96 newBase = (pos.raw + pos.rewards) + pending.amount;
+        ss.setDelegatorStakeBase(pos.identityId, delegatorKey, newBase);
+
+        // Restore node + total stake. Symmetric to the create path.
+        ss.increaseNodeStake(pos.identityId, pending.amount);
+        ss.increaseTotalStake(pending.amount);
+
+        // Delete the pending slot — withdrawal is fully reversed.
+        cs.deletePendingWithdrawal(tokenId);
+
+        // Sharding-table maintenance: node may have crossed back above
+        // `minimumStake` after the restore.
+        uint96 newNodeStake = ss.getNodeStake(pos.identityId);
+        if (
+            !shardingTableStorage.nodeExists(pos.identityId) &&
+            newNodeStake >= parametersStorage.minimumStake()
+        ) {
+            shardingTable.insertNode(pos.identityId);
+        }
+
+        ask.recalculateActiveSet();
+
+        emit WithdrawalCancelled(tokenId);
+    }
+
+    /**
+     * @notice After `WITHDRAWAL_DELAY` has elapsed, transfer the previously-
+     *         decremented TRAC back to `staker`. Under the decrement-at-
+     *         request model this function does NOT touch the position
+     *         buckets, the delegator base, or the node/total stake — those
+     *         were all decremented at `createWithdrawal` time. The only
+     *         work is the TRAC transfer + pending-slot cleanup.
+     * @param staker   Original NFT owner / caller. The NFT wrapper passes
+     *                 `msg.sender` directly — we trust it because the
+     *                 `ownerOf(tokenId) == msg.sender` check already ran.
+     * @param tokenId  Target position.
+     *
+     * @dev Flow:
+     *        1. Read position; `pos.identityId == 0` → `PositionNotFound`.
+     *        2. Read pending; `amount == 0` → `WithdrawalNotRequested`.
+     *           `block.timestamp < releaseAt` → `WithdrawalDelayPending`.
+     *        3. Transfer TRAC from the StakingStorage vault to `staker`.
+     *        4. Delete the pending slot.
+     *
+     *      No score-index settlement here: the position's effective-stake
+     *      contribution was already adjusted at create time, and finalize
+     *      does not change it again.
+     *
+     *      No sharding-table or ask recalc: the node's stake snapshot also
+     *      already settled at create time.
+     */
+    function finalizeWithdrawal(
+        address staker,
+        uint256 tokenId
+    ) external onlyConvictionNFT {
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        if (pos.identityId == 0) revert PositionNotFound();
+
+        ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
+        if (pending.amount == 0) revert WithdrawalNotRequested();
+        if (block.timestamp < pending.releaseAt) revert WithdrawalDelayPending();
+
+        uint96 amount = pending.amount;
+
+        // Transfer TRAC from the vault to the NFT owner. The V8
+        // Staking.finalizeWithdrawal uses the same vault path.
+        stakingStorage.transferStake(staker, amount);
+
+        // Delete the pending slot — request is satisfied.
+        convictionStorage.deletePendingWithdrawal(tokenId);
+
+        emit WithdrawalFinalized(tokenId, amount);
     }
 
     /**
