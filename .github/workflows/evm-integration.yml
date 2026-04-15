@@ -53,9 +53,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build packages
-        run: pnpm build
-
       - name: Cache Hardhat artifacts
         uses: actions/cache@v4
         with:
@@ -66,6 +63,9 @@ jobs:
           key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
           restore-keys: |
             hardhat-${{ runner.os }}-
+
+      - name: Build packages
+        run: pnpm build
 
       - name: Run EVM integration tests (${{ matrix.scope }})
         run: ./scripts/test-evm-integration.sh ${{ matrix.scope }}

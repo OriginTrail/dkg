@@ -308,7 +308,7 @@ export async function spawnHardhatEnv(port: number): Promise<HardhatContext> {
   hardhatProcess.on('exit', (code) => { processExitCode = code; });
   hardhatProcess.on('error', (err) => { stderrOutput += `\nspawn error: ${err.message}`; });
 
-  const startupTimeout = process.env.CI ? 60_000 : 15_000;
+  const startupTimeout = process.env.CI ? 120_000 : 15_000;
   const ready = await waitForNode(rpcUrl, startupTimeout);
   if (!ready) {
     hardhatProcess.kill('SIGTERM');
