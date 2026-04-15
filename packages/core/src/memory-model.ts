@@ -41,11 +41,36 @@ export interface MemoryTransition {
   timestamp: string;
 }
 
+/**
+ * Assertion lifecycle states. Forward-only progression mirrors the memory
+ * layer chain: created (WM) → promoted (SWM) → published (VM) → finalized.
+ * `discarded` is a terminal state reachable only from `created`.
+ */
+export type AssertionState = 'created' | 'promoted' | 'published' | 'finalized' | 'discarded';
+
+export const ASSERTION_STATES: readonly AssertionState[] = [
+  'created', 'promoted', 'published', 'finalized', 'discarded',
+] as const;
+
+export const VALID_ASSERTION_TRANSITIONS: ReadonlyMap<AssertionState, readonly AssertionState[]> = new Map([
+  ['created', ['promoted', 'discarded'] as const],
+  ['promoted', ['published'] as const],
+  ['published', ['finalized'] as const],
+]);
+
 export interface AssertionDescriptor {
   contextGraphId: string;
   agentAddress: string;
   name: string;
+  state: AssertionState;
   createdAt: string;
+  promotedAt?: string;
+  shareOperationId?: string;
+  publishedAt?: string;
+  kcUal?: string;
+  finalizedAt?: string;
+  discardedAt?: string;
+  rootEntities?: string[];
 }
 
 

@@ -5,13 +5,14 @@ import {
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
+  contextGraphMetaUri, assertionLifecycleUri,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry, sparqlString, escapeSparqlLiteral,
-  type DKGNodeConfig, type OperationContext, type GetView,
+  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -4326,6 +4327,53 @@ export class DKGAgent {
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
+      },
+
+      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string }): Promise<AssertionDescriptor | null> {
+        const addr = opts?.agentAddress ?? agentAddress;
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name);
+        const metaGraph = contextGraphMetaUri(contextGraphId);
+        const DKG = 'http://dkg.io/ontology/';
+        const result = await agent.store.query(
+          `SELECT ?state ?createdAt ?promotedAt ?shareOperationId ?publishedAt ?kcUal ?finalizedAt ?discardedAt WHERE {
+            GRAPH <${metaGraph}> {
+              <${lifecycleUri}> <${DKG}state> ?state .
+              OPTIONAL { <${lifecycleUri}> <${DKG}createdAt> ?createdAt }
+              OPTIONAL { <${lifecycleUri}> <${DKG}promotedAt> ?promotedAt }
+              OPTIONAL { <${lifecycleUri}> <${DKG}shareOperationId> ?shareOperationId }
+              OPTIONAL { <${lifecycleUri}> <${DKG}publishedAt> ?publishedAt }
+              OPTIONAL { <${lifecycleUri}> <${DKG}kcUal> ?kcUal }
+              OPTIONAL { <${lifecycleUri}> <${DKG}finalizedAt> ?finalizedAt }
+              OPTIONAL { <${lifecycleUri}> <${DKG}discardedAt> ?discardedAt }
+            }
+          } LIMIT 1`,
+        );
+        if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+
+        const row = result.bindings[0];
+        const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
+
+        const entityResult = await agent.store.query(
+          `SELECT ?entity WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${DKG}rootEntity> ?entity } }`,
+        );
+        const rootEntities = entityResult.type === 'bindings'
+          ? entityResult.bindings.map((b) => b['entity']).filter((e): e is string => !!e)
+          : [];
+
+        return {
+          contextGraphId,
+          agentAddress: addr,
+          name,
+          state: strip(row['state']) as AssertionDescriptor['state'],
+          createdAt: strip(row['createdAt']) ?? '',
+          promotedAt: strip(row['promotedAt']),
+          shareOperationId: strip(row['shareOperationId']),
+          publishedAt: strip(row['publishedAt']),
+          kcUal: strip(row['kcUal']),
+          finalizedAt: strip(row['finalizedAt']),
+          discardedAt: strip(row['discardedAt']),
+          rootEntities: rootEntities.length > 0 ? rootEntities : undefined,
+        };
       },
     };
   }
