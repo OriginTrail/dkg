@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -68,9 +68,6 @@ function buildSnapshotFactQuads(opts: {
   });
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 describe('AgentWallet', () => {
   it('generates a wallet with keypair', async () => {
@@ -302,9 +299,6 @@ describe('ProfileManager', () => {
     });
 
     const newCount = await store.countQuads(graph);
-
-    // Data graph triple count should stay the same (old cleaned up, new inserted)
-    expect(newCount).toBe(oldCount);
 
     // Data graph triple count should stay the same (old cleaned up, new inserted)
     expect(newCount).toBe(oldCount);
@@ -1361,31 +1355,36 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         releaseSync = resolve;
       });
 
-      const syncFromPeer = vi.fn(async () => {
+      let syncCallCount = 0;
+      const syncFromPeer = async () => {
+        syncCallCount++;
         await syncGate;
         return 7;
-      });
+      };
 
-      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
-        protocols: [PROTOCOL_SYNC],
-      } as any);
+      const origGet = agent.node.libp2p.peerStore.get.bind(agent.node.libp2p.peerStore);
+      (agent.node.libp2p.peerStore as any).get = async (peerId: any) => {
+        try { return await origGet(peerId); } catch { return { protocols: [PROTOCOL_SYNC] }; }
+      };
       (agent as any).syncFromPeer = syncFromPeer;
-      (agent as any).discoverContextGraphsFromStore = vi.fn(async () => {});
-      (agent as any).syncSharedMemoryFromPeer = vi.fn(async () => 0);
+      (agent as any).discoverContextGraphsFromStore = async () => {};
+      (agent as any).syncSharedMemoryFromPeer = async () => 0;
 
       const first = (agent as any).trySyncFromPeer(remotePeer);
       const second = (agent as any).trySyncFromPeer(remotePeer);
 
-      await vi.waitFor(() => {
-        expect(syncFromPeer).toHaveBeenCalledTimes(1);
-      });
+      // Wait for first sync call to register
+      for (let i = 0; i < 50 && syncCallCount < 1; i++) {
+        await new Promise(r => setTimeout(r, 20));
+      }
+      expect(syncCallCount).toBe(1);
 
       releaseSync?.();
       await Promise.all([first, second]);
       expect((agent as any).syncingPeers.has(remotePeer)).toBe(false);
 
       await (agent as any).trySyncFromPeer(remotePeer);
-      expect(syncFromPeer).toHaveBeenCalledTimes(2);
+      expect(syncCallCount).toBe(2);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1408,7 +1407,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       const chain = (agent as any).chain as MockChainAdapter;
       const identityId = await chain.ensureProfile();
-      vi.spyOn(chain, 'signMessage').mockResolvedValue({ r: new Uint8Array(32), vs: new Uint8Array(32) });
+      const origSignMessage = chain.signMessage.bind(chain);
+      (chain as any).signMessage = async (...args: unknown[]) => ({ r: new Uint8Array(32), vs: new Uint8Array(32) });
 
       const encoded = await (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote');
       const parsed = JSON.parse(new TextDecoder().decode(encoded));
@@ -1451,7 +1451,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         onChainId: '1',
       });
 
-      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+      (chain as any).verifyACKIdentity = async () => true;
 
       const allowed = await (agent as any).authorizeSyncRequest({
         contextGraphId: 'private-cg',
@@ -1489,9 +1489,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(chain, 'getContextGraphParticipants').mockResolvedValue([1n]);
-      vi.spyOn(chain, 'verifyACKIdentity').mockResolvedValue(true);
+      (agent as any).isPrivateContextGraph = async () => true;
+      (chain as any).getContextGraphParticipants = async () => [1n];
+      (chain as any).verifyACKIdentity = async () => true;
 
       const request = {
         contextGraphId: 'private-cg',
@@ -1530,7 +1530,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(second).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 
@@ -1649,7 +1648,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
   it('canReadContextGraph allows locally subscribed private CGs when identityId is 0n', async () => {
     const chain = new MockChainAdapter('mock:0');
-    vi.spyOn(chain, 'getIdentityId').mockResolvedValue(0n);
+    (chain as any).getIdentityId = async () => 0n;
     const agent = await DKGAgent.create({
       name: 'CanReadLocal',
       listenHost: '127.0.0.1',
@@ -1662,8 +1661,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         subscribed: false,
         synced: true,
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      vi.spyOn(agent as any, 'getPrivateContextGraphParticipants').mockResolvedValue([1n]);
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => [1n];
 
       const canRead = await (agent as any).canReadContextGraph('local-private-cg');
       expect(canRead).toBe(true);
@@ -1672,7 +1671,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(cannotRead).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 
@@ -1693,9 +1691,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         onChainId: '1',
         participantIdentityIds: [1n],
       });
-      vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
-      const syncSpy = vi.spyOn(chain, 'verifySyncIdentity').mockResolvedValue(true);
-      const ackSpy = vi.spyOn(chain, 'verifyACKIdentity');
+      (agent as any).isPrivateContextGraph = async () => true;
+      let syncIdentityCalled = false;
+      let ackIdentityCalled = false;
+      (chain as any).verifySyncIdentity = async () => { syncIdentityCalled = true; return true; };
+      const origVerifyACK = chain.verifyACKIdentity?.bind(chain);
+      (chain as any).verifyACKIdentity = async (...args: unknown[]) => { ackIdentityCalled = true; return origVerifyACK?.(...args); };
 
       const request = {
         contextGraphId: 'private-cg',
@@ -1724,11 +1725,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
       expect(result).toBe(true);
-      expect(syncSpy).toHaveBeenCalledOnce();
-      expect(ackSpy).not.toHaveBeenCalled();
+      expect(syncIdentityCalled).toBe(true);
+      expect(ackIdentityCalled).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
-      vi.restoreAllMocks();
     }
   });
 

@@ -140,6 +140,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     if (!ready) {
       skipSuite = true;
       if (hardhatProcess) { hardhatProcess.kill('SIGTERM'); hardhatProcess = null; }
+      ctx.skip();
       return;
     }
     provider = new JsonRpcProvider(RPC_URL, undefined, { cacheTimeout: -1 });

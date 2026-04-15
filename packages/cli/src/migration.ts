@@ -4,6 +4,14 @@ import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
 
+export const _migrationIo = {
+  execSync: execSync as (...args: any[]) => any,
+  execFileSync: execFileSync as (...args: any[]) => any,
+  repoDir: repoDir as () => string | null,
+  loadConfig: loadConfig as () => Promise<any>,
+  loadNetworkConfig: loadNetworkConfig as () => Promise<any>,
+};
+
 /**
  * One-time migration from old single-directory layout to blue-green slots.
  * Called before `dkg start` if `~/.dkg/releases/current` doesn't exist.
@@ -12,6 +20,7 @@ export async function migrateToBlueGreen(
   log: (msg: string) => void = console.log,
   opts: { allowRemoteBootstrap?: boolean } = {},
 ): Promise<void> {
+  const { execSync, execFileSync, repoDir, loadConfig, loadNetworkConfig } = _migrationIo;
   const INSTALL_TIMEOUT_MS = 10 * 60_000;
   const BUILD_TIMEOUT_MS = 15 * 60_000;
   const rDir = releasesDir();

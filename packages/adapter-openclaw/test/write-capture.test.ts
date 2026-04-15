@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, rmSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -6,13 +6,21 @@ import { WriteCapture, isMemoryPath, computeDelta } from '../src/write-capture.j
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
 
-function makeApi(): OpenClawPluginApi {
+function makeApi(): OpenClawPluginApi & { hookCalls: any[]; infoCalls: any[] } {
+  const hookCalls: any[] = [];
+  const infoCalls: any[] = [];
   return {
     config: {},
-    registerTool: vi.fn(),
-    registerHook: vi.fn(),
-    on: vi.fn(),
-    logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    registerTool: () => {},
+    registerHook: (...args: any[]) => { hookCalls.push(args); },
+    on: () => {},
+    logger: {
+      info: (...args: any[]) => { infoCalls.push(args); },
+      warn: () => {},
+      debug: () => {},
+    },
+    hookCalls,
+    infoCalls,
   };
 }
 
@@ -27,30 +35,33 @@ describe('WriteCapture', () => {
 
   afterEach(() => {
     capture.stop();
-    vi.restoreAllMocks();
   });
 
   it('should register as file-watcher mode (no hook registration)', () => {
     const api = makeApi();
     capture.register(api);
 
-    // No after_tool_call hook registered (not available in OpenClaw)
-    expect(api.registerHook).not.toHaveBeenCalled();
-    expect(api.logger.info).toHaveBeenCalledWith(
-      expect.stringContaining('file watcher mode'),
-    );
+    expect(api.hookCalls).toHaveLength(0);
+    expect(api.infoCalls.some(
+      (call: any[]) => String(call[0]).includes('file watcher mode'),
+    )).toBe(true);
   });
 
   it('stop should clean up timers and watchers', () => {
     capture.stop();
-    // Should not throw even when called multiple times
     capture.stop();
   });
 
   it('syncFile should retry after failed import', async () => {
-    const importSpy = vi.spyOn(client, 'importMemories')
-      .mockRejectedValueOnce(new Error('daemon offline'))
-      .mockResolvedValueOnce({ imported: 1 });
+    let importCallCount = 0;
+    const importCallArgs: any[] = [];
+    const origImport = client.importMemories.bind(client);
+    client.importMemories = async (content: string, ...rest: any[]) => {
+      importCallCount++;
+      importCallArgs.push(content);
+      if (importCallCount === 1) throw new Error('daemon offline');
+      return { imported: 1 };
+    };
 
     const tmpDir = resolve(__dirname, '..', 'tmp-test-sync');
     try {
@@ -58,22 +69,16 @@ describe('WriteCapture', () => {
       const filePath = resolve(tmpDir, 'test.md');
       await writeFile(filePath, '# Test\n- fact 1', 'utf-8');
 
-      // First sync — import fails, tracking should NOT be updated
       await expect(capture.syncFile(filePath)).rejects.toThrow('daemon offline');
-      expect(importSpy).toHaveBeenCalledTimes(1);
+      expect(importCallCount).toBe(1);
 
-      // Touch the file so mtime changes
       await new Promise(r => setTimeout(r, 50));
       await writeFile(filePath, '# Test\n- fact 1\n- fact 2', 'utf-8');
 
-      // Second sync — should reimport from old baseline (full content since
-      // first import failed), not just the delta "- fact 2"
       await capture.syncFile(filePath);
-      expect(importSpy).toHaveBeenCalledTimes(2);
-      const secondCallContent = importSpy.mock.calls[1][0];
-      // Should contain the full file since tracking wasn't updated after failure
-      expect(secondCallContent).toContain('- fact 1');
-      expect(secondCallContent).toContain('- fact 2');
+      expect(importCallCount).toBe(2);
+      expect(importCallArgs[1]).toContain('- fact 1');
+      expect(importCallArgs[1]).toContain('- fact 2');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -106,10 +111,8 @@ describe('computeDelta', () => {
     const prev = '# Old';
     const curr = '# Old\n## New Section\n- new fact';
     const delta = computeDelta(prev, curr);
-    // Both "## New Section" and "- new fact" are new
     expect(delta).toBe('## New Section\n- new fact');
-    // Should NOT have "## New Section" duplicated
-    expect(delta.split('## New Section').length).toBe(2); // appears once
+    expect(delta.split('## New Section').length).toBe(2);
   });
 
   it('should handle multiple new sections', () => {
@@ -152,9 +155,6 @@ describe('computeDelta', () => {
   });
 
   it('should treat duplicate existing lines as unchanged', () => {
-    // Duplicate lines are in the Set — adding another identical line is ignored.
-    // This is a known limitation: duplicate lines are semantically meaningless
-    // in memory files, so this is acceptable.
     const prev = '## Items\n- item\n- item';
     const curr = '## Items\n- item\n- item\n- item';
     const delta = computeDelta(prev, curr);

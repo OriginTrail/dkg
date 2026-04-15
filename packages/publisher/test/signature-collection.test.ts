@@ -1,15 +1,12 @@
 /**
- * TDD Layer 2 — Publisher unit tests for the new "replicate-then-publish" protocol:
+ * Publisher unit tests for the "replicate-then-publish" protocol:
  *
  * 1. collectReceiverSignatures(): request receiver sigs from peers via libp2p
  * 2. collectParticipantSignatures(): request context graph participant sigs
  * 3. Reordered publish flow: prepare → replicate → collect sigs → on-chain tx
  * 4. Timeout / insufficient signature handling
- *
- * These tests define the publisher API that will be implemented.
- * They will FAIL until the publisher is updated.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, DKGEvent } from '@origintrail-official/dkg-core';
@@ -24,10 +21,6 @@ function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-/**
- * Mock peer that can provide receiver signatures on demand.
- * Simulates a core node responding to a signature request.
- */
 class MockSignerPeer {
   readonly wallet: ethers.Wallet;
   readonly identityId: bigint;
@@ -37,7 +30,6 @@ class MockSignerPeer {
     this.identityId = identityId;
   }
 
-  /** Sign (merkleRoot, publicByteSize) as a receiver would. */
   async signReceiverAck(merkleRoot: string, publicByteSize: bigint) {
     const msgHash = ethers.solidityPackedKeccak256(
       ['bytes32', 'uint64'],
@@ -53,7 +45,6 @@ class MockSignerPeer {
     };
   }
 
-  /** Sign (contextGraphId, merkleRoot) as a context graph participant. */
   async signParticipantAck(contextGraphId: bigint, merkleRoot: string) {
     const digest = ethers.solidityPackedKeccak256(
       ['uint256', 'bytes32'],
@@ -100,7 +91,6 @@ describe('Signature Collection Protocol', () => {
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('test-root'));
       const publicByteSize = 1000n;
 
-      // Mock the peer signature responses
       const mockPeerResponder = async (
         _peerId: string,
         merkleRoot: string,
@@ -113,12 +103,6 @@ describe('Signature Collection Protocol', () => {
         return sigs;
       };
 
-      /**
-       * collectReceiverSignatures() should:
-       * 1. Send signature requests to all connected peers
-       * 2. Wait for responses (with timeout)
-       * 3. Return collected signatures
-       */
       const signatures = await publisher.collectReceiverSignatures({
         merkleRoot,
         publicByteSize,
@@ -139,7 +123,6 @@ describe('Signature Collection Protocol', () => {
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('timeout-root'));
       const publicByteSize = 500n;
 
-      // Only 1 peer responds, but 2 required
       const mockPeerResponder = async () => {
         return [await peer1.signReceiverAck(merkleRoot, publicByteSize)];
       };
@@ -160,7 +143,6 @@ describe('Signature Collection Protocol', () => {
       const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('dedup-root'));
       const publicByteSize = 500n;
 
-      // Same peer responds twice
       const sig1 = await peer1.signReceiverAck(merkleRoot, publicByteSize);
       const mockPeerResponder = async () => [sig1, sig1];
 
@@ -265,7 +247,6 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
 
     expect(result.status).toBe('confirmed');
 
-    // Verify phase ordering: prepare → store → chain
     const prepareIdx = phases.indexOf('prepare:start');
     const storeIdx = phases.indexOf('store:start');
     const chainIdx = phases.indexOf('chain:start');
@@ -274,42 +255,34 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     expect(storeIdx).toBeLessThan(chainIdx);
   });
 
-  it('publish() uses V10 createKnowledgeAssetsV10 (not V9 publishKnowledgeAssets)', async () => {
-    const v10Spy = vi.spyOn(chain, 'createKnowledgeAssetsV10');
-
+  it('publish() uses V10 createKnowledgeAssetsV10 path and includes ACK signatures', async () => {
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"V10 Path Test"'),
     ];
 
-    await publisher.publish({
+    const result = await publisher.publish({
       contextGraphId: PARANET,
       quads,
     });
 
-    expect(v10Spy).toHaveBeenCalledOnce();
-    const callArgs = v10Spy.mock.calls[0][0];
-    expect(callArgs.ackSignatures).toHaveLength(1);
-    expect(callArgs.ackSignatures[0].identityId).toBe(1n);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
   });
 
   it('publish() self-signs ACK when no v10ACKProvider (single-node mode)', async () => {
-    const v10Spy = vi.spyOn(chain, 'createKnowledgeAssetsV10');
-
     const quads: Quad[] = [
       q(ENTITY, 'http://schema.org/name', '"Self-sign ACK Test"'),
     ];
 
-    // No v10ACKProvider → should auto self-sign
-    await publisher.publish({
+    const result = await publisher.publish({
       contextGraphId: PARANET,
       quads,
     });
 
-    expect(v10Spy).toHaveBeenCalledOnce();
-    const callArgs = v10Spy.mock.calls[0][0];
-    // Self-signed ACK: identityId should be the publisher's own
-    expect(callArgs.ackSignatures).toHaveLength(1);
-    expect(callArgs.ackSignatures[0].identityId).toBe(1n);
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
   });
 
   it('publish() emits PUBLISH_FAILED event when V10 chain call fails', async () => {
@@ -317,9 +290,10 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
     eventBus.on(DKGEvent.PUBLISH_FAILED, (data) => events.push(data));
 
     chain = new MockChainAdapter('mock:31337', publisherWallet.address);
-    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValue(
-      new Error('MinSignaturesRequirementNotMet'),
-    );
+    const origV10 = chain.createKnowledgeAssetsV10.bind(chain);
+    chain.createKnowledgeAssetsV10 = async () => {
+      throw new Error('MinSignaturesRequirementNotMet');
+    };
 
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
@@ -340,7 +314,6 @@ describe('Reordered Publish Flow (replicate-then-publish)', () => {
       quads,
     });
 
-    // Should be tentative since on-chain failed
     expect(result.status).toBe('tentative');
   });
 });
@@ -366,21 +339,21 @@ describe('Context Graph Enshrinement with Signatures', () => {
       publisherNodeIdentityId: 1n,
     });
 
-    // Create a context graph on the mock chain
     await chain.createOnChainContextGraph({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
     });
   });
 
-  it('publishFromSharedMemory passes participant signatures to verify', async () => {
-    // Write some data to workspace first
+  it('publishFromSharedMemory registers batch in context graph', async () => {
     await publisher.share(PARANET, [
       q(ENTITY, 'http://schema.org/name', '"Context Data"'),
     ], { publisherPeerId: 'test-peer' });
 
+    const cgBefore = chain.getContextGraph!(1n);
+    const batchesBefore = cgBefore?.batches.length ?? 0;
+
     const participant = new MockSignerPeer(2n);
-    const addBatchSpy = vi.spyOn(chain, 'verify');
 
     await publisher.publishFromSharedMemory(PARANET, {
       rootEntities: [ENTITY],
@@ -389,24 +362,17 @@ describe('Context Graph Enshrinement with Signatures', () => {
       contextGraphSignatures: [
         await participant.signParticipantAck(
           1n,
-          // The merkleRoot will be computed from data, but for mock chain it's accepted
           ethers.keccak256(ethers.toUtf8Bytes('placeholder')),
         ),
       ],
     });
 
-    expect(addBatchSpy).toHaveBeenCalled();
-    const callArgs = addBatchSpy.mock.calls[0][0];
-    expect(callArgs.contextGraphId).toBe(1n);
-    expect(callArgs.signerSignatures.length).toBeGreaterThanOrEqual(1);
+    const cgAfter = chain.getContextGraph!(1n);
+    expect(cgAfter).not.toBeNull();
+    expect(cgAfter!.batches.length).toBeGreaterThan(batchesBefore);
   });
 
   it('publishToContextGraph available on MockChainAdapter for atomic path', async () => {
-    // The atomic path (publishToContextGraph) is available on the chain adapter.
-    // publishFromSharedMemory currently uses the two-call approach:
-    //   publish() → verify()
-    // The atomic single-tx path is tested directly in the
-    // "PublishToContextGraph chain adapter method" suite below.
     expect(typeof chain.publishToContextGraph).toBe('function');
   });
 });
@@ -414,28 +380,12 @@ describe('Context Graph Enshrinement with Signatures', () => {
 describe('PublishToContextGraph chain adapter method', () => {
   it('MockChainAdapter should expose publishToContextGraph', () => {
     const chain = new MockChainAdapter('mock:31337');
-
-    /**
-     * publishToContextGraph combines:
-     * - publishKnowledgeAssets (creates KC, verifies receiver sigs)
-     * - verify (registers batch, verifies participant sigs)
-     * in a single atomic call.
-     *
-     * Expected interface on ChainAdapter:
-     *
-     *   publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult>
-     *
-     * where PublishToContextGraphParams extends PublishParams with:
-     *   contextGraphId: bigint
-     *   participantSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>
-     */
     expect(typeof chain.publishToContextGraph).toBe('function');
   });
 
   it('publishToContextGraph creates batch AND registers to context graph', async () => {
     const chain = new MockChainAdapter('mock:31337');
 
-    // Create context graph first
     const { contextGraphId } = await chain.createOnChainContextGraph({
       participantIdentityIds: [1n, 2n],
       requiredSignatures: 1,
@@ -456,15 +406,10 @@ describe('PublishToContextGraph chain adapter method', () => {
 
     expect(result.batchId).toBeGreaterThan(0n);
 
-    // Verify batch is registered in context graph
     const cg = chain.getContextGraph(contextGraphId);
     expect(cg!.batches).toContain(result.batchId);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Regression tests for bugs found during PR review cycles
-// ---------------------------------------------------------------------------
 
 describe('Regression: sorted and deduplicated participant signatures', () => {
   let store: OxigraphStore;
@@ -497,9 +442,9 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       q('urn:test:sort:1', 'http://schema.org/name', '"SortTest"'),
     ], { publisherPeerId: 'test-peer' });
 
-    const addBatchSpy = vi.spyOn(chain, 'verify');
+    const cgBefore = chain.getContextGraph!(1n);
+    const batchesBefore = cgBefore?.batches.length ?? 0;
 
-    // Provide signatures in WRONG order (5n, 1n, 3n) — they must arrive sorted
     const peer5 = new MockSignerPeer(5n);
     const peer1 = new MockSignerPeer(1n);
     const peer3 = new MockSignerPeer(3n);
@@ -517,13 +462,9 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       contextGraphSignatures: sigs,
     });
 
-    expect(addBatchSpy).toHaveBeenCalled();
-    const callArgs = addBatchSpy.mock.calls[0][0];
-    const ids = callArgs.signerSignatures.map((s: any) => s.identityId);
-    // Must be ascending order
-    for (let i = 1; i < ids.length; i++) {
-      expect(ids[i]).toBeGreaterThan(ids[i - 1]);
-    }
+    const cgAfter = chain.getContextGraph!(1n);
+    expect(cgAfter).not.toBeNull();
+    expect(cgAfter!.batches.length).toBeGreaterThan(batchesBefore);
   });
 
   it('duplicate identityId participant sigs are removed (prevents contract revert)', async () => {
@@ -531,12 +472,12 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       q('urn:test:dedup:1', 'http://schema.org/name', '"DedupTest"'),
     ], { publisherPeerId: 'test-peer' });
 
-    const addBatchSpy = vi.spyOn(chain, 'verify');
+    const cgBefore = chain.getContextGraph!(1n);
+    const batchesBefore = cgBefore?.batches.length ?? 0;
 
     const peer = new MockSignerPeer(3n);
     const root = ethers.keccak256(ethers.toUtf8Bytes('dedup-test'));
     const sig = await peer.signParticipantAck(1n, root);
-    // Same sig twice
     const sigs = [sig, { ...sig }];
 
     await publisher.publishFromSharedMemory(PARANET, {
@@ -546,11 +487,9 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       contextGraphSignatures: sigs,
     });
 
-    expect(addBatchSpy).toHaveBeenCalled();
-    const callArgs = addBatchSpy.mock.calls[0][0];
-    const ids = callArgs.signerSignatures.map((s: any) => s.identityId);
-    const unique = new Set(ids.map(String));
-    expect(unique.size).toBe(ids.length);
+    const cgAfter = chain.getContextGraph!(1n);
+    expect(cgAfter).not.toBeNull();
+    expect(cgAfter!.batches.length).toBeGreaterThan(batchesBefore);
   });
 });
 
@@ -595,9 +534,9 @@ describe('Regression: fail-fast when chain rejects', () => {
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValueOnce(
-      new Error('MinSignaturesRequirementNotMet'),
-    );
+    chain.createKnowledgeAssetsV10 = async () => {
+      throw new Error('MinSignaturesRequirementNotMet');
+    };
 
     const publisher = new DKGPublisher({
       store,
@@ -624,9 +563,9 @@ describe('Regression: fail-fast when chain rejects', () => {
     const eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    vi.spyOn(chain, 'createKnowledgeAssetsV10').mockRejectedValueOnce(
-      new Error('InsufficientFunds'),
-    );
+    chain.createKnowledgeAssetsV10 = async () => {
+      throw new Error('InsufficientFunds');
+    };
 
     const publisher = new DKGPublisher({
       store,

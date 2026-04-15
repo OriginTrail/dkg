@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { VerifyCollector } from '../src/verify-collector.js';
 import { encodeVerifyApproval, decodeVerifyProposal } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -22,10 +22,9 @@ describe('VerifyCollector', () => {
 
     const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('test-root')));
 
-    const sendP2P = vi.fn(async (_peerId: string, _protocol: string, data: Uint8Array) => {
+    const sendP2P = async (_peerId: string, _protocol: string, data: Uint8Array) => {
       const proposal = decodeVerifyProposal(data);
 
-      // Compute the same digest the contract expects
       const contextGraphIdBig = BigInt(42);
       const packed = new Uint8Array(64);
       const cgBytes = new Uint8Array(32);
@@ -35,11 +34,10 @@ describe('VerifyCollector', () => {
       packed.set(proposal.merkleRoot, 32);
       const digest = ethers.getBytes(ethers.keccak256(packed));
 
-      // Return approval signed by the "peer's" wallet
       if (_peerId === 'peer-a') return makeApproval(proposal.proposalId, walletA, digest);
       if (_peerId === 'peer-b') return makeApproval(proposal.proposalId, walletB, digest);
       return makeApproval(proposal.proposalId, walletC, digest);
-    });
+    };
 
     const collector = new VerifyCollector({
       sendP2P,

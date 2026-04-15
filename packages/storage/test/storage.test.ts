@@ -451,4 +451,78 @@ describe('PrivateContentStore', () => {
     const remaining = await ps.getPrivateTriples('p1', entity);
     expect(remaining.length).toBe(0);
   });
+
+  it('storePrivateTriples with empty quads is a no-op', async () => {
+    const entity = 'did:dkg:agent:NoOp';
+    await ps.storePrivateTriples('cg-1', entity, []);
+    expect(ps.hasPrivateTriples('cg-1', entity)).toBe(false);
+  });
+
+  it('hasPrivateTriples returns false before any data is stored', () => {
+    expect(ps.hasPrivateTriples('unknown-cg', 'urn:x')).toBe(false);
+  });
+
+  it('stores and retrieves private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubGraph';
+    const quads: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/sg', object: '"subgraph-val"', graph: '' },
+    ];
+    await ps.storePrivateTriples('cg-sg', entity, quads, 'my-sub');
+    expect(ps.hasPrivateTriples('cg-sg', entity, 'my-sub')).toBe(true);
+    expect(ps.hasPrivateTriples('cg-sg', entity)).toBe(false);
+
+    const retrieved = await ps.getPrivateTriples('cg-sg', entity, 'my-sub');
+    expect(retrieved.length).toBe(1);
+    expect(retrieved[0].object).toBe('"subgraph-val"');
+  });
+
+  it('deletes private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubDel';
+    await ps.storePrivateTriples('cg-del', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"x"', graph: '' },
+    ], 'sub-del');
+
+    await ps.deletePrivateTriples('cg-del', entity, 'sub-del');
+    expect(ps.hasPrivateTriples('cg-del', entity, 'sub-del')).toBe(false);
+    const remaining = await ps.getPrivateTriples('cg-del', entity, 'sub-del');
+    expect(remaining.length).toBe(0);
+  });
+
+  it('clearCache removes in-memory tracker for a context graph', async () => {
+    const entity = 'did:dkg:agent:QmCacheClear';
+    await ps.storePrivateTriples('cg-cache', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"val"', graph: '' },
+    ]);
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(true);
+
+    ps.clearCache('cg-cache');
+    // In-memory tracker cleared, but data is still in store
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(false);
+    const inStore = await ps.hasPrivateTriplesInStore('cg-cache', entity);
+    expect(inStore).toBe(true);
+  });
+
+  it('hasPrivateTriplesInStore returns false when no data exists', async () => {
+    const result = await ps.hasPrivateTriplesInStore('empty-cg', 'urn:nothing');
+    expect(result).toBe(false);
+  });
+
+  it('multiple entities can coexist in the same context graph', async () => {
+    const e1 = 'did:dkg:agent:Multi1';
+    const e2 = 'did:dkg:agent:Multi2';
+
+    await ps.storePrivateTriples('cg-multi', e1, [
+      { subject: e1, predicate: 'http://ex.org/p', object: '"v1"', graph: '' },
+    ]);
+    await ps.storePrivateTriples('cg-multi', e2, [
+      { subject: e2, predicate: 'http://ex.org/p', object: '"v2"', graph: '' },
+    ]);
+
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(true);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
+
+    await ps.deletePrivateTriples('cg-multi', e1);
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(false);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
+  });
 });

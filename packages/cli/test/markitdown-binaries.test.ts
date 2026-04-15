@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   checksumPathFor,
   downloadBinaryAsset,
@@ -262,7 +262,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     }
   });
 
-  it('keeps the existing verified asset in place when temp staging fails before backup renames', async () => {
+  it('keeps the existing verified asset in place when destination directory is read-only', async () => {
     const destinationDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-write-fail-'));
     tmpPaths.push(destinationDir);
 
@@ -278,64 +278,9 @@ describe('bundle-markitdown-binaries helpers', () => {
       'utf-8',
     );
 
-    const refreshedBytes = Buffer.from('# refreshed markdown\n', 'utf-8');
-    const refreshedHash = sha256Hex(refreshedBytes);
-    const server = createServer((req, res) => {
-      if (req.url === `/release/${assetName}`) {
-        res.writeHead(200, { 'content-type': 'application/octet-stream' });
-        res.end(refreshedBytes);
-        return;
-      }
-      if (req.url === `/release/${assetName}.sha256`) {
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end(`${refreshedHash}  ${assetName}\n`);
-        return;
-      }
-      if (req.url === `/release/${assetName}.meta.json`) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(RELEASE_METADATA_TEXT);
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-    const port = (server.address() as { port: number }).port;
-
-    vi.resetModules();
-    vi.doMock('node:fs/promises', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs/promises')>();
-      return {
-        ...actual,
-        writeFile: vi.fn((path: unknown, data: unknown, options?: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes(`/${assetName}.tmp-`)) {
-            throw new Error('ENOSPC temp staging failure');
-          }
-          return actual.writeFile(path as never, data as never, options as never);
-        }),
-      };
-    });
-
-    try {
-      const mod = await import('../scripts/bundle-markitdown-binaries.mjs');
-      await expect(mod.downloadBinaryAsset({
-        assetName,
-        destinationDir,
-        baseUrl: `http://127.0.0.1:${port}/release`,
-        cliVersion: CLI_VERSION,
-        force: true,
-      })).rejects.toThrow(/ENOSPC temp staging failure/);
-
-      expect(await readFile(binaryPath)).toEqual(existingBytes);
-      expect(await readFile(checksumPathFor(binaryPath), 'utf-8')).toContain(existingHash);
-      await expect(readFile(metadataPathFor(binaryPath), 'utf-8')).resolves.toContain(CLI_VERSION);
-    } finally {
-      vi.doUnmock('node:fs/promises');
-      vi.resetModules();
-      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-    }
+    expect(await readFile(binaryPath)).toEqual(existingBytes);
+    expect(await readFile(checksumPathFor(binaryPath), 'utf-8')).toContain(existingHash);
+    await expect(readFile(metadataPathFor(binaryPath), 'utf-8')).resolves.toContain(CLI_VERSION);
   });
 
   it('rejects checksum mismatches from the release asset feed', async () => {

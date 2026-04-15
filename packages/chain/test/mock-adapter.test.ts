@@ -403,6 +403,313 @@ describe('MockChainAdapter V9', () => {
   // V8 backward compat
   // =====================================================================
 
+  // =====================================================================
+  // resolvePublishByTxHash
+  // =====================================================================
+
+  it('resolvePublishByTxHash returns result for a known txHash', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    const publishResult = await adapter.publishKnowledgeAssets({
+      kaCount: 3,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0xdd),
+      publicByteSize: 1024n,
+      epochs: 2,
+      tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const resolved = await adapter.resolvePublishByTxHash(publishResult.txHash);
+    expect(resolved).not.toBeNull();
+    expect(resolved!.batchId).toBe(publishResult.batchId);
+    expect(resolved!.txHash).toBe(publishResult.txHash);
+    expect(resolved!.blockNumber).toBe(publishResult.blockNumber);
+    expect(resolved!.publisherAddress).toBe(MOCK_DEFAULT_SIGNER);
+  });
+
+  it('resolvePublishByTxHash returns null for unknown txHash', async () => {
+    const adapter = createAdapter();
+    const result = await adapter.resolvePublishByTxHash('0xdeadbeef');
+    expect(result).toBeNull();
+  });
+
+  // =====================================================================
+  // verifyKAUpdate
+  // =====================================================================
+
+  it('verifyKAUpdate returns verified=true for a valid update', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.batchMintKnowledgeAssets({
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      startKAId: 1n, endKAId: 3n,
+      publicByteSize: 1024n, epochs: 2, tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const newRoot = new Uint8Array(32).fill(0xfe);
+    const updateResult = await adapter.updateKnowledgeAssets({
+      batchId: 1n,
+      newMerkleRoot: newRoot,
+      newPublicByteSize: 2048n,
+    });
+
+    const verification = await adapter.verifyKAUpdate(updateResult.hash, 1n, MOCK_DEFAULT_SIGNER);
+    expect(verification.verified).toBe(true);
+    expect(verification.onChainMerkleRoot).toEqual(newRoot);
+    expect(verification.blockNumber).toBeGreaterThan(0);
+  });
+
+  it('verifyKAUpdate returns verified=false for unknown txHash', async () => {
+    const adapter = createAdapter();
+    const verification = await adapter.verifyKAUpdate('0xbad', 1n, MOCK_DEFAULT_SIGNER);
+    expect(verification.verified).toBe(false);
+  });
+
+  it('verifyKAUpdate returns verified=false for wrong publisher address', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.batchMintKnowledgeAssets({
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0x01),
+      startKAId: 1n, endKAId: 3n,
+      publicByteSize: 1024n, epochs: 2, tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+    });
+
+    const updateResult = await adapter.updateKnowledgeAssets({
+      batchId: 1n,
+      newMerkleRoot: new Uint8Array(32).fill(0xfe),
+      newPublicByteSize: 2048n,
+    });
+
+    const verification = await adapter.verifyKAUpdate(updateResult.hash, 1n, '0x' + '9'.repeat(40));
+    expect(verification.verified).toBe(false);
+  });
+
+  // =====================================================================
+  // publishToContextGraph
+  // =====================================================================
+
+  it('publishToContextGraph publishes and adds batch to context graph', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.createOnChainContextGraph!({
+      participantIdentityIds: [1n, 2n],
+      requiredSignatures: 1,
+    });
+
+    const result = await adapter.publishToContextGraph!({
+      contextGraphId: 1n,
+      kaCount: 3,
+      publisherNodeIdentityId: 1n,
+      merkleRoot: new Uint8Array(32).fill(0xcc),
+      publicByteSize: 1024n,
+      epochs: 2,
+      tokenAmount: 0n,
+      publisherSignature: sig,
+      receiverSignatures: [{ identityId: 2n, ...sig }],
+      participantSignatures: [{ identityId: 1n, ...sig }],
+    });
+
+    expect(result.batchId).toBeDefined();
+    expect(result.txHash).toMatch(/^0x/);
+
+    const cg = adapter.getContextGraph!(1n);
+    expect(cg!.batches).toContain(result.batchId);
+  });
+
+  it('publishToContextGraph rejects insufficient participant signatures', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await adapter.createOnChainContextGraph!({
+      participantIdentityIds: [1n, 2n],
+      requiredSignatures: 2,
+    });
+
+    await expect(
+      adapter.publishToContextGraph!({
+        contextGraphId: 1n,
+        kaCount: 1,
+        publisherNodeIdentityId: 1n,
+        merkleRoot: new Uint8Array(32).fill(0xcc),
+        publicByteSize: 512n,
+        epochs: 1,
+        tokenAmount: 0n,
+        publisherSignature: sig,
+        receiverSignatures: [{ identityId: 2n, ...sig }],
+        participantSignatures: [{ identityId: 1n, ...sig }],
+      }),
+    ).rejects.toThrow(/Not enough participant signatures/);
+  });
+
+  it('publishToContextGraph rejects inactive context graph', async () => {
+    const adapter = createAdapter();
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await expect(
+      adapter.publishToContextGraph!({
+        contextGraphId: 999n,
+        kaCount: 1,
+        publisherNodeIdentityId: 1n,
+        merkleRoot: new Uint8Array(32).fill(0xcc),
+        publicByteSize: 512n,
+        epochs: 1,
+        tokenAmount: 0n,
+        publisherSignature: sig,
+        receiverSignatures: [{ identityId: 2n, ...sig }],
+        participantSignatures: [],
+      }),
+    ).rejects.toThrow(/not found or inactive/);
+  });
+
+  // =====================================================================
+  // publishKnowledgeAssets — MinSignaturesRequirementNotMet
+  // =====================================================================
+
+  it('publishKnowledgeAssets rejects when receiver signatures are fewer than minimum', async () => {
+    const adapter = createAdapter();
+    adapter.minimumRequiredSignatures = 3;
+    const sig = { r: new Uint8Array(32), vs: new Uint8Array(32) };
+
+    await expect(
+      adapter.publishKnowledgeAssets({
+        kaCount: 1,
+        publisherNodeIdentityId: 1n,
+        merkleRoot: new Uint8Array(32).fill(0xcc),
+        publicByteSize: 512n,
+        epochs: 1,
+        tokenAmount: 0n,
+        publisherSignature: sig,
+        receiverSignatures: [{ identityId: 2n, ...sig }],
+      }),
+    ).rejects.toThrow('MinSignaturesRequirementNotMet');
+  });
+
+  // =====================================================================
+  // Conviction accounts
+  // =====================================================================
+
+  it('creates conviction account and returns info', async () => {
+    const adapter = createAdapter();
+    const { accountId } = await adapter.createConvictionAccount!(100n, 6);
+    expect(accountId).toBe(1n);
+
+    const info = await adapter.getConvictionAccountInfo!(accountId);
+    expect(info).not.toBeNull();
+    expect(info!.balance).toBe(100n);
+    expect(info!.lockEpochs).toBe(6);
+    expect(info!.conviction).toBe(600n);
+  });
+
+  it('addConvictionFunds increases balance', async () => {
+    const adapter = createAdapter();
+    const { accountId } = await adapter.createConvictionAccount!(100n, 3);
+    await adapter.addConvictionFunds!(accountId, 50n);
+    const info = await adapter.getConvictionAccountInfo!(accountId);
+    expect(info!.balance).toBe(150n);
+  });
+
+  it('extendConvictionLock increases lock epochs and recalculates conviction', async () => {
+    const adapter = createAdapter();
+    const { accountId } = await adapter.createConvictionAccount!(100n, 3);
+    await adapter.extendConvictionLock!(accountId, 3);
+    const info = await adapter.getConvictionAccountInfo!(accountId);
+    expect(info!.lockEpochs).toBe(6);
+    expect(info!.conviction).toBe(600n);
+  });
+
+  // =====================================================================
+  // FairSwap lifecycle
+  // =====================================================================
+
+  it('FairSwap purchase lifecycle: initiate → fulfill → revealKey → claimPayment', async () => {
+    const adapter = createAdapter();
+    const seller = '0x' + '5'.repeat(40);
+    const { purchaseId } = await adapter.initiatePurchase!(seller, 1n, 1n, 100n);
+    expect(purchaseId).toBe(1n);
+
+    await adapter.fulfillPurchase!(purchaseId, new Uint8Array(32), new Uint8Array(32));
+    await adapter.revealKey!(purchaseId, new Uint8Array(32));
+
+    const claimResult = await adapter.claimPayment!(purchaseId);
+    expect(claimResult.success).toBe(true);
+
+    const info = await adapter.getFairSwapPurchase!(purchaseId);
+    expect(info!.state).toBe(4);
+  });
+
+  it('FairSwap claimRefund works on initiated purchase', async () => {
+    const adapter = createAdapter();
+    const { purchaseId } = await adapter.initiatePurchase!('0x' + '5'.repeat(40), 1n, 1n, 100n);
+    const result = await adapter.claimRefund!(purchaseId);
+    expect(result.success).toBe(true);
+  });
+
+  it('getFairSwapPurchase returns null for unknown purchase', async () => {
+    const adapter = createAdapter();
+    const info = await adapter.getFairSwapPurchase!(999n);
+    expect(info).toBeNull();
+  });
+
+  // =====================================================================
+  // getContextGraphParticipants
+  // =====================================================================
+
+  it('getContextGraphParticipants returns participant IDs', async () => {
+    const adapter = createAdapter();
+    await adapter.createOnChainContextGraph!({
+      participantIdentityIds: [1n, 2n, 3n],
+      requiredSignatures: 2,
+    });
+    const participants = await adapter.getContextGraphParticipants!(1n);
+    expect(participants).toEqual([1n, 2n, 3n]);
+  });
+
+  it('getContextGraphParticipants returns null for unknown graph', async () => {
+    const adapter = createAdapter();
+    const result = await adapter.getContextGraphParticipants!(999n);
+    expect(result).toBeNull();
+  });
+
+  // =====================================================================
+  // createOnChainContextGraph validation
+  // =====================================================================
+
+  it('createOnChainContextGraph rejects requiredSignatures < 1', async () => {
+    const adapter = createAdapter();
+    await expect(
+      adapter.createOnChainContextGraph!({
+        participantIdentityIds: [1n],
+        requiredSignatures: 0,
+      }),
+    ).rejects.toThrow(/requiredSignatures must be >= 1/);
+  });
+
+  it('createOnChainContextGraph rejects unsorted participant IDs', async () => {
+    const adapter = createAdapter();
+    await expect(
+      adapter.createOnChainContextGraph!({
+        participantIdentityIds: [3n, 1n],
+        requiredSignatures: 1,
+      }),
+    ).rejects.toThrow(/strictly increasing/);
+  });
+
+  // =====================================================================
+  // V8 backward compat
+  // =====================================================================
+
   it('createKnowledgeCollection still works (V8 compat)', async () => {
     const adapter = createAdapter();
     const result = await adapter.createKnowledgeCollection({

@@ -1,5 +1,5 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`computeNetworkId > matches a known golden value to detect accidental genesis changes 1`] = `"6f63f485c6cce67e677f7844ec835024c6d97f13fe8cacaf0ceedfd3ad658510"`;
+exports[`computeNetworkId > matches a known golden value to detect accidental genesis changes 1`] = `"f81f9df2e9604fcaa0aaeb34d07171434199d2bc70d9f35680614453300d9b9d"`;
 
-exports[`getGenesisQuads > genesis content integrity check — hash detects any modification 1`] = `"84515c9e8f1f518e130d407640a998e386347aec2046c438a64644e5064e5632"`;
+exports[`getGenesisQuads > genesis content integrity check — hash detects any modification 1`] = `"55feb41d1c21067170ec030ac60f7b7fd386fa69a38f6af6750e55a7abe20156"`;

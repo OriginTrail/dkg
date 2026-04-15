@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -214,15 +214,33 @@ describe('Agent hub shell surfaces', () => {
   });
 });
 
+interface FetchCall { url: string; opts?: RequestInit }
+
+function createTrackingFetch(responses: Array<{ ok: boolean; json: () => Promise<unknown>; headers?: { get: (k: string) => string | null }; body?: any }>): { fetch: typeof globalThis.fetch; calls: FetchCall[] } {
+  const calls: FetchCall[] = [];
+  let idx = 0;
+  const fn = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), opts: init });
+    const resp = responses[Math.min(idx++, responses.length - 1)];
+    return {
+      ok: resp.ok,
+      status: resp.ok ? 200 : 500,
+      json: resp.json,
+      headers: resp.headers ?? { get: () => null },
+      body: resp.body ?? null,
+    } as unknown as Response;
+  };
+  return { fetch: fn as typeof globalThis.fetch, calls };
+}
+
 describe('OpenClaw bridge behavioral tests', () => {
   beforeEach(() => {
     (globalThis as any).window = { __DKG_TOKEN__: undefined };
     (globalThis as any).localStorage = {
-      getItem: vi.fn(() => null),
-      setItem: vi.fn(),
-      removeItem: vi.fn(),
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
     };
-    vi.resetModules();
   });
 
   afterEach(() => {
@@ -234,18 +252,16 @@ describe('OpenClaw bridge behavioral tests', () => {
     const mockAgents = [
       { peerId: '12D3abc', name: 'TestClaw', framework: 'OpenClaw', connected: true, lastSeen: Date.now(), latencyMs: 42 },
     ];
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ agents: mockAgents }),
-    });
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => ({ agents: mockAgents }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchOpenClawAgents } = await import('../src/ui/api.js');
       const result = await fetchOpenClawAgents();
-      expect(fakeFetch).toHaveBeenCalledTimes(1);
-      const calledUrl = fakeFetch.mock.calls[0][0] as string;
-      expect(calledUrl).toContain('/api/openclaw-agents');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/api/openclaw-agents');
       expect(result.agents).toEqual(mockAgents);
     } finally {
       globalThis.fetch = original;
@@ -254,20 +270,18 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles delivered + reply', async () => {
     const fakeResponse = { delivered: true, reply: 'Hello from OpenClaw!', timedOut: false, waitMs: 120 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
-      expect(fakeFetch).toHaveBeenCalledTimes(1);
-      const [url, opts] = fakeFetch.mock.calls[0];
-      expect(url).toContain('/api/chat-openclaw');
-      expect(opts.method).toBe('POST');
-      expect(JSON.parse(opts.body)).toEqual({ peerId: '12D3abc', text: 'hello' });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toContain('/api/chat-openclaw');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({ peerId: '12D3abc', text: 'hello' });
       expect(result.delivered).toBe(true);
       expect(result.reply).toBe('Hello from OpenClaw!');
       expect(result.timedOut).toBe(false);
@@ -278,12 +292,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles delivered + timeout (no reply)', async () => {
     const fakeResponse = { delivered: true, reply: null, timedOut: true, waitMs: 30000 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -297,12 +310,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles not-delivered response', async () => {
     const fakeResponse = { delivered: false, reply: null, timedOut: false, error: 'Agent offline' };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -317,12 +329,11 @@ describe('OpenClaw bridge behavioral tests', () => {
 
   it('sendOpenClawChat handles empty-string reply (not treated as no reply)', async () => {
     const fakeResponse = { delivered: true, reply: '', timedOut: false, waitMs: 50 };
-    const fakeFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fakeResponse,
-    });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => fakeResponse },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { sendOpenClawChat } = await import('../src/ui/api.js');
       const result = await sendOpenClawChat('12D3abc', 'hello');
@@ -391,7 +402,7 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('fetchOpenClawLocalHistory requests the newest turns from /api/memory/sessions/:sessionId and normalizes them back to chronological order for chat display', async () => {
-    const fakeFetch = vi.fn().mockResolvedValue({
+    const { fetch, calls } = createTrackingFetch([{
       ok: true,
       json: async () => ({
         session: 'openclaw:dkg-ui',
@@ -401,16 +412,15 @@ describe('OpenClaw bridge behavioral tests', () => {
           { uri: 'urn:dkg:chat:msg:user-1', text: 'first', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
         ],
       }),
-    });
+    }]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchOpenClawLocalHistory } = await import('../src/ui/api.js');
       const history = await fetchOpenClawLocalHistory(3);
-      const [url] = fakeFetch.mock.calls[0];
-      expect(String(url)).toContain('/api/memory/sessions/openclaw%3Adkg-ui');
-      expect(String(url)).toContain('limit=3');
-      expect(String(url)).toContain('order=desc');
+      expect(calls[0].url).toContain('/api/memory/sessions/openclaw%3Adkg-ui');
+      expect(calls[0].url).toContain('limit=3');
+      expect(calls[0].url).toContain('order=desc');
       expect(history.map((row: any) => row.text)).toEqual(['first', 'second', 'third']);
       expect(history[0].turnId).toBe('turn-1');
     } finally {
@@ -477,7 +487,7 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('fetchLocalAgentHistory uses the selected sessionId and latest-first session query when reopening a non-default OpenClaw thread, while returning chronological rows', async () => {
-    const fakeFetch = vi.fn().mockResolvedValue({
+    const { fetch, calls } = createTrackingFetch([{
       ok: true,
       json: async () => ({
         session: 'openclaw:dkg-ui:worker-1',
@@ -486,18 +496,17 @@ describe('OpenClaw bridge behavioral tests', () => {
           { uri: 'urn:dkg:chat:msg:worker-user-1', text: 'worker hello', author: 'user', ts: '2026-03-11T10:00:00Z', turnId: 'turn-1' },
         ],
       }),
-    });
+    }]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchLocalAgentHistory } = await import('../src/ui/api.js');
       const history = await fetchLocalAgentHistory('openclaw', 10, {
         sessionId: 'openclaw:dkg-ui:worker-1',
       });
-      const [url] = fakeFetch.mock.calls[0];
-      expect(String(url)).toContain('/api/memory/sessions/openclaw%3Adkg-ui%3Aworker-1');
-      expect(String(url)).toContain('limit=10');
-      expect(String(url)).toContain('order=desc');
+      expect(calls[0].url).toContain('/api/memory/sessions/openclaw%3Adkg-ui%3Aworker-1');
+      expect(calls[0].url).toContain('limit=10');
+      expect(calls[0].url).toContain('order=desc');
       expect(history).toHaveLength(2);
       expect(history[0].text).toBe('worker hello');
       expect(history[1].text).toBe('worker reply');
@@ -522,17 +531,12 @@ describe('OpenClaw bridge behavioral tests', () => {
         { uri: 'urn:dkg:chat:msg:user-older', text: 'older context', author: 'user', ts: '2026-03-11T09:59:00Z' },
       ],
     };
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => firstWindow,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => shiftedWindow,
-      });
+    const { fetch } = createTrackingFetch([
+      { ok: true, json: async () => firstWindow },
+      { ok: true, json: async () => shiftedWindow },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchLocalAgentHistory } = await import('../src/ui/api.js');
       const firstHistory = await fetchLocalAgentHistory('openclaw', 2);
@@ -547,21 +551,20 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('streamLocalAgentChat forwards the non-default OpenClaw identity so follow-up sends stay on the selected session', async () => {
-    const fakeFetch = vi.fn().mockResolvedValue({
+    const { fetch, calls } = createTrackingFetch([{
       ok: true,
       headers: { get: () => 'application/json' },
       body: null,
       json: async () => ({ text: 'reply', correlationId: 'corr-1' }),
-    });
+    }]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { streamLocalAgentChat } = await import('../src/ui/api.js');
       await streamLocalAgentChat('openclaw', 'hello', {
         sessionId: 'openclaw:dkg-ui:background-worker',
       });
-      const [, opts] = fakeFetch.mock.calls[0];
-      const body = JSON.parse(opts.body);
+      const body = JSON.parse(calls[0].opts?.body as string);
       expect(body.identity).toBe('background-worker');
       expect(body.correlationId).toBeTruthy();
     } finally {
@@ -570,8 +573,8 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('fetchLocalAgentIntegrations maps OpenClaw readiness and Hermes placeholder state', async () => {
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
+    const { fetch } = createTrackingFetch([
+      {
         ok: true,
         json: async () => ({
           integrations: [
@@ -591,13 +594,11 @@ describe('OpenClaw bridge behavioral tests', () => {
             },
           ],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ok: true, target: 'gateway' }),
-      });
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'gateway' }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
       const result = await fetchLocalAgentIntegrations();
@@ -616,8 +617,8 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('fetchLocalAgentIntegrations keeps OpenClaw in connecting state until the bridge is ready', async () => {
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
+    const { fetch } = createTrackingFetch([
+      {
         ok: true,
         json: async () => ({
           integrations: [
@@ -631,13 +632,11 @@ describe('OpenClaw bridge behavioral tests', () => {
             },
           ],
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ok: false, error: 'still booting' }),
-      });
+      },
+      { ok: true, json: async () => ({ ok: false, error: 'still booting' }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
       const result = await fetchLocalAgentIntegrations();
@@ -656,24 +655,23 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('fetchLocalAgentIntegrations does not treat a failed unattached OpenClaw record as a persistent chat tab', async () => {
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          integrations: [
-            {
-              id: 'openclaw',
-              name: 'OpenClaw',
-              description: 'OpenClaw framework adapter',
-              enabled: false,
-              capabilities: { localChat: true, connectFromUi: true },
-              runtime: { status: 'error', lastError: 'setup failed' },
-            },
-          ],
-        }),
-      });
+    const { fetch, calls } = createTrackingFetch([{
+      ok: true,
+      json: async () => ({
+        integrations: [
+          {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: false,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'error', lastError: 'setup failed' },
+          },
+        ],
+      }),
+    }]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
       const result = await fetchLocalAgentIntegrations();
@@ -685,7 +683,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         statusLabel: 'Ready to connect',
         detail: 'setup failed',
       });
-      expect(fakeFetch).toHaveBeenCalledTimes(1);
+      expect(calls).toHaveLength(1);
     } finally {
       globalThis.fetch = original;
     }
@@ -1083,8 +1081,8 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('connectLocalAgentIntegration returns the refreshed OpenClaw integration plus daemon notice', async () => {
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
+    const { fetch, calls } = createTrackingFetch([
+      {
         ok: true,
         json: async () => ({
           ok: true,
@@ -1099,36 +1097,31 @@ describe('OpenClaw bridge behavioral tests', () => {
             transport: { bridgeUrl: 'http://127.0.0.1:9201' },
           },
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ok: true, target: 'bridge' }),
-      });
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'bridge' }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
       const result = await connectLocalAgentIntegration('openclaw');
-      const [registerUrl, registerOpts] = fakeFetch.mock.calls[0];
-      expect(String(registerUrl)).toContain('/api/local-agent-integrations/connect');
-      expect(registerOpts.method).toBe('POST');
-      expect(JSON.parse(registerOpts.body)).toEqual({
+      expect(calls[0].url).toContain('/api/local-agent-integrations/connect');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({
         id: 'openclaw',
-        metadata: {
-          source: 'node-ui',
-        },
+        metadata: { source: 'node-ui' },
       });
       expect(result.integration.chatReady).toBe(true);
       expect(result.notice).toBe('OpenClaw is connected and chat-ready.');
-      expect(fakeFetch).toHaveBeenCalledTimes(2);
+      expect(calls).toHaveLength(2);
     } finally {
       globalThis.fetch = original;
     }
   });
 
   it('connectLocalAgentIntegration does not require a second integrations fetch when the daemon already returns the connected record', async () => {
-    const fakeFetch = vi.fn()
-      .mockResolvedValueOnce({
+    const { fetch, calls } = createTrackingFetch([
+      {
         ok: true,
         json: async () => ({
           ok: true,
@@ -1143,13 +1136,11 @@ describe('OpenClaw bridge behavioral tests', () => {
             transport: { bridgeUrl: 'http://127.0.0.1:9201' },
           },
         }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ ok: false, error: 'still booting' }),
-      });
+      },
+      { ok: true, json: async () => ({ ok: false, error: 'still booting' }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { connectLocalAgentIntegration } = await import('../src/ui/api.js');
       const result = await connectLocalAgentIntegration('openclaw');
@@ -1159,28 +1150,26 @@ describe('OpenClaw bridge behavioral tests', () => {
         chatReady: false,
         status: 'connecting',
       });
-      expect(fakeFetch).toHaveBeenCalledTimes(2);
-      expect(String(fakeFetch.mock.calls[0][0])).toContain('/api/local-agent-integrations/connect');
-      expect(String(fakeFetch.mock.calls[1][0])).toContain('/api/openclaw-channel/health');
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toContain('/api/local-agent-integrations/connect');
+      expect(calls[1].url).toContain('/api/openclaw-channel/health');
     } finally {
       globalThis.fetch = original;
     }
   });
 
   it('disconnectLocalAgentIntegration disables the stored integration without deleting the registry record', async () => {
-    const fakeFetch = vi.fn().mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ ok: true }),
-    });
+    const { fetch, calls } = createTrackingFetch([
+      { ok: true, json: async () => ({ ok: true }) },
+    ]);
     const original = globalThis.fetch;
-    globalThis.fetch = fakeFetch;
+    globalThis.fetch = fetch;
     try {
       const { disconnectLocalAgentIntegration } = await import('../src/ui/api.js');
       await disconnectLocalAgentIntegration('openclaw');
-      const [url, opts] = fakeFetch.mock.calls[0];
-      expect(String(url)).toContain('/api/local-agent-integrations/openclaw');
-      expect(opts.method).toBe('PUT');
-      expect(JSON.parse(opts.body)).toEqual({
+      expect(calls[0].url).toContain('/api/local-agent-integrations/openclaw');
+      expect(calls[0].opts?.method).toBe('PUT');
+      expect(JSON.parse(calls[0].opts?.body as string)).toEqual({
         enabled: false,
         runtime: {
           status: 'disconnected',

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 as computeFlatKCRoot, computeFlatKCRootV10, computeTripleHashV10 } from '../src/merkle.js';
@@ -84,14 +84,14 @@ describe('V10 Publish E2E', () => {
     const merkleRoot = computeFlatKCRoot(publishQuads, []);
     const rootEntities = ['urn:experiment:wsd'];
 
-    const mockStore = {
-      insert: vi.fn(),
-      delete: vi.fn(),
-      deleteByPattern: vi.fn(),
-      hasGraph: vi.fn().mockResolvedValue(true),
-      createGraph: vi.fn(),
-      dropGraph: vi.fn(),
-      query: vi.fn().mockImplementation((sparql: string) => {
+    const store = {
+      insert: async () => {},
+      delete: async () => {},
+      deleteByPattern: async () => {},
+      hasGraph: async () => true,
+      createGraph: async () => {},
+      dropGraph: async () => {},
+      query: async (sparql: string) => {
         const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
         if (entityMatch) {
           const entity = entityMatch[1];
@@ -99,14 +99,15 @@ describe('V10 Publish E2E', () => {
           const filtered = publishQuads.filter(q =>
             q.subject === entity || q.subject.startsWith(genidPrefix),
           );
-          return Promise.resolve({ type: 'quads' as const, quads: filtered });
+          return { type: 'quads' as const, quads: filtered };
         }
-        return Promise.resolve({ type: 'quads' as const, quads: publishQuads });
-      }),
-      close: vi.fn(),
+        return { type: 'quads' as const, quads: publishQuads };
+      },
+      close: async () => {},
     };
 
-    // Create 3 StorageACK handlers (one per core node)
+    const noopBus = { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
+
     const handlers = coreWallets.map((wallet, idx) => {
       const config: StorageACKHandlerConfig = {
         nodeRole: 'core',
@@ -115,18 +116,11 @@ describe('V10 Publish E2E', () => {
         contextGraphSharedMemoryUri: (cgId: string) =>
           `did:dkg:context-graph:${cgId}/_shared_memory`,
       };
-      const eventBus = {
-        emit: vi.fn(),
-        on: vi.fn(),
-        off: vi.fn(),
-        once: vi.fn(),
-      };
-      return new StorageACKHandler(mockStore as any, config, eventBus as any);
+      return new StorageACKHandler(store as any, config, noopBus as any);
     });
 
-    // Create ACKCollector that calls handlers directly (simulating P2P)
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async (peerId, _protocol, data) => {
         const idx = parseInt(peerId.replace('core-', ''), 10);
         const handler = handlers[idx];
@@ -134,7 +128,7 @@ describe('V10 Publish E2E', () => {
         return handler.handler(data, fakePeerId);
       },
       getConnectedCorePeers: () => ['core-0', 'core-1', 'core-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);

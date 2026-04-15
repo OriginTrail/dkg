@@ -34,10 +34,13 @@ export interface EncryptedKeystore {
   id: string;
 }
 
-const SCRYPT_N = 2 ** 18;
+let SCRYPT_N = 2 ** 18;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const DKLEN = 32;
+
+/** @internal Allow tests to use lighter scrypt params to avoid memory limits */
+export function _setScryptN(n: number) { SCRYPT_N = n; }
 
 function deriveKey(passphrase: string, salt: Buffer): Buffer {
   return scryptSync(passphrase, salt, DKLEN, {

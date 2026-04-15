@@ -71,6 +71,7 @@
     "@types/n3": "^1.26.1",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@vitest/coverage-v8": "^4.0.18",
     "3d-force-graph": "^1.79.1",
     "three": "^0.182.0",
     "tsup": "^8.4.0",

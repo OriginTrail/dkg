@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   encodePublishRequest,
   DKG_ONTOLOGY,
@@ -71,7 +71,8 @@ describe('GossipPublishHandler', () => {
 
   it('ignores empty broadcast with no UAL', async () => {
     const { store, handler } = createHandler();
-    const insertSpy = vi.spyOn(store, 'insert');
+
+    const countBefore = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
 
     const data = encodePublishRequest({
       ual: '',
@@ -89,12 +90,14 @@ describe('GossipPublishHandler', () => {
 
     await handler.handlePublishMessage(data, PARANET);
 
-    expect(insertSpy).not.toHaveBeenCalled();
+    const countAfter = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    expect(countAfter).toBe(countBefore);
   });
 
   it('rejects gossip when contextGraphId mismatches topic', async () => {
     const { store, handler } = createHandler();
-    const insertSpy = vi.spyOn(store, 'insert');
+
+    const countBefore = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
 
     const data = makePublishMessage({
       contextGraphId: 'wrong-paranet',
@@ -103,7 +106,8 @@ describe('GossipPublishHandler', () => {
 
     await handler.handlePublishMessage(data, PARANET);
 
-    expect(insertSpy).not.toHaveBeenCalled();
+    const countAfter = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    expect(countAfter).toBe(countBefore);
   });
 
   it('handles duplicate gossip replay (same UAL) without breaking', async () => {

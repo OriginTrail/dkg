@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,15 +7,36 @@ import { NS, Class, Prop, Status } from '../src/ontology.js';
 import type { DkgClientLike } from '../src/types.js';
 
 // ---------------------------------------------------------------------------
+// Tracking function helper
+// ---------------------------------------------------------------------------
+
+interface TrackingFn<T> {
+  (...args: unknown[]): Promise<T>;
+  calls: unknown[][];
+  resetCalls(): void;
+}
+
+function trackingAsyncFn<T>(impl: (...args: unknown[]) => T | Promise<T>): TrackingFn<T> {
+  const calls: unknown[][] = [];
+  const fn = (async (...args: unknown[]) => {
+    calls.push(args);
+    return impl(...args);
+  }) as TrackingFn<T>;
+  fn.calls = calls;
+  fn.resetCalls = () => { calls.length = 0; };
+  return fn;
+}
+
+// ---------------------------------------------------------------------------
 // Mock DKG client
 // ---------------------------------------------------------------------------
 
 function createMockClient(overrides: Partial<DkgClientLike> = {}): DkgClientLike {
   return {
-    query: vi.fn().mockResolvedValue({ result: { bindings: [] } }),
-    publish: vi.fn().mockResolvedValue({ kcId: 'kc-test-001', status: 'confirmed' }),
-    createContextGraph: vi.fn().mockResolvedValue({ created: 'autoresearch', uri: 'urn:context-graph:autoresearch' }),
-    subscribe: vi.fn().mockResolvedValue({ subscribed: 'autoresearch' }),
+    query: trackingAsyncFn(async () => ({ result: { bindings: [] } })),
+    publish: trackingAsyncFn(async () => ({ kcId: 'kc-test-001', status: 'confirmed' })),
+    createContextGraph: trackingAsyncFn(async () => ({ created: 'autoresearch', uri: 'urn:context-graph:autoresearch' })),
+    subscribe: trackingAsyncFn(async () => ({ subscribed: 'autoresearch' })),
     ...overrides,
   };
 }
@@ -92,17 +113,17 @@ describe('autoresearch_setup', () => {
 
     expect(text).toContain('autoresearch');
     expect(text).toContain('subscribed');
-    expect(mock.createContextGraph).toHaveBeenCalledWith(
+    expect((mock.createContextGraph as TrackingFn<unknown>).calls[0]).toEqual([
       'autoresearch',
       'Autoresearch',
       expect.any(String),
-    );
-    expect(mock.subscribe).toHaveBeenCalledWith('autoresearch');
+    ]);
+    expect((mock.subscribe as TrackingFn<unknown>).calls[0]).toEqual(['autoresearch']);
   });
 
   it('handles context graph already existing gracefully', async () => {
     const mock = createMockClient({
-      createContextGraph: vi.fn().mockRejectedValue(new Error('already exists')),
+      createContextGraph: trackingAsyncFn(async () => { throw new Error('already exists'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -110,12 +131,12 @@ describe('autoresearch_setup', () => {
     const text = getText(result);
 
     expect(text).toContain('ready');
-    expect(mock.subscribe).toHaveBeenCalled();
+    expect((mock.subscribe as TrackingFn<unknown>).calls.length).toBeGreaterThan(0);
   });
 
   it('returns error when subscribe fails', async () => {
     const mock = createMockClient({
-      subscribe: vi.fn().mockRejectedValue(new Error('network down')),
+      subscribe: trackingAsyncFn(async () => { throw new Error('network down'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -159,8 +180,9 @@ describe('autoresearch_publish_experiment', () => {
       arguments: baseArgs,
     });
 
-    expect(mock.publish).toHaveBeenCalledTimes(1);
-    const [contextGraphId, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+    const publishCalls = (mock.publish as TrackingFn<unknown>).calls;
+    expect(publishCalls).toHaveLength(1);
+    const [contextGraphId, quads] = publishCalls[0] as [string, any[]];
     expect(contextGraphId).toBe('autoresearch');
 
     const types = quads.filter((q: any) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
@@ -204,7 +226,7 @@ describe('autoresearch_publish_experiment', () => {
       },
     });
 
-    const [, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [, quads] = (mock.publish as TrackingFn<unknown>).calls[0] as [string, any[]];
 
     expect(quads.find((q: any) => q.predicate === Prop.commitHash)).toBeDefined();
     expect(quads.find((q: any) => q.predicate === Prop.platform)).toBeDefined();
@@ -229,7 +251,7 @@ describe('autoresearch_publish_experiment', () => {
       arguments: baseArgs,
     });
 
-    const [, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [, quads] = (mock.publish as TrackingFn<unknown>).calls[0] as [string, any[]];
 
     expect(quads.find((q: any) => q.predicate === Prop.commitHash)).toBeUndefined();
     expect(quads.find((q: any) => q.predicate === Prop.platform)).toBeUndefined();
@@ -245,14 +267,14 @@ describe('autoresearch_publish_experiment', () => {
       ['discard', Status.Discard],
       ['crash', Status.Crash],
     ] as const) {
-      vi.mocked(mock.publish).mockClear();
+      (mock.publish as TrackingFn<unknown>).resetCalls();
 
       await mcpClient.callTool({
         name: 'autoresearch_publish_experiment',
         arguments: { ...baseArgs, status: statusStr },
       });
 
-      const [, quads] = (mock.publish as ReturnType<typeof vi.fn>).mock.calls[0];
+      const [, quads] = (mock.publish as TrackingFn<unknown>).calls[0] as [string, any[]];
       const statusQuad = quads.find((q: any) => q.predicate === Prop.status);
       expect(statusQuad.object).toBe(expectedUri);
     }
@@ -260,7 +282,7 @@ describe('autoresearch_publish_experiment', () => {
 
   it('returns error when publish fails', async () => {
     const mock = createMockClient({
-      publish: vi.fn().mockRejectedValue(new Error('DKG daemon not running')),
+      publish: trackingAsyncFn(async () => { throw new Error('DKG daemon not running'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -288,7 +310,7 @@ describe('autoresearch_best_results', () => {
 
   it('formats results when experiments exist', async () => {
     const mock = createMockClient({
-      query: vi.fn().mockResolvedValue({
+      query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
             {
@@ -302,7 +324,7 @@ describe('autoresearch_best_results', () => {
             },
           ],
         },
-      }),
+      })),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -327,8 +349,9 @@ describe('autoresearch_best_results', () => {
       arguments: { limit: 5 },
     });
 
-    expect(mock.query).toHaveBeenCalledTimes(1);
-    const [sparql, contextGraphId] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    const queryCalls = (mock.query as TrackingFn<unknown>).calls;
+    expect(queryCalls).toHaveLength(1);
+    const [sparql, contextGraphId] = queryCalls[0] as [string, string];
     expect(contextGraphId).toBe('autoresearch');
     expect(sparql).toContain(Class.Experiment);
     expect(sparql).toContain('ORDER BY ASC(?valBpb)');
@@ -357,7 +380,7 @@ describe('autoresearch_experiment_history', () => {
       arguments: { run_tag: 'mar8' },
     });
 
-    const [sparql] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [sparql] = (mock.query as TrackingFn<unknown>).calls[0] as [string];
     expect(sparql).toContain(Prop.runTag);
     expect(sparql).toContain('mar8');
   });
@@ -371,14 +394,14 @@ describe('autoresearch_experiment_history', () => {
       arguments: { agent_did: 'did:dkg:agent-7' },
     });
 
-    const [sparql] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [sparql] = (mock.query as TrackingFn<unknown>).calls[0] as [string];
     expect(sparql).toContain(Prop.agentDid);
     expect(sparql).toContain('did:dkg:agent-7');
   });
 
   it('returns table-formatted results', async () => {
     const mock = createMockClient({
-      query: vi.fn().mockResolvedValue({
+      query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
             {
@@ -401,7 +424,7 @@ describe('autoresearch_experiment_history', () => {
             },
           ],
         },
-      }),
+      })),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -439,14 +462,14 @@ describe('autoresearch_insights', () => {
       arguments: { keyword: 'learning rate' },
     });
 
-    const [sparql] = (mock.query as ReturnType<typeof vi.fn>).mock.calls[0];
+    const [sparql] = (mock.query as TrackingFn<unknown>).calls[0] as [string];
     expect(sparql).toContain('FILTER(CONTAINS(LCASE(?desc)');
     expect(sparql).toContain('learning rate');
   });
 
   it('shows summary with keep/discard/crash counts', async () => {
     const mock = createMockClient({
-      query: vi.fn().mockResolvedValue({
+      query: trackingAsyncFn(async () => ({
         result: {
           bindings: [
             { exp: 'urn:1', valBpb: '"0.98"', status: `${NS}keep`, desc: '"LR 0.06"' },
@@ -454,7 +477,7 @@ describe('autoresearch_insights', () => {
             { exp: 'urn:3', valBpb: '"0.00"', status: `${NS}crash`, desc: '"LR 1.0 OOM"' },
           ],
         },
-      }),
+      })),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -474,11 +497,11 @@ describe('autoresearch_insights', () => {
 describe('autoresearch_query', () => {
   it('passes raw SPARQL to client', async () => {
     const mock = createMockClient({
-      query: vi.fn().mockResolvedValue({
+      query: trackingAsyncFn(async () => ({
         result: {
           bindings: [{ avg: '"0.9856"' }],
         },
-      }),
+      })),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -488,7 +511,7 @@ describe('autoresearch_query', () => {
       arguments: { sparql },
     });
 
-    expect(mock.query).toHaveBeenCalledWith(sparql, 'autoresearch');
+    expect((mock.query as TrackingFn<unknown>).calls[0]).toEqual([sparql, 'autoresearch']);
     expect(getText(result)).toContain('0.9856');
   });
 
@@ -505,7 +528,7 @@ describe('autoresearch_query', () => {
 
   it('returns error on query failure', async () => {
     const mock = createMockClient({
-      query: vi.fn().mockRejectedValue(new Error('SPARQL syntax error')),
+      query: trackingAsyncFn(async () => { throw new Error('SPARQL syntax error'); }),
     });
     const { mcpClient } = await createTestHarness(mock);
 
@@ -532,11 +555,11 @@ describe('custom context graph', () => {
 
     await mcpClient.callTool({ name: 'autoresearch_setup', arguments: {} });
 
-    expect(mock.createContextGraph).toHaveBeenCalledWith(
+    expect((mock.createContextGraph as TrackingFn<unknown>).calls[0]).toEqual([
       'my-custom-paranet',
       expect.any(String),
       expect.any(String),
-    );
-    expect(mock.subscribe).toHaveBeenCalledWith('my-custom-paranet');
+    ]);
+    expect((mock.subscribe as TrackingFn<unknown>).calls[0]).toEqual(['my-custom-paranet']);
   });
 });

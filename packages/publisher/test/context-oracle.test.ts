@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { MerkleTree, hashTriple } from '@origintrail-official/dkg-core';
 import type { TripleStore, Quad, QueryResult, SelectResult, AskResult, ConstructResult } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -20,18 +20,31 @@ const testTriples: Quad[] = [
   q('did:dkg:agent:Bob', 'http://schema.org/name', '"Bob"'),
 ];
 
+/** Returns a query function that yields results in order; the last result repeats on subsequent calls. */
+function queryReturning(...results: (SelectResult | AskResult)[]) {
+  const calls: unknown[][] = [];
+  let idx = 0;
+  const fn = async (...args: unknown[]) => {
+    calls.push(args);
+    const result = results[Math.min(idx, results.length - 1)];
+    idx++;
+    return result;
+  };
+  return { fn, calls };
+}
+
 function createMockStore(): TripleStore {
   return {
-    insert: vi.fn(),
-    delete: vi.fn(),
-    deleteByPattern: vi.fn(),
-    query: vi.fn(),
-    hasGraph: vi.fn(),
-    createGraph: vi.fn(),
-    dropGraph: vi.fn(),
-    listGraphs: vi.fn(),
-    deleteBySubjectPrefix: vi.fn(),
-    close: vi.fn(),
+    insert: async () => {},
+    delete: async () => {},
+    deleteByPattern: async () => {},
+    query: async () => ({ type: 'bindings' as const, bindings: [] }),
+    hasGraph: async () => false,
+    createGraph: async () => {},
+    dropGraph: async () => {},
+    listGraphs: async () => [],
+    deleteBySubjectPrefix: async () => {},
+    close: async () => {},
   } as unknown as TripleStore;
 }
 
@@ -39,7 +52,7 @@ function createMockChain(): ChainAdapter {
   return {
     chainType: 'evm' as const,
     chainId: 'eip155:84532',
-    init: vi.fn(),
+    init: async () => {},
   } as unknown as ChainAdapter;
 }
 
@@ -70,7 +83,8 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Alice', p: 'http://schema.org/age', o: '"30"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
 
@@ -101,7 +115,8 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Alice', p: 'http://schema.org/nickname', o: '"Ali"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
 
@@ -112,7 +127,8 @@ describe('ContextOracle', () => {
 
     it('returns empty triples for unknown entity', async () => {
       const selectResult: SelectResult = { type: 'bindings', bindings: [] };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Nobody');
       expect(result.triples).toHaveLength(0);
@@ -121,11 +137,12 @@ describe('ContextOracle', () => {
 
     it('issues SPARQL query scoped to the correct named graph', async () => {
       const selectResult: SelectResult = { type: 'bindings', bindings: [] };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
 
-      const sparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+      const sparql = qry.calls[0][0] as string;
       expect(sparql).toContain(`GRAPH <${GRAPH_URI}>`);
       expect(sparql).toContain('did:dkg:agent:Alice');
     });
@@ -147,9 +164,8 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Alice', p: 'http://schema.org/age', o: '"30"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce(selectResult)
-        .mockResolvedValueOnce(provenanceResult);
+      const qry = queryReturning(selectResult, provenanceResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.queryWithProofs(
         PARANET, CG_ID,
@@ -170,11 +186,12 @@ describe('ContextOracle', () => {
 
     it('wraps query with GRAPH clause when not already present', async () => {
       const empty: SelectResult = { type: 'bindings', bindings: [] };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(empty);
+      const qry = queryReturning(empty);
+      (store as any).query = qry.fn;
 
       await oracle.queryWithProofs(PARANET, CG_ID, 'SELECT ?s WHERE { ?s ?p ?o }');
 
-      const wrappedSparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+      const wrappedSparql = qry.calls[0][0] as string;
       expect(wrappedSparql).toContain(`GRAPH <${GRAPH_URI}>`);
     });
 
@@ -199,16 +216,15 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Alice', p: 'http://schema.org/age', o: '"30"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce(selectResult)
-        .mockResolvedValueOnce(provenanceResult);
+      const qry = queryReturning(selectResult, provenanceResult);
+      (store as any).query = qry.fn;
 
       await oracle.queryWithProofs(
         PARANET, CG_ID,
         'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
       );
 
-      const secondCallSparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[1][0] as string;
+      const secondCallSparql = qry.calls[1][0] as string;
       expect(secondCallSparql).toContain('VALUES ?s { <did:dkg:agent:Alice> }');
     });
 
@@ -223,9 +239,8 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Zora', p: 'http://schema.org/name', o: '"Zora"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce(selectResult)
-        .mockResolvedValueOnce(provenanceResult);
+      const qry = queryReturning(selectResult, provenanceResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.queryWithProofs(
         PARANET, CG_ID,
@@ -241,7 +256,8 @@ describe('ContextOracle', () => {
   describe('proveTriple', () => {
     it('returns proof when triple exists in store and index', async () => {
       const askResult: AskResult = { type: 'boolean', value: true };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(
         PARANET, CG_ID,
@@ -262,7 +278,8 @@ describe('ContextOracle', () => {
 
     it('returns exists=false when triple not in store', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(
         PARANET, CG_ID,
@@ -276,7 +293,8 @@ describe('ContextOracle', () => {
 
     it('returns exists=true but no proof when triple in store but not in index', async () => {
       const askResult: AskResult = { type: 'boolean', value: true };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(
         PARANET, CG_ID,
@@ -301,14 +319,15 @@ describe('ContextOracle', () => {
 
     it('formats ASK query with correct SPARQL terms', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       await oracle.proveTriple(
         PARANET, CG_ID,
         'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"',
       );
 
-      const sparql = (store.query as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+      const sparql = qry.calls[0][0] as string;
       expect(sparql).toContain(`GRAPH <${GRAPH_URI}>`);
       expect(sparql).toContain('<did:dkg:agent:Alice>');
       expect(sparql).toContain('<http://schema.org/name>');
@@ -348,7 +367,8 @@ describe('ContextOracle', () => {
           { s: 'did:dkg:agent:Charlie', p: 'http://schema.org/name', o: '"Charlie"' },
         ],
       };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
 
@@ -363,7 +383,8 @@ describe('ContextOracle', () => {
         type: 'bindings',
         bindings: [{ s: 'did:dkg:agent:Alice', p: 'http://schema.org/name', o: '"Alice"' }],
       };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
       expect(result.verification.chainId).toBe('eip155:84532');
@@ -374,7 +395,8 @@ describe('ContextOracle', () => {
         type: 'bindings',
         bindings: [{ s: 'did:dkg:agent:Bob', p: 'http://schema.org/name', o: '"Bob"' }],
       };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Bob');
       const expectedRoot = proofIndex.getBatchMerkleRoot(CG_ID, BATCH_ID);
@@ -421,7 +443,8 @@ describe('ContextOracle', () => {
 
     it('allows safe IRIs through', async () => {
       const selectResult: SelectResult = { type: 'bindings', bindings: [] };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(selectResult);
+      const qry = queryReturning(selectResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
       expect(result.triples).toHaveLength(0);
@@ -447,7 +470,8 @@ describe('ContextOracle', () => {
 
     it('proveTriple accepts well-formed simple literal', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"');
       expect(result.exists).toBe(false);
@@ -455,7 +479,8 @@ describe('ContextOracle', () => {
 
     it('proveTriple accepts well-formed language-tagged literal', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"@en');
       expect(result.exists).toBe(false);
@@ -463,7 +488,8 @@ describe('ContextOracle', () => {
 
     it('proveTriple accepts well-formed typed literal', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(
         PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/age',
@@ -474,7 +500,8 @@ describe('ContextOracle', () => {
 
     it('proveTriple accepts literal with escaped characters', async () => {
       const askResult: AskResult = { type: 'boolean', value: false };
-      (store.query as ReturnType<typeof vi.fn>).mockResolvedValue(askResult);
+      const qry = queryReturning(askResult);
+      (store as any).query = qry.fn;
 
       const result = await oracle.proveTriple(
         PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/desc',

@@ -1,15 +1,30 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import { type ServerResponse, type IncomingMessage } from 'node:http';
 import { ChatMemoryManager } from '../src/chat-memory.js';
 import { handleNodeUIRequest } from '../src/api.js';
 
+interface TrackingFn {
+  (...args: unknown[]): any;
+  calls: unknown[][];
+}
+
+function trackFn<T>(impl: (...args: unknown[]) => T | Promise<T>): TrackingFn {
+  const calls: unknown[][] = [];
+  const fn = (async (...args: unknown[]) => {
+    calls.push(args);
+    return impl(...args);
+  }) as TrackingFn;
+  fn.calls = calls;
+  return fn;
+}
+
 function createMocks() {
-  const mockQuery = vi.fn();
-  const mockShare = vi.fn().mockResolvedValue({ shareOperationId: 'op-1' });
-  const mockCreateContextGraph = vi.fn().mockResolvedValue(undefined);
-  const mockListContextGraphs = vi.fn().mockResolvedValue([{ id: 'agent-memory', name: 'Agent Memory' }]);
-  const mockPublishFromSharedMemory = vi.fn().mockResolvedValue({});
+  const mockQuery = trackFn(async () => undefined as any);
+  const mockShare = trackFn(async () => ({ shareOperationId: 'op-1' }));
+  const mockCreateContextGraph = trackFn(async () => undefined);
+  const mockListContextGraphs = trackFn(async () => [{ id: 'agent-memory', name: 'Agent Memory' }]);
+  const mockPublishFromSharedMemory = trackFn(async () => ({}));
 
   return {
     mockQuery,
@@ -154,7 +169,16 @@ describe('Import Memory — importMemories integration', () => {
 
   beforeEach(() => {
     mocks = createMocks();
-    mocks.mockQuery.mockResolvedValue({ bindings: [] });
+    (mocks.mockQuery as any)._defaultReturn = { bindings: [] };
+    const origQuery = mocks.mockQuery;
+    const queryReturns: unknown[] = [];
+    mocks.tools.query = mocks.mockQuery = Object.assign(
+      async (...args: unknown[]) => {
+        origQuery.calls.push(args);
+        return queryReturns.length > 0 ? queryReturns.shift() : { bindings: [] };
+      },
+      { calls: origQuery.calls, _pushReturn: (v: unknown) => queryReturns.push(v) },
+    ) as any;
     manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
   });
 
@@ -169,8 +193,8 @@ describe('Import Memory — importMemories integration', () => {
     expect(result.batchId).toBeTruthy();
     expect(result.tripleCount).toBeGreaterThan(0);
 
-    expect(mocks.mockShare).toHaveBeenCalled();
-    const quads = mocks.mockShare.mock.calls[0][1];
+    expect(mocks.mockShare.calls.length).toBeGreaterThan(0);
+    const quads = mocks.mockShare.calls[0][1] as any[];
 
     const batchTriple = quads.find(
       (q: any) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' &&
@@ -189,7 +213,7 @@ describe('Import Memory — importMemories integration', () => {
   it('tags memory items with correct source', async () => {
     await manager.importMemories('- My preference', 'chatgpt');
 
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const sourceTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/importSource',
     );
@@ -200,7 +224,7 @@ describe('Import Memory — importMemories integration', () => {
   it('links memory items to their batch', async () => {
     const result = await manager.importMemories('- First item\n- Second item', 'gemini');
 
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const batchLinks = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/importBatch',
     );
@@ -212,7 +236,7 @@ describe('Import Memory — importMemories integration', () => {
   it('stores text content in schema:text', async () => {
     await manager.importMemories('- Prefers dark mode', 'other');
 
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const textTriple = quads.find(
       (q: any) => q.predicate === 'http://schema.org/text',
     );
@@ -223,7 +247,7 @@ describe('Import Memory — importMemories integration', () => {
   it('stores dateCreated on both batch and items', async () => {
     await manager.importMemories('- Something to remember', 'claude');
 
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const dateTriples = quads.filter(
       (q: any) => q.predicate === 'http://schema.org/dateCreated',
     );
@@ -235,7 +259,7 @@ describe('Import Memory — importMemories integration', () => {
     expect(result.memoryCount).toBe(0);
     expect(result.tripleCount).toBe(0);
     expect(result.batchId).toBeNull();
-    expect(mocks.mockShare).not.toHaveBeenCalled();
+    expect(mocks.mockShare.calls).toHaveLength(0);
   });
 
   it('defaults source to "other" for unknown values', async () => {
@@ -291,15 +315,23 @@ describe('Import Memory — privacy guarantees', () => {
 
   beforeEach(() => {
     mocks = createMocks();
-    mocks.mockQuery.mockResolvedValue({ bindings: [] });
+    const queryReturns: unknown[] = [];
+    const origCalls = mocks.mockQuery.calls;
+    mocks.tools.query = mocks.mockQuery = Object.assign(
+      async (...args: unknown[]) => {
+        origCalls.push(args);
+        return queryReturns.length > 0 ? queryReturns.shift() : { bindings: [] };
+      },
+      { calls: origCalls, _pushReturn: (v: unknown) => queryReturns.push(v) },
+    ) as any;
   });
 
   it('all import writes use localOnly: true', async () => {
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- Secret preference\n- Another secret', 'claude');
 
-    expect(mocks.mockShare).toHaveBeenCalled();
-    for (const call of mocks.mockShare.mock.calls) {
+    expect(mocks.mockShare.calls.length).toBeGreaterThan(0);
+    for (const call of mocks.mockShare.calls) {
       expect(call[2]).toEqual({ localOnly: true });
     }
   });
@@ -308,17 +340,26 @@ describe('Import Memory — privacy guarantees', () => {
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- My data', 'chatgpt');
 
-    for (const call of mocks.mockShare.mock.calls) {
+    for (const call of mocks.mockShare.calls) {
       expect(call[0]).toBe('agent-memory');
     }
   });
 
   it('creates agent-memory context graph with private: true if missing', async () => {
-    mocks.mockListContextGraphs.mockResolvedValueOnce([]);
+    const listReturns: unknown[] = [[]];
+    const origListCalls = mocks.mockListContextGraphs.calls;
+    mocks.tools.listContextGraphs = mocks.mockListContextGraphs = Object.assign(
+      async (...args: unknown[]) => {
+        origListCalls.push(args);
+        return listReturns.length > 0 ? listReturns.shift() : [{ id: 'agent-memory', name: 'Agent Memory' }];
+      },
+      { calls: origListCalls },
+    ) as any;
+
     const manager = new ChatMemoryManager(mocks.tools, { apiKey: '' });
     await manager.importMemories('- My data', 'claude');
 
-    expect(mocks.mockCreateContextGraph).toHaveBeenCalledWith(
+    expect(mocks.mockCreateContextGraph.calls[0][0]).toEqual(
       expect.objectContaining({ id: 'agent-memory', private: true }),
     );
   });
@@ -330,7 +371,15 @@ describe('Import Memory — LLM-assisted parsing', () => {
 
   beforeEach(() => {
     mocks = createMocks();
-    mocks.mockQuery.mockResolvedValue({ bindings: [] });
+    const queryReturns: unknown[] = [];
+    const origCalls = mocks.mockQuery.calls;
+    mocks.tools.query = mocks.mockQuery = Object.assign(
+      async (...args: unknown[]) => {
+        origCalls.push(args);
+        return queryReturns.length > 0 ? queryReturns.shift() : { bindings: [] };
+      },
+      { calls: origCalls, _pushReturn: (v: unknown) => queryReturns.push(v) },
+    ) as any;
   });
 
   afterEach(() => {
@@ -338,7 +387,11 @@ describe('Import Memory — LLM-assisted parsing', () => {
   });
 
   it('does not send data to LLM when useLlm opt-in is not set', async () => {
-    globalThis.fetch = vi.fn();
+    const fetchCalls: unknown[][] = [];
+    globalThis.fetch = (async (...args: unknown[]) => {
+      fetchCalls.push(args);
+      return new Response('{}', { status: 200 });
+    }) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -347,7 +400,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     });
     const result = await manager.importMemories('- Private thought', 'claude');
 
-    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(fetchCalls).toHaveLength(0);
     expect(result.memoryCount).toBe(1);
     expect(result.entityCount).toBe(0);
   });
@@ -358,13 +411,16 @@ describe('Import Memory — LLM-assisted parsing', () => {
       { text: 'Works at Acme Corp', category: 'fact' },
     ]);
 
-    globalThis.fetch = vi.fn()
-      .mockResolvedValue({
+    const fetchCalls: unknown[][] = [];
+    globalThis.fetch = (async (...args: unknown[]) => {
+      fetchCalls.push(args);
+      return {
         ok: true,
         json: () => Promise.resolve({
           choices: [{ message: { content: llmResponse } }],
         }),
-      } as any);
+      } as any;
+    }) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -374,10 +430,9 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    // First call: parse memories, second call: knowledge extraction
-    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(fetchCalls).toHaveLength(2);
 
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const catTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
@@ -386,23 +441,32 @@ describe('Import Memory — LLM-assisted parsing', () => {
   });
 
   it('falls back to heuristic when LLM call fails', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValueOnce({ ok: false } as any);
+    const fetchCalls: unknown[][] = [];
+    globalThis.fetch = (async (...args: unknown[]) => {
+      fetchCalls.push(args);
+      return { ok: false } as any;
+    }) as any;
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const manager = new ChatMemoryManager(mocks.tools, {
-      apiKey: 'test-key',
-      model: 'gpt-4o-mini',
-      baseURL: 'https://api.openai.com/v1',
-    });
-    const result = await manager.importMemories('- Likes coffee\n- Has a cat', 'chatgpt', { useLlm: true });
+    const warnCalls: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnCalls.push(args); };
+    try {
+      const manager = new ChatMemoryManager(mocks.tools, {
+        apiKey: 'test-key',
+        model: 'gpt-4o-mini',
+        baseURL: 'https://api.openai.com/v1',
+      });
+      const result = await manager.importMemories('- Likes coffee\n- Has a cat', 'chatgpt', { useLlm: true });
 
-    expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockShare.mock.calls[0][1];
-    const catTriples = quads.filter(
-      (q: any) => q.predicate === 'http://dkg.io/ontology/category',
-    );
-    expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
-    warnSpy.mockRestore();
+      expect(result.memoryCount).toBe(2);
+      const quads = mocks.mockShare.calls[0][1] as any[];
+      const catTriples = quads.filter(
+        (q: any) => q.predicate === 'http://dkg.io/ontology/category',
+      );
+      expect(catTriples.every((q: any) => q.object === '"fact"')).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
   });
 
   it('handles LLM using alternate key names like "memory" instead of "text"', async () => {
@@ -411,13 +475,12 @@ describe('Import Memory — LLM-assisted parsing', () => {
       { memory: 'Works at Acme Corp', category: 'fact' },
     ]);
 
-    globalThis.fetch = vi.fn()
-      .mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: llmResponse } }],
-        }),
-      } as any);
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: llmResponse } }],
+      }),
+    })) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -427,7 +490,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const textTriple = quads.find(
       (q: any) => q.predicate === 'http://schema.org/text' && q.object === '"Prefers dark mode"',
     );
@@ -440,13 +503,12 @@ describe('Import Memory — LLM-assisted parsing', () => {
       { description: 'Works at Acme Corp', type: 'fact' },
     ]);
 
-    globalThis.fetch = vi.fn()
-      .mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: llmResponse } }],
-        }),
-      } as any);
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: llmResponse } }],
+      }),
+    })) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -456,7 +518,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('- Prefers dark mode\n- Works at Acme Corp', 'claude', { useLlm: true });
 
     expect(result.memoryCount).toBe(2);
-    const quads = mocks.mockShare.mock.calls[0][1];
+    const quads = mocks.mockShare.calls[0][1] as any[];
     const catTriples = quads.filter(
       (q: any) => q.predicate === 'http://dkg.io/ontology/category',
     );
@@ -466,13 +528,12 @@ describe('Import Memory — LLM-assisted parsing', () => {
   it('falls back to heuristic in importMemories when LLM returns empty array', async () => {
     const llmResponse = '[]';
 
-    globalThis.fetch = vi.fn()
-      .mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve({
-          choices: [{ message: { content: llmResponse } }],
-        }),
-      } as any);
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: () => Promise.resolve({
+        choices: [{ message: { content: llmResponse } }],
+      }),
+    })) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -483,7 +544,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
 
     expect(result.memoryCount).toBe(2);
     expect(result.source).toBe('claude');
-    expect(mocks.mockShare).toHaveBeenCalled();
+    expect(mocks.mockShare.calls.length).toBeGreaterThan(0);
   });
 
   it('extracts knowledge entities when LLM returns N-Triples', async () => {
@@ -494,23 +555,23 @@ describe('Import Memory — LLM-assisted parsing', () => {
 <urn:dkg:entity:acme-corp> <http://schema.org/name> "Acme Corp" .`;
 
     let callCount = 0;
-    globalThis.fetch = vi.fn().mockImplementation(() => {
+    globalThis.fetch = (async () => {
       callCount++;
       if (callCount === 1) {
-        return Promise.resolve({
+        return {
           ok: true,
           json: () => Promise.resolve({
             choices: [{ message: { content: parseResponse } }],
           }),
-        });
+        };
       }
-      return Promise.resolve({
+      return {
         ok: true,
         json: () => Promise.resolve({
           choices: [{ message: { content: kgResponse } }],
         }),
-      });
-    });
+      };
+    }) as any;
 
     const manager = new ChatMemoryManager(mocks.tools, {
       apiKey: 'test-key',
@@ -520,10 +581,10 @@ describe('Import Memory — LLM-assisted parsing', () => {
     const result = await manager.importMemories('Works at Acme Corp as an engineer', 'claude', { useLlm: true });
 
     expect(result.entityCount).toBe(1);
-    expect(mocks.mockShare).toHaveBeenCalledTimes(2);
+    expect(mocks.mockShare.calls).toHaveLength(2);
 
-    const importQuads = mocks.mockShare.mock.calls[0][1];
-    const entityQuads = mocks.mockShare.mock.calls[1][1];
+    const importQuads = mocks.mockShare.calls[0][1] as any[];
+    const entityQuads = mocks.mockShare.calls[1][1] as any[];
     expect(result.tripleCount).toBe(importQuads.length + entityQuads.length);
 
     expect(result.quads.length).toBe(result.tripleCount);
@@ -539,7 +600,7 @@ describe('Import Memory — LLM-assisted parsing', () => {
     );
     expect(orgType).toBeDefined();
 
-    for (const call of mocks.mockShare.mock.calls) {
+    for (const call of mocks.mockShare.calls) {
       expect(call[0]).toBe('agent-memory');
       expect(call[2]).toEqual({ localOnly: true });
     }
@@ -551,34 +612,39 @@ describe('Import Memory — LLM-assisted parsing', () => {
     ]);
 
     let callCount = 0;
-    globalThis.fetch = vi.fn().mockImplementation(() => {
+    globalThis.fetch = (async () => {
       callCount++;
       if (callCount === 1) {
-        return Promise.resolve({
+        return {
           ok: true,
           json: () => Promise.resolve({
             choices: [{ message: { content: parseResponse } }],
           }),
-        });
+        };
       }
-      return Promise.reject(new Error('LLM service unavailable'));
-    });
+      throw new Error('LLM service unavailable');
+    }) as any;
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const manager = new ChatMemoryManager(mocks.tools, {
-      apiKey: 'test-key',
-      model: 'gpt-4o-mini',
-      baseURL: 'https://api.openai.com/v1',
-    });
-    const result = await manager.importMemories('Works at Acme Corp', 'claude', { useLlm: true });
+    const warnCalls: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnCalls.push(args); };
+    try {
+      const manager = new ChatMemoryManager(mocks.tools, {
+        apiKey: 'test-key',
+        model: 'gpt-4o-mini',
+        baseURL: 'https://api.openai.com/v1',
+      });
+      const result = await manager.importMemories('Works at Acme Corp', 'claude', { useLlm: true });
 
-    expect(result.memoryCount).toBe(1);
-    expect(result.entityCount).toBe(0);
-    expect(result.warnings).toBeDefined();
-    expect(result.warnings!.length).toBe(1);
-    expect(result.warnings![0]).toContain('Knowledge extraction failed');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Knowledge extraction failed'));
-    warnSpy.mockRestore();
+      expect(result.memoryCount).toBe(1);
+      expect(result.entityCount).toBe(0);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.length).toBe(1);
+      expect(result.warnings![0]).toContain('Knowledge extraction failed');
+      expect(warnCalls.some(c => String(c[0]).includes('Knowledge extraction failed'))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+    }
   });
 });
 
@@ -604,7 +670,15 @@ function mockRes(): ServerResponse & { _status: number; _body: string } {
 
 function createMemoryManager() {
   const mocks = createMocks();
-  mocks.mockQuery.mockResolvedValue({ bindings: [] });
+  const queryReturns: unknown[] = [];
+  const origCalls = mocks.mockQuery.calls;
+  mocks.tools.query = Object.assign(
+    async (...args: unknown[]) => {
+      origCalls.push(args);
+      return queryReturns.length > 0 ? queryReturns.shift() : { bindings: [] };
+    },
+    { calls: origCalls },
+  ) as any;
   return new ChatMemoryManager(mocks.tools, { apiKey: '' });
 }
 

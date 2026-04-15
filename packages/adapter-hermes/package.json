@@ -20,13 +20,15 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },
   "publishConfig": {

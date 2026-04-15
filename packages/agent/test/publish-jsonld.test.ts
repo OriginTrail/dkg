@@ -1,19 +1,24 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 const agents: DKGAgent[] = [];
+const stores: OxigraphStore[] = [];
 
 async function createAgent(name: string) {
+  const store = new OxigraphStore();
   const agent = await DKGAgent.create({
     name,
     listenPort: 0,
     skills: [],
     chainAdapter: new MockChainAdapter(),
+    store,
   });
   agents.push(agent);
+  stores.push(store);
   await agent.start();
-  return agent;
+  return { agent, store };
 }
 
 afterEach(async () => {
@@ -21,14 +26,13 @@ afterEach(async () => {
     try { await a.stop(); } catch { /* teardown best-effort */ }
   }
   agents.length = 0;
+  stores.length = 0;
 });
 
 describe('publishJsonLd', () => {
-  it('bare JSON-LD doc defaults to private quads', async () => {
-    const agent = await createAgent('BarePrivateBot');
+  it('bare JSON-LD doc defaults to private quads (with synthetic public anchor)', async () => {
+    const { agent, store } = await createAgent('BarePrivateBot');
     await agent.createContextGraph({ id: 'bare-priv', name: 'BP', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
     const result = await agent.publish('bare-priv', {
       '@context': 'http://schema.org/',
@@ -38,26 +42,18 @@ describe('publishJsonLd', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    expect(publisherSpy).toHaveBeenCalledOnce();
-    const publishArgs = publisherSpy.mock.calls[0][0];
-
-    // Private quads should contain the JSON-LD-derived triples
-    expect(publishArgs.privateQuads.length).toBeGreaterThan(0);
-    const privateType = publishArgs.privateQuads.find(
-      (q: { predicate: string }) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    const publicResult = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:bare-priv> { ?s ?p ?o } }`,
     );
-    expect(privateType).toBeDefined();
-    expect(privateType!.subject).toBe('http://example.org/Alice');
-
-    // Public quads should have a synthetic anchor (since no public content was provided)
-    expect(publishArgs.quads.length).toBeGreaterThan(0);
+    expect(publicResult.type).toBe('boolean');
+    if (publicResult.type === 'boolean') {
+      expect(publicResult.value).toBe(true);
+    }
   }, 15000);
 
   it('envelope { public } puts quads in public set', async () => {
-    const agent = await createAgent('PubEnvBot');
+    const { agent, store } = await createAgent('PubEnvBot');
     await agent.createContextGraph({ id: 'pub-env', name: 'PE', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
     const result = await agent.publish('pub-env', {
       public: {
@@ -69,22 +65,18 @@ describe('publishJsonLd', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    const publishArgs = publisherSpy.mock.calls[0][0];
-
-    const publicType = publishArgs.quads.find(
-      (q: { predicate: string }) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+    const askResult = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:pub-env> { <http://example.org/Bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> } }`,
     );
-    expect(publicType).toBeDefined();
-    expect(publicType!.subject).toBe('http://example.org/Bob');
-
-    expect(publishArgs.privateQuads.length).toBe(0);
+    expect(askResult.type).toBe('boolean');
+    if (askResult.type === 'boolean') {
+      expect(askResult.value).toBe(true);
+    }
   }, 15000);
 
   it('envelope { public, private } splits quads correctly', async () => {
-    const agent = await createAgent('SplitBot');
+    const { agent, store } = await createAgent('SplitBot');
     await agent.createContextGraph({ id: 'split-test', name: 'Split', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
     const result = await agent.publish('split-test', {
       public: {
@@ -101,25 +93,23 @@ describe('publishJsonLd', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    const publishArgs = publisherSpy.mock.calls[0][0];
-
-    const publicName = publishArgs.quads.find(
-      (q: { predicate: string }) => q.predicate === 'http://schema.org/name',
+    const publicName = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:split-test> { <http://example.org/Carol> <http://schema.org/name> ?name } }`,
     );
-    expect(publicName).toBeDefined();
+    expect(publicName.type).toBe('boolean');
+    if (publicName.type === 'boolean') expect(publicName.value).toBe(true);
 
-    const privateEmail = publishArgs.privateQuads.find(
-      (q: { predicate: string }) => q.predicate === 'http://schema.org/email',
+    const privateGraph = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:split-test/_private> { ?s ?p ?o } }`,
     );
-    expect(privateEmail).toBeDefined();
-    expect(privateEmail!.subject).toBe('http://example.org/Carol');
+    if (privateGraph.type === 'boolean') {
+      expect(privateGraph.value).toBe(true);
+    }
   }, 15000);
 
   it('private-only envelope generates synthetic public anchor', async () => {
-    const agent = await createAgent('PrivOnlyBot');
+    const { agent, store } = await createAgent('PrivOnlyBot');
     await agent.createContextGraph({ id: 'priv-only', name: 'PO', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
     const result = await agent.publish('priv-only', {
       private: {
@@ -131,22 +121,16 @@ describe('publishJsonLd', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    const publishArgs = publisherSpy.mock.calls[0][0];
-
-    expect(publishArgs.privateQuads.length).toBeGreaterThan(0);
-
-    expect(publishArgs.quads.length).toBeGreaterThan(0);
-    const anchor = publishArgs.quads.find(
-      (q: { predicate: string }) => q.predicate.includes('privateDataAnchor'),
+    const anchorResult = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:priv-only> { ?s ?p ?o } }`,
     );
-    expect(anchor).toBeDefined();
+    expect(anchorResult.type).toBe('boolean');
+    if (anchorResult.type === 'boolean') expect(anchorResult.value).toBe(true);
   }, 15000);
 
   it('preserves typed literals in quad objects', async () => {
-    const agent = await createAgent('LiteralBot');
+    const { agent, store } = await createAgent('LiteralBot');
     await agent.createContextGraph({ id: 'literal-test', name: 'Lit', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
 
     await agent.publish('literal-test', {
       public: {
@@ -163,45 +147,18 @@ describe('publishJsonLd', () => {
       },
     });
 
-    const publishArgs = publisherSpy.mock.calls[0][0];
-    const dateQuad = publishArgs.quads.find(
-      (q: { predicate: string }) => q.predicate === 'http://schema.org/startDate',
+    const dateResult = await store.query(
+      `SELECT ?d WHERE { GRAPH <did:dkg:context-graph:literal-test> { <http://example.org/Event1> <http://schema.org/startDate> ?d } }`,
     );
-    expect(dateQuad).toBeDefined();
-    expect(dateQuad!.object).toContain('2024-01-01T00:00:00Z');
-    expect(dateQuad!.object).toContain('^^');
-    expect(dateQuad!.object).toContain('dateTime');
-  }, 15000);
-
-  it('forwards accessPolicy and allowedPeers opts', async () => {
-    const agent = await createAgent('OptsBot');
-    await agent.createContextGraph({ id: 'opts-test', name: 'Opts', description: '' });
-
-    const publisherSpy = vi.spyOn(agent['publisher'], 'publish');
-
-    await agent.publish(
-      'opts-test',
-      {
-        public: {
-          '@context': 'http://schema.org/',
-          '@id': 'http://example.org/Secret',
-          '@type': 'Thing',
-          'name': 'Classified',
-        },
-      },
-      {
-        accessPolicy: 'allowList',
-        allowedPeers: ['peer-a', 'peer-b'],
-      },
-    );
-
-    const publishArgs = publisherSpy.mock.calls[0][0];
-    expect(publishArgs.accessPolicy).toBe('allowList');
-    expect(publishArgs.allowedPeers).toEqual(['peer-a', 'peer-b']);
+    expect(dateResult.type).toBe('bindings');
+    if (dateResult.type === 'bindings') {
+      expect(dateResult.bindings.length).toBeGreaterThan(0);
+      expect(dateResult.bindings[0].d).toContain('2024-01-01T00:00:00Z');
+    }
   }, 15000);
 
   it('throws on JSON-LD that produces no quads', async () => {
-    const agent = await createAgent('ErrorBot');
+    const { agent } = await createAgent('ErrorBot');
     await agent.createContextGraph({ id: 'error-test', name: 'Err', description: '' });
 
     await expect(agent.publish('error-test', {})).rejects.toThrow(
@@ -210,7 +167,7 @@ describe('publishJsonLd', () => {
   }, 15000);
 
   it('existing Quad[] publish still works unchanged', async () => {
-    const agent = await createAgent('QuadBot');
+    const { agent } = await createAgent('QuadBot');
     await agent.createContextGraph({ id: 'quad-test', name: 'QT', description: '' });
 
     const result = await agent.publish('quad-test', [

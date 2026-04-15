@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
@@ -7,6 +7,22 @@ import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+interface Tracked { calls: unknown[][] }
+
+function tracked<T extends (...args: any[]) => any>(fn: T): T & Tracked {
+  const calls: unknown[][] = [];
+  const wrapper = ((...args: unknown[]) => {
+    calls.push(args);
+    return fn(...args);
+  }) as any;
+  wrapper.calls = calls;
+  return wrapper;
+}
+
+function noop(): ((...args: any[]) => void) & Tracked {
+  return tracked(() => {});
+}
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -18,16 +34,16 @@ function quadsToNQuads(quads: Quad[]): string {
 
 function createMockStore(quads: Quad[] = []) {
   return {
-    query: vi.fn().mockResolvedValue({ type: 'quads' as const, quads }),
-    insert: vi.fn().mockResolvedValue(undefined),
-    dropGraph: vi.fn().mockResolvedValue(undefined),
-    countQuads: vi.fn().mockResolvedValue(quads.length),
-    hasGraph: vi.fn().mockResolvedValue(quads.length > 0),
+    query: tracked(async () => ({ type: 'quads' as const, quads })),
+    insert: tracked(async () => undefined),
+    dropGraph: tracked(async () => undefined),
+    countQuads: tracked(async () => quads.length),
+    hasGraph: tracked(async () => quads.length > 0),
   } as any;
 }
 
 function makeEventBus() {
-  return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
+  return { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
 }
 
 async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
@@ -90,39 +106,39 @@ function buildSendP2P(opts: {
 describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
   it('throws immediately when 0 peers connected', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
-      sendP2P: vi.fn(),
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
       getConnectedCorePeers: () => [],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
     await expect(collector.collect(buildCollectParams()))
       .rejects.toThrow('no connected core peers');
-    expect(deps.sendP2P).not.toHaveBeenCalled();
-    expect(deps.gossipPublish).not.toHaveBeenCalled();
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
+    expect((deps.gossipPublish as unknown as Tracked).calls).toHaveLength(0);
   });
 
   it('throws immediately when peers < requiredACKs (e.g., 2 peers, need 3)', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
-      sendP2P: vi.fn(),
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
       getConnectedCorePeers: () => ['peer-0', 'peer-1'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
     await expect(collector.collect(buildCollectParams({ requiredACKs: 3 })))
       .rejects.toThrow('quorum impossible');
-    expect(deps.sendP2P).not.toHaveBeenCalled();
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
   });
 
   it('succeeds with exactly requiredACKs peers (3 peers, need 3)', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -134,10 +150,10 @@ describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
 
   it('succeeds with more peers than required (5 peers, need 3)', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -154,45 +170,47 @@ describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
 
 describe('ACKCollector identity verification', () => {
   it('accepts ACK when verifyIdentity returns true', async () => {
+    const verifyIdentity = tracked(async () => true);
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      verifyIdentity: vi.fn().mockResolvedValue(true),
-      log: vi.fn(),
+      verifyIdentity,
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
     const result = await collector.collect(buildCollectParams());
     expect(result.acks).toHaveLength(3);
-    expect(deps.verifyIdentity).toHaveBeenCalled();
-    for (const call of (deps.verifyIdentity as ReturnType<typeof vi.fn>).mock.calls) {
+    expect(verifyIdentity.calls.length).toBeGreaterThan(0);
+    for (const call of verifyIdentity.calls) {
       expect(typeof call[0]).toBe('string');
       expect(typeof call[1]).toBe('bigint');
     }
   });
 
   it('rejects ACK when verifyIdentity returns false', async () => {
+    const verifyIdentity = tracked(async () => false);
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      verifyIdentity: vi.fn().mockResolvedValue(false),
-      log: vi.fn(),
+      verifyIdentity,
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
     await expect(collector.collect(buildCollectParams()))
       .rejects.toThrow('storage_ack_insufficient');
-    expect(deps.verifyIdentity).toHaveBeenCalledTimes(3);
+    expect(verifyIdentity.calls).toHaveLength(3);
   });
 
   it('accepts ACK when verifyIdentity is undefined (no on-chain check)', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -204,14 +222,14 @@ describe('ACKCollector identity verification', () => {
   it('multiple rejected identities still reaches quorum if enough valid ones', async () => {
     const validPeers = new Set(['peer-2', 'peer-3', 'peer-4']);
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
-      verifyIdentity: vi.fn().mockImplementation((_addr: string, identityId: bigint) => {
+      verifyIdentity: tracked(async (_addr: string, identityId: bigint) => {
         const idx = Number(identityId) - 1;
-        return Promise.resolve(validPeers.has(`peer-${idx}`));
+        return validPeers.has(`peer-${idx}`);
       }),
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -224,19 +242,20 @@ describe('ACKCollector identity verification', () => {
   });
 
   it('all identities rejected = storage_ack_insufficient error', async () => {
+    const log = noop();
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P(),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
-      verifyIdentity: vi.fn().mockResolvedValue(false),
-      log: vi.fn(),
+      verifyIdentity: tracked(async () => false),
+      log,
     };
     const collector = new ACKCollector(deps);
 
     await expect(collector.collect(buildCollectParams()))
       .rejects.toThrow('storage_ack_insufficient');
-    expect((deps.log as ReturnType<typeof vi.fn>).mock.calls.some(
-      (c: string[]) => c[0].includes('not registered'),
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('not registered'),
     )).toBe(true);
   });
 });
@@ -247,7 +266,7 @@ describe('ACKCollector deduplication', () => {
   it('same peerId sends two different ACKs — only first accepted', async () => {
     const callCounts = new Map<string, number>();
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: async (peerId) => {
         const count = (callCounts.get(peerId) ?? 0) + 1;
         callCounts.set(peerId, count);
@@ -263,7 +282,7 @@ describe('ACKCollector deduplication', () => {
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -275,7 +294,7 @@ describe('ACKCollector deduplication', () => {
 
   it('different peers with same nodeIdentityId — only first accepted', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P({
         identityMap: {
           'peer-0': 1, 'peer-1': 1, 'peer-2': 1,
@@ -283,7 +302,7 @@ describe('ACKCollector deduplication', () => {
         },
       }),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -298,12 +317,12 @@ describe('ACKCollector deduplication', () => {
 
   it('different peers with different identities — all accepted', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: buildSendP2P({
         identityMap: { 'peer-0': 10, 'peer-1': 20, 'peer-2': 30 },
       }),
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -322,8 +341,9 @@ describe('ACKCollector deduplication', () => {
 describe('ACKCollector retry behavior', () => {
   it('retries failed P2P request up to 3 times', async () => {
     const attemptsByPeer = new Map<string, number>();
+    const log = noop();
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: async (peerId) => {
         const attempts = (attemptsByPeer.get(peerId) ?? 0) + 1;
         attemptsByPeer.set(peerId, attempts);
@@ -342,22 +362,22 @@ describe('ACKCollector retry behavior', () => {
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log,
     };
     const collector = new ACKCollector(deps);
 
     const result = await collector.collect(buildCollectParams());
     expect(result.acks).toHaveLength(3);
     expect(attemptsByPeer.get('peer-0')).toBe(3);
-    expect((deps.log as ReturnType<typeof vi.fn>).mock.calls.some(
-      (c: string[]) => c[0].includes('Retry'),
+    expect(log.calls.some(
+      (c: unknown[]) => (c[0] as string).includes('Retry'),
     )).toBe(true);
   });
 
   it('handles mixed success/failure responses', async () => {
     const failPeers = new Set(['peer-0', 'peer-1']);
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
+      gossipPublish: noop(),
       sendP2P: async (peerId) => {
         if (failPeers.has(peerId)) throw new Error('unreachable');
         const idx = parseInt(peerId.replace('peer-', ''), 10);
@@ -372,7 +392,7 @@ describe('ACKCollector retry behavior', () => {
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3', 'peer-4'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -384,16 +404,12 @@ describe('ACKCollector retry behavior', () => {
   });
 
   it('timeout after ACK_TIMEOUT_MS produces storage_ack_timeout error', async () => {
-    // Cannot use vi.useFakeTimers here — the source's Promise.race creates a
-    // timer-fired rejection that escapes before the test handler attaches,
-    // causing an unhandled-rejection vitest error. Instead we verify that when
-    // all peers fail after retries, the error message follows the expected
-    // timeout/insufficient pattern and includes the ACK count ratio.
+    const sendP2P = tracked(async () => { throw new Error('connection refused'); });
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn(),
-      sendP2P: vi.fn().mockRejectedValue(new Error('connection refused')),
+      gossipPublish: noop(),
+      sendP2P: sendP2P as any,
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: noop(),
     };
     const collector = new ACKCollector(deps);
 
@@ -401,9 +417,8 @@ describe('ACKCollector retry behavior', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toMatch(/storage_ack_(insufficient|timeout)/);
     expect(err.message).toMatch(/0\/3/);
-    expect(deps.sendP2P).toHaveBeenCalled();
-    // Each peer retried 3 times (MAX_RETRIES)
-    expect((deps.sendP2P as ReturnType<typeof vi.fn>).mock.calls.length).toBe(9);
+    expect(sendP2P.calls.length).toBeGreaterThan(0);
+    expect(sendP2P.calls).toHaveLength(9);
   });
 });
 
@@ -446,7 +461,7 @@ describe('StorageACKHandler inline verification', () => {
     expect(ack.contextGraphId).toBe(testCGIdStr);
     const ackRoot = ack.merkleRoot instanceof Uint8Array ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(Buffer.from(ackRoot).equals(Buffer.from(merkleRoot))).toBe(true);
-    expect(store.query).not.toHaveBeenCalled();
+    expect(store.query.calls).toHaveLength(0);
   });
 
   it('persists inline quads to staging graph before signing (crash safety)', async () => {
@@ -467,11 +482,11 @@ describe('StorageACKHandler inline verification', () => {
 
     await handler.handler(intent, fakePeerId);
 
-    expect(store.dropGraph).toHaveBeenCalled();
-    expect(store.insert).toHaveBeenCalled();
-    const insertedQuads = store.insert.mock.calls[0][0];
+    expect(store.dropGraph.calls.length).toBeGreaterThan(0);
+    expect(store.insert.calls.length).toBeGreaterThan(0);
+    const insertedQuads = store.insert.calls[0][0];
     expect(insertedQuads[0].graph).toContain('/staging/');
-    expect(store.query).not.toHaveBeenCalled();
+    expect(store.query.calls).toHaveLength(0);
   });
 
   it('falls back to SWM query when stagingQuads not present', async () => {
@@ -491,7 +506,7 @@ describe('StorageACKHandler inline verification', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
 
-    expect(store.query).toHaveBeenCalled();
+    expect(store.query.calls.length).toBeGreaterThan(0);
     expect(ack.contextGraphId).toBe(testCGIdStr);
   });
 
@@ -511,7 +526,7 @@ describe('StorageACKHandler inline verification', () => {
 
     await expect(handler.handler(intent, fakePeerId))
       .rejects.toThrow('No data found in SWM');
-    expect(store.query).toHaveBeenCalled();
+    expect(store.query.calls.length).toBeGreaterThan(0);
   });
 
   it("SWM fallback: rejects when merkle root doesn't match SWM data", async () => {
@@ -531,7 +546,7 @@ describe('StorageACKHandler inline verification', () => {
 
     await expect(handler.handler(intent, fakePeerId))
       .rejects.toThrow('Merkle root mismatch');
-    expect(store.query).toHaveBeenCalled();
+    expect(store.query.calls.length).toBeGreaterThan(0);
   });
 });
 
@@ -567,7 +582,7 @@ describe('StorageACKHandler security', () => {
 
     await expect(handler.handler(intent, fakePeerId))
       .rejects.toThrow('Only core nodes can issue StorageACKs');
-    expect(store.query).not.toHaveBeenCalled();
+    expect(store.query.calls).toHaveLength(0);
   });
 
   it('rejects stagingQuads > 4MB', async () => {
@@ -588,8 +603,8 @@ describe('StorageACKHandler security', () => {
 
     await expect(handler.handler(intent, fakePeerId))
       .rejects.toThrow('exceeds');
-    expect(store.query).not.toHaveBeenCalled();
-    expect(store.insert).not.toHaveBeenCalled();
+    expect(store.query.calls).toHaveLength(0);
+    expect(store.insert.calls).toHaveLength(0);
   });
 
   it('rejects empty stagingQuads (0 parseable quads)', async () => {
@@ -632,7 +647,7 @@ describe('StorageACKHandler security', () => {
 
     await expect(handler.handler(intent, fakePeerId))
       .rejects.toThrow('Merkle root mismatch (inline quads)');
-    expect(store.insert).not.toHaveBeenCalled();
+    expect(store.insert.calls).toHaveLength(0);
   });
 
   it('nodeIdentityId > 2^64 throws protocol upgrade error', async () => {

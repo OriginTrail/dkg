@@ -7,5 +7,6 @@ export default function setupEntry(api = {}) {
     return;
   }
 
-  return import('./openclaw-entry.mjs').then(({ default: runtimeEntry }) => runtimeEntry(api));
+  const importRuntime = api._importRuntime ?? (() => import('./openclaw-entry.mjs'));
+  return importRuntime().then(({ default: runtimeEntry }) => runtimeEntry(api));
 }

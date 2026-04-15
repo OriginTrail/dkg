@@ -1,5 +1,5 @@
 /**
- * TDD Layer 3 — E2E multi-node tests for the "replicate-then-publish" protocol.
+ * E2E multi-node tests for the "replicate-then-publish" protocol.
  *
  * These tests verify the full end-to-end flows across 2+ nodes with a shared MockChainAdapter:
  *
@@ -9,8 +9,6 @@
  * 4. Negative: insufficient receiver signatures → publish rejected
  * 5. Negative: insufficient participant signatures → context graph registration rejected
  * 6. Edge node as context graph participant
- *
- * These tests will FAIL until the protocol is fully implemented.
  */
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';

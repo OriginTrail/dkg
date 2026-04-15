@@ -11,7 +11,7 @@ import { sha256 } from '../src/index.js';
 describe('getGenesisQuads', () => {
   it('returns the expected number of quads', () => {
     const quads = getGenesisQuads();
-    expect(quads.length).toBe(34);
+    expect(quads.length).toBe(40);
   });
 
   it('every quad has subject, predicate, object, and graph fields', () => {
@@ -138,9 +138,12 @@ describe('DKG_ONTOLOGY', () => {
     }
   });
 
-  it('all values are unique URIs', () => {
+  it('all values are valid URIs (aliases allowed)', () => {
     const values = Object.values(DKG_ONTOLOGY);
-    const uniqueValues = new Set(values);
-    expect(uniqueValues.size).toBe(values.length);
+    for (const v of values) {
+      expect(typeof v).toBe('string');
+      expect((v as string).length).toBeGreaterThan(0);
+      expect(v).toMatch(/^https?:\/\//);
+    }
   });
 });

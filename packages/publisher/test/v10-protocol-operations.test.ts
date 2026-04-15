@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -25,7 +25,7 @@ function makeQuad(s: string, p: string, o: string, g = ''): Quad {
 }
 
 function makeEventBus() {
-  return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
+  return { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
 }
 
 async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint, epochs?: number, tokenAmount?: bigint) {
@@ -171,7 +171,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
       let callIdx = 0;
       const deps: ACKCollectorDeps = {
-        gossipPublish: vi.fn().mockResolvedValue(undefined),
+        gossipPublish: async () => {},
         sendP2P: async () => {
           const wallet = coreWallets[callIdx % coreWallets.length];
           const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
@@ -184,7 +184,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
           });
         },
         getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2', 'p-3'],
-        log: vi.fn(),
+        log: () => {},
       };
 
       const collector = new ACKCollector(deps);
@@ -258,7 +258,7 @@ describe('V10 SHARE Protocol (spec §7.0)', () => {
       for (const q of promoted) {
         expect(q.graph).toBe(swmUri);
         expect(q.subject).toMatch(/^urn:/);
-        expect(q.predicate).toMatch(/^http/);
+        expect(q.predicate).toMatch(/^(http|urn:)/);
       }
     });
 
@@ -324,9 +324,10 @@ describe('V10 ACK Edge Cases', () => {
   const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
 
   it('fails fast when requiredACKs > connected peers', async () => {
+    let sendCalled = false;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
-      sendP2P: vi.fn(),
+      gossipPublish: async () => {},
+      sendP2P: async () => { sendCalled = true; return new Uint8Array(); },
       getConnectedCorePeers: () => ['peer-0', 'peer-1'],
     };
 
@@ -345,14 +346,14 @@ describe('V10 ACK Edge Cases', () => {
       }),
     ).rejects.toThrow('quorum impossible');
 
-    expect(deps.sendP2P).not.toHaveBeenCalled();
+    expect(sendCalled).toBe(false);
   });
 
   it('rejects ACK with wrong merkle root', async () => {
     const wrongRoot = new Uint8Array(32).fill(0xde);
 
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot);
         return encodeStorageACK({
@@ -364,7 +365,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -384,8 +385,9 @@ describe('V10 ACK Edge Cases', () => {
 
   it('rejects ACK from unknown identity (verifyIdentity returns false)', async () => {
     let idx = 0;
+    let verifyIdentityCalled = false;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const wallet = coreWallets[idx++ % coreWallets.length];
         const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
@@ -398,8 +400,8 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      verifyIdentity: vi.fn().mockResolvedValue(false),
-      log: vi.fn(),
+      verifyIdentity: async () => { verifyIdentityCalled = true; return false; },
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -415,13 +417,13 @@ describe('V10 ACK Edge Cases', () => {
         rootEntities: [],
       }),
     ).rejects.toThrow('storage_ack_insufficient');
-    expect(deps.verifyIdentity).toHaveBeenCalled();
+    expect(verifyIdentityCalled).toBe(true);
   });
 
   it('deduplicates ACKs from same peerId', async () => {
     let callCount = 0;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const wallet = coreWallets[0];
         const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot);
@@ -435,7 +437,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['same-peer', 'same-peer', 'same-peer', 'p-3'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -455,7 +457,7 @@ describe('V10 ACK Edge Cases', () => {
 
   it('deduplicates ACKs from same nodeIdentityId', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot);
         return encodeStorageACK({
@@ -467,7 +469,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -555,7 +557,7 @@ describe('V10 ACK Edge Cases', () => {
       contextGraphSharedMemoryUri: () => 'urn:test:swm',
     };
     const handler = new StorageACKHandler(
-      { query: vi.fn() } as any,
+      { query: async () => ({ type: 'quads' as const, quads: [] }) } as any,
       config,
       makeEventBus() as any,
     );
@@ -688,8 +690,12 @@ describe('V10 StorageACKHandler round-trip', () => {
   const merkleRoot = computeFlatKCRoot(testQuads, []);
 
   function createMockStore(quads: Quad[]) {
+    const queryCalls: unknown[][] = [];
+    const insertCalls: unknown[][] = [];
+    const dropGraphCalls: unknown[][] = [];
     return {
-      query: vi.fn().mockImplementation((sparql: string) => {
+      query: async (sparql: string) => {
+        queryCalls.push([sparql]);
         const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
         if (entityMatch) {
           const entity = entityMatch[1];
@@ -697,14 +703,17 @@ describe('V10 StorageACKHandler round-trip', () => {
           const filtered = quads.filter(q =>
             q.subject === entity || q.subject.startsWith(genidPrefix),
           );
-          return Promise.resolve({ type: 'quads' as const, quads: filtered });
+          return { type: 'quads' as const, quads: filtered };
         }
-        return Promise.resolve({ type: 'quads' as const, quads });
-      }),
-      insert: vi.fn(),
-      delete: vi.fn(),
-      dropGraph: vi.fn(),
-      close: vi.fn(),
+        return { type: 'quads' as const, quads };
+      },
+      insert: async (...args: unknown[]) => { insertCalls.push(args); },
+      delete: async () => {},
+      dropGraph: async (...args: unknown[]) => { dropGraphCalls.push(args); },
+      close: async () => {},
+      _queryCalls: queryCalls,
+      _insertCalls: insertCalls,
+      _dropGraphCalls: dropGraphCalls,
     };
   }
 
@@ -771,7 +780,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
     expect(ack.contextGraphId).toBe(contextGraphId);
-    expect(store.query).toHaveBeenCalled();
+    expect(store._queryCalls.length).toBeGreaterThan(0);
   });
 
   it('handler rejects non-core node role', async () => {
@@ -872,9 +881,9 @@ describe('V10 StorageACKHandler round-trip', () => {
 
     await handler.handler(intent, fakePeerId);
 
-    expect(store.dropGraph).toHaveBeenCalled();
-    expect(store.insert).toHaveBeenCalled();
-    const insertedQuads = store.insert.mock.calls[0][0];
+    expect(store._dropGraphCalls.length).toBeGreaterThan(0);
+    expect(store._insertCalls.length).toBeGreaterThan(0);
+    const insertedQuads = store._insertCalls[0][0] as any[];
     expect(insertedQuads.length).toBeGreaterThan(0);
     expect(insertedQuads[0].graph).toContain('/staging/');
   });

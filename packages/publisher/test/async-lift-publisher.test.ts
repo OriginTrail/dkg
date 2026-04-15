@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-official/dkg-core';
@@ -725,7 +725,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('publishes only the unmatched CREATE remainder against finalized authoritative state', async () => {
-    const publishExecutor = vi.fn(async ({ publishOptions }) => {
+    const executorCalls: Array<{ publishOptions: any }> = [];
+    const publishExecutor = async ({ walletId, publishOptions }: any) => {
+      executorCalls.push({ publishOptions });
       expect(publishOptions.quads).toHaveLength(1);
       expect(publishOptions.quads[0]?.predicate).toBe('http://schema.org/genre');
       return {
@@ -744,7 +746,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           publisherAddress: '0x1111111111111111111111111111111111111111',
         },
       };
-    });
+    };
     const publisher = createPublisher({ config: { publishExecutor } });
 
     const dkgPublisher = new DKGPublisher({
@@ -777,14 +779,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const processed = await publisher.processNext('wallet-1');
 
-    expect(publishExecutor).toHaveBeenCalledTimes(1);
+    expect(executorCalls).toHaveLength(1);
     expect(processed?.status).toBe('finalized');
   });
 
   it('finalizes CREATE as a no-op when all canonical quads are already authoritative', async () => {
-    const publishExecutor = vi.fn(async () => {
+    let executorCallCount = 0;
+    const publishExecutor = async () => {
+      executorCallCount++;
       throw new Error('should not be called');
-    });
+    };
     const publisher = createPublisher({ config: { publishExecutor } });
 
     const dkgPublisher = new DKGPublisher({
@@ -817,7 +821,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const processed = await publisher.processNext('wallet-1');
     const reloaded = await publisher.getStatus(processed!.jobId);
 
-    expect(publishExecutor).not.toHaveBeenCalled();
+    expect(executorCallCount).toBe(0);
     expect(processed?.status).toBe('finalized');
     expect(processed?.finalization?.mode).toBe('noop');
     expect(reloaded?.status).toBe('finalized');

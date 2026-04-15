@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable, Writable } from 'node:stream';
 import { EventEmitter } from 'node:events';
@@ -84,24 +84,32 @@ function parseJsonBody(body: string): any {
   return body ? JSON.parse(body) : {};
 }
 
+function trackingFn<T>(impl: (...args: unknown[]) => T | Promise<T>) {
+  const calls: unknown[][] = [];
+  const fn = async (...args: unknown[]) => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return { fn, calls };
+}
+
 describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   it('returns session graph delta for valid session/turn parameters', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn().mockResolvedValue({
-        mode: 'delta',
-        sessionId: 'session-1',
-        turnId: 'turn-2',
-        watermark: {
-          baseTurnId: 'turn-1',
-          previousTurnId: 'turn-1',
-          appliedTurnId: 'turn-2',
-          latestTurnId: 'turn-2',
-          turnIndex: 2,
-          turnCount: 2,
-        },
-        triples: [{ subject: 's', predicate: 'p', object: 'o' }],
-      }),
-    } as any;
+    const { fn: getSessionGraphDelta, calls: deltaCalls } = trackingFn(() => ({
+      mode: 'delta',
+      sessionId: 'session-1',
+      turnId: 'turn-2',
+      watermark: {
+        baseTurnId: 'turn-1',
+        previousTurnId: 'turn-1',
+        appliedTurnId: 'turn-2',
+        latestTurnId: 'turn-2',
+        turnIndex: 2,
+        turnCount: 2,
+      },
+      triples: [{ subject: 's', predicate: 'p', object: 'o' }],
+    }));
+    const memoryManager = { getSessionGraphDelta } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -124,14 +132,13 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionGraphDelta).toHaveBeenCalledWith('session-1', 'turn-2', { baseTurnId: 'turn-1' });
+    expect(deltaCalls[0]).toEqual(['session-1', 'turn-2', { baseTurnId: 'turn-1' }]);
     expect(parseJsonBody(state.body)).toMatchObject({ mode: 'delta', turnId: 'turn-2' });
   });
 
   it('returns 400 for invalid turn id in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const { fn: getSessionGraphDelta, calls: deltaCalls } = trackingFn(() => undefined);
+    const memoryManager = { getSessionGraphDelta } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -155,13 +162,12 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(400);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'Missing or invalid "turnId"' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(deltaCalls).toHaveLength(0);
   });
 
   it('returns 400 for invalid baseTurnId in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const { fn: getSessionGraphDelta, calls: deltaCalls } = trackingFn(() => undefined);
+    const memoryManager = { getSessionGraphDelta } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -185,30 +191,29 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(400);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "baseTurnId" format' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(deltaCalls).toHaveLength(0);
   });
 
   it('passes session history limit and descending ordering through to memoryManager.getSession() without reordering the backend result', async () => {
-    const memoryManager = {
-      getSession: vi.fn().mockResolvedValue({
-        session: 'session-1',
-        messages: [
-          {
-            uri: 'urn:dkg:chat:msg:agent-2',
-            author: 'agent',
-            text: 'newest',
-            ts: '2026-04-14T08:00:01Z',
-          },
-          {
-            uri: 'urn:dkg:chat:msg:user-1',
-            author: 'user',
-            text: 'older',
-            ts: '2026-04-14T08:00:00Z',
-            failureReason: 'timeout',
-          },
-        ],
-      }),
-    } as any;
+    const { fn: getSession, calls: sessionCalls } = trackingFn(() => ({
+      session: 'session-1',
+      messages: [
+        {
+          uri: 'urn:dkg:chat:msg:agent-2',
+          author: 'agent',
+          text: 'newest',
+          ts: '2026-04-14T08:00:01Z',
+        },
+        {
+          uri: 'urn:dkg:chat:msg:user-1',
+          author: 'user',
+          text: 'older',
+          ts: '2026-04-14T08:00:00Z',
+          failureReason: 'timeout',
+        },
+      ],
+    }));
+    const memoryManager = { getSession } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -231,7 +236,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
+    expect(sessionCalls[0]).toEqual(['session-1', { limit: 25, order: 'desc' }]);
     expect(parseJsonBody(state.body)).toMatchObject({
       session: 'session-1',
       messages: [
@@ -242,9 +247,8 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   });
 
   it('returns 400 for invalid session query parameters', async () => {
-    const memoryManager = {
-      getSession: vi.fn(),
-    } as any;
+    const { fn: getSession, calls: sessionCalls } = trackingFn(() => undefined);
+    const memoryManager = { getSession } as any;
 
     const invalidCases = [
       '/api/memory/sessions/session-1?limit=0',
@@ -273,19 +277,18 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
       expect(state.statusCode).toBe(400);
     }
 
-    expect(memoryManager.getSession).not.toHaveBeenCalled();
+    expect(sessionCalls).toHaveLength(0);
   });
 
   it('returns publication status for a valid session id', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn().mockResolvedValue({
-        sessionId: 'session-1',
-        workspaceTripleCount: 12,
-        dataTripleCount: 3,
-        scope: 'published',
-        rootEntityCount: 4,
-      }),
-    } as any;
+    const { fn: getSessionPublicationStatus, calls: pubCalls } = trackingFn(() => ({
+      sessionId: 'session-1',
+      workspaceTripleCount: 12,
+      dataTripleCount: 3,
+      scope: 'published',
+      rootEntityCount: 4,
+    }));
+    const memoryManager = { getSessionPublicationStatus } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -308,7 +311,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionPublicationStatus).toHaveBeenCalledWith('session-1');
+    expect(pubCalls[0]).toEqual(['session-1']);
     expect(parseJsonBody(state.body)).toMatchObject({
       sessionId: 'session-1',
       scope: 'published',
@@ -316,21 +319,20 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   });
 
   it('publishes a session with selected roots and clearAfter option', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockResolvedValue({
+    const { fn: publishSession, calls: publishCalls } = trackingFn(() => ({
+      sessionId: 'session-1',
+      rootEntityCount: 1,
+      status: 'confirmed',
+      tripleCount: 5,
+      publication: {
         sessionId: 'session-1',
+        workspaceTripleCount: 5,
+        dataTripleCount: 5,
+        scope: 'published',
         rootEntityCount: 1,
-        status: 'confirmed',
-        tripleCount: 5,
-        publication: {
-          sessionId: 'session-1',
-          workspaceTripleCount: 5,
-          dataTripleCount: 5,
-          scope: 'published',
-          rootEntityCount: 1,
-        },
-      }),
-    } as any;
+      },
+    }));
+    const memoryManager = { publishSession } as any;
 
     const { req, url } = createMockReq({
       method: 'POST',
@@ -358,10 +360,10 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(200);
-    expect(memoryManager.publishSession).toHaveBeenCalledWith('session-1', {
+    expect(publishCalls[0]).toEqual(['session-1', {
       rootEntities: ['urn:dkg:chat:msg:m-1'],
       clearSharedMemoryAfter: true,
-    });
+    }]);
     expect(parseJsonBody(state.body)).toMatchObject({
       sessionId: 'session-1',
       status: 'confirmed',
@@ -369,9 +371,8 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   });
 
   it('returns 400 for invalid session id in publication route', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn(),
-    } as any;
+    const { fn: getSessionPublicationStatus, calls: pubCalls } = trackingFn(() => undefined);
+    const memoryManager = { getSessionPublicationStatus } as any;
 
     const { req, url } = createMockReq({
       method: 'GET',
@@ -395,13 +396,12 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(400);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
+    expect(pubCalls).toHaveLength(0);
   });
 
   it('returns 400 for invalid session id in publish route', async () => {
-    const memoryManager = {
-      publishSession: vi.fn(),
-    } as any;
+    const { fn: publishSession, calls: publishCalls } = trackingFn(() => undefined);
+    const memoryManager = { publishSession } as any;
 
     const { req, url } = createMockReq({
       method: 'POST',
@@ -427,15 +427,14 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(400);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid session ID' });
-    expect(memoryManager.publishSession).not.toHaveBeenCalled();
+    expect(publishCalls).toHaveLength(0);
   });
 
   it('returns 400 for session-scope publish validation errors', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(
-        new Error('Selected root entities are not part of session session-1'),
-      ),
-    } as any;
+    const { fn: publishSession, calls: publishCalls } = trackingFn(() => {
+      throw new Error('Selected root entities are not part of session session-1');
+    });
+    const memoryManager = { publishSession } as any;
 
     const { req, url } = createMockReq({
       method: 'POST',
@@ -466,9 +465,10 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   });
 
   it('returns 500 for unexpected publish failures', async () => {
-    const memoryManager = {
-      publishSession: vi.fn().mockRejectedValue(new Error('storage offline')),
-    } as any;
+    const { fn: publishSession } = trackingFn(() => {
+      throw new Error('storage offline');
+    });
+    const memoryManager = { publishSession } as any;
 
     const { req, url } = createMockReq({
       method: 'POST',
@@ -605,7 +605,6 @@ describe('handleNodeUIRequest /api/node-log', () => {
 
   it('returns empty lines when daemon.log does not exist', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
-    // No daemon.log created
 
     const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
     const { res, state } = createMockRes();
@@ -646,7 +645,6 @@ describe('serveStatic path traversal prevention', () => {
       req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
     );
 
-    // URL parser normalizes /ui/../../etc/passwd to /etc/passwd which doesn't match /ui
     expect(handled).toBe(false);
   });
 

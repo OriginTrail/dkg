@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -300,17 +300,14 @@ describe('Workspace: publishFromSharedMemory', () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Batch Test"')];
     await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
 
-    const addBatchSpy = vi.spyOn(chain, 'verify');
+    const cgBefore = chain.getContextGraph!(1n);
+    const batchesBefore = cgBefore?.batches.length ?? 0;
 
     await publisher.publishFromSharedMemory(PARANET, 'all', { publishContextGraphId: ctxId });
 
-    expect(addBatchSpy).toHaveBeenCalledTimes(1);
-    expect(addBatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contextGraphId: 1n,
-        batchId: expect.any(BigInt),
-      }),
-    );
+    const cgAfter = chain.getContextGraph!(1n);
+    expect(cgAfter).not.toBeNull();
+    expect(cgAfter!.batches.length).toBe(batchesBefore + 1);
   });
 });
 

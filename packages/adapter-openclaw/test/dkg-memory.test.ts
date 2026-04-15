@@ -1,16 +1,31 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { DkgMemoryPlugin } from '../src/DkgMemoryPlugin.js';
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
 
-function makeApi(): OpenClawPluginApi {
-  return {
-    config: {},
-    registerTool: vi.fn(),
-    registerHook: vi.fn(),
-    on: vi.fn(),
-    logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+function makeApi() {
+  const registeredTools: unknown[] = [];
+  const registeredHooks: unknown[][] = [];
+  const onCalls: unknown[][] = [];
+  const logCalls = {
+    info: [] as unknown[][],
+    warn: [] as unknown[][],
+    debug: [] as unknown[][],
   };
+
+  const api: OpenClawPluginApi = {
+    config: {},
+    registerTool: (tool: unknown) => { registeredTools.push(tool); },
+    registerHook: (...args: unknown[]) => { registeredHooks.push(args); },
+    on: (...args: unknown[]) => { onCalls.push(args); },
+    logger: {
+      info: (...args: unknown[]) => { logCalls.info.push(args); },
+      warn: (...args: unknown[]) => { logCalls.warn.push(args); },
+      debug: (...args: unknown[]) => { logCalls.debug.push(args); },
+    },
+  };
+
+  return { api, registeredTools, registeredHooks, onCalls, logCalls };
 }
 
 describe('DkgMemoryPlugin', () => {
@@ -22,31 +37,26 @@ describe('DkgMemoryPlugin', () => {
     plugin = new DkgMemoryPlugin(client, { enabled: true });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it('should register dkg_memory_search and dkg_memory_import tools', () => {
-    const api = makeApi();
+    const { api, registeredTools } = makeApi();
     plugin.register(api);
 
-    const calls = (api.registerTool as any).mock.calls;
-    const toolNames = calls.map((c: any) => c[0].name);
+    const toolNames = (registeredTools as any[]).map((t: any) => t.name);
     expect(toolNames).toContain('dkg_memory_search');
     expect(toolNames).toContain('dkg_memory_import');
   });
 
   it('search should return formatted results from SPARQL', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       results: {
         bindings: [
           { uri: { value: 'urn:dkg:memory:1' }, text: { value: 'TypeScript patterns' }, type: { value: 'memory' } },
           { uri: { value: 'urn:dkg:memory:2' }, text: { value: 'TypeScript testing guide' }, type: { value: 'memory' } },
         ],
       },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const results = await plugin.search('TypeScript');
 
@@ -57,9 +67,9 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('search should return empty array on error', async () => {
-    vi.spyOn(client, 'query').mockRejectedValueOnce(new Error('daemon offline'));
+    client.query = (async () => { throw new Error('daemon offline'); }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const results = await plugin.search('anything');
 
@@ -67,15 +77,15 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('readFile should return text from SPARQL result', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       results: {
         bindings: [
           { text: { value: '# MEMORY\n\nSome content here' } },
         ],
       },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const content = await plugin.readFile('MEMORY.md');
 
@@ -83,11 +93,11 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('readFile should return null when not found', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       results: { bindings: [] },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const content = await plugin.readFile('nonexistent.md');
 
@@ -95,13 +105,13 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('status should report ready from daemon stats', async () => {
-    vi.spyOn(client, 'getMemoryStats').mockResolvedValueOnce({
+    client.getMemoryStats = (async () => ({
       initialized: true,
       messageCount: 42,
       totalTriples: 500,
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const s = await plugin.status();
 
@@ -110,9 +120,9 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('status should report not ready on error', async () => {
-    vi.spyOn(client, 'getMemoryStats').mockRejectedValueOnce(new Error('offline'));
+    client.getMemoryStats = (async () => { throw new Error('offline'); }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const s = await plugin.status();
 
@@ -120,67 +130,73 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('dkg_memory_search tool should delegate to search()', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       results: {
         bindings: [
           { uri: { value: 'urn:1' }, text: { value: 'found it' }, type: { value: 'memory' } },
         ],
       },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api, registeredTools } = makeApi();
     plugin.register(api);
 
-    const toolCall = (api.registerTool as any).mock.calls.find((c: any) => c[0].name === 'dkg_memory_search');
-    expect(toolCall).toBeTruthy();
+    const tool = (registeredTools as any[]).find((t: any) => t.name === 'dkg_memory_search');
+    expect(tool).toBeTruthy();
 
-    const tool = toolCall[0];
     const result = await tool.execute('call-1', { query: 'test query' });
     expect(result.content[0].text).toContain('found it');
   });
 
   it('search should include short keywords like "UI" and "AI"', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: {
-        bindings: [
-          { uri: { value: 'urn:1' }, text: { value: 'UI patterns' }, type: { value: 'memory' } },
-        ],
-      },
-    });
+    const queryCalls: unknown[][] = [];
+    client.query = (async (...args: unknown[]) => {
+      queryCalls.push(args);
+      return {
+        results: {
+          bindings: [
+            { uri: { value: 'urn:1' }, text: { value: 'UI patterns' }, type: { value: 'memory' } },
+          ],
+        },
+      };
+    }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const results = await plugin.search('UI');
 
     expect(results).toHaveLength(1);
-    // Verify the SPARQL query includes the short keyword
-    const sparql = querySpy.mock.calls[0][0];
+    const sparql = queryCalls[0][0] as string;
     expect(sparql).toContain('ui');
   });
 
   it('search should generate SPARQL matching dkg:ImportedMemory', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
+    const queryCalls: unknown[][] = [];
+    client.query = (async (...args: unknown[]) => {
+      queryCalls.push(args);
+      return { results: { bindings: [] } };
+    }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     await plugin.search('test search');
 
-    const sparql = querySpy.mock.calls[0][0];
+    const sparql = queryCalls[0][0] as string;
     expect(sparql).toContain('ImportedMemory');
   });
 
   it('search should query shared memory graph with includeSharedMemory: true', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
+    const queryCalls: unknown[][] = [];
+    client.query = (async (...args: unknown[]) => {
+      queryCalls.push(args);
+      return { results: { bindings: [] } };
+    }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     await plugin.search('test');
 
-    const opts = querySpy.mock.calls[0][1];
+    const opts = queryCalls[0][1];
     expect(opts).toEqual(
       expect.objectContaining({
         contextGraphId: 'agent-memory',
@@ -190,15 +206,17 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('readFile should query shared memory graph with includeSharedMemory: true', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
+    const queryCalls: unknown[][] = [];
+    client.query = (async (...args: unknown[]) => {
+      queryCalls.push(args);
+      return { results: { bindings: [] } };
+    }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     await plugin.readFile('MEMORY.md');
 
-    const opts = querySpy.mock.calls[0][1];
+    const opts = queryCalls[0][1];
     expect(opts).toEqual(
       expect.objectContaining({
         contextGraphId: 'agent-memory',
@@ -208,16 +226,15 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('search should handle DKG daemon N-Triples binding format', async () => {
-    // DKG daemon returns raw N-Triples literals, not { value: "..." } objects
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       result: {
         bindings: [
           { uri: 'urn:dkg:memory:file:MEMORY.md', text: '"PostgreSQL is the preferred database"', type: '"memory"' },
         ],
       },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const results = await plugin.search('database');
 
@@ -229,15 +246,15 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('readFile should handle DKG daemon N-Triples binding format', async () => {
-    vi.spyOn(client, 'query').mockResolvedValueOnce({
+    client.query = (async () => ({
       result: {
         bindings: [
           { text: '"# MEMORY\\nContent here"' },
         ],
       },
-    });
+    })) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     const content = await plugin.readFile('MEMORY.md');
 
@@ -245,16 +262,17 @@ describe('DkgMemoryPlugin', () => {
   });
 
   it('search should escape special characters in keywords', async () => {
-    const querySpy = vi.spyOn(client, 'query').mockResolvedValueOnce({
-      results: { bindings: [] },
-    });
+    const queryCalls: unknown[][] = [];
+    client.query = (async (...args: unknown[]) => {
+      queryCalls.push(args);
+      return { results: { bindings: [] } };
+    }) as any;
 
-    const api = makeApi();
+    const { api } = makeApi();
     plugin.register(api);
     await plugin.search('test "injection');
 
-    const sparql = querySpy.mock.calls[0][0];
-    // The double-quote in the keyword should be escaped with backslash
+    const sparql = queryCalls[0][0] as string;
     expect(sparql).toContain('\\"injection');
   });
 });

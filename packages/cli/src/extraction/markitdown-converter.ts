@@ -41,31 +41,31 @@ function hasVerifiedBundledBinary(candidate: string): boolean {
 }
 
 function resolveMarkItDownBin(): string | null {
+  const { existsSync: ioExistsSync, execFileSync: ioExecFileSync, consoleWarn } = _markitdownConverterIo;
   const suffix = platform === 'win32' ? '.exe' : '';
   const binaryName = `markitdown-${platform}-${arch}${suffix}`;
   const binDir = resolve(fileURLToPath(new URL('../../bin', import.meta.url)));
   const candidate = join(binDir, binaryName);
   if (hasVerifiedBundledBinary(candidate)) return candidate;
-  if (existsSync(candidate)) {
+  if (ioExistsSync(candidate)) {
     const failure = bundledBinaryValidationFailure(candidate);
     if (failure === 'metadata') {
-      console.warn(
+      consoleWarn(
         `Ignoring bundled MarkItDown binary with incompatible metadata sidecar (${candidate}). `
         + 'Rerun the staging flow or remove the stale file to use a bundled converter that matches this package version.',
       );
     } else {
-      console.warn(
+      consoleWarn(
         `Ignoring bundled MarkItDown binary without a valid checksum sidecar (${candidate}). `
         + 'Rerun the staging flow or remove the stale file to use a verified bundled converter.',
       );
     }
   }
 
-  // Fallback: check if markitdown is on PATH
   const pathBin = `markitdown${suffix}`;
   try {
     const whichCmd = platform === 'win32' ? 'where' : 'which';
-    execFileSync(whichCmd, [pathBin], { encoding: 'utf-8', stdio: 'pipe' });
+    ioExecFileSync(whichCmd, [pathBin], { encoding: 'utf-8', stdio: 'pipe' });
     return pathBin;
   } catch {
     return null;
@@ -73,6 +73,13 @@ function resolveMarkItDownBin(): string | null {
 }
 
 let cachedBinPath: string | null | undefined;
+
+export const _markitdownConverterIo = {
+  existsSync: existsSync as (path: any) => boolean,
+  execFileSync: execFileSync as (...args: any[]) => any,
+  consoleWarn: console.warn.bind(console) as (...args: any[]) => void,
+  resetBinCache: () => { cachedBinPath = undefined; },
+};
 
 function getMarkItDownBin(): string | null {
   if (cachedBinPath !== undefined) return cachedBinPath;

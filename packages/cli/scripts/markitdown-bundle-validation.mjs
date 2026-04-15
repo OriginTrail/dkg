@@ -2,6 +2,12 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 
+export const _validationIo = {
+  existsSync,
+  readFileSync,
+  readFile,
+};
+
 export function checksumPathFor(binaryPath) {
   return `${binaryPath}.sha256`;
 }
@@ -30,9 +36,9 @@ export function metadataMatchesExpected(actualMetadata, expectedMetadata) {
 
 export async function readMetadataFile(binaryPath) {
   const path = metadataPathFor(binaryPath);
-  if (!existsSync(path)) return null;
+  if (!_validationIo.existsSync(path)) return null;
   try {
-    return JSON.parse(await readFile(path, 'utf-8'));
+    return JSON.parse(await _validationIo.readFile(path, 'utf-8'));
   } catch {
     return null;
   }
@@ -40,9 +46,9 @@ export async function readMetadataFile(binaryPath) {
 
 export function readMetadataFileSync(binaryPath) {
   const path = metadataPathFor(binaryPath);
-  if (!existsSync(path)) return null;
+  if (!_validationIo.existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf-8'));
+    return JSON.parse(_validationIo.readFileSync(path, 'utf-8'));
   } catch {
     return null;
   }
@@ -54,12 +60,12 @@ function sha256Hex(bytes) {
 
 export async function bundledBinaryValidationFailure(binaryPath, expectedMetadata = null) {
   const binaryChecksumPath = checksumPathFor(binaryPath);
-  if (!existsSync(binaryPath) || !existsSync(binaryChecksumPath)) {
+  if (!_validationIo.existsSync(binaryPath) || !_validationIo.existsSync(binaryChecksumPath)) {
     return 'checksum';
   }
   try {
-    const expectedHash = parseSha256File(await readFile(binaryChecksumPath, 'utf-8'));
-    const actualHash = sha256Hex(await readFile(binaryPath));
+    const expectedHash = parseSha256File(await _validationIo.readFile(binaryChecksumPath, 'utf-8'));
+    const actualHash = sha256Hex(await _validationIo.readFile(binaryPath));
     if (actualHash !== expectedHash) return 'checksum';
     const metadata = await readMetadataFile(binaryPath);
     return metadataMatchesExpected(metadata, expectedMetadata) ? null : 'metadata';
@@ -70,12 +76,12 @@ export async function bundledBinaryValidationFailure(binaryPath, expectedMetadat
 
 export function bundledBinaryValidationFailureSync(binaryPath, expectedMetadata = null) {
   const binaryChecksumPath = checksumPathFor(binaryPath);
-  if (!existsSync(binaryPath) || !existsSync(binaryChecksumPath)) {
+  if (!_validationIo.existsSync(binaryPath) || !_validationIo.existsSync(binaryChecksumPath)) {
     return 'checksum';
   }
   try {
-    const expectedHash = parseSha256File(readFileSync(binaryChecksumPath, 'utf-8'));
-    const actualHash = sha256Hex(readFileSync(binaryPath));
+    const expectedHash = parseSha256File(_validationIo.readFileSync(binaryChecksumPath, 'utf-8'));
+    const actualHash = sha256Hex(_validationIo.readFileSync(binaryPath));
     if (actualHash !== expectedHash) return 'checksum';
     const metadata = readMetadataFileSync(binaryPath);
     return metadataMatchesExpected(metadata, expectedMetadata) ? null : 'metadata';

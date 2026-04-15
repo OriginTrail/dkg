@@ -1,14 +1,16 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { readFileSync as nativeReadFileSync } from 'node:fs';
+import { readFileSync as nativeReadFileSync, existsSync as nativeExistsSync } from 'node:fs';
 import { writeFile, rm, mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-
-// Dynamic import so vi.mock takes effect before module loads
-let MarkItDownConverter: typeof import('../src/extraction/markitdown-converter.js').MarkItDownConverter;
-let isMarkItDownAvailable: typeof import('../src/extraction/markitdown-converter.js').isMarkItDownAvailable;
-let MARKITDOWN_CONTENT_TYPES: typeof import('../src/extraction/markitdown-converter.js').MARKITDOWN_CONTENT_TYPES;
+import {
+  MarkItDownConverter,
+  isMarkItDownAvailable,
+  MARKITDOWN_CONTENT_TYPES,
+  _markitdownConverterIo,
+} from '../src/extraction/markitdown-converter.js';
+import { _validationIo } from '../scripts/markitdown-bundle-validation.mjs';
 
 const CLI_VERSION = JSON.parse(nativeReadFileSync(new URL('../package.json', import.meta.url), 'utf-8')) as { version: string };
 const BUILD_INFO = JSON.parse(nativeReadFileSync(new URL('../markitdown-build-info.json', import.meta.url), 'utf-8')) as {
@@ -28,12 +30,15 @@ const MARKITDOWN_BUILD_FINGERPRINT = createHash('sha256').update([
   createHash('sha256').update(BUNDLER_SCRIPT_BYTES).digest('hex'),
 ].join('\n')).digest('hex');
 
-describe('MARKITDOWN_CONTENT_TYPES', () => {
-  beforeEach(async () => {
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    MARKITDOWN_CONTENT_TYPES = mod.MARKITDOWN_CONTENT_TYPES;
-  });
+const origConverterIo = { ..._markitdownConverterIo };
+const origValidationIo = { ..._validationIo };
 
+function restoreIo() {
+  Object.assign(_markitdownConverterIo, origConverterIo);
+  Object.assign(_validationIo, origValidationIo);
+}
+
+describe('MARKITDOWN_CONTENT_TYPES', () => {
   it('includes PDF', () => {
     expect(MARKITDOWN_CONTENT_TYPES).toContain('application/pdf');
   });
@@ -63,14 +68,8 @@ describe('MARKITDOWN_CONTENT_TYPES', () => {
 });
 
 describe('MarkItDownConverter', () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    MarkItDownConverter = mod.MarkItDownConverter;
-  });
-
   afterEach(() => {
-    vi.restoreAllMocks();
+    restoreIo();
   });
 
   it('exposes all supported content types', () => {
@@ -83,9 +82,7 @@ describe('MarkItDownConverter', () => {
   it('extract returns ConverterOutput with mdIntermediate only (phase 1)', async () => {
     const converter = new MarkItDownConverter();
 
-    // If markitdown is not available, the extract call should throw
-    // with a helpful error message rather than silently failing
-    const available = (await import('../src/extraction/markitdown-converter.js')).isMarkItDownAvailable();
+    const available = isMarkItDownAvailable();
     if (!available) {
       await expect(converter.extract({
         filePath: '/tmp/nonexistent.pdf',
@@ -95,7 +92,6 @@ describe('MarkItDownConverter', () => {
       return;
     }
 
-    // If available, test the actual conversion (only runs if binary is present)
     const tmpDir = await mkdtemp(join(tmpdir(), 'markitdown-test-'));
     const testFile = join(tmpDir, 'test.html');
     await writeFile(testFile, '<html><body><h1>Hello</h1><p>World</p></body></html>');
@@ -109,11 +105,6 @@ describe('MarkItDownConverter', () => {
 
       expect(typeof result.mdIntermediate).toBe('string');
       expect(result.mdIntermediate.length).toBeGreaterThan(0);
-      // Phase 1 only — converter returns ConverterOutput, no triples
-      // or source-file linkage (those are Phase 2 extractor output).
-      // Round 13 Bug 39 renamed the linkage field from `provenance`
-      // to `sourceFileLinkage` on `MarkdownExtractOutput`; this
-      // converter's output has neither.
       expect((result as { triples?: unknown }).triples).toBeUndefined();
       expect((result as { sourceFileLinkage?: unknown }).sourceFileLinkage).toBeUndefined();
     } finally {
@@ -123,17 +114,13 @@ describe('MarkItDownConverter', () => {
 });
 
 describe('isMarkItDownAvailable', () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    isMarkItDownAvailable = mod.isMarkItDownAvailable;
+  beforeEach(() => {
+    _markitdownConverterIo.resetBinCache();
   });
 
   afterEach(() => {
-    vi.doUnmock('node:fs');
-    vi.doUnmock('node:child_process');
-    vi.resetModules();
-    vi.restoreAllMocks();
+    restoreIo();
+    _markitdownConverterIo.resetBinCache();
   });
 
   it('returns a boolean', () => {
@@ -141,190 +128,153 @@ describe('isMarkItDownAvailable', () => {
     expect(typeof result).toBe('boolean');
   });
 
-  it('ignores a bundled binary when the checksum sidecar is missing', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) return false;
-          if (normalized.includes('/bin/markitdown-')) return true;
-          return actual.existsSync(path as any);
-        }),
-      };
-    });
-    vi.doMock('node:child_process', () => ({
-      execFileSync: vi.fn(() => { throw new Error('not on path'); }),
-      execFile: vi.fn(),
-    }));
+  it('ignores a bundled binary when the checksum sidecar is missing', () => {
+    const warnCalls: string[] = [];
+    _markitdownConverterIo.consoleWarn = (...args: any[]) => { warnCalls.push(args.map(String).join(' ')); };
 
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    expect(mod.isMarkItDownAvailable()).toBe(false);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring bundled MarkItDown binary without a valid checksum sidecar'));
+    _validationIo.existsSync = (path: unknown) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) return false;
+      if (normalized.includes('/bin/markitdown-')) return true;
+      return nativeExistsSync(path as any);
+    };
+    _markitdownConverterIo.existsSync = _validationIo.existsSync as any;
+
+    _markitdownConverterIo.execFileSync = (() => { throw new Error('not on path'); }) as any;
+
+    expect(isMarkItDownAvailable()).toBe(false);
+    expect(warnCalls.some(m => m.includes('Ignoring bundled MarkItDown binary without a valid checksum sidecar'))).toBe(true);
   });
 
-  it('ignores a bundled binary when the metadata sidecar targets a different package version', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('ignores a bundled binary when the metadata sidecar targets a different package version', () => {
+    const warnCalls: string[] = [];
+    _markitdownConverterIo.consoleWarn = (...args: any[]) => { warnCalls.push(args.map(String).join(' ')); };
+
     const binaryBytes = Buffer.from('verified markitdown binary', 'utf-8');
     const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-')) return true;
-          return actual.existsSync(path as any);
-        }),
-        readFileSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
-            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
-            return `${binaryHash}  ${assetName}\n`;
-          }
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
-            return JSON.stringify({ source: 'release', cliVersion: '0.0.0-test' });
-          }
-          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
-          return actual.readFileSync(path as any);
-        }),
-      };
-    });
-    vi.doMock('node:child_process', () => ({
-      execFileSync: vi.fn(() => { throw new Error('not on path'); }),
-      execFile: vi.fn(),
-    }));
+    _validationIo.existsSync = (path: unknown) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-')) return true;
+      return nativeExistsSync(path as any);
+    };
+    _markitdownConverterIo.existsSync = _validationIo.existsSync as any;
 
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    expect(mod.isMarkItDownAvailable()).toBe(false);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Ignoring bundled MarkItDown binary with incompatible metadata sidecar'));
+    _validationIo.readFileSync = ((path: unknown, ...rest: any[]) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${binaryHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({ source: 'release', cliVersion: '0.0.0-test' });
+      }
+      if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+      return nativeReadFileSync(path as any, ...rest);
+    }) as any;
+
+    _markitdownConverterIo.execFileSync = (() => { throw new Error('not on path'); }) as any;
+
+    expect(isMarkItDownAvailable()).toBe(false);
+    expect(warnCalls.some(m => m.includes('Ignoring bundled MarkItDown binary with incompatible metadata sidecar'))).toBe(true);
   });
 
-  it('accepts a bundled binary when the checksum and release metadata match', async () => {
+  it('accepts a bundled binary when the checksum and release metadata match', () => {
     const binaryBytes = Buffer.from('verified markitdown binary', 'utf-8');
     const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-')) return true;
-          return actual.existsSync(path as any);
-        }),
-        readFileSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
-            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
-            return `${binaryHash}  ${assetName}\n`;
-          }
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
-            return JSON.stringify({
-              source: 'release',
-              cliVersion: CLI_VERSION.version,
-              buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
-            });
-          }
-          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
-          return actual.readFileSync(path as any);
-        }),
-      };
-    });
-    vi.doMock('node:child_process', () => ({
-      execFileSync: vi.fn(() => { throw new Error('path fallback should not be used'); }),
-      execFile: vi.fn(),
-    }));
+    _validationIo.existsSync = (path: unknown) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-')) return true;
+      return nativeExistsSync(path as any);
+    };
+    _markitdownConverterIo.existsSync = _validationIo.existsSync as any;
 
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    expect(mod.isMarkItDownAvailable()).toBe(true);
+    _validationIo.readFileSync = ((path: unknown, ...rest: any[]) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${binaryHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'release',
+          cliVersion: CLI_VERSION.version,
+          buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
+        });
+      }
+      if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+      return nativeReadFileSync(path as any, ...rest);
+    }) as any;
+
+    _markitdownConverterIo.execFileSync = (() => { throw new Error('path fallback should not be used'); }) as any;
+
+    expect(isMarkItDownAvailable()).toBe(true);
   });
 
-  it('accepts a bundled binary when the build fingerprint matches across CLI version changes', async () => {
+  it('accepts a bundled binary when the build fingerprint matches across CLI version changes', () => {
     const binaryBytes = Buffer.from('verified markitdown binary', 'utf-8');
     const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-')) return true;
-          return actual.existsSync(path as any);
-        }),
-        readFileSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
-            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
-            return `${binaryHash}  ${assetName}\n`;
-          }
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
-            return JSON.stringify({
-              source: 'release',
-              cliVersion: '0.0.0-test',
-              buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
-            });
-          }
-          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
-          return actual.readFileSync(path as any);
-        }),
-      };
-    });
-    vi.doMock('node:child_process', () => ({
-      execFileSync: vi.fn(() => { throw new Error('path fallback should not be used'); }),
-      execFile: vi.fn(),
-    }));
+    _validationIo.existsSync = (path: unknown) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-')) return true;
+      return nativeExistsSync(path as any);
+    };
+    _markitdownConverterIo.existsSync = _validationIo.existsSync as any;
 
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    expect(mod.isMarkItDownAvailable()).toBe(true);
+    _validationIo.readFileSync = ((path: unknown, ...rest: any[]) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${binaryHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'release',
+          cliVersion: '0.0.0-test',
+          buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
+        });
+      }
+      if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+      return nativeReadFileSync(path as any, ...rest);
+    }) as any;
+
+    _markitdownConverterIo.execFileSync = (() => { throw new Error('path fallback should not be used'); }) as any;
+
+    expect(isMarkItDownAvailable()).toBe(true);
   });
 
-  it('accepts a bundled binary when the checksum and build metadata match the current package', async () => {
+  it('accepts a bundled binary when the checksum and build metadata match the current package', () => {
     const binaryBytes = Buffer.from('verified markitdown build binary', 'utf-8');
     const binaryHash = createHash('sha256').update(binaryBytes).digest('hex');
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      return {
-        ...actual,
-        existsSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-')) return true;
-          return actual.existsSync(path as any);
-        }),
-        readFileSync: vi.fn((path: unknown) => {
-          const normalized = String(path).replace(/\\/g, '/');
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
-            const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
-            return `${binaryHash}  ${assetName}\n`;
-          }
-          if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
-            return JSON.stringify({
-              source: 'build',
-              cliVersion: CLI_VERSION.version,
-              buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
-            });
-          }
-          if (normalized.includes('/bin/markitdown-')) return binaryBytes;
-          return actual.readFileSync(path as any);
-        }),
-      };
-    });
-    vi.doMock('node:child_process', () => ({
-      execFileSync: vi.fn(() => { throw new Error('path fallback should not be used'); }),
-      execFile: vi.fn(),
-    }));
+    _validationIo.existsSync = (path: unknown) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-')) return true;
+      return nativeExistsSync(path as any);
+    };
+    _markitdownConverterIo.existsSync = _validationIo.existsSync as any;
 
-    const mod = await import('../src/extraction/markitdown-converter.js');
-    expect(mod.isMarkItDownAvailable()).toBe(true);
+    _validationIo.readFileSync = ((path: unknown, ...rest: any[]) => {
+      const normalized = String(path).replace(/\\/g, '/');
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.sha256')) {
+        const assetName = normalized.split('/').pop()?.replace(/\.sha256$/, '') ?? 'markitdown-test';
+        return `${binaryHash}  ${assetName}\n`;
+      }
+      if (normalized.includes('/bin/markitdown-') && normalized.endsWith('.meta.json')) {
+        return JSON.stringify({
+          source: 'build',
+          cliVersion: CLI_VERSION.version,
+          buildFingerprint: MARKITDOWN_BUILD_FINGERPRINT,
+        });
+      }
+      if (normalized.includes('/bin/markitdown-')) return binaryBytes;
+      return nativeReadFileSync(path as any, ...rest);
+    }) as any;
+
+    _markitdownConverterIo.execFileSync = (() => { throw new Error('path fallback should not be used'); }) as any;
+
+    expect(isMarkItDownAvailable()).toBe(true);
   });
 });

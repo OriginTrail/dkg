@@ -1,30 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
-
-/**
- * Mock scryptSync to use lightweight params (N=2^14 instead of 2^18)
- * so the real encryptKeystore/decryptKeystore can be tested without
- * exceeding memory limits in CI.
- */
-vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:crypto')>();
-  return {
-    ...actual,
-    scryptSync: (password: any, salt: any, keylen: any, options: any) => {
-      return actual.scryptSync(password, salt, keylen, {
-        ...options,
-        N: 2 ** 14,
-        maxmem: 64 * 1024 * 1024,
-      });
-    },
-  };
-});
-
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   encryptKeystore,
   decryptKeystore,
   isEncryptedKeystore,
+  _setScryptN,
   type EncryptedKeystore,
 } from '../src/keystore.js';
+
+beforeAll(() => {
+  _setScryptN(2 ** 14);
+});
 
 const TEST_KEY = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
 const PASSPHRASE = 'test-passphrase-123';
