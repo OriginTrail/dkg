@@ -3791,13 +3791,22 @@ async function handleRequest(
       const sel: "all" | { rootEntities: string[] } = Array.isArray(selection)
         ? { rootEntities: selection }
         : selection || "all";
+      let resolvedPublishContextGraphId: string | null = null;
+      if (publishContextGraphId != null) {
+        resolvedPublishContextGraphId = String(publishContextGraphId);
+      } else if (!subGraphName) {
+        const onChainId = await agent.getContextGraphOnChainId(paranetId);
+        if (onChainId && /^\d+$/.test(onChainId)) {
+          resolvedPublishContextGraphId = onChainId;
+        }
+      }
       const result = await tracker.trackPhase(ctx, "read-shared-memory", () =>
         agent.publishFromSharedMemory(paranetId, sel, {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
           subGraphName,
-          ...(publishContextGraphId != null
-            ? { contextGraphId: String(publishContextGraphId) }
+          ...(resolvedPublishContextGraphId != null
+            ? { contextGraphId: resolvedPublishContextGraphId }
             : {}),
         }),
       );
@@ -3821,8 +3830,8 @@ async function handleRequest(
         status: result.status,
         kas: result.kaManifest.map((ka: any) => ({ tokenId: String(ka.tokenId), rootEntity: ka.rootEntity })),
         ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-        ...(publishContextGraphId != null
-          ? { publishContextGraphId: String(publishContextGraphId) }
+        ...(resolvedPublishContextGraphId != null
+          ? { publishContextGraphId: String(resolvedPublishContextGraphId) }
           : {}),
         ...(result.contextGraphError
           ? { contextGraphError: result.contextGraphError }
@@ -4091,6 +4100,7 @@ async function handleRequest(
         ...(Array.isArray(parsed.participantIdentityIds)
           ? { participantIdentityIds: parsed.participantIdentityIds.map((v: string | number) => BigInt(v)) }
           : {}),
+        ...(typeof parsed.requiredSignatures === 'number' ? { requiredSignatures: parsed.requiredSignatures } : {}),
       });
     } catch (err: any) {
       const msg = err?.message ?? "";
@@ -4196,6 +4206,52 @@ async function handleRequest(
         return jsonResponse(res, 400, { error: msg });
       }
       return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
+  if (req.method === "POST" && path === "/api/context-graph/register") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { id, revealOnChain, accessPolicy } = parsed;
+    if (!id) {
+      return jsonResponse(res, 400, { error: 'Missing "id"' });
+    }
+    if (typeof id !== 'string') {
+      return jsonResponse(res, 400, { error: '"id" must be a string' });
+    }
+    if (!isValidContextGraphId(id)) {
+      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    }
+    if (revealOnChain != null && typeof revealOnChain !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
+    }
+    if (accessPolicy != null && typeof accessPolicy !== 'number') {
+      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
+    }
+    try {
+      const result = await agent.registerContextGraph(id, {
+        ...(typeof revealOnChain === 'boolean' ? { revealOnChain } : {}),
+        ...(typeof accessPolicy === 'number' ? { accessPolicy } : {}),
+      });
+      return jsonResponse(res, 200, {
+        registered: id,
+        onChainId: result.onChainId,
+        ...(result.txHash ? { txHash: result.txHash } : {}),
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (
+        msg.includes('does not exist locally') ||
+        msg.includes('already registered') ||
+        msg.includes('Only the context graph creator') ||
+        msg.includes('no known creator') ||
+        msg.includes('configured chain adapter')
+      ) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg || 'Failed to register context graph' });
     }
   }
 
