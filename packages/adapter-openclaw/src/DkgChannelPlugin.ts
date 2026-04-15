@@ -29,6 +29,10 @@ import type {
   OpenClawPluginApi,
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
+import {
+  SemanticEnrichmentWorker,
+  type SemanticEnrichmentWakeRequest,
+} from './SemanticEnrichmentWorker.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -210,6 +214,7 @@ interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
   attachmentRefs?: OpenClawAttachmentRef[];
+  semanticWake?: SemanticEnrichmentWakeRequest;
 }
 
 interface InboundChatOptions {
@@ -293,6 +298,7 @@ export class DkgChannelPlugin {
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
   }>();
+  private semanticEnrichmentWorker: SemanticEnrichmentWorker | null = null;
   /**
    * Per-dispatch AsyncLocalStorage holding the UI-selected project
    * context graph for the currently-running turn. Populated by
@@ -318,6 +324,43 @@ export class DkgChannelPlugin {
     private readonly client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  private ensureSemanticEnrichmentWorker(): SemanticEnrichmentWorker | null {
+    if (!this.api) return null;
+    if (!this.semanticEnrichmentWorker) {
+      this.semanticEnrichmentWorker = new SemanticEnrichmentWorker(this.api, this.client);
+    } else {
+      this.semanticEnrichmentWorker.bind(this.api, this.client);
+    }
+    return this.semanticEnrichmentWorker;
+  }
+
+  private buildSemanticWakeRequest(
+    kind: SemanticEnrichmentWakeRequest['kind'],
+    correlationId: string,
+    triggerSource: SemanticEnrichmentWakeRequest['triggerSource'],
+    context: {
+      uiContextGraphId?: string;
+      sessionKey?: string;
+      payload?: Record<string, unknown>;
+    },
+  ): SemanticEnrichmentWakeRequest {
+    return {
+      kind,
+      eventKey: correlationId,
+      triggerSource,
+      uiContextGraphId: context.uiContextGraphId,
+      sessionKey: context.sessionKey,
+      payload: context.payload,
+    };
+  }
+
+  private noteSemanticWake(request: SemanticEnrichmentWakeRequest): void {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    if (!worker) return;
+    worker.noteWake(request);
+    worker.poke();
   }
 
   /**
@@ -402,6 +445,25 @@ export class DkgChannelPlugin {
         log.info?.(`[dkg-channel] runtime config-like keys: ${rtKeys || 'none'}`);
         const allRtKeys = Object.keys(rt).sort().join(', ');
         log.info?.(`[dkg-channel] runtime all keys: ${allRtKeys}`);
+      }
+    }
+
+    const semanticWorker = this.ensureSemanticEnrichmentWorker();
+    if (semanticWorker) {
+      const probe = semanticWorker.getRuntimeProbe();
+      if (probe.supported) {
+        log.info?.(
+          `[dkg-channel] runtime.subagent available for semantic wake coordination (worker=${semanticWorker.getWorkerInstanceId()})`,
+        );
+      } else {
+        log.warn?.(
+          `[dkg-channel] runtime.subagent unavailable for semantic wake coordination; missing ${probe.missing.join(', ') || 'subagent helpers'}`,
+        );
+      }
+      if (probe.supported) {
+        void semanticWorker.start().catch((err: any) => {
+          log.warn?.(`[dkg-channel] Semantic enrichment worker failed to start: ${err?.message ?? String(err)}`);
+        });
       }
     }
 
@@ -523,6 +585,7 @@ export class DkgChannelPlugin {
       this.clearPendingTurnPersistence();
     }
     this.stopDrainDeadlineAt = null;
+    await this.semanticEnrichmentWorker?.stop();
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
@@ -719,9 +782,19 @@ export class DkgChannelPlugin {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
+        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
+          uiContextGraphId,
+          payload: {
+            userMessage: text,
+            assistantReply: reply.text,
+            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
+          },
+        });
+        this.noteSemanticWake(semanticWake);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
+          semanticWake,
         }, true);
         return reply;
       } catch (err: any) {
@@ -756,8 +829,18 @@ export class DkgChannelPlugin {
           correlationId,
         } as any),
       );
+      const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
+        uiContextGraphId,
+        payload: {
+          userMessage: text,
+          assistantReply: reply.text,
+          attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
+        },
+      });
+      this.noteSemanticWake(semanticWake);
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
+        semanticWake,
       }, true);
       return reply;
     }
@@ -1170,25 +1253,59 @@ export class DkgChannelPlugin {
       }
 
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
+        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
+          uiContextGraphId,
+          sessionKey: route?.sessionKey,
+          payload: {
+            userMessage: text,
+            assistantReply: resolvedFinalText,
+            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
+          },
+        });
+        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
+          semanticWake,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
+        const failedReply = this.buildFailedAssistantReply(resolvedFailureReason);
+        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
+          uiContextGraphId,
+          sessionKey: route?.sessionKey,
+          payload: {
+            userMessage: text,
+            assistantReply: failedReply,
+            failureReason: resolvedFailureReason,
+            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
+          },
+        });
+        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(
           text,
-          this.buildFailedAssistantReply(resolvedFailureReason),
+          failedReply,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
+          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs, semanticWake },
           true,
         );
       } else {
+        const semanticWake = this.buildSemanticWakeRequest('chat_turn', correlationId, 'direct', {
+          uiContextGraphId,
+          sessionKey: route?.sessionKey,
+          payload: {
+            userMessage: text,
+            assistantReply: CANCELLED_TURN_MESSAGE,
+            failureReason: 'cancelled',
+            attachmentRefs: attachmentRefs?.map((ref) => ({ ...ref })),
+          },
+        });
+        this.noteSemanticWake(semanticWake);
         this.queueTurnPersistence(
           text,
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
+          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs, semanticWake },
           true,
         );
       }
@@ -1381,7 +1498,7 @@ export class DkgChannelPlugin {
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
-    await this.client.storeChatTurn(
+    const persisted = await this.client.storeChatTurn(
       sessionId,
       userMessage,
       assistantReply,
@@ -1390,8 +1507,21 @@ export class DkgChannelPlugin {
         ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
         ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
+        ...(opts?.semanticWake?.uiContextGraphId ? { projectContextGraphId: opts.semanticWake.uiContextGraphId } : {}),
       },
     );
+    if (opts?.semanticWake) {
+      this.noteSemanticWake({
+        ...opts.semanticWake,
+        triggerSource: 'background',
+        payload: {
+          ...(opts.semanticWake.payload ?? {}),
+          userMessage,
+          assistantReply,
+          semanticEnrichmentEventId: persisted?.semanticEnrichment?.eventId,
+        },
+      });
+    }
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
   }
 

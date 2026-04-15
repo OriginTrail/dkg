@@ -49,8 +49,33 @@ export interface OpenClawPluginApi {
    */
   registerMemoryCapability?(capability: MemoryPluginCapability): void;
 
+  /**
+   * Runtime namespace exposed by newer OpenClaw gateways.
+   * Typed narrowly enough for the adapter's subagent gating while still
+   * allowing additional host-specific runtime helpers to flow through.
+   */
+  runtime?: OpenClawRuntime;
+
   /** Workspace directory path (set by gateway). */
   workspaceDir?: string;
+}
+
+export interface OpenClawRuntimeSubagent {
+  run(params: {
+    sessionKey: string;
+    message: string;
+    provider?: string;
+    model?: string;
+    deliver?: boolean;
+  }): Promise<{ runId?: string; [key: string]: unknown }>;
+  waitForRun(params: { runId: string; timeoutMs?: number }): Promise<{ status?: string; [key: string]: unknown }>;
+  getSessionMessages(params: { sessionKey: string; limit?: number }): Promise<{ messages?: unknown[]; [key: string]: unknown }>;
+  deleteSession(params: { sessionKey: string }): Promise<void>;
+}
+
+export interface OpenClawRuntime {
+  subagent?: OpenClawRuntimeSubagent;
+  [key: string]: unknown;
 }
 
 export interface OpenClawTool {

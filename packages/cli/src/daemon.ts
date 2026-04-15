@@ -89,6 +89,17 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from './config.js';
+import {
+  buildChatSemanticIdempotencyKey,
+  buildFileSemanticIdempotencyKey,
+  contextGraphOntologyUri,
+  type ChatTurnSemanticEventPayload,
+  type FileImportSemanticEventPayload,
+  type SemanticEnrichmentDescriptor,
+  type SemanticEnrichmentEventPayload,
+  type SemanticEnrichmentStatus,
+  type SemanticTripleInput,
+} from './semantic-enrichment.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -2641,6 +2652,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   persistenceState?: unknown;
   failureReason?: unknown;
   attachmentRefs?: unknown;
+  projectContextGraphId?: unknown;
 }): payload is {
   sessionId: string;
   userMessage: string;
@@ -2650,6 +2662,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   persistenceState?: unknown;
   failureReason?: unknown;
   attachmentRefs?: unknown;
+  projectContextGraphId?: unknown;
 } {
   return (
     typeof payload.sessionId === "string" &&
@@ -2923,6 +2936,290 @@ export async function verifyOpenClawAttachmentRefsProvenance(
   }
 
   return attachmentRefs;
+}
+
+const SEMANTIC_ENRICHMENT_MAX_ATTEMPTS = 5;
+const SEMANTIC_ENRICHMENT_METHOD = 'semantic-llm-agent';
+const SEMANTIC_ENRICHMENT_EVENT_ID_PREDICATE = 'http://dkg.io/ontology/semanticEnrichmentEventId';
+const SEMANTIC_ENRICHMENT_SOURCE_PREDICATE = 'http://dkg.io/ontology/extractedFrom';
+const SEMANTIC_ENRICHMENT_COUNT_PREDICATE = 'http://dkg.io/ontology/semanticTripleCount';
+const STRUCTURAL_TRIPLE_COUNT_PREDICATE = 'http://dkg.io/ontology/structuralTripleCount';
+const EXTRACTION_PROVENANCE_TYPE = 'http://dkg.io/ontology/ExtractionProvenance';
+const EXTRACTION_METHOD_PREDICATE = 'http://dkg.io/ontology/extractionMethod';
+const EXTRACTED_AT_PREDICATE = 'http://dkg.io/ontology/extractedAt';
+const EXTRACTED_BY_PREDICATE = 'http://dkg.io/ontology/extractedBy';
+const RDF_TYPE_PREDICATE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+function semanticEnrichmentDescriptorFromRow(
+  row: {
+    id: string;
+    status: SemanticEnrichmentStatus;
+    updated_at: number;
+    last_error: string | null;
+  },
+  semanticTripleCount = 0,
+): SemanticEnrichmentDescriptor {
+  return {
+    eventId: row.id,
+    status: row.status,
+    semanticTripleCount,
+    updatedAt: new Date(row.updated_at).toISOString(),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+  };
+}
+
+function isSemanticTripleInput(value: unknown): value is SemanticTripleInput {
+  return isPlainRecord(value)
+    && typeof value.subject === 'string'
+    && value.subject.trim().length > 0
+    && typeof value.predicate === 'string'
+    && value.predicate.trim().length > 0
+    && typeof value.object === 'string'
+    && value.object.trim().length > 0;
+}
+
+function normalizeSemanticTripleInputs(raw: unknown): SemanticTripleInput[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const triples: SemanticTripleInput[] = [];
+  for (const entry of raw) {
+    if (!isSemanticTripleInput(entry)) return undefined;
+    triples.push({
+      subject: entry.subject.trim(),
+      predicate: entry.predicate.trim(),
+      object: entry.object.trim(),
+    });
+  }
+  return triples;
+}
+
+function parseSemanticEnrichmentEventPayload(raw: string): SemanticEnrichmentEventPayload | undefined {
+  try {
+    const parsed = JSON.parse(raw) as SemanticEnrichmentEventPayload;
+    if (!parsed || typeof parsed !== 'object' || !('kind' in parsed)) return undefined;
+    if (parsed.kind === 'chat_turn') return parsed;
+    if (parsed.kind === 'file_import') return parsed;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function updateExtractionStatusSemanticDescriptor(
+  extractionStatus: Map<string, ExtractionStatusRecord>,
+  assertionUri: string,
+  descriptor: SemanticEnrichmentDescriptor,
+): void {
+  const current = getExtractionStatusRecord(extractionStatus, assertionUri);
+  if (!current) return;
+  setExtractionStatusRecord(extractionStatus, assertionUri, {
+    ...current,
+    semanticEnrichment: {
+      eventId: descriptor.eventId,
+      status: descriptor.status,
+      semanticTripleCount: descriptor.semanticTripleCount,
+      updatedAt: descriptor.updatedAt,
+      ...(descriptor.lastError ? { lastError: descriptor.lastError } : {}),
+    },
+  });
+}
+
+function buildChatSemanticEventPayload(args: {
+  agentPeerId: string;
+  sessionId: string;
+  turnId: string;
+  userMessage: string;
+  assistantReply: string;
+  attachmentRefs?: OpenClawAttachmentRef[];
+  persistenceState: 'stored' | 'failed' | 'pending';
+  failureReason?: string;
+  projectContextGraphId?: string;
+}): ChatTurnSemanticEventPayload {
+  return {
+    kind: 'chat_turn',
+    sessionId: args.sessionId,
+    turnId: args.turnId,
+    contextGraphId: 'agent-context',
+    assertionName: 'chat-turns',
+    assertionUri: contextGraphAssertionUri('agent-context', args.agentPeerId, 'chat-turns'),
+    sessionUri: `urn:dkg:chat:session:${args.sessionId}`,
+    turnUri: `urn:dkg:chat:turn:${args.turnId}`,
+    userMessage: args.userMessage,
+    assistantReply: args.assistantReply,
+    ...(args.attachmentRefs?.length ? { attachmentRefs: args.attachmentRefs } : {}),
+    persistenceState: args.persistenceState,
+    ...(args.failureReason ? { failureReason: args.failureReason } : {}),
+    ...(args.projectContextGraphId ? { projectContextGraphId: args.projectContextGraphId } : {}),
+  };
+}
+
+function buildFileSemanticEventPayload(args: {
+  contextGraphId: string;
+  assertionName: string;
+  assertionUri: string;
+  rootEntity?: string;
+  fileHash: string;
+  mdIntermediateHash?: string;
+  detectedContentType: string;
+  sourceFileName?: string;
+  ontologyRef?: string;
+}): FileImportSemanticEventPayload {
+  return {
+    kind: 'file_import',
+    contextGraphId: args.contextGraphId,
+    assertionName: args.assertionName,
+    assertionUri: args.assertionUri,
+    ...(args.rootEntity ? { rootEntity: args.rootEntity } : {}),
+    fileHash: args.fileHash,
+    ...(args.mdIntermediateHash ? { mdIntermediateHash: args.mdIntermediateHash } : {}),
+    detectedContentType: args.detectedContentType,
+    ...(args.sourceFileName ? { sourceFileName: args.sourceFileName } : {}),
+    ...(args.ontologyRef ? { ontologyRef: args.ontologyRef } : {}),
+  };
+}
+
+function ensureSemanticEnrichmentEvent(
+  dashDb: DashboardDB,
+  kind: 'chat_turn' | 'file_import',
+  payload: SemanticEnrichmentEventPayload,
+  semanticTripleCount = 0,
+): SemanticEnrichmentDescriptor {
+  const now = Date.now();
+  const idempotencyKey = kind === 'chat_turn' && payload.kind === 'chat_turn'
+    ? buildChatSemanticIdempotencyKey(payload.turnId)
+    : kind === 'file_import' && payload.kind === 'file_import'
+      ? buildFileSemanticIdempotencyKey({
+          assertionUri: payload.assertionUri,
+          fileHash: payload.fileHash,
+          mdIntermediateHash: payload.mdIntermediateHash,
+        })
+      : (() => {
+          throw new Error(`Semantic enrichment payload kind mismatch: expected ${kind}, received ${payload.kind}`);
+        })();
+  const existing = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
+  if (existing) return semanticEnrichmentDescriptorFromRow(existing, semanticTripleCount);
+
+  const eventId = randomUUID();
+  dashDb.insertSemanticEnrichmentEvent({
+    id: eventId,
+    kind,
+    idempotency_key: idempotencyKey,
+    payload_json: JSON.stringify(payload),
+    status: 'pending',
+    attempts: 0,
+    max_attempts: SEMANTIC_ENRICHMENT_MAX_ATTEMPTS,
+    next_attempt_at: now,
+    created_at: now,
+    updated_at: now,
+  });
+  const row = dashDb.getSemanticEnrichmentEvent(eventId);
+  return semanticEnrichmentDescriptorFromRow(row ?? {
+    id: eventId,
+    status: 'pending',
+    updated_at: now,
+    last_error: null,
+  }, semanticTripleCount);
+}
+
+function semanticEnrichmentSourceRef(payload: SemanticEnrichmentEventPayload): string {
+  if (payload.kind === 'file_import') return `urn:dkg:file:${payload.fileHash}`;
+  return payload.turnUri;
+}
+
+async function resolveChatTurnMessageUris(
+  agent: Pick<DKGAgent, 'store'>,
+  payload: ChatTurnSemanticEventPayload,
+): Promise<{ userMsgUri: string; assistantMsgUri: string } | null> {
+  const result = await agent.store.query(`
+    SELECT ?user ?assistant WHERE {
+      GRAPH <${payload.assertionUri}> {
+        <${payload.turnUri}> <http://dkg.io/ontology/hasUserMessage> ?user .
+        <${payload.turnUri}> <http://dkg.io/ontology/hasAssistantMessage> ?assistant .
+      }
+    }
+    LIMIT 1
+  `) as { bindings?: Array<Record<string, string>> };
+  const binding = result?.bindings?.[0];
+  const userMsgUri = typeof binding?.user === 'string' ? binding.user.replace(/[<>]/g, '').trim() : '';
+  const assistantMsgUri = typeof binding?.assistant === 'string' ? binding.assistant.replace(/[<>]/g, '').trim() : '';
+  if (!userMsgUri || !assistantMsgUri || !isSafeIri(userMsgUri) || !isSafeIri(assistantMsgUri)) return null;
+  return { userMsgUri, assistantMsgUri };
+}
+
+async function semanticEnrichmentAlreadyApplied(
+  agent: Pick<DKGAgent, 'store'>,
+  graph: string,
+  eventId: string,
+): Promise<boolean> {
+  const provenanceUri = `urn:dkg:semantic-enrichment:${eventId}`;
+  const result = await agent.store.query(`
+    ASK {
+      GRAPH <${graph}> {
+        <${provenanceUri}> ?p ?o .
+      }
+    }
+  `) as { value?: boolean };
+  return result?.value === true;
+}
+
+async function readCurrentSemanticTripleCount(
+  agent: Pick<DKGAgent, 'store'>,
+  contextGraphId: string,
+  assertionUri: string,
+): Promise<number> {
+  const result = await agent.store.query(`
+    SELECT ?count WHERE {
+      GRAPH <${contextGraphMetaUri(contextGraphId)}> {
+        <${assertionUri}> <${SEMANTIC_ENRICHMENT_COUNT_PREDICATE}> ?count .
+      }
+    }
+    LIMIT 1
+  `) as { bindings?: Array<Record<string, string>> };
+  return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
+}
+
+function buildSemanticAppendQuads(args: {
+  agentDid: string;
+  eventId: string;
+  graph: string;
+  sourceRef: string;
+  triples: SemanticTripleInput[];
+  extractedAt: string;
+}): Array<{ subject: string; predicate: string; object: string; graph: string }> {
+  const provenanceUri = `urn:dkg:semantic-enrichment:${args.eventId}`;
+  const quads = args.triples.map((triple) => ({
+    subject: triple.subject,
+    predicate: triple.predicate,
+    object: triple.object,
+    graph: args.graph,
+  }));
+
+  const sourceLinkedSubjects = new Set<string>();
+  for (const triple of args.triples) {
+    if (triple.subject !== args.sourceRef && isSafeIri(triple.subject)) {
+      sourceLinkedSubjects.add(triple.subject);
+    }
+  }
+
+  quads.push(
+    { subject: provenanceUri, predicate: RDF_TYPE_PREDICATE, object: EXTRACTION_PROVENANCE_TYPE, graph: args.graph },
+    { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_SOURCE_PREDICATE, object: args.sourceRef, graph: args.graph },
+    { subject: provenanceUri, predicate: EXTRACTED_BY_PREDICATE, object: args.agentDid, graph: args.graph },
+    { subject: provenanceUri, predicate: EXTRACTED_AT_PREDICATE, object: `"${args.extractedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: args.graph },
+    { subject: provenanceUri, predicate: EXTRACTION_METHOD_PREDICATE, object: JSON.stringify(SEMANTIC_ENRICHMENT_METHOD), graph: args.graph },
+    { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_EVENT_ID_PREDICATE, object: JSON.stringify(args.eventId), graph: args.graph },
+  );
+
+  for (const subject of sourceLinkedSubjects) {
+    quads.push({
+      subject,
+      predicate: SEMANTIC_ENRICHMENT_SOURCE_PREDICATE,
+      object: args.sourceRef,
+      graph: args.graph,
+    });
+  }
+
+  return quads;
 }
 
 let _standaloneCache: boolean | null = null;
@@ -3689,7 +3986,7 @@ async function handleRequest(
           "Missing required fields: sessionId, userMessage, assistantReply",
       });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason } =
+    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason, projectContextGraphId } =
       payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? (toolCalls as Array<{
@@ -3714,6 +4011,9 @@ async function handleRequest(
     const normalizedFailureReason = typeof failureReason === 'string'
       ? failureReason.trim() || undefined
       : undefined;
+    const normalizedProjectContextGraphId = typeof projectContextGraphId === 'string'
+      ? projectContextGraphId.trim() || undefined
+      : undefined;
     try {
       await memoryManager.storeChatExchange(
         sessionId,
@@ -3727,10 +4027,263 @@ async function handleRequest(
           failureReason: normalizedFailureReason,
         },
       );
-      return jsonResponse(res, 200, { ok: true });
+      const semanticEnrichment = ensureSemanticEnrichmentEvent(
+        dashDb,
+        'chat_turn',
+        buildChatSemanticEventPayload({
+          agentPeerId: agent.peerId,
+          sessionId,
+          turnId: normalizedTurnId,
+          userMessage,
+          assistantReply,
+          attachmentRefs: verifiedAttachmentRefs,
+          persistenceState: normalizedPersistenceState,
+          failureReason: normalizedFailureReason,
+          projectContextGraphId: normalizedProjectContextGraphId,
+        }),
+      );
+      return jsonResponse(res, 200, { ok: true, turnId: normalizedTurnId, semanticEnrichment });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
     }
+  }
+
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/claim') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    if (!leaseOwner) {
+      return jsonResponse(res, 400, { error: 'Missing "leaseOwner"' });
+    }
+    const now = Date.now();
+    const claimed = dashDb.claimNextRunnableSemanticEnrichmentEvent(now, leaseOwner);
+    if (!claimed) {
+      return jsonResponse(res, 200, { event: null });
+    }
+    const eventPayload = parseSemanticEnrichmentEventPayload(claimed.payload_json);
+    if (!eventPayload) {
+      dashDb.failSemanticEnrichmentEvent(
+        claimed.id,
+        leaseOwner,
+        claimed.attempts,
+        claimed.max_attempts,
+        dashDb.getSemanticEnrichmentNextAttemptAt(now, claimed.attempts),
+        now,
+        'Invalid semantic enrichment event payload',
+      );
+      return jsonResponse(res, 200, { event: null });
+    }
+    return jsonResponse(res, 200, {
+      event: {
+        id: claimed.id,
+        kind: claimed.kind,
+        payload: eventPayload,
+        status: claimed.status,
+        attempts: claimed.attempts,
+        maxAttempts: claimed.max_attempts,
+        leaseOwner: claimed.lease_owner,
+        leaseExpiresAt: claimed.lease_expires_at,
+        nextAttemptAt: claimed.next_attempt_at,
+        lastError: claimed.last_error ?? undefined,
+      },
+    });
+  }
+
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/renew') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    if (!eventId || !leaseOwner) {
+      return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    }
+    const renewed = dashDb.renewSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
+    return jsonResponse(res, renewed ? 200 : 409, { renewed });
+  }
+
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/complete') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const semanticTripleCount = typeof payload.semanticTripleCount === 'number' && Number.isFinite(payload.semanticTripleCount)
+      ? payload.semanticTripleCount
+      : 0;
+    if (!eventId || !leaseOwner) {
+      return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    }
+    const now = Date.now();
+    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now);
+    if (!completed) {
+      return jsonResponse(res, 409, { completed: false });
+    }
+    const row = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!row) {
+      return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
+    }
+    const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
+    if (eventPayload?.kind === 'file_import') {
+      const descriptor = semanticEnrichmentDescriptorFromRow(row, semanticTripleCount);
+      updateExtractionStatusSemanticDescriptor(extractionStatus, eventPayload.assertionUri, descriptor);
+      return jsonResponse(res, 200, { completed: true, semanticEnrichment: descriptor });
+    }
+    return jsonResponse(res, 200, {
+      completed: true,
+      semanticEnrichment: semanticEnrichmentDescriptorFromRow(row, semanticTripleCount),
+    });
+  }
+
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/fail') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const errorMessage = typeof payload.error === 'string' ? payload.error.trim() : '';
+    if (!eventId || !leaseOwner || !errorMessage) {
+      return jsonResponse(res, 400, { error: 'Missing "eventId", "leaseOwner", or "error"' });
+    }
+    const row = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!row) {
+      return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
+    }
+    const now = Date.now();
+    const nextAttemptAt = dashDb.getSemanticEnrichmentNextAttemptAt(now, row.attempts);
+    const status = dashDb.failSemanticEnrichmentEvent(
+      eventId,
+      leaseOwner,
+      row.attempts,
+      row.max_attempts,
+      nextAttemptAt,
+      now,
+      errorMessage,
+    );
+    if (!status) {
+      return jsonResponse(res, 409, { status: null });
+    }
+    const updated = dashDb.getSemanticEnrichmentEvent(eventId);
+    const eventPayload = updated ? parseSemanticEnrichmentEventPayload(updated.payload_json) : undefined;
+    if (updated && eventPayload?.kind === 'file_import') {
+      updateExtractionStatusSemanticDescriptor(
+        extractionStatus,
+        eventPayload.assertionUri,
+        semanticEnrichmentDescriptorFromRow(updated),
+      );
+    }
+    return jsonResponse(res, 200, {
+      status,
+      ...(updated ? { semanticEnrichment: semanticEnrichmentDescriptorFromRow(updated) } : {}),
+    });
+  }
+
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/append') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    const triples = normalizeSemanticTripleInputs(payload.triples);
+    if (!eventId || !leaseOwner || !triples) {
+      return jsonResponse(res, 400, { error: 'Missing "eventId", "leaseOwner", or valid "triples"' });
+    }
+    const row = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!row) {
+      return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
+    }
+    const eventPayload = parseSemanticEnrichmentEventPayload(row.payload_json);
+    if (!eventPayload) {
+      return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
+    }
+    if (row.status !== 'leased' || row.lease_owner !== leaseOwner) {
+      if (row.status === 'completed') {
+        const semanticTripleCount = eventPayload.kind === 'file_import'
+          ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
+          : triples.length;
+        return jsonResponse(res, 200, {
+          applied: false,
+          alreadyApplied: true,
+          semanticEnrichment: semanticEnrichmentDescriptorFromRow(row, semanticTripleCount),
+        });
+      }
+      return jsonResponse(res, 409, { error: 'Semantic enrichment lease is no longer owned by this worker' });
+    }
+
+    const now = Date.now();
+    const extractedAt = new Date(now).toISOString();
+    const targetGraph = eventPayload.assertionUri;
+    const sourceRef = semanticEnrichmentSourceRef(eventPayload);
+    const alreadyApplied = await semanticEnrichmentAlreadyApplied(agent, targetGraph, eventId);
+    let semanticTripleCount = eventPayload.kind === 'file_import'
+      ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
+      : 0;
+
+    if (!alreadyApplied && triples.length > 0) {
+      const semanticQuads = buildSemanticAppendQuads({
+        agentDid: `did:dkg:agent:${agent.peerId}`,
+        eventId,
+        graph: targetGraph,
+        sourceRef,
+        triples,
+        extractedAt,
+      });
+      if (eventPayload.kind === 'file_import') {
+        semanticTripleCount += triples.length;
+        const metaGraph = contextGraphMetaUri(eventPayload.contextGraphId);
+        await agent.store.deleteByPattern({
+          subject: eventPayload.assertionUri,
+          predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
+          graph: metaGraph,
+        });
+        semanticQuads.push({
+          subject: eventPayload.assertionUri,
+          predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
+          object: `"${semanticTripleCount}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          graph: metaGraph,
+        });
+      } else {
+        semanticTripleCount = triples.length;
+      }
+      await agent.store.insert(semanticQuads);
+    }
+
+    const completed = dashDb.completeSemanticEnrichmentEvent(eventId, leaseOwner, now);
+    const updated = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!updated) {
+      return jsonResponse(res, 404, { error: `Semantic enrichment event not found after append: ${eventId}` });
+    }
+    const descriptor = semanticEnrichmentDescriptorFromRow(updated, semanticTripleCount);
+    if (eventPayload.kind === 'file_import') {
+      updateExtractionStatusSemanticDescriptor(extractionStatus, eventPayload.assertionUri, descriptor);
+    }
+    return jsonResponse(res, completed ? 200 : 409, {
+      applied: !alreadyApplied && triples.length > 0,
+      alreadyApplied,
+      completed,
+      semanticEnrichment: descriptor,
+    });
   }
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable
@@ -4256,6 +4809,60 @@ async function handleRequest(
       }
       throw err;
     }
+  }
+
+  if (
+    req.method === 'POST'
+    && path.startsWith('/api/context-graph/')
+    && path.endsWith('/_ontology/write')
+  ) {
+    const contextGraphId = safeDecodeURIComponent(
+      path.slice('/api/context-graph/'.length, -'/_ontology/write'.length),
+      res,
+    );
+    if (contextGraphId === null) return;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const quads = Array.isArray(parsed.quads) ? parsed.quads : undefined;
+    if (!quads?.length) {
+      return jsonResponse(res, 400, { error: 'Missing "quads"' });
+    }
+    const ontologyGraph = contextGraphOntologyUri(contextGraphId);
+    const normalizedQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+    for (const entry of quads) {
+      if (!isPlainRecord(entry)) {
+        return jsonResponse(res, 400, { error: 'Each ontology quad must be an object' });
+      }
+      const subject = typeof entry.subject === 'string' ? entry.subject.trim() : '';
+      const predicate = typeof entry.predicate === 'string' ? entry.predicate.trim() : '';
+      const objectRaw = typeof entry.object === 'string' ? entry.object.trim() : '';
+      if (!subject || !predicate || !objectRaw) {
+        return jsonResponse(res, 400, { error: 'Ontology quads require subject, predicate, and object strings' });
+      }
+      if (!isSafeIri(subject) || !isSafeIri(predicate)) {
+        return jsonResponse(res, 400, { error: 'Ontology quad subject/predicate must be safe IRIs' });
+      }
+      const object = objectRaw.startsWith('"') || isSafeIri(objectRaw)
+        ? objectRaw
+        : JSON.stringify(objectRaw);
+      normalizedQuads.push({
+        subject,
+        predicate,
+        object,
+        graph: ontologyGraph,
+      });
+    }
+    await agent.store.insert(normalizedQuads);
+    res.setHeader('Deprecation', 'true');
+    return jsonResponse(res, 200, {
+      written: normalizedQuads.length,
+      graph: ontologyGraph,
+      deprecated: {
+        replacementEndpoint: 'POST /api/context-graph/{id}/ontology',
+      },
+    });
   }
 
   // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
@@ -5367,11 +5974,33 @@ async function handleRequest(
         completedRecord,
       );
 
+      const semanticEnrichment = ensureSemanticEnrichmentEvent(
+        dashDb,
+        'file_import',
+        buildFileSemanticEventPayload({
+          contextGraphId: contextGraphId!,
+          assertionName,
+          assertionUri,
+          rootEntity: importRootEntity,
+          fileHash: fileStoreEntry.keccak256,
+          mdIntermediateHash,
+          detectedContentType,
+          sourceFileName: uploadedFilename || undefined,
+          ontologyRef,
+        }),
+      );
+      updateExtractionStatusSemanticDescriptor(
+        extractionStatus,
+        assertionUri,
+        semanticEnrichment,
+      );
+
       return respondWithImportFileResponse(200, {
         status: "completed",
         tripleCount: triples.length,
         pipelineUsed,
         ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        semanticEnrichment,
       });
     } finally {
       // Round 14 Bug 42 outer finally: release the per-assertion
@@ -5438,6 +6067,9 @@ async function handleRequest(
       detectedContentType: record.detectedContentType,
       pipelineUsed: record.pipelineUsed,
       tripleCount: record.tripleCount,
+      ...(record.semanticEnrichment
+        ? { semanticEnrichment: record.semanticEnrichment }
+        : {}),
       ...(record.mdIntermediateHash
         ? { mdIntermediateHash: record.mdIntermediateHash }
         : {}),
@@ -7014,6 +7646,7 @@ interface ImportFileExtractionPayload {
   pipelineUsed: string | null;
   mdIntermediateHash?: string;
   error?: string;
+  semanticEnrichment?: SemanticEnrichmentDescriptor;
 }
 
 function buildImportFileResponse(args: {
@@ -7036,6 +7669,9 @@ function buildImportFileResponse(args: {
         ? { mdIntermediateHash: args.extraction.mdIntermediateHash }
         : {}),
       ...(args.extraction.error ? { error: args.extraction.error } : {}),
+      ...(args.extraction.semanticEnrichment
+        ? { semanticEnrichment: args.extraction.semanticEnrichment }
+        : {}),
     },
   };
 }

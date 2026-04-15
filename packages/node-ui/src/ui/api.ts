@@ -214,6 +214,13 @@ export interface ImportFileResult {
     provenance?: any;
     error?: string;
     pipelineUsed?: string;
+    semanticEnrichment?: {
+      eventId: string;
+      status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+      semanticTripleCount: number;
+      updatedAt: string;
+      lastError?: string;
+    };
   };
 }
 
@@ -323,6 +330,13 @@ export interface ExtractionStatus {
   pipelineUsed: string | null;
   tripleCount: number;
   mdIntermediateHash?: string;
+  semanticEnrichment?: {
+    eventId: string;
+    status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+    semanticTripleCount: number;
+    updatedAt: string;
+    lastError?: string;
+  };
   startedAt: string;
   completedAt?: string;
 }

@@ -1,3 +1,11 @@
+export interface SemanticEnrichmentStatusRecord {
+  eventId: string;
+  status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+  semanticTripleCount: number;
+  updatedAt: string;
+  lastError?: string;
+}
+
 export interface ExtractionStatusRecord {
   status: 'in_progress' | 'completed' | 'skipped' | 'failed';
   // `keccak256:<hex>` — canonical per spec §10.2:603 / 03 §2.1:658.
@@ -13,6 +21,7 @@ export interface ExtractionStatusRecord {
   error?: string;
   startedAt: string;
   completedAt?: string;
+  semanticEnrichment?: SemanticEnrichmentStatusRecord;
 }
 
 export const EXTRACTION_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
