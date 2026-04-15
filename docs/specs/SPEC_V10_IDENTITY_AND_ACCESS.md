@@ -129,6 +129,39 @@ If `nodeRole` is not specified in config, it defaults to `'edge'`. Core nodes mu
 
 ---
 
+## 4.3 Custodial Agent Key Restoration
+
+When a node restarts (non-clean), agent records loaded from the triple store
+may lack their `privateKey` (private keys are intentionally not persisted to
+the store). For custodial agents, the node restores the private key from the
+configured `operationalKeys` by matching the derived wallet address to the
+stored `agentAddress`. This ensures signed operations (e.g., join requests)
+work correctly after restart.
+
+## 4.4 Join Approval Broadcast
+
+When a curator approves a join request, the notification is **broadcast to
+all connected peers** via `PROTOCOL_JOIN_REQUEST`, not targeted to a specific
+agent registry entry. Each peer's handler checks the `agentAddress` field —
+only the matching node auto-subscribes and initiates catch-up sync. This
+approach avoids reliance on a potentially incomplete agent registry.
+
+## 4.5 Real-Time SSE Events
+
+The node emits Server-Sent Events on `GET /api/events` for:
+
+| Event | Trigger |
+|-------|---------|
+| `join_request` | Peer submits a join request for a CG this node curates |
+| `join_approved` | This node's join request was approved by a curator |
+| `project_synced` | Catch-up sync completed with new data (dataSynced > 0 or sharedMemorySynced > 0) |
+
+These events are also stored as notifications in the dashboard database. The
+Node UI subscribes to SSE for instant updates, falling back to 60-second
+polling. See [17_NODE_API.md `GET /api/events`](../../dkgv10-spec/17_NODE_API.md) for protocol details.
+
+---
+
 ## 5. Node API Changes
 
 ### New Routes
@@ -140,6 +173,9 @@ If `nodeRole` is not specified in config, it defaults to `'edge'`. Core nodes mu
 | `POST` | `/api/context-graph/{id}/add-participant` | Add agent to CG allowlist |
 | `POST` | `/api/context-graph/{id}/remove-participant` | Remove agent from CG allowlist |
 | `GET` | `/api/context-graph/{id}/participants` | List allowed agents for a CG |
+| `POST` | `/api/context-graph/register` | Register CG on-chain (required for VM publish) |
+| `GET` | `/api/assertion/{name}/history` | Query assertion lifecycle provenance |
+| `GET` | `/api/events` | SSE stream for join_request, join_approved, project_synced |
 
 ### Updated Routes
 
