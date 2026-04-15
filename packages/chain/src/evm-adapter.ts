@@ -940,10 +940,12 @@ export class EVMChainAdapter implements ChainAdapter {
     const identityIds = params.participantIdentityIds.map((id) => id);
     const tx = await this.contracts.contextGraphs.createContextGraph(
       identityIds,
+      params.participantAgents ?? [],
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
       params.publishPolicy ?? 0,
       params.publishAuthority ?? ethers.ZeroAddress,
+      params.publishAuthorityAccountId ?? 0n,
     );
     const receipt = await tx.wait();
 
@@ -985,8 +987,8 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     try {
-      const participants: bigint[] = await this.contracts.contextGraphStorage.getContextGraphParticipants(contextGraphId);
-      return participants.map((id) => BigInt(id));
+      const hostingNodes: bigint[] = await this.contracts.contextGraphStorage.getHostingNodes(contextGraphId);
+      return hostingNodes.map((id) => BigInt(id));
     } catch {
       return null;
     }
@@ -1414,13 +1416,86 @@ export class EVMChainAdapter implements ChainAdapter {
 
     const ka = this.contracts.knowledgeAssetsV10.connect(signer) as Contract;
 
-    const tx = await ka.updateKnowledgeCollection(
-      params.kcId,
-      ethers.hexlify(params.newMerkleRoot),
-      params.newByteSize,
-      params.mintAmount ?? 0,
-      params.burnTokenIds ?? [],
-    );
+    const kav10Address = await this.contracts.knowledgeAssetsV10.getAddress();
+    const evmChainId = (await this.provider.getNetwork()).chainId;
+
+    const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
+
+    // Look up the current tokenAmount on-chain to carry it forward
+    let currentTokenAmount = 0n;
+    if (kcs) {
+      try {
+        currentTokenAmount = await kcs.getTokenAmount(params.kcId);
+      } catch { /* use 0 */ }
+    }
+    const newTokenAmount = params.newTokenAmount ?? currentTokenAmount;
+
+    // Look up the contextGraphId for this KC
+    const contextGraphStorage = this.contracts.contextGraphStorage;
+    let contextGraphId = 0n;
+    if (contextGraphStorage) {
+      try {
+        contextGraphId = BigInt(await contextGraphStorage.kcToContextGraph(params.kcId));
+      } catch { /* use 0 */ }
+    }
+
+    // Compute pre-update merkle root count (array length)
+    let preUpdateMerkleRootCount = 0n;
+    if (kcs) {
+      try {
+        const roots: unknown[] = await kcs.getMerkleRoots(params.kcId);
+        preUpdateMerkleRootCount = BigInt(roots.length);
+      } catch { /* use 0 */ }
+    }
+
+    const opId = params.updateOperationId ?? `update-${Date.now()}`;
+    const burnIds = params.burnTokenIds ?? [];
+
+    let pubSig = params.publisherSignature;
+    if (!pubSig) {
+      const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
+        ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
+        [evmChainId, kav10Address, identityId, contextGraphId, ethers.hexlify(params.newMerkleRoot)],
+      ));
+      const raw = ethers.Signature.from(await signer.signMessage(pubDigest));
+      pubSig = { r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) };
+    }
+
+    let ackSigs = params.ackSignatures ?? [];
+    if (ackSigs.length === 0) {
+      // Update ACK digest: keccak256(abi.encodePacked(chainid, KAV10, cgId, kcId, preCount, newRoot, byteSize, tokenAmount, mintAmount, keccak256(burnIds)))
+      const burnPackedHash = ethers.keccak256(
+        burnIds.length > 0
+          ? ethers.solidityPacked(burnIds.map(() => 'uint256'), burnIds)
+          : new Uint8Array(0),
+      );
+      const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
+        ['uint256', 'address', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'bytes32'],
+        [evmChainId, kav10Address, contextGraphId, params.kcId, preUpdateMerkleRootCount,
+         ethers.hexlify(params.newMerkleRoot), params.newByteSize, newTokenAmount,
+         BigInt(params.mintAmount ?? 0), burnPackedHash],
+      ));
+      const raw = ethers.Signature.from(await signer.signMessage(ackDigest));
+      ackSigs = [{ identityId, r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) }];
+    }
+
+    const updateParams = {
+      id: params.kcId,
+      updateOperationId: opId,
+      newMerkleRoot: ethers.hexlify(params.newMerkleRoot),
+      newByteSize: params.newByteSize,
+      newTokenAmount,
+      mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
+      knowledgeAssetsToBurn: burnIds,
+      publisherNodeIdentityId: identityId,
+      publisherNodeR: ethers.hexlify(pubSig.r),
+      publisherNodeVS: ethers.hexlify(pubSig.vs),
+      identityIds: ackSigs.map(s => s.identityId),
+      r: ackSigs.map(s => ethers.hexlify(s.r)),
+      vs: ackSigs.map(s => ethers.hexlify(s.vs)),
+    };
+
+    const tx = await ka.updateDirect(updateParams, ethers.ZeroAddress);
 
     const receipt = await tx.wait();
 

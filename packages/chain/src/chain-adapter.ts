@@ -142,10 +142,12 @@ export interface FairSwapPurchaseInfo {
 
 export interface CreateOnChainContextGraphParams {
   participantIdentityIds: bigint[];
+  participantAgents?: string[];
   requiredSignatures: number;
   metadataBatchId?: bigint;
   publishPolicy?: number;
   publishAuthority?: string;
+  publishAuthorityAccountId?: bigint;
 }
 
 export interface CreateOnChainContextGraphResult extends Omit<TxResult, 'contextGraphId'> {
@@ -215,11 +217,16 @@ export interface V10UpdateKCParams {
   kcId: bigint;
   newMerkleRoot: Uint8Array;
   newByteSize: bigint;
+  newTokenAmount?: bigint;
   mintAmount?: number;
   burnTokenIds?: bigint[];
   /** When true, the caller asserts the KC was created via V10. Skips probing. */
   v10Origin?: boolean;
   publisherAddress?: string;
+  updateOperationId?: string;
+  publisherNodeIdentityId?: bigint;
+  publisherSignature?: { r: Uint8Array; vs: Uint8Array };
+  ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----

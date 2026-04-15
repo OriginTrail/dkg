@@ -136,7 +136,7 @@ export async function createNodeProfile(
   const tx = await profile.createProfile(admin.address, [], name, nodeId, 0);
   const receipt = await tx.wait();
 
-  const iface = new ethers.Interface(['event IdentityCreated(uint72 indexed identityId, address indexed operational)']);
+  const iface = new ethers.Interface(['event IdentityCreated(uint72 indexed identityId, bytes32 indexed operationalKey, bytes32 indexed adminKey)']);
   const parsed = receipt.logs
     .map((log: any) => { try { return iface.parseLog({ topics: log.topics, data: log.data }); } catch { return null; } })
     .find((e: any) => e?.name === 'IdentityCreated');

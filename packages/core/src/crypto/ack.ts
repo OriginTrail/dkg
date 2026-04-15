@@ -189,6 +189,63 @@ export function computePublishACKDigest(
  * produces a different digest that the contract rejects at
  * `_verifySignature`.
  */
+/**
+ * Compute the V10 update ACK digest that core nodes sign.
+ *
+ * Layout matches `KnowledgeAssetsV10.sol:832-846`:
+ *   keccak256(abi.encodePacked(
+ *     block.chainid,                          // uint256 (32)
+ *     address(this),                          // address (20)
+ *     contextGraphId,                         // uint256 (32)
+ *     p.id,                                   // uint256 (32)
+ *     preUpdateMerkleRootCount,               // uint256 (32)
+ *     p.newMerkleRoot,                        // bytes32 (32)
+ *     uint256(p.newByteSize),                 // uint256 (32)
+ *     uint256(p.newTokenAmount),              // uint256 (32)
+ *     p.mintKnowledgeAssetsAmount,            // uint256 (32)
+ *     keccak256(abi.encodePacked(burnIds))    // bytes32 (32)
+ *   ))                                        // total packed width = 340 bytes
+ */
+export function computeUpdateACKDigest(
+  chainId: bigint,
+  kav10Address: string,
+  contextGraphId: bigint,
+  kcId: bigint,
+  preUpdateMerkleRootCount: bigint,
+  newMerkleRoot: Uint8Array,
+  newByteSize: bigint,
+  newTokenAmount: bigint,
+  mintAmount: bigint,
+  burnTokenIds: bigint[],
+): Uint8Array {
+  if (newMerkleRoot.length !== 32) {
+    throw new Error(`newMerkleRoot must be 32 bytes, got ${newMerkleRoot.length}`);
+  }
+  const addrBytes = addressToBytes(kav10Address);
+
+  // keccak256(abi.encodePacked(burnTokenIds))
+  const burnPacked = new Uint8Array(burnTokenIds.length * 32);
+  for (let i = 0; i < burnTokenIds.length; i++) {
+    burnPacked.set(uint256ToBytes(burnTokenIds[i]), i * 32);
+  }
+  const burnHash = keccak256(burnPacked);
+
+  const packed = new Uint8Array(340);
+  let offset = 0;
+  packed.set(uint256ToBytes(chainId), offset); offset += 32;
+  packed.set(addrBytes, offset); offset += 20;
+  packed.set(uint256ToBytes(contextGraphId), offset); offset += 32;
+  packed.set(uint256ToBytes(kcId), offset); offset += 32;
+  packed.set(uint256ToBytes(preUpdateMerkleRootCount), offset); offset += 32;
+  packed.set(newMerkleRoot, offset); offset += 32;
+  packed.set(uint256ToBytes(newByteSize), offset); offset += 32;
+  packed.set(uint256ToBytes(newTokenAmount), offset); offset += 32;
+  packed.set(uint256ToBytes(mintAmount), offset); offset += 32;
+  packed.set(burnHash, offset); offset += 32;
+
+  return keccak256(packed);
+}
+
 export function computePublishPublisherDigest(
   chainId: bigint,
   kav10Address: string,

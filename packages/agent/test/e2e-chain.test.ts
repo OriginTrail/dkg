@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers, Wallet, Contract } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   spawnHardhatEnv,
   killHardhat,
   mintTokens,
   createNodeProfile,
   stakeAndSetAsk,
+  makeAdapterConfig,
   HARDHAT_KEYS,
   type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
@@ -100,16 +102,30 @@ describe('E2E: DKGAgent with real blockchain', () => {
   // Publish + query
   // -------------------------------------------------------------------------
 
-  const CONTEXT_GRAPH_ID = 'test-chain-paranet';
+  let CONTEXT_GRAPH_ID: string;
   let firstPublishBatchId: bigint;
 
   it('publishes knowledge through agent with on-chain finality', async () => {
+
+    // Create an on-chain V10 context graph with the agent's identity as a hosting node
+    const chainAdapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1),
+    );
+    const cgResult = await chainAdapter.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(agentAIdentityId)],
+      requiredSignatures: 1,
+    });
+    CONTEXT_GRAPH_ID = String(cgResult.contextGraphId);
 
     await agents[0].createContextGraph({
       id: CONTEXT_GRAPH_ID,
       name: 'Chain Test Paranet',
       description: 'E2E test with real blockchain',
     });
+
+    // Store the numeric on-chain ID so the V10 publish path can find it
+    const sub = (agents[0] as any).subscribedContextGraphs.get(CONTEXT_GRAPH_ID);
+    if (sub) sub.onChainId = CONTEXT_GRAPH_ID;
 
     agents[0].subscribeToContextGraph(CONTEXT_GRAPH_ID);
     agents[1].subscribeToContextGraph(CONTEXT_GRAPH_ID);
@@ -148,10 +164,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     );
 
     expect(result).toBeDefined();
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      expect(result.bindings.length).toBeGreaterThan(0);
-    }
+    expect(result.bindings).toBeDefined();
+    expect(result.bindings.length).toBeGreaterThan(0);
   }, 30_000);
 
   it('second agent receives published knowledge via gossipsub', async () => {
@@ -159,13 +173,12 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     const result = await agents[1].query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CONTEXT_GRAPH_ID },
     );
 
     expect(result).toBeDefined();
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      expect(result.bindings.length).toBeGreaterThan(0);
-    }
+    expect(result.bindings).toBeDefined();
+    expect(result.bindings.length).toBeGreaterThan(0);
   }, 30_000);
 
   // -------------------------------------------------------------------------
@@ -193,14 +206,13 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     const queryResult = await agents[0].query(
       `SELECT ?name WHERE { <did:dkg:test:Alice> <http://schema.org/name> ?name }`,
+      { contextGraphId: CONTEXT_GRAPH_ID },
     );
     expect(queryResult).toBeDefined();
-    expect(queryResult.type).toBe('bindings');
-    if (queryResult.type === 'bindings') {
-      expect(queryResult.bindings.length).toBeGreaterThan(0);
-      const names = queryResult.bindings.map((b: any) => b.name?.value ?? b.name);
-      expect(names.some((n: string) => n.includes('Alice Updated'))).toBe(true);
-    }
+    expect(queryResult.bindings).toBeDefined();
+    expect(queryResult.bindings.length).toBeGreaterThan(0);
+    const names = queryResult.bindings.map((b: any) => b.name?.value ?? b.name);
+    expect(names.some((n: string) => n.includes('Alice Updated'))).toBe(true);
   }, 60_000);
 
   // -------------------------------------------------------------------------
@@ -209,12 +221,22 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('creates a second context graph and publishes on-chain', async () => {
 
-    const secondCG = 'test-chain-paranet-2';
+    const chainAdapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1),
+    );
+    const cgResult = await chainAdapter.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(agentAIdentityId)],
+      requiredSignatures: 1,
+    });
+    const secondCG = String(cgResult.contextGraphId);
+
     await agents[0].createContextGraph({
       id: secondCG,
       name: 'Second Chain Paranet',
       description: 'Second E2E context graph',
     });
+    const sub2 = (agents[0] as any).subscribedContextGraphs.get(secondCG);
+    if (sub2) sub2.onChainId = secondCG;
 
     agents[0].subscribeToContextGraph(secondCG);
     await new Promise((r) => setTimeout(r, 500));
@@ -246,10 +268,8 @@ describe('E2E: DKGAgent with real blockchain', () => {
     );
 
     expect(queryResult).toBeDefined();
-    expect(queryResult.type).toBe('bindings');
-    if (queryResult.type === 'bindings') {
-      expect(queryResult.bindings.length).toBeGreaterThanOrEqual(1);
-    }
+    expect(queryResult.bindings).toBeDefined();
+    expect(queryResult.bindings.length).toBeGreaterThanOrEqual(1);
   }, 60_000);
 
   // -------------------------------------------------------------------------
@@ -283,12 +303,11 @@ describe('E2E: DKGAgent with real blockchain', () => {
     for (const entity of entities) {
       const queryResult = await agents[0].query(
         `SELECT ?name WHERE { <${entity}> <http://schema.org/name> ?name }`,
+        { contextGraphId: CONTEXT_GRAPH_ID },
       );
       expect(queryResult).toBeDefined();
-      expect(queryResult.type).toBe('bindings');
-      if (queryResult.type === 'bindings') {
-        expect(queryResult.bindings.length).toBeGreaterThanOrEqual(1);
-      }
+      expect(queryResult.bindings).toBeDefined();
+      expect(queryResult.bindings.length).toBeGreaterThanOrEqual(1);
     }
   }, 60_000);
 
@@ -298,11 +317,21 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
   it('second agent sees new publish via gossipsub without manual sync', async () => {
 
-    const gossipCG = 'gossip-verification-cg';
+    const chainAdapter = new EVMChainAdapter(
+      makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.EXTRA1),
+    );
+    const cgResult = await chainAdapter.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(agentAIdentityId)],
+      requiredSignatures: 1,
+    });
+    const gossipCG = String(cgResult.contextGraphId);
+
     await agents[0].createContextGraph({
       id: gossipCG,
       name: 'Gossip Verification',
     });
+    const sub3 = (agents[0] as any).subscribedContextGraphs.get(gossipCG);
+    if (sub3) sub3.onChainId = gossipCG;
 
     agents[0].subscribeToContextGraph(gossipCG);
     agents[1].subscribeToContextGraph(gossipCG);
@@ -324,14 +353,13 @@ describe('E2E: DKGAgent with real blockchain', () => {
 
     const result = await agents[1].query(
       `SELECT ?name WHERE { <did:dkg:test:GossipEntity> <http://schema.org/name> ?name }`,
+      { contextGraphId: gossipCG },
     );
 
     expect(result).toBeDefined();
-    expect(result.type).toBe('bindings');
-    if (result.type === 'bindings') {
-      expect(result.bindings.length).toBeGreaterThanOrEqual(1);
-      const names = result.bindings.map((b: any) => b.name?.value ?? b.name);
-      expect(names.some((n: string) => n.includes('GossipTest'))).toBe(true);
-    }
+    expect(result.bindings).toBeDefined();
+    expect(result.bindings.length).toBeGreaterThanOrEqual(1);
+    const names = result.bindings.map((b: any) => b.name?.value ?? b.name);
+    expect(names.some((n: string) => n.includes('GossipTest'))).toBe(true);
   }, 60_000);
 });

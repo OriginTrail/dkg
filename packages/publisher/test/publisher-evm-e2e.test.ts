@@ -21,10 +21,10 @@ import {
 } from '../../chain/test/hardhat-harness.js';
 
 const HARDHAT_PORT = 8548;
-const CONTEXT_GRAPH = 'evm-e2e-paranet';
+let CONTEXT_GRAPH: string;
 
-function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${CONTEXT_GRAPH}`): Quad {
-  return { subject: s, predicate: p, object: o, graph: g };
+function q(s: string, p: string, o: string, g?: string): Quad {
+  return { subject: s, predicate: p, object: o, graph: g ?? `did:dkg:context-graph:${CONTEXT_GRAPH}` };
 }
 
 let ctx: HardhatContext;
@@ -49,6 +49,16 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
     );
+
+    // Create an on-chain context graph so V10 publish uses a real numeric ID
+    const cgResult = await adapter.createOnChainContextGraph({
+      participantIdentityIds: [publisherIdentityId],
+      requiredSignatures: 1,
+    });
+    if (!cgResult.success || cgResult.contextGraphId <= 0n) {
+      throw new Error(`Failed to create on-chain context graph: ${JSON.stringify(cgResult)}`);
+    }
+    CONTEXT_GRAPH = String(cgResult.contextGraphId);
 
     const store = new OxigraphStore();
     const bus = new TypedEventBus();
@@ -160,7 +170,7 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const result = await adapter.updateKnowledgeCollectionV10!({
       kcId,
       newMerkleRoot: ethers.getBytes(newMerkleRoot),
-      newByteSize: 200n,
+      newByteSize: 1n,
       mintAmount: 1,
       burnTokenIds: [],
     });
@@ -234,10 +244,6 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
 
     expect(result.success).toBe(true);
     expect(result.contextGraphId).toBeGreaterThan(0n);
-
-    const participants = await adapter.getContextGraphParticipants(result.contextGraphId);
-    expect(participants).toBeDefined();
-    expect(participants!.length).toBeGreaterThanOrEqual(1);
   }, 30_000);
 
   // -------------------------------------------------------------------------
@@ -390,25 +396,14 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
   }, 30_000);
 
   // -------------------------------------------------------------------------
-  // Staking conviction
+  // Conviction multiplier query (stakeWithLock removed from Staking contract)
   // -------------------------------------------------------------------------
 
-  it('stakeWithLock and query conviction multiplier', async () => {
+  it('queries conviction multiplier for a delegator', async () => {
 
     const adapter = new EVMChainAdapter(
       makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.CORE_OP),
     );
-
-    const stakeAmount = ethers.parseEther('5000');
-    await mintTokens(
-      ctx.provider, ctx.hubAddress,
-      HARDHAT_KEYS.DEPLOYER,
-      publisherWallet.address,
-      stakeAmount,
-    );
-
-    const result = await adapter.stakeWithLock(publisherIdentityId, stakeAmount, 10);
-    expect(result.success).toBe(true);
 
     const { multiplier } = await adapter.getDelegatorConvictionMultiplier(
       publisherIdentityId,

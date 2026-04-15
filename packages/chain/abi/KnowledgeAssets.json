@@ -489,19 +489,6 @@
   },
   {
     "inputs": [],
-    "name": "contextGraphs",
-    "outputs": [
-      {
-        "internalType": "contract ContextGraphs",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "epochStorage",
     "outputs": [
       {
@@ -729,110 +716,6 @@
       }
     ],
     "name": "publishKnowledgeAssets",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "batchId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "startKAId",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "endKAId",
-        "type": "uint64"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint32",
-        "name": "kaCount",
-        "type": "uint32"
-      },
-      {
-        "internalType": "uint72",
-        "name": "publisherNodeIdentityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint64",
-        "name": "publicByteSize",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint40",
-        "name": "epochs",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint96",
-        "name": "tokenAmount",
-        "type": "uint96"
-      },
-      {
-        "internalType": "address",
-        "name": "paymaster",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "publisherNodeR",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "publisherNodeVS",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "identityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "r",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "vs",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "uint256",
-        "name": "contextGraphId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72[]",
-        "name": "participantIdentityIds",
-        "type": "uint72[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "participantRs",
-        "type": "bytes32[]"
-      },
-      {
-        "internalType": "bytes32[]",
-        "name": "participantVSs",
-        "type": "bytes32[]"
-      }
-    ],
-    "name": "publishToContextGraph",
     "outputs": [
       {
         "internalType": "uint256",

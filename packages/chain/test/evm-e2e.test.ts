@@ -168,7 +168,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
 
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(events[0].type).toBe('KnowledgeBatchCreated');
-    expect(events[0].data.batchId).toBe(1n);
+    expect(BigInt(events[0].data.batchId as string | bigint)).toBe(1n);
     expect(String(events[0].data.publisherAddress).toLowerCase()).toBe(
       new Wallet(HARDHAT_KEYS.PUBLISHER2).address.toLowerCase(),
     );
@@ -199,28 +199,38 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const coreOp = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
     await mintTokens(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('500000'));
 
+    // Create an on-chain context graph with all 3 receivers as hosting nodes (M/N: 3/3)
+    const cgResult = await adapter.createOnChainContextGraph({
+      participantIdentityIds: ctx.receiverIds.map((id) => BigInt(id)),
+      requiredSignatures: 3,
+    });
+    expect(cgResult.success).toBe(true);
+    const contextGraphId = cgResult.contextGraphId;
+    expect(contextGraphId).toBeGreaterThan(0n);
+
     // Build V10 publish parameters
     const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('multi-ack-test')));
-    const contextGraphId = 0n;
     const kaCount = 2;
     const byteSize = 256n;
     const epochs = 2;
     const tokenAmount = await adapter.getRequiredPublishTokenAmount(byteSize, epochs);
 
     const publisherIdentityId = BigInt(ctx.coreProfileId);
+    const kav10Address = await adapter.getKnowledgeAssetsV10Address();
+    const evmChainId = await adapter.getEvmChainId();
 
-    // Publisher signature: keccak256(abi.encodePacked(uint256 contextGraphId, uint72 identityId, bytes32 merkleRoot))
+    // Publisher digest: keccak256(abi.encodePacked(chainid, address(KAV10), identityId, contextGraphId, merkleRoot))
     const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-      ['uint256', 'uint72', 'bytes32'],
-      [contextGraphId, publisherIdentityId, ethers.hexlify(merkleRoot)],
+      ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
+      [evmChainId, kav10Address, publisherIdentityId, contextGraphId, ethers.hexlify(merkleRoot)],
     ));
     const pubSigRaw = await coreOp.signMessage(pubDigest);
     const pubSig = ethers.Signature.from(pubSigRaw);
 
-    // ACK digest (6-field): keccak256(abi.encodePacked(contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
+    // ACK digest: keccak256(abi.encodePacked(chainid, address(KAV10), contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
     const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-      ['uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
-      [contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount],
+      ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
+      [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount],
     ));
 
     // Collect ACK signatures from 3 receivers
