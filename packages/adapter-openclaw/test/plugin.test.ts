@@ -1184,22 +1184,55 @@ describe('DkgNodePlugin', () => {
       logger: { info: () => {}, warn: () => {}, debug: () => {} },
     } as unknown as OpenClawPluginApi;
 
-    // Prevent real network calls during register() — the plugin fires
-    // getStatus() + listContextGraphs() best-effort to populate resolver
-    // state. Both can fail silently; we don't need them here.
+    // Stub fetch so the plugin's best-effort getStatus + listContextGraphs
+    // probes during register() resolve cleanly. /api/status returns a real
+    // peer ID so DkgNodePlugin.nodePeerId populates and the runtime can
+    // hand back an actual DkgMemorySearchManager (not the null-manager
+    // fallback that fires when peer ID is still undefined — Codex B12).
+    // /api/context-graph/list returns an empty array so the subscribed-CG
+    // preflight terminates cleanly. Any other call returns an empty 200.
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('stubbed')) as any;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, peerId: 'peer-dispatch-test' }),
+        } as Response;
+      }
+      if (url.includes('/api/context-graph/list')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ contextGraphs: [] }),
+        } as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
 
     try {
       plugin.register(mockApi);
       expect(registeredCapability).not.toBeNull();
 
+      // Let the best-effort probes kicked off inside register() flush so
+      // nodePeerId is populated before we exercise the runtime path below.
+      // Codex B59: without this, the peer-ID probe is still pending and
+      // getMemorySearchManager returns { manager: null, error } — and the
+      // original `toBeDefined()` assertion passed only because `null` is
+      // "defined" in vitest's loose sense, silently masking the real
+      // B12 null-manager fallback path.
+      await new Promise((resolve) => setImmediate(resolve));
+
       // Before any dispatch: resolver returns no projectContextGraphId for
       // any sessionKey — the ALS store is empty outside of an active
-      // dispatch.
+      // dispatch. The runtime still hands back a real manager because the
+      // peer-ID probe succeeded above; null-manager fallback only fires
+      // when the resolver cannot produce an agent address.
       const runtime = registeredCapability.runtime;
       const resultBefore = await runtime.getMemorySearchManager({ sessionKey: 'session-xyz' });
-      expect(resultBefore.manager).toBeDefined();
+      expect(resultBefore.manager).not.toBeNull();
+      expect(resultBefore.error).toBeUndefined();
 
       const channelPlugin = (plugin as any).channelPlugin as any;
       expect(channelPlugin).toBeDefined();
