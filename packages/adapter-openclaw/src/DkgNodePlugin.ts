@@ -15,8 +15,6 @@
  *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join as pathJoin } from 'node:path';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
@@ -61,54 +59,6 @@ const LOCAL_AGENT_STATE_RETRY_BASE_DELAY_MS = 5_000;
 const LOCAL_AGENT_STATE_RETRY_MAX_DELAY_MS = 60_000;
 
 /**
- * Codex B66: upper bound on the number of directory entries walked by the
- * legacy memory-dir retirement scan. The retired file-watcher accepted a
- * recursive `memory/**\/*.md` layout, so the retirement detector has to
- * walk into subdirectories — but the scan fires on every register() and
- * must not turn into a stall if an operator has a huge unrelated `memory/`
- * tree. First `.md` match short-circuits the walk; this cap is the backstop.
- */
-const MAX_LEGACY_MEMORY_SCAN_ENTRIES = 256;
-
-/**
- * Codex B66: recursive scan for the first markdown file under a directory.
- * Returns `true` as soon as it sees any entry whose name ends in `.md`
- * (case-insensitive), bounding total directory-entry visits at
- * MAX_LEGACY_MEMORY_SCAN_ENTRIES so pathological layouts cannot stall
- * startup. Uses `visited` as a shared counter across the recursive
- * frame so the cap is global, not per-directory.
- */
-function containsLegacyMemoryMarkdown(
-  dir: string,
-  depth: number,
-  visited: { count: number } = { count: 0 },
-): boolean {
-  if (visited.count >= MAX_LEGACY_MEMORY_SCAN_ENTRIES) return false;
-  if (depth > 10) return false; // defense against symlink loops
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return false;
-  }
-  for (const name of entries) {
-    visited.count += 1;
-    if (visited.count > MAX_LEGACY_MEMORY_SCAN_ENTRIES) return false;
-    if (name.toLowerCase().endsWith('.md')) return true;
-    const full = pathJoin(dir, name);
-    let isDir = false;
-    try {
-      isDir = statSync(full).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir && containsLegacyMemoryMarkdown(full, depth + 1, visited)) {
-      return true;
-    }
-  }
-  return false;
-}
-/**
  * Delay before the deferred "first-failure" re-probe of the node peer ID
  * fires after `refreshMemoryResolverState` reports a missing peerId at
  * register time. Gives the daemon a grace window to finish startup when
@@ -139,7 +89,6 @@ export class DkgNodePlugin {
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private warnedLegacyGameConfig = false;
-  private warnedLegacyMemoryFileWatcherConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Retry attempt counter for `scheduleLocalAgentIntegrationRetry`. Used to
@@ -292,7 +241,6 @@ export class DkgNodePlugin {
    */
   register(api: OpenClawPluginApi): void {
     this.warnOnLegacyGameConfig(api);
-    this.warnOnLegacyMemoryFileWatcherConfig(api);
 
     const registrationMode = api.registrationMode ?? 'full';
     const fullRuntime = registrationMode === 'full';
@@ -433,108 +381,6 @@ export class DkgNodePlugin {
       this.warnedLegacyGameConfig = true;
       api.logger.warn?.(
         '[dkg] Legacy dkg-node.game.enabled is no longer supported in the V10 OpenClaw adapter path; OriginTrail Game tools were intentionally removed.',
-      );
-    }
-  }
-
-  /**
-   * Warn on legacy memory config keys. `memoryDir` and `watchDebounceMs`
-   * used to drive the file-watcher / `/api/memory/import` ingestion path
-   * that was retired in the openclaw-dkg-primary-memory workstream. The
-   * keys are still tolerated in config (for forward-compat with stale
-   * workspace files) but are now no-ops. Emit a one-shot warning at
-   * register time so operators know to drop them — otherwise they see
-   * `memory.enabled: true`, assume writes to `MEMORY.md` / `memory/*.md`
-   * will be picked up, and silently lose new memories after upgrade.
-   * Codex Bug B22.
-   */
-  private warnOnLegacyMemoryFileWatcherConfig(api: OpenClawPluginApi): void {
-    if (this.warnedLegacyMemoryFileWatcherConfig) return;
-
-    // Branch 1: explicit config keys. Operators who wrote `memoryDir` or
-    // `watchDebounceMs` in their workspace config had their retirement
-    // flagged before — keep that branch unchanged.
-    const memoryConfig = this.config.memory as Record<string, unknown> | undefined;
-    const hasLegacyKey =
-      !!memoryConfig &&
-      ('memoryDir' in memoryConfig || 'watchDebounceMs' in memoryConfig);
-
-    // Branch 2 (Codex B62 + B66): operators who relied on the pre-retirement
-    // default watch paths without ever setting `memoryDir` explicitly. The
-    // retired file-watcher had three input shapes that all silently stop
-    // syncing after upgrade, and each has to be detected on its own:
-    //
-    //   1. `<workspace>/MEMORY.md`             — root single-file shape
-    //   2. `<workspace>/memory/*.md`           — flat directory shape
-    //   3. `<workspace>/memory/**/*.md`        — recursive directory shape
-    //
-    // Branch 1 misses all three because nothing in their config looks
-    // "legacy" — the defaults were implicit. Walk the workspace at
-    // register-time and report the first matching signal. Best-effort:
-    // any filesystem error falls through silently because a missing
-    // workspace or EACCES is not a retirement signal. Recursive scan is
-    // bounded by MAX_LEGACY_MEMORY_SCAN_FILES so a huge directory tree
-    // cannot turn the register path into a stall.
-    let hasLegacyDefaultDir = false;
-    let legacyDefaultDirPath: string | undefined;
-    const workspaceDir = (api as any).workspaceDir as string | undefined;
-    if (!hasLegacyKey && typeof workspaceDir === 'string' && workspaceDir.length > 0) {
-      try {
-        // 1. Root MEMORY.md (case-insensitive so `memory.md` / `Memory.md`
-        //    variants also trip the warning — the file watcher accepted
-        //    whatever the OS filesystem happened to return).
-        const rootEntries = existsSync(workspaceDir) ? readdirSync(workspaceDir) : [];
-        const rootMemoryMatch = rootEntries.find(
-          (name) => name.toLowerCase() === 'memory.md',
-        );
-        if (rootMemoryMatch) {
-          hasLegacyDefaultDir = true;
-          legacyDefaultDirPath = pathJoin(workspaceDir, rootMemoryMatch);
-        }
-
-        // 2 + 3. `<workspace>/memory/` recursive scan. Short-circuit as
-        //        soon as we see the first .md so we don't walk a huge
-        //        tree for nothing.
-        if (!hasLegacyDefaultDir) {
-          const memoryDir = pathJoin(workspaceDir, 'memory');
-          if (existsSync(memoryDir) && statSync(memoryDir).isDirectory()) {
-            if (containsLegacyMemoryMarkdown(memoryDir, 0)) {
-              hasLegacyDefaultDir = true;
-              legacyDefaultDirPath = memoryDir;
-            }
-          }
-        }
-      } catch {
-        // Ignore filesystem errors — absence of a signal is not a signal.
-      }
-    }
-
-    if (!hasLegacyKey && !hasLegacyDefaultDir) return;
-    this.warnedLegacyMemoryFileWatcherConfig = true;
-
-    if (hasLegacyKey) {
-      api.logger.warn?.(
-        '[dkg] Legacy memory config keys detected in dkg-node.memory — the ' +
-        'openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
-        'backlog-import ingestion flow that memoryDir and watchDebounceMs ' +
-        'configured. These keys are now ignored. Memories are recorded ' +
-        'through the memory slot (saveMemory via registerMemoryCapability) ' +
-        'or through chat-turn persistence. Any `MEMORY.md` or `memory/*.md` ' +
-        'files on disk will NOT be ingested after upgrade. Remove these ' +
-        'keys from your workspace config to silence this warning.',
-      );
-    } else {
-      api.logger.warn?.(
-        `[dkg] Legacy memory directory detected at \`${legacyDefaultDirPath}\` — ` +
-        'the openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
-        'backlog-import ingestion flow that previously watched this path for ' +
-        'markdown files. Files in this directory will NOT be ingested after ' +
-        'upgrade. Memories are now recorded through the memory slot ' +
-        '(saveMemory via registerMemoryCapability) or through chat-turn ' +
-        'persistence. To migrate existing content, import each file once via ' +
-        '`POST /api/assertion/:name/import-file` on your target project ' +
-        'context graph, then archive or delete the directory to silence this ' +
-        'warning.',
       );
     }
   }
