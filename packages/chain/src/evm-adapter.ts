@@ -23,7 +23,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishParams,
+  V10PublishDirectParams,
   V10UpdateKCParams,
   ConvictionAccountInfo,
 } from './chain-adapter.js';
@@ -1135,47 +1135,92 @@ export class EVMChainAdapter implements ChainAdapter {
   // V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage)
   // =====================================================================
 
-  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
+  async getKnowledgeAssetsV10Address(): Promise<string> {
+    await this.init();
+    if (!this.contracts.knowledgeAssetsV10) {
+      throw new Error('KnowledgeAssetsV10 contract not deployed on this chain.');
+    }
+    return await this.contracts.knowledgeAssetsV10.getAddress();
+  }
+
+  async getEvmChainId(): Promise<bigint> {
+    const network = await this.provider.getNetwork();
+    return network.chainId;
+  }
+
+  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
     await this.init();
 
     if (!this.contracts.knowledgeAssetsV10) {
       throw new Error('KnowledgeAssetsV10 contract not deployed.');
     }
 
+    // Pre-tx validation of `contextGraphId`. The V10 contract rejects
+    // `cgId == 0` at `KnowledgeAssetsV10.sol:379` with `ZeroContextGraphId`;
+    // catching this here gives a clearer error than a generic revert and
+    // saves a round-trip. Reject `<= 0n` rather than `=== 0n` so that
+    // `BigInt("-1") === -1n` does not slip past our fail-loud boundary and
+    // die in ethers' uint256 encoder with a cryptic low-level error — the
+    // upstream guards in `dkg-publisher.ts`, `agent/dkg-agent.ts`,
+    // `cli/publisher-runner.ts`, and `publisher/storage-ack-handler.ts`
+    // accept whatever `BigInt(...)` returns for non-throwing inputs, which
+    // includes negative decimal strings.
+    if (params.contextGraphId <= 0n) {
+      throw new Error(
+        'V10 publishDirect requires a positive on-chain context graph id; ' +
+        `got ${params.contextGraphId}. Register the context graph via ` +
+        '`ContextGraphs.createContextGraph` first and pass the returned ' +
+        'numeric id as `publishContextGraphId`.',
+      );
+    }
+
     const txSigner = this.nextSigner();
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
+    const kaAddress = await ka.getAddress();
 
-    if (this.contracts.token && params.convictionAccountId === 0n) {
+    // Approval policy: always approve TRAC from the operational signer.
+    //
+    // `KnowledgeAssetsV10._publishDirect` (KnowledgeAssetsV10.sol:613-628)
+    // only routes payment to `IPaymaster(paymaster).coverCost(...)` when
+    // `paymasterManager.validPaymasters(paymaster) == true` at tx-mine
+    // time; otherwise it falls back to `token.transferFrom(msg.sender,
+    // ...)`. The adapter used to skip approval when an off-chain
+    // `validPaymasters` probe returned `true`, but that was a TOCTOU bug:
+    // if the whitelist mutates between the probe and the mined tx, the
+    // contract silently reverts to the `msg.sender` branch and hits a
+    // zero allowance → publish reverts. A redundant allowance is cheap
+    // and idle when the paymaster does cover the cost, so we always
+    // approve and drop the probe entirely.
+    if (this.contracts.token) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
-      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, await ka.getAddress());
+      const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
-        const approveTx = await tokenWithSigner.approve(await ka.getAddress(), params.tokenAmount);
+        const approveTx = await tokenWithSigner.approve(kaAddress, params.tokenAmount);
         await approveTx.wait();
       }
     }
 
-    const identityIds = params.ackSignatures.map((s) => s.identityId);
-    const rValues = params.ackSignatures.map((s) => ethers.hexlify(s.r));
-    const vsValues = params.ackSignatures.map((s) => ethers.hexlify(s.vs));
+    // Build the on-chain PublishParams struct as a plain JS object matching
+    // the field order + types in KnowledgeAssetsV10.sol:99-114. ethers.js
+    // encodes object literals to solidity structs positionally by field name.
+    const publishParamsStruct = {
+      publishOperationId: params.publishOperationId,
+      contextGraphId: params.contextGraphId,
+      merkleRoot: ethers.hexlify(params.merkleRoot),
+      knowledgeAssetsAmount: params.knowledgeAssetsAmount,
+      byteSize: params.byteSize,
+      epochs: params.epochs,
+      tokenAmount: params.tokenAmount,
+      isImmutable: params.isImmutable,
+      publisherNodeIdentityId: params.publisherNodeIdentityId,
+      publisherNodeR: ethers.hexlify(params.publisherSignature.r),
+      publisherNodeVS: ethers.hexlify(params.publisherSignature.vs),
+      identityIds: params.ackSignatures.map((s) => s.identityId),
+      r: params.ackSignatures.map((s) => ethers.hexlify(s.r)),
+      vs: params.ackSignatures.map((s) => ethers.hexlify(s.vs)),
+    };
 
-    const tx = await ka.createKnowledgeAssets(
-      params.publishOperationId,
-      params.contextGraphId,
-      ethers.hexlify(params.merkleRoot),
-      params.knowledgeAssetsAmount,
-      params.byteSize,
-      params.epochs,
-      params.tokenAmount,
-      params.isImmutable,
-      params.paymaster,
-      params.convictionAccountId,
-      params.publisherNodeIdentityId,
-      ethers.hexlify(params.publisherSignature.r),
-      ethers.hexlify(params.publisherSignature.vs),
-      identityIds,
-      rValues,
-      vsValues,
-    );
+    const tx = await ka.publishDirect(publishParamsStruct, params.paymaster);
 
     const receipt = await tx.wait();
     if (!receipt) throw new Error('Transaction receipt is null');

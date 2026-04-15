@@ -1,15 +1,37 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
-import { encodeStorageACK, computeACKDigest } from '@origintrail-official/dkg-core';
+import { encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
+
+// Test H5 prefix inputs — must match what the collector passes into
+// computePublishACKDigest so ecrecover locks onto the same digest bytes.
+const TEST_CHAIN_ID = 31337n;
+const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test') {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-async function signACK(wallet: ethers.Wallet, contextGraphId: bigint, merkleRoot: Uint8Array, kaCount?: number, byteSize?: bigint) {
-  const digest = computeACKDigest(contextGraphId, merkleRoot, kaCount, byteSize);
+async function signACK(
+  wallet: ethers.Wallet,
+  contextGraphId: bigint,
+  merkleRoot: Uint8Array,
+  kaCount: number,
+  byteSize: bigint,
+  epochs: bigint = 1n,
+  tokenAmount: bigint = 0n,
+) {
+  const digest = computePublishACKDigest(
+    TEST_CHAIN_ID,
+    TEST_KAV10_ADDR,
+    contextGraphId,
+    merkleRoot,
+    BigInt(kaCount),
+    byteSize,
+    epochs,
+    tokenAmount,
+  );
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
@@ -61,6 +83,8 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -111,6 +135,8 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -137,6 +163,8 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     })).rejects.toThrow('no connected core peers');
   });
 
@@ -170,6 +198,8 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     })).rejects.toThrow('storage_ack_insufficient');
   });
 
@@ -202,6 +232,8 @@ describe('ACKCollector', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
     })).rejects.toThrow('storage_ack_insufficient');
   });
 });

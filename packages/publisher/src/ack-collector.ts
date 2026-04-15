@@ -2,7 +2,7 @@ import {
   PROTOCOL_STORAGE_ACK,
   encodePublishIntent,
   decodeStorageACK,
-  computeACKDigest,
+  computePublishACKDigest,
   type PublishIntentMsg,
   type StorageACKMsg,
 } from '@origintrail-official/dkg-core';
@@ -58,21 +58,39 @@ export class ACKCollector {
     isPrivate: boolean;
     kaCount: number;
     rootEntities: string[];
+    /** Numeric EVM chain id (e.g. 31337n for hardhat). Required by the H5 prefix in the V10 ACK digest. */
+    chainId: bigint;
+    /** Deployed address of `KnowledgeAssetsV10`. Required by the H5 prefix in the V10 ACK digest. */
+    kav10Address: string;
     requiredACKs?: number;
     stagingQuads?: Uint8Array;
     epochs?: number;
     tokenAmount?: bigint;
+    /**
+     * Source SWM graph id. Different from `contextGraphIdStr` only on the
+     * `publishFromSharedMemory` remap flow where the data lives under one
+     * graph name but is published to a different on-chain numeric id.
+     * Peers use this to locate SWM data; the ACK digest still uses
+     * `contextGraphId`.
+     */
+    swmGraphId?: string;
+    /** Optional sub-graph name suffix appended to the SWM URI. */
+    subGraphName?: string;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
       publisherPeerId, publicByteSize, isPrivate,
-      kaCount, rootEntities,
+      kaCount, rootEntities, chainId, kav10Address,
     } = params;
     const REQUIRED_ACKS = params.requiredACKs ?? DEFAULT_REQUIRED_ACKS;
 
     const log = this.deps.log ?? (() => {});
 
-    // P2P intent includes staging quads so core nodes can verify inline
+    // P2P intent includes staging quads so core nodes can verify inline.
+    // `contextGraphId` on the wire is the TARGET numeric id peers will sign
+    // the ACK against. `swmGraphId` (optional) is the SOURCE graph where
+    // data lives in SWM — only set when the publisher is remapping a named
+    // SWM graph to a numeric on-chain id.
     const p2pMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
@@ -84,6 +102,10 @@ export class ACKCollector {
       stagingQuads: params.stagingQuads,
       epochs: params.epochs ?? 1,
       tokenAmountStr: params.tokenAmount != null ? params.tokenAmount.toString() : undefined,
+      swmGraphId: params.swmGraphId && params.swmGraphId !== contextGraphIdStr
+        ? params.swmGraphId
+        : undefined,
+      subGraphName: params.subGraphName,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -103,7 +125,16 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const ackDigest = computeACKDigest(contextGraphId, merkleRoot, kaCount, publicByteSize, params.epochs, params.tokenAmount);
+    const ackDigest = computePublishACKDigest(
+      chainId,
+      kav10Address,
+      contextGraphId,
+      merkleRoot,
+      BigInt(kaCount),
+      publicByteSize,
+      BigInt(params.epochs ?? 1),
+      params.tokenAmount ?? 0n,
+    );
 
     const collected: CollectedACK[] = [];
     const seenPeers = new Set<string>();

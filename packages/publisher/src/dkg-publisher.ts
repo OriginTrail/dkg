@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computeACKDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -596,8 +596,29 @@ export class DKGPublisher implements Publisher {
 
     const ctxGraphId = options?.publishContextGraphId;
     if (ctxGraphId !== undefined && ctxGraphId !== null) {
-      try { BigInt(ctxGraphId); } catch {
+      // Validate at the public entry so the caller sees one clear error
+      // instead of watching it decay through ACK collection, self-sign
+      // digests, and finally the evm-adapter pre-tx guard. Mirrors the
+      // `<= 0n` gate at `packages/chain/src/evm-adapter.ts:createKnowledgeAssetsV10`
+      // and the 3 other round-4 boundaries (ACK provider, async
+      // publisher-runner, core-node storage-ack-handler) so the whole
+      // pipeline agrees on the legal domain. `BigInt("-1")` returns `-1n`
+      // without throwing — the old try/catch-only check would let
+      // negative ids through, the publisher digests got built with the
+      // wrong value, and the publish ended in a misleading `tentative`
+      // status with the root error three layers deep.
+      let parsed: bigint;
+      try {
+        parsed = BigInt(ctxGraphId);
+      } catch {
         throw new Error(`Invalid publishContextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
+      }
+      if (parsed <= 0n) {
+        throw new Error(
+          `Invalid publishContextGraphId: ${String(ctxGraphId)} ` +
+          `(must be a positive integer; V10 contract rejects cgId <= 0 at ` +
+          `KnowledgeAssetsV10.sol:379 with ZeroContextGraphId)`,
+        );
       }
     }
 
@@ -1006,7 +1027,11 @@ export class DKGPublisher implements Publisher {
       ? undefined
       : new TextEncoder().encode(nquadsStr);
 
-    // Pre-compute tokenAmount and epochs so they can be included in the 6-field ACK digest.
+    // Pre-compute tokenAmount and epochs so they can be included in the
+    // H5-prefixed 8-field publish ACK digest (chainid, kav10Address, cgId,
+    // merkleRoot, kaCount, byteSize, epochs, tokenAmount) — matches
+    // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
+    // `KnowledgeAssetsV10.sol:362-373`.
     const publishEpochs = 1;
     let precomputedTokenAmount = 0n;
     if (this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
@@ -1017,17 +1042,65 @@ export class DKGPublisher implements Publisher {
       }
     }
 
+    // Identifier split for V10 publishes.
+    //
+    //   `contextGraphId` (outer) = the SWM graph id the publisher reads
+    //     data from (e.g. "devnet-test" or "42").
+    //   `options.publishContextGraphId` (optional) = the TARGET on-chain
+    //     numeric CG id that the ACK digest + publishDirect tx use.
+    //
+    // Remap flow: `publishFromSharedMemory("devnet-test", { publishContextGraphId: "42" })`
+    //   → swmGraphId = "devnet-test", target CG id = 42. Peers read SWM at
+    //   "devnet-test" and sign the ACK against on-chain id 42.
+    //
+    // Direct flow: `dkg publish "42"` → both are "42"; no remap.
+    //
+    // The previous code force-picked `contextGraphId` whenever
+    // `isPublishFromSharedMemory` was true, which made the ACK digest and
+    // the on-chain tx see the SOURCE name (not a number) in the remap
+    // flow → `BigInt()` threw → silent 0n → evm-adapter fail-loud →
+    // ZeroContextGraphId. Always prefer the explicit target override.
+    const v10CgDomain = options.publishContextGraphId ?? contextGraphId;
+    const swmGraphId = contextGraphId;
+
+    // Numeric-negative and numeric-zero CG ids are programming errors —
+    // reject them here BEFORE burning CPU on ACK collection, self-sign
+    // digests, or on-chain tx construction, so the caller sees the real
+    // error instead of watching it decay through a swallowed ACK warning
+    // into a misleading `tentative` status. Descriptive SWM graph names
+    // (e.g. `"devnet-test"`, `"test-paranet"`) MUST still fall through to
+    // the soft `v10CgId = 0n` coercion below — mock adapter tests and
+    // integration fixtures publish with those names and rely on the
+    // data-flow path continuing to exercise. So we only fail loud when
+    // `BigInt(v10CgDomain)` actually parses and the parsed value is
+    // non-positive, which is specifically the "numeric but invalid" case.
+    {
+      let parsedDomain: bigint | null = null;
+      try {
+        parsedDomain = BigInt(v10CgDomain);
+      } catch {
+        // Non-numeric descriptive name — stays on the soft path below.
+      }
+      if (parsedDomain !== null && parsedDomain <= 0n) {
+        throw new Error(
+          `V10 publish requires a positive on-chain context graph id; ` +
+          `got '${v10CgDomain}' (parsed to ${parsedDomain}). ` +
+          'Register the CG via ContextGraphs.createContextGraph first ' +
+          'and pass the returned numeric id as `publishContextGraphId` ' +
+          '(or as the first argument to `publish()`).',
+        );
+      }
+    }
+
     let v10ACKs: Array<{ peerId: string; signatureR: Uint8Array; signatureVS: Uint8Array; nodeIdentityId: bigint }> | undefined;
     if (options.v10ACKProvider && !hasPrivateData) {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        const ackDomain = isPublishFromSharedMemory
-          ? contextGraphId
-          : (options.publishContextGraphId ?? contextGraphId);
         v10ACKs = await options.v10ACKProvider(
-          kcMerkleRoot, ackDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
+          kcMerkleRoot, v10CgDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
           publishEpochs, precomputedTokenAmount,
+          swmGraphId, options.subGraphName,
         );
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
@@ -1040,23 +1113,64 @@ export class DKGPublisher implements Publisher {
       this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
+    // Resolve the target CG id bigint once for the whole V10 block so the
+    // self-sign ACK digest (below) and the publisher digest (in the chain-
+    // submit block) see the same value. Non-numeric domains resolve to 0n
+    // here — the V10 contract rejects `contextGraphId == 0` with
+    // `ZeroContextGraphId`, so the authoritative fail-loud lives at the EVM
+    // adapter boundary (`evm-adapter.ts:createKnowledgeAssetsV10` pre-tx
+    // check) and at the core-node `storage-ack-handler.ts`. Keeping the
+    // publisher-side resolution soft lets mock adapters and integration
+    // tests that publish with descriptive SWM CG names continue to exercise
+    // the data-flow path without needing per-test fixture gymnastics.
+    let v10CgId: bigint;
+    try {
+      v10CgId = BigInt(v10CgDomain);
+    } catch {
+      v10CgId = 0n;
+    }
+
+    // Numeric EVM chainId + kav10Address are needed by BOTH the self-sign ACK
+    // digest and the publisher digest (H5 prefix). Fetch them once; the
+    // adapter field `this.chain.chainId` is a namespaced string like
+    // `evm:31337` and is not directly parseable with `BigInt()`. Wrap in
+    // try/catch so non-V10-capable adapters (e.g. `NoChainAdapter`, whose
+    // stubs throw) do not crash the publish path — they simply leave
+    // both values undefined, the self-sign fallback stays skipped, and
+    // the publish goes tentative.
+    let v10ChainId: bigint | undefined;
+    let v10KavAddress: string | undefined;
+    try {
+      v10ChainId = await this.chain.getEvmChainId();
+      v10KavAddress = await this.chain.getKnowledgeAssetsV10Address();
+    } catch {
+      v10ChainId = undefined;
+      v10KavAddress = undefined;
+    }
+
     // Self-sign ACK as last resort: single-node mode (no provider), or when
     // ACK collection was skipped for private data, or when collection failed.
     // On networks requiring > 1 signature, a single self-signed ACK will be
     // rejected on-chain by minimumRequiredSignatures — this is intentional:
     // the contract is the ultimate gatekeeper.
-    if (!v10ACKs && this.publisherWallet && this.publisherNodeIdentityId > 0n) {
+    if (
+      !v10ACKs &&
+      this.publisherWallet &&
+      this.publisherNodeIdentityId > 0n &&
+      v10ChainId !== undefined &&
+      v10KavAddress !== undefined
+    ) {
       const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
       this.log.info(ctx, `Self-signing ACK — ${reason}`);
-      const cgIdForACK = (() => {
-        // Must match the ackDomain used by the provider path and publisher signature
-        const raw = isPublishFromSharedMemory
-          ? contextGraphId
-          : (options.publishContextGraphId ?? contextGraphId);
-        try { return BigInt(raw); } catch { return 0n; }
-      })();
-      const ackDigest = computeACKDigest(
-        cgIdForACK, kcMerkleRoot, kaCount, publicByteSize, publishEpochs, precomputedTokenAmount,
+      const ackDigest = computePublishACKDigest(
+        v10ChainId,
+        v10KavAddress,
+        v10CgId,
+        kcMerkleRoot,
+        BigInt(kaCount),
+        publicByteSize,
+        BigInt(publishEpochs),
+        precomputedTokenAmount,
       );
       const ackSig = ethers.Signature.from(
         await this.publisherWallet.signMessage(ackDigest),
@@ -1090,21 +1204,6 @@ export class DKGPublisher implements Publisher {
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
 
-      // Resolve contextGraphId for V10 on-chain publish.
-      // Must match the mapping used by ACKCollector and StorageACKHandler so
-      // the ACK digest is consistent across all parties.
-      const ackDomainForSig = isPublishFromSharedMemory
-        ? contextGraphId
-        : (options.publishContextGraphId ?? contextGraphId);
-      let cgIdForSig: bigint;
-      try {
-        cgIdForSig = BigInt(ackDomainForSig);
-      } catch {
-        // Non-numeric CG names are virtual/off-chain — pass 0 so the contract
-        // skips on-chain CG authorization (only on-chain CGs have governance).
-        cgIdForSig = 0n;
-      }
-
       onPhase?.('chain:sign', 'end');
       onPhase?.('chain:submit', 'start');
       this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
@@ -1112,20 +1211,37 @@ export class DKGPublisher implements Publisher {
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
-        if (typeof this.chain.createKnowledgeAssetsV10 !== 'function') {
-          throw new Error('Chain adapter does not support V10 publish (createKnowledgeAssetsV10 not available)');
+        if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
+          throw new Error(
+            'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
+            'Publish is routed through KnowledgeAssetsV10.publishDirect, which requires ' +
+            'the adapter to expose createKnowledgeAssetsV10, getEvmChainId, and ' +
+            'getKnowledgeAssetsV10Address — use an EVM adapter pointed at a chain where ' +
+            'KnowledgeAssetsV10 is deployed.',
+          );
         }
-        // V10 publisher signature: keccak256(abi.encodePacked(uint256 contextGraphId, uint72 identityId, bytes32 merkleRoot))
-        const pubMsgHash = ethers.solidityPackedKeccak256(
-          ['uint256', 'uint72', 'bytes32'],
-          [cgIdForSig, identityId, merkleRootHex],
+        if (v10ChainId === undefined || v10KavAddress === undefined) {
+          throw new Error(
+            'V10 publish requires the chain adapter to expose getEvmChainId() and ' +
+            'getKnowledgeAssetsV10Address(); neither was resolved. The adapter is not V10-capable.',
+          );
+        }
+        // V10 publisher digest (KnowledgeAssetsV10.sol:327-335):
+        //   keccak256(abi.encodePacked(chainid, kav10Address, uint72 identityId, uint256 cgId, bytes32 merkleRoot))
+        // H5 prefix + N26 field order (identityId BEFORE cgId).
+        const pubMsgHash = computePublishPublisherDigest(
+          v10ChainId,
+          v10KavAddress,
+          identityId,
+          v10CgId,
+          kcMerkleRoot,
         );
         const pubSig = ethers.Signature.from(
-          await this.publisherWallet.signMessage(ethers.getBytes(pubMsgHash)),
+          await this.publisherWallet.signMessage(pubMsgHash),
         );
         onChainResult = await this.chain.createKnowledgeAssetsV10!({
           publishOperationId: `${this.sessionId}-${tentativeSeq}`,
-          contextGraphId: cgIdForSig,
+          contextGraphId: v10CgId,
           merkleRoot: kcMerkleRoot,
           knowledgeAssetsAmount: kaCount,
           byteSize: publicByteSize,
@@ -1133,7 +1249,6 @@ export class DKGPublisher implements Publisher {
           tokenAmount,
           isImmutable: false,
           paymaster: ethers.ZeroAddress,
-          convictionAccountId: 0n,
           publisherNodeIdentityId: identityId,
           publisherSignature: {
             r: ethers.getBytes(pubSig.r),

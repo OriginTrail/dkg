@@ -5,9 +5,13 @@ const { Type, Field } = protobuf;
 /**
  * Storage ACK message (spec §9.0.3).
  *
- * Sent by core nodes to attest that they have stored the data
- * and computed a matching merkle root. The ACK signature scheme:
- * ACK = EIP-191(keccak256(abi.encodePacked(contextGraphId, merkleRoot)))
+ * Sent by core nodes to attest that they have stored the data and
+ * computed a matching merkle root. The ACK signature scheme is:
+ *   ACK = EIP-191(computePublishACKDigest(chainId, kav10Address, cgId,
+ *     merkleRoot, kaCount, byteSize, epochs, tokenAmount))
+ * — the H5-prefixed 8-field digest. See `packages/core/src/crypto/ack.ts`
+ * for the packed layout; matches `KnowledgeAssetsV10.sol:362-373`
+ * byte-for-byte.
  */
 
 export const StorageACKSchema = new Type('StorageACK')
