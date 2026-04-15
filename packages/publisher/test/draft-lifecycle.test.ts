@@ -6,6 +6,7 @@ import {
   generateEd25519Keypair,
   contextGraphAssertionUri,
   contextGraphSharedMemoryUri,
+  assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { ethers } from 'ethers';
@@ -341,5 +342,176 @@ describe('Working Memory Assertion sub-graph registration check', () => {
     await expect(
       publisher.assertionCreate(SG_CG_ID, ASSERTION_NAME, AGENT, 'Invalid Name With Spaces'),
     ).rejects.toThrow(/Invalid sub-graph name/);
+  });
+});
+
+describe('Assertion Lifecycle Provenance', () => {
+  const META_GRAPH = `did:dkg:context-graph:${CG_ID}/_meta`;
+  const DKG = 'http://dkg.io/ontology/';
+  let store: OxigraphStore;
+  let publisher: DKGPublisher;
+
+  beforeEach(async () => {
+    store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const keypair = await generateEd25519Keypair();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+      publisherNodeIdentityId: 1n,
+    });
+  });
+
+  async function queryLifecycleState(name: string = ASSERTION_NAME): Promise<string | undefined> {
+    const uri = assertionLifecycleUri(CG_ID, AGENT, name);
+    const result = await store.query(
+      `SELECT ?state WHERE { GRAPH <${META_GRAPH}> { <${uri}> <${DKG}state> ?state } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    return result.bindings[0]['state']?.replace(/^"|"$/g, '');
+  }
+
+  async function queryLifecycleField(field: string, name: string = ASSERTION_NAME): Promise<string | undefined> {
+    const uri = assertionLifecycleUri(CG_ID, AGENT, name);
+    const result = await store.query(
+      `SELECT ?val WHERE { GRAPH <${META_GRAPH}> { <${uri}> <${DKG}${field}> ?val } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    return result.bindings[0]['val']?.replace(/^"|"$/g, '');
+  }
+
+  it('assertionCreate writes lifecycle record with state "created"', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const state = await queryLifecycleState();
+    expect(state).toBe('created');
+  });
+
+  it('lifecycle record includes rdf:type dkg:Assertion', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const uri = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const result = await store.query(
+      `SELECT ?type WHERE { GRAPH <${META_GRAPH}> { <${uri}> a ?type } } LIMIT 1`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings[0]['type']).toBe(`${DKG}Assertion`);
+    }
+  });
+
+  it('lifecycle record includes createdAt timestamp', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    const createdAt = await queryLifecycleField('createdAt');
+    expect(createdAt).toBeDefined();
+    expect(createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('promote updates lifecycle state to "promoted"', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+
+    const state = await queryLifecycleState();
+    expect(state).toBe('promoted');
+  });
+
+  it('promote records promotedAt and shareOperationId', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+
+    const promotedAt = await queryLifecycleField('promotedAt');
+    expect(promotedAt).toBeDefined();
+    expect(promotedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const opId = await queryLifecycleField('shareOperationId');
+    expect(opId).toBeDefined();
+    expect(opId!.length).toBeGreaterThan(0);
+  });
+
+  it('promote records rootEntities', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+
+    const uri = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const result = await store.query(
+      `SELECT ?entity WHERE { GRAPH <${META_GRAPH}> { <${uri}> <${DKG}rootEntity> ?entity } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      const entities = result.bindings.map(b => b['entity']);
+      expect(entities).toContain('urn:test:entity:alice');
+      expect(entities).toContain('urn:test:entity:bob');
+    }
+  });
+
+  it('discard updates lifecycle state to "discarded"', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    const state = await queryLifecycleState();
+    expect(state).toBe('discarded');
+  });
+
+  it('discard records discardedAt timestamp', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    const discardedAt = await queryLifecycleField('discardedAt');
+    expect(discardedAt).toBeDefined();
+    expect(discardedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('lifecycle record persists in _meta even after assertion graph is emptied', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+
+    const assertionQuads = await publisher.assertionQuery(CG_ID, ASSERTION_NAME, AGENT);
+    expect(assertionQuads.length).toBe(0);
+
+    const state = await queryLifecycleState();
+    expect(state).toBe('promoted');
+
+    const name = await queryLifecycleField('assertionName');
+    expect(name).toBe(ASSERTION_NAME);
+  });
+
+  it('lifecycle record persists after discard drops the data graph', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+
+    const uri = assertionLifecycleUri(CG_ID, AGENT, ASSERTION_NAME);
+    const result = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${META_GRAPH}> { <${uri}> ?p ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings.length).toBeGreaterThanOrEqual(5);
+    }
+  });
+
+  it('different agents have separate lifecycle records', async () => {
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT_B);
+
+    await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
+    await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
+
+    const stateA = await queryLifecycleState();
+    expect(stateA).toBe('promoted');
+
+    const uriBState = await store.query(
+      `SELECT ?state WHERE { GRAPH <${META_GRAPH}> { <${assertionLifecycleUri(CG_ID, AGENT_B, ASSERTION_NAME)}> <${DKG}state> ?state } } LIMIT 1`,
+    );
+    expect(uriBState.type).toBe('bindings');
+    if (uriBState.type === 'bindings') {
+      expect(uriBState.bindings[0]['state']?.replace(/^"|"$/g, '')).toBe('created');
+    }
   });
 });

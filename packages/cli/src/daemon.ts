@@ -4255,6 +4255,31 @@ async function handleRequest(
     }
   }
 
+  // POST /api/context-graph/register  { id, revealOnChain?, accessPolicy? }
+  if (req.method === "POST" && path === "/api/context-graph/register") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { id } = parsed;
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    try {
+      const result = await agent.registerContextGraph(id, {
+        revealOnChain: parsed.revealOnChain,
+        accessPolicy: parsed.accessPolicy,
+      });
+      return jsonResponse(res, 200, {
+        registered: id,
+        onChainId: result.onChainId,
+        txHash: result.txHash,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (msg.includes("does not exist")) return jsonResponse(res, 404, { error: msg });
+      if (msg.includes("already registered")) return jsonResponse(res, 409, { error: msg });
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
   // POST /api/sub-graph/create  { contextGraphId, subGraphName }
   if (req.method === "POST" && path === "/api/sub-graph/create") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -4489,6 +4514,50 @@ async function handleRequest(
       );
       extractionStatus.delete(assertionUri);
       return jsonResponse(res, 200, { discarded: true });
+    } catch (err: any) {
+      if (
+        err.message?.includes("not found") ||
+        err.message?.includes("Invalid") ||
+        err.message?.includes("Unsafe")
+      ) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // GET /api/assertion/:name/history?contextGraphId=...&agentAddress=...
+  if (
+    req.method === "GET" &&
+    path.startsWith("/api/assertion/") &&
+    path.includes("/history")
+  ) {
+    const assertionName = safeDecodeURIComponent(
+      path.slice("/api/assertion/".length, -"/history".length),
+      res,
+    );
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid)
+      return jsonResponse(res, 400, {
+        error: `Invalid assertion name: ${nameVal.reason}`,
+      });
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const contextGraphId = qs.get("contextGraphId");
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const agentAddress = qs.get("agentAddress") ?? undefined;
+    try {
+      const descriptor = await agent.assertion.history(
+        contextGraphId!,
+        assertionName,
+        agentAddress ? { agentAddress } : undefined,
+      );
+      if (!descriptor) {
+        return jsonResponse(res, 404, {
+          error: `No lifecycle record found for assertion "${assertionName}"`,
+        });
+      }
+      return jsonResponse(res, 200, descriptor);
     } catch (err: any) {
       if (
         err.message?.includes("not found") ||

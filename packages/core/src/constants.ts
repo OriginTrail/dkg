@@ -94,6 +94,15 @@ export function contextGraphRulesUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_rules`;
 }
 
+/**
+ * Stable URI for an assertion's lifecycle record in `_meta`.
+ * Persists across WM → SWM → VM transitions so assertions remain
+ * queryable by identity after promotion.
+ */
+export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string): string {
+  return `urn:dkg:assertion:${contextGraphId}:${agentAddress}:${name}`;
+}
+
 export function contextGraphSubGraphUri(contextGraphId: string, subGraphName: string): string {
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
 }

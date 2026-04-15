@@ -1,6 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { validateSubGraphName, isSafeIri } from '@origintrail-official/dkg-core';
+import { validateSubGraphName, isSafeIri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
+import type { AssertionState } from '@origintrail-official/dkg-core';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
@@ -521,4 +522,102 @@ export function subGraphWritersSparql(contextGraphId: string, subGraphName: stri
     <${subGraphUri}> <${DKG}authorizedWriter> ?writer
   }
 }`;
+}
+
+// ── Assertion Lifecycle Metadata ────────────────────────────────────────
+//
+// Persistent records in `_meta` that track an assertion's identity and
+// provenance across all three memory layers (WM → SWM → VM).
+
+export interface AssertionCreatedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  timestamp: Date;
+}
+
+export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  return [
+    mq(subject, `${RDF}type`, `${DKG}Assertion`, metaGraph),
+    mq(subject, `${DKG}contextGraph`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
+    mq(subject, `${DKG}agent`, `did:dkg:agent:${meta.agentAddress}`, metaGraph),
+    mq(subject, `${DKG}assertionName`, lit(meta.assertionName), metaGraph),
+    mq(subject, `${DKG}state`, lit('created'), metaGraph),
+    mq(subject, `${DKG}createdAt`, dateLit(meta.timestamp), metaGraph),
+  ];
+}
+
+export interface AssertionPromotedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  shareOperationId: string;
+  rootEntities: string[];
+  timestamp: Date;
+}
+
+export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+
+  const del = [assertionStateQuad(subject, 'created', metaGraph)];
+  const ins: Quad[] = [
+    mq(subject, `${DKG}state`, lit('promoted'), metaGraph),
+    mq(subject, `${DKG}promotedAt`, dateLit(meta.timestamp), metaGraph),
+    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), metaGraph),
+  ];
+  for (const entity of meta.rootEntities) {
+    ins.push(mq(subject, `${DKG}rootEntity`, entity, metaGraph));
+  }
+  return { insert: ins, delete: del };
+}
+
+export interface AssertionPublishedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  kcUal: string;
+  timestamp: Date;
+}
+
+export function generateAssertionPublishedMetadata(meta: AssertionPublishedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  return {
+    insert: [
+      mq(subject, `${DKG}state`, lit('published'), metaGraph),
+      mq(subject, `${DKG}publishedAt`, dateLit(meta.timestamp), metaGraph),
+      mq(subject, `${DKG}kcUal`, meta.kcUal, metaGraph),
+    ],
+    delete: [assertionStateQuad(subject, 'promoted', metaGraph)],
+  };
+}
+
+export interface AssertionDiscardedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  timestamp: Date;
+}
+
+export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  return {
+    insert: [
+      mq(subject, `${DKG}state`, lit('discarded'), metaGraph),
+      mq(subject, `${DKG}discardedAt`, dateLit(meta.timestamp), metaGraph),
+    ],
+    delete: [assertionStateQuad(subject, 'created', metaGraph)],
+  };
+}
+
+/**
+ * Build the quad for a specific assertion state value.
+ * Used as the target of DELETE operations when transitioning states.
+ */
+export function assertionStateQuad(lifecycleUri: string, state: AssertionState, metaGraph: string): Quad {
+  return mq(lifecycleUri, `${DKG}state`, lit(state), metaGraph);
 }

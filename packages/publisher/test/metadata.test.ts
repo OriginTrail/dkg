@@ -9,13 +9,23 @@ import {
   generateShareMetadata,
   generateAuthorshipProof,
   generateShareTransitionMetadata,
+  generateAssertionCreatedMetadata,
+  generateAssertionPromotedMetadata,
+  generateAssertionPublishedMetadata,
+  generateAssertionDiscardedMetadata,
+  assertionStateQuad,
   type KCMetadata,
   type KAMetadata,
   type OnChainProvenance,
   type ShareMetadata,
   type AuthorshipProof,
   type ShareTransitionMetadata,
+  type AssertionCreatedMeta,
+  type AssertionPromotedMeta,
+  type AssertionPublishedMeta,
+  type AssertionDiscardedMeta,
 } from '../src/metadata.js';
+import { assertionLifecycleUri } from '@origintrail-official/dkg-core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG = 'http://dkg.io/ontology/';
@@ -328,5 +338,144 @@ describe('generateShareTransitionMetadata', () => {
     for (const q of quads) {
       expect(q.graph).toBe(SWM_META_GRAPH);
     }
+  });
+});
+
+// ── Assertion Lifecycle Metadata ────────────────────────────────────────
+
+const AGENT_ADDR = '0x1234567890abcdef1234567890abcdef12345678';
+const ASSERTION = 'game-turn-42';
+const LIFECYCLE_URI = assertionLifecycleUri(PARANET, AGENT_ADDR, ASSERTION);
+
+describe('generateAssertionCreatedMetadata', () => {
+  const meta: AssertionCreatedMeta = {
+    contextGraphId: PARANET,
+    agentAddress: AGENT_ADDR,
+    assertionName: ASSERTION,
+    timestamp: new Date('2026-04-15T10:00:00Z'),
+  };
+
+  it('generates correct rdf:type', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const typeQuad = quads.find(q => q.predicate === RDF_TYPE);
+    expect(typeQuad).toBeDefined();
+    expect(typeQuad!.object).toBe(`${DKG}Assertion`);
+  });
+
+  it('subject is the lifecycle URI', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    expect(quads[0].subject).toBe(LIFECYCLE_URI);
+  });
+
+  it('state is "created"', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const stateQuad = quads.find(q => q.predicate === `${DKG}state`);
+    expect(stateQuad!.object).toBe('"created"');
+  });
+
+  it('includes contextGraph, agent, assertionName, and createdAt', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const preds = quads.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}contextGraph`);
+    expect(preds).toContain(`${DKG}agent`);
+    expect(preds).toContain(`${DKG}assertionName`);
+    expect(preds).toContain(`${DKG}createdAt`);
+  });
+
+  it('all quads target the _meta graph', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    for (const q of quads) {
+      expect(q.graph).toBe(META_GRAPH);
+    }
+  });
+});
+
+describe('generateAssertionPromotedMetadata', () => {
+  const meta: AssertionPromotedMeta = {
+    contextGraphId: PARANET,
+    agentAddress: AGENT_ADDR,
+    assertionName: ASSERTION,
+    shareOperationId: 'op-123',
+    rootEntities: ['urn:test:alice', 'urn:test:bob'],
+    timestamp: new Date('2026-04-15T10:05:00Z'),
+  };
+
+  it('inserts state "promoted" and deletes state "created"', () => {
+    const { insert, delete: del } = generateAssertionPromotedMetadata(meta);
+    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
+    expect(stateInsert!.object).toBe('"promoted"');
+    expect(del).toHaveLength(1);
+    expect(del[0].object).toBe('"created"');
+  });
+
+  it('includes promotedAt and shareOperationId', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    const preds = insert.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}promotedAt`);
+    expect(preds).toContain(`${DKG}shareOperationId`);
+  });
+
+  it('includes one rootEntity quad per entity', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    const entityQuads = insert.filter(q => q.predicate === `${DKG}rootEntity`);
+    expect(entityQuads).toHaveLength(2);
+    expect(entityQuads.map(q => q.object)).toContain('urn:test:alice');
+    expect(entityQuads.map(q => q.object)).toContain('urn:test:bob');
+  });
+});
+
+describe('generateAssertionPublishedMetadata', () => {
+  const meta: AssertionPublishedMeta = {
+    contextGraphId: PARANET,
+    agentAddress: AGENT_ADDR,
+    assertionName: ASSERTION,
+    kcUal: 'did:dkg:kc:test-kc-001',
+    timestamp: new Date('2026-04-15T10:10:00Z'),
+  };
+
+  it('inserts state "published" and deletes state "promoted"', () => {
+    const { insert, delete: del } = generateAssertionPublishedMetadata(meta);
+    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
+    expect(stateInsert!.object).toBe('"published"');
+    expect(del[0].object).toBe('"promoted"');
+  });
+
+  it('includes publishedAt and kcUal', () => {
+    const { insert } = generateAssertionPublishedMetadata(meta);
+    const preds = insert.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}publishedAt`);
+    expect(preds).toContain(`${DKG}kcUal`);
+  });
+});
+
+describe('generateAssertionDiscardedMetadata', () => {
+  const meta: AssertionDiscardedMeta = {
+    contextGraphId: PARANET,
+    agentAddress: AGENT_ADDR,
+    assertionName: ASSERTION,
+    timestamp: new Date('2026-04-15T10:15:00Z'),
+  };
+
+  it('inserts state "discarded" and deletes state "created"', () => {
+    const { insert, delete: del } = generateAssertionDiscardedMetadata(meta);
+    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
+    expect(stateInsert!.object).toBe('"discarded"');
+    expect(del[0].object).toBe('"created"');
+  });
+
+  it('includes discardedAt', () => {
+    const { insert } = generateAssertionDiscardedMetadata(meta);
+    const preds = insert.map(q => q.predicate);
+    expect(preds).toContain(`${DKG}discardedAt`);
+  });
+});
+
+describe('assertionStateQuad', () => {
+  it('produces a quad with dkg:state predicate and correct value', () => {
+    const q = assertionStateQuad(LIFECYCLE_URI, 'promoted', META_GRAPH);
+    expect(q.subject).toBe(LIFECYCLE_URI);
+    expect(q.predicate).toBe(`${DKG}state`);
+    expect(q.object).toBe('"promoted"');
+    expect(q.graph).toBe(META_GRAPH);
   });
 });
