@@ -614,9 +614,37 @@ export class DkgNodePlugin {
       const status = await this.client.getStatus();
       if (status.ok && status.peerId) {
         this.nodePeerId = status.peerId;
+        return;
+      }
+      // B30: `DkgDaemonClient.getStatus()` already converts transport /
+      // HTTP failures into `{ ok: false, error }`, so the `catch` block
+      // below almost never runs — the previous implementation's log
+      // message was effectively dead code and peer-ID probe failures
+      // were silent. Log the non-ok branch explicitly at warn level so
+      // operators can diagnose why every memory call is falling back
+      // to `needs_clarification`. The `status.ok && status.peerId`
+      // check above handles the successful-but-no-peerId edge case
+      // (daemon not yet fully initialized) — fall through to the same
+      // warn log so it too is visible.
+      if (!status.ok) {
+        const reason = (status as any).error ?? 'unknown error';
+        api.logger.warn?.(
+          `[dkg-memory] Node peer ID probe failed — daemon /api/status returned not-ok: ${reason}. ` +
+          'Working-memory reads and writes will return needs_clarification until the next retry lands.',
+        );
+      } else {
+        api.logger.warn?.(
+          '[dkg-memory] Node peer ID probe returned ok but no peerId — daemon is up but has not yet ' +
+          'published a peer identity. Retrying on the next lazy-probe tick.',
+        );
       }
     } catch (err: any) {
-      api.logger.debug?.(`[dkg-memory] Could not read daemon peer ID: ${err?.message ?? err}`);
+      // Defense-in-depth: `getStatus()` catches its own transport errors,
+      // but a future refactor might throw (e.g. from a JSON parse in the
+      // client layer). Keep the catch so that path is also diagnosed.
+      api.logger.warn?.(
+        `[dkg-memory] Node peer ID probe threw unexpectedly: ${err?.message ?? err}`,
+      );
     }
   }
 

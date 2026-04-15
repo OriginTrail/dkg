@@ -111,6 +111,31 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     const agentAddress = session?.agentAddress ?? this.deps.resolver.getDefaultAgentAddress();
     const projectContextGraphId = session?.projectContextGraphId;
 
+    // B28: Preflight the agent address BEFORE firing WM queries. The query
+    // engine at `packages/query/src/dkg-query-engine.ts:47-48` throws
+    // `'agentAddress is required for the working-memory view'` on every
+    // view-based read when `agentAddress` is falsy. The per-call `.catch`
+    // blocks below swallow that throw and convert it to empty bindings,
+    // which is indistinguishable from "no memories matched" to callers.
+    // `buildDkgMemoryRuntime.getMemorySearchManager` (B12) and
+    // `DkgMemoryPlugin.handleLegacySearch` (B15) already preflight for
+    // their respective callers — the factory returns a null manager and
+    // the legacy tool returns a retryable `needs_clarification`. This
+    // preflight is the innermost safety net for direct consumers of
+    // `DkgMemorySearchManager.search` (re-exported from the barrel for
+    // programmatic use — see B24) so those callers do not silently see
+    // `[]` either. Log distinctively at warn level so the "backend not
+    // ready" state is diagnosable, and return `[]` early to avoid wasted
+    // network round-trips.
+    if (!agentAddress) {
+      this.deps.logger?.warn?.(
+        '[dkg-memory] DkgMemorySearchManager.search skipped: peer ID not yet available. ' +
+        'Returning empty result set for this call; lazy re-probe has been scheduled by the resolver, ' +
+        'so the next search after the probe lands will proceed normally.',
+      );
+      return [];
+    }
+
     const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length >= 2);
     if (keywords.length === 0) {
       return [];
@@ -388,16 +413,33 @@ export class DkgMemoryPlugin {
   }
 
   /**
-   * Read the workspace-config memory-slot owner from `api.config`. Returns
-   * `true` only when the slot is explicitly pointing at this adapter's
-   * plugin id (`"adapter-openclaw"`, matching the manifest and the value
-   * setup.ts writes during slot election). Any other result — unset slot,
-   * slot pointing at another plugin, or malformed config — returns
-   * `false` and is treated as "not our slot" by the fallback-tool gate.
+   * Read the workspace-config memory-slot owner and return `true` only
+   * when the slot is explicitly pointing at this adapter's plugin id
+   * (`"adapter-openclaw"`, matching the manifest and the value setup.ts
+   * writes during slot election). Any other result — unset slot, slot
+   * pointing at another plugin, or malformed config — returns `false`
+   * and is treated as "not our slot" by the fallback-tool gate.
+   *
+   * B29: some OpenClaw gateway versions expose the merged config on
+   * `api.cfg` instead of `api.config` — `DkgChannelPlugin.register`
+   * already handles this divergence at
+   * `this.cfg = (api as any).cfg ?? (api as any).config ?? runtime.cfg ?? runtime.config`.
+   * Reading only `api.config` here would leave `slotOwnedByThisAdapter`
+   * false on those runtimes even after setup completes, and the compat
+   * `dkg_memory_search` tool would stay registered on fully-migrated
+   * installs — the exact duplicate-recall-surface state this PR is
+   * trying to remove. Mirror the same fallback order so the slot check
+   * resolves on every gateway shape we see in the wild.
    */
   private isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
-    const config = (api as any)?.config as Record<string, unknown> | undefined;
-    const plugins = config?.plugins as Record<string, unknown> | undefined;
+    const anyApi = api as any;
+    const runtime = anyApi?.runtime;
+    const mergedConfig =
+      (anyApi?.cfg as Record<string, unknown> | undefined) ??
+      (anyApi?.config as Record<string, unknown> | undefined) ??
+      (runtime?.cfg as Record<string, unknown> | undefined) ??
+      (runtime?.config as Record<string, unknown> | undefined);
+    const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
     const slots = plugins?.slots as Record<string, unknown> | undefined;
     return slots?.memory === 'adapter-openclaw';
   }
