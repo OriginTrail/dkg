@@ -52,10 +52,18 @@ cd "$ROOT"
 
 # Run sequentially — each test spawns its own Hardhat node on a unique port,
 # but we still serialize to avoid port collisions and reduce CI flakiness.
+#
+# These EVM integration tests are excluded from per-package vitest configs
+# (they need a live Hardhat node). We run them from their package directory
+# with a minimal vitest config that has no exclude list.
 exit_code=0
 for f in "${files[@]}"; do
   echo "──── Running: $f ────"
-  if ! npx vitest run "$f" --reporter=verbose; then
+  pkg_dir="$ROOT/$(dirname "$(dirname "$f")")"
+  test_file="test/$(basename "$f")"
+  if ! (cd "$pkg_dir" && npx vitest run "$test_file" \
+       --config "$ROOT/vitest.evm-integration.ts" \
+       --reporter=verbose); then
     exit_code=1
     echo "FAIL: $f"
   fi
