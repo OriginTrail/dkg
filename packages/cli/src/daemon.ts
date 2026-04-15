@@ -453,6 +453,8 @@ async function runDaemonInner(foreground: boolean, config: Awaited<ReturnType<ty
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    syncMode: config.syncMode === true,
+    syncIntervalMs: config.syncIntervalMs,
   });
 
   let publisherRuntime: PublisherRuntime | null = null;
@@ -4658,6 +4660,69 @@ async function handleRequest(
         jobId,
       },
     });
+  }
+
+  // GET /api/sync/status — aggregate sync progress (used by explorer UI)
+  if (req.method === 'GET' && path === '/api/sync/status') {
+    const subscribed = agent.getSubscribedContextGraphs();
+    const progress = agent.getSyncProgress();
+    const contextGraphs: Record<string, unknown>[] = [];
+
+    for (const [id, sub] of subscribed) {
+      const p = progress.get(id);
+      contextGraphs.push({
+        id,
+        name: sub.name ?? id,
+        subscribed: sub.subscribed,
+        synced: sub.synced,
+        onChainId: sub.onChainId ?? null,
+        totalTriples: p?.totalTriples ?? 0,
+        lastSyncedAt: p?.lastSyncedAt ?? null,
+        lastCheckedAt: p?.lastCheckedAt ?? null,
+        lastDelta: p?.lastDelta ?? 0,
+        lastPeerSource: p?.lastPeerSource ?? null,
+        lastDurationMs: p?.lastDurationMs ?? null,
+        syncCount: p?.syncCount ?? 0,
+        peerSources: p?.peerSources ? p.peerSources.size : 0,
+        lastGossipAt: p?.lastGossipAt ?? null,
+        lastGossipTriples: p?.lastGossipTriples ?? 0,
+      });
+    }
+
+    const totalTriples = contextGraphs.reduce((sum, cg) => sum + ((cg.totalTriples as number) ?? 0), 0);
+    const syncedCount = contextGraphs.filter((cg) => cg.synced && ((cg.totalTriples as number) ?? 0) > 0).length;
+
+    return jsonResponse(res, 200, {
+      syncMode: config.syncMode === true,
+      syncIntervalMs: config.syncMode ? (config.syncIntervalMs ?? 60_000) : null,
+      totalContextGraphs: contextGraphs.length,
+      syncedContextGraphs: syncedCount,
+      pendingContextGraphs: contextGraphs.length - syncedCount,
+      totalTriples,
+      contextGraphs,
+    });
+  }
+
+  // POST /api/sync/trigger — force an immediate sync round from all connected peers
+  if (req.method === 'POST' && path === '/api/sync/trigger') {
+    const peers = agent.node.libp2p.getPeers();
+    if (peers.length === 0) {
+      return jsonResponse(res, 200, { triggered: 0, message: 'No peers connected' });
+    }
+    let triggered = 0;
+    for (const pid of peers) {
+      try {
+        agent.requestSyncFromPeer(pid.toString()).catch(() => {});
+        triggered++;
+      } catch { /* skip */ }
+    }
+    return jsonResponse(res, 200, { triggered, peers: peers.length });
+  }
+
+  // GET /api/sync/log — in-memory sync event buffer (no file scraping)
+  if (req.method === 'GET' && path === '/api/sync/log') {
+    const events = agent.getSyncEventLog();
+    return jsonResponse(res, 200, { events });
   }
 
   // GET /api/sync/catchup-status?contextGraphId=<id> | ?paranetId=<id> | ?jobId=<id>

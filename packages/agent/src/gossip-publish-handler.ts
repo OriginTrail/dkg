@@ -23,6 +23,7 @@ export interface GossipPublishHandlerCallbacks {
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
   onPhase?: GossipPhaseCallback;
+  onGossipData?: (contextGraphId: string, tripleCount: number, fromPeerId?: string) => void;
 }
 
 export class GossipPublishHandler {
@@ -247,6 +248,7 @@ export class GossipPublishHandler {
       phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
+        this.callbacks.onGossipData?.(contextGraphId, normalized.length, fromPeerId);
       }
 
       if (request.ual) {

@@ -4,6 +4,7 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import { useJourneyStore } from '../../stores/journey.js';
 import { api } from '../../api-wrapper.js';
+import { useFetch } from '../../hooks.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
 
@@ -104,6 +105,22 @@ function IntegrationsSection() {
   );
 }
 
+function SyncStatusNavItem() {
+  const { data: syncStatus } = useFetch(api.fetchSyncStatus, [], 10_000);
+  const { openTab, activeTabId } = useTabsStore();
+
+  if (!syncStatus?.syncMode) return null;
+
+  return (
+    <div
+      className={`v10-tree-dashboard ${activeTabId === 'sync-status' ? 'active' : ''}`}
+      onClick={() => openTab({ id: 'sync-status', label: 'Sync Status', closable: true })}
+    >
+      <span>⟳</span> Sync Status
+    </div>
+  );
+}
+
 export function PanelLeft() {
   const { toggleLeft } = useLayoutStore();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
@@ -156,6 +173,8 @@ export function PanelLeft() {
           >
             <span>▦</span> Dashboard
           </div>
+
+          <SyncStatusNavItem />
 
           {contextGraphs.length > 0 && (
             <div

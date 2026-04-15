@@ -52,6 +52,7 @@ export {
   type ContextGraphSub,
   type ParanetSub,
   type PeerHealth,
+  type SyncProgressEntry,
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';

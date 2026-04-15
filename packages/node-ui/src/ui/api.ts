@@ -155,6 +155,9 @@ export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
   return { contextGraphs: list.filter((p: any) => !p.isSystem) };
 }
 
+// --- Sync Status ---
+export const fetchSyncStatus = () => get<any>('/api/sync/status');
+
 export async function createContextGraph(id: string, name: string, description?: string): Promise<{ created: string; uri: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);

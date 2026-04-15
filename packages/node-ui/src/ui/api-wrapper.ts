@@ -57,4 +57,8 @@ export const api = {
   fetchMemorySessions: (n?: number) => withFallback(() => realApi.fetchMemorySessions(n), mockApi.fetchMemorySessions),
   markNotificationsRead: realApi.markNotificationsRead,
   executeQuery: realApi.executeQuery,
+  fetchSyncStatus: () => withFallback(realApi.fetchSyncStatus, () => Promise.resolve({
+    syncMode: false, totalContextGraphs: 0, syncedContextGraphs: 0,
+    pendingContextGraphs: 0, totalTriples: 0, contextGraphs: [],
+  })),
 };

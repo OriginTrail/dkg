@@ -174,6 +174,10 @@ export interface DkgConfig {
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
+  /** When true, the node auto-discovers and syncs ALL public context graphs from the network. */
+  syncMode?: boolean;
+  /** Interval in ms between periodic catch-up rounds (only when syncMode is true). Default: 60000 (60s). */
+  syncIntervalMs?: number;
 }
 
 /**

@@ -1,8 +1,11 @@
-import React, { Suspense } from 'react';
+import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
+import { ExplorerView } from '../../views/ExplorerView.js';
+import { ExplorerDetailView } from '../../views/ExplorerDetailView.js';
+import { SyncStatusView } from '../../views/SyncStatusView.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -20,6 +23,10 @@ const AgentHubView = React.lazy(() =>
 
 const GameView = React.lazy(() =>
   import('../../pages/Apps.js').then((m) => ({ default: m.AppsPage }))
+);
+
+const SettingsView = React.lazy(() =>
+  import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
 );
 
 function TabBar() {
@@ -77,58 +84,102 @@ function MemoryStackView() {
   );
 }
 
+/*
+ * Views that poll APIs (SyncStatus, Explorer) use keep-alive rendering:
+ * mount on first visit, then stay mounted but hidden when another tab is active.
+ * This prevents state/data loss on tab switch.
+ */
+const KEEP_ALIVE_TABS = ['sync-status'] as const;
+
 function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
+  const [visited, setVisited] = useState<Set<string>>(new Set());
 
-  if (activeTabId === 'dashboard') return <DashboardView />;
+  useEffect(() => {
+    if ((KEEP_ALIVE_TABS as readonly string[]).includes(activeTabId) && !visited.has(activeTabId)) {
+      setVisited((prev) => new Set(prev).add(activeTabId));
+    }
+  }, [activeTabId, visited]);
 
-  if (activeTabId === 'operations') {
+  const renderEphemeral = () => {
+    if ((KEEP_ALIVE_TABS as readonly string[]).includes(activeTabId)) return null;
+
+    if (activeTabId === 'dashboard') return <DashboardView />;
+
+    if (activeTabId === 'operations') {
+      return (
+        <Suspense fallback={<div className="lazy-spinner">Loading operations...</div>}>
+          <OperationsView />
+        </Suspense>
+      );
+    }
+
+    if (activeTabId === 'agent-hub') {
+      return (
+        <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
+          <AgentHubView />
+        </Suspense>
+      );
+    }
+
+    if (activeTabId === 'game') {
+      return (
+        <Suspense fallback={<div className="lazy-spinner">Loading game...</div>}>
+          <GameView />
+        </Suspense>
+      );
+    }
+
+    if (activeTabId === 'settings') {
+      return (
+        <Suspense fallback={<div className="lazy-spinner">Loading settings...</div>}>
+          <SettingsView />
+        </Suspense>
+      );
+    }
+
+    if (activeTabId === 'explorer') return <ExplorerView />;
+
+    if (activeTabId.startsWith('explorer-cg:')) {
+      const cgId = activeTabId.slice('explorer-cg:'.length);
+      return <ExplorerDetailView contextGraphId={cgId} />;
+    }
+
+    if (activeTabId === 'memory-stack') return <MemoryStackView />;
+
+    if (activeTabId.startsWith('project:')) {
+      const cgId = activeTabId.slice('project:'.length);
+      return <ProjectView contextGraphId={cgId} />;
+    }
+
+    if (activeTabId.startsWith('wm:')) {
+      return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
+    }
+    if (activeTabId.startsWith('swm:')) {
+      return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
+    }
+    if (activeTabId.startsWith('vm:')) {
+      return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
+    }
+
     return (
-      <Suspense fallback={<div className="lazy-spinner">Loading operations...</div>}>
-        <OperationsView />
-      </Suspense>
+      <div className="v10-view-placeholder">
+        <p style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
+          View &ldquo;{activeTabId}&rdquo; coming soon.
+        </p>
+      </div>
     );
-  }
-
-  if (activeTabId === 'agent-hub') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
-        <AgentHubView />
-      </Suspense>
-    );
-  }
-
-  if (activeTabId === 'game') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading game...</div>}>
-        <GameView />
-      </Suspense>
-    );
-  }
-
-  if (activeTabId === 'memory-stack') return <MemoryStackView />;
-
-  if (activeTabId.startsWith('project:')) {
-    const cgId = activeTabId.slice('project:'.length);
-    return <ProjectView contextGraphId={cgId} />;
-  }
-
-  if (activeTabId.startsWith('wm:')) {
-    return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
-  }
-  if (activeTabId.startsWith('swm:')) {
-    return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
-  }
-  if (activeTabId.startsWith('vm:')) {
-    return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
-  }
+  };
 
   return (
-    <div className="v10-view-placeholder">
-      <p style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
-        View "{activeTabId}" coming soon.
-      </p>
-    </div>
+    <>
+      {visited.has('sync-status') && (
+        <div style={{ display: activeTabId === 'sync-status' ? undefined : 'none' }}>
+          <SyncStatusView />
+        </div>
+      )}
+      {renderEphemeral()}
+    </>
   );
 }
 

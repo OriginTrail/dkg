@@ -125,6 +125,28 @@ export interface ContextGraphSub {
   participantIdentityIds?: bigint[];
 }
 
+/** Per-context-graph sync progress record. */
+export interface SyncProgressEntry {
+  contextGraphId: string;
+  totalTriples: number;
+  lastSyncedAt: number;
+  lastCheckedAt: number;
+  lastDelta: number;
+  lastPeerSource: string;
+  lastDurationMs: number;
+  syncCount: number;
+  peerSources: Set<string>;
+  lastGossipAt: number;
+  lastGossipTriples: number;
+}
+
+/** Single sync event for the in-memory log buffer. */
+export interface SyncLogEvent {
+  ts: number;
+  level: 'info' | 'ok' | 'warn';
+  message: string;
+}
+
 /** @deprecated Use ContextGraphSub */
 export type ParanetSub = ContextGraphSub;
 
@@ -174,6 +196,10 @@ export interface DKGAgentConfig {
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
+  /** When true, auto-discover and sync ALL public context graphs from the network. */
+  syncMode?: boolean;
+  /** Interval in ms between periodic catch-up rounds (only when syncMode is true). Default: 60000 (60s). Real-time data arrives via GossipSub; this is a safety net. */
+  syncIntervalMs?: number;
 }
 
 /**
@@ -220,6 +246,10 @@ export class DKGAgent {
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
+  private readonly syncProgress = new Map<string, SyncProgressEntry>();
+  private readonly syncEventLog: SyncLogEvent[] = [];
+  private static readonly SYNC_LOG_MAX = 500;
+  private periodicSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(
     config: DKGAgentConfig,
@@ -650,6 +680,20 @@ export class DKGAgent {
       this.subscribeToContextGraph(systemContextGraph);
     }
 
+    // When syncMode is enabled, discover all public CGs from on-chain registry
+    // so they are included in sync-on-connect with peers.
+    if (this.config.syncMode) {
+      const discovered = await this.discoverContextGraphsFromChain();
+      this.log.info(ctx, `syncMode: discovered ${discovered} context graph(s) from chain`);
+      await this.loadSyncProgress();
+      // Hydrate subscribedContextGraphs from store so CGs restored from
+      // sync-progress.json are visible to /api/sync/status before first peer sync.
+      const storeDiscovered = await this.discoverContextGraphsFromStore();
+      if (storeDiscovered > 0) {
+        this.log.info(ctx, `syncMode: discovered ${storeDiscovered} additional context graph(s) from store`);
+      }
+    }
+
     // Connect to bootstrap peers
     if (this.config.bootstrapPeers) {
       for (const addr of this.config.bootstrapPeers) {
@@ -669,15 +713,23 @@ export class DKGAgent {
       const shortPeer = remotePeer.slice(-8);
       const message = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `Sync-on-connect failed for ${shortPeer}: ${message}`);
+      if (this.config.syncMode) {
+        this.pushSyncEvent('warn', `Sync failed from peer ${shortPeer}: ${message}`);
+      }
     };
+
+    const syncDelay = this.config.syncMode ? 500 : 3000;
 
     this.node.libp2p.addEventListener('peer:connect', (evt) => {
       const remotePeer = evt.detail.toString();
+      if (this.config.syncMode) {
+        this.pushSyncEvent('info', `Peer connected: ${remotePeer.slice(-8)}`);
+      }
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
           handleSyncError(remotePeer, err);
         });
-      }, 3000);
+      }, syncDelay);
     });
 
     // Sync from peers already connected (e.g. relay dialed during node.start())
@@ -688,7 +740,7 @@ export class DKGAgent {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
           handleSyncError(remotePeer, err);
         });
-      }, 3000);
+      }, syncDelay);
     }
 
     // Start periodic shared memory cleanup
@@ -699,6 +751,40 @@ export class DKGAgent {
         this.cleanupExpiredSharedMemory().catch(() => {});
       }, SWM_CLEANUP_INTERVAL_MS);
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
+    }
+
+    // Periodic re-sync for sync nodes — actively check peers on a timer.
+    // Uses recursive setTimeout so the interval is measured from the END of
+    // each round, giving predictable lastCheckedAt freshness.
+    if (this.config.syncMode) {
+      const MIN_SYNC_INTERVAL = 10_000;
+      const intervalMs = Math.max(MIN_SYNC_INTERVAL, this.config.syncIntervalMs ?? 60_000);
+      const label = intervalMs >= 60_000 ? `${Math.round(intervalMs / 60_000)}min` : `${Math.round(intervalMs / 1_000)}s`;
+      this.pushSyncEvent('info', `Periodic sync enabled (every ${label}), gossip delivers new data in real-time`);
+      const scheduleNext = () => {
+        if (!this.started) return;
+        this.periodicSyncTimer = setTimeout(async () => {
+          if (!this.started) return;
+          const peers = this.node.libp2p.getPeers();
+          if (peers.length === 0) {
+            this.pushSyncEvent('warn', 'Periodic sync: no peers connected');
+            scheduleNext();
+            return;
+          }
+          const pick = peers[Math.floor(Math.random() * peers.length)].toString();
+          const short = pick.slice(-8);
+          this.pushSyncEvent('info', `Periodic sync: checking peer ${short} (${peers.length} connected)...`);
+          try {
+            await this.trySyncFromPeer(pick);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.pushSyncEvent('warn', `Periodic sync failed: ${msg}`);
+          }
+          scheduleNext();
+        }, intervalMs);
+        this.periodicSyncTimer?.unref?.();
+      };
+      scheduleNext();
     }
   }
 
@@ -736,7 +822,11 @@ export class DKGAgent {
       }
 
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
-      const synced = await this.syncFromPeer(remotePeer);
+      // When syncMode is on, sync ALL subscribed CGs, not just system paranets
+      const cgIds = this.config.syncMode
+        ? [...new Set([SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncContextGraphs ?? []), ...this.subscribedContextGraphs.keys()])]
+        : undefined;
+      const synced = await this.syncFromPeer(remotePeer, cgIds);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
@@ -786,34 +876,79 @@ export class DKGAgent {
 
         onPhase?.('fetch', 'end');
 
-        if (dataQuads.length === 0 && metaQuads.length === 0) continue;
+        const cgSyncStart = Date.now();
+        let cgTriples = 0;
 
-        const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
-        if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
-          this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
-          continue;
-        }
-        if (!isSystemContextGraph && metaQuads.length > 0 && dataQuads.length === 0) {
-          this.log.warn(ctx, `Sync for "${pid}": received ${metaQuads.length} meta triples but no data — peer may have empty or pruned data graph`);
+        if (dataQuads.length === 0 && metaQuads.length === 0) {
+          // No new data — still record that we checked this CG
+        } else {
+          const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+          if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
+            this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
+            // Still update progress below (we checked, peer had invalid data)
+          } else {
+            if (!isSystemContextGraph && metaQuads.length > 0 && dataQuads.length === 0) {
+              this.log.warn(ctx, `Sync for "${pid}": received ${metaQuads.length} meta triples but no data — peer may have empty or pruned data graph`);
+            }
+
+            onPhase?.('verify', 'start');
+            const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemContextGraph);
+            onPhase?.('verify', 'end');
+
+            onPhase?.('store', 'start');
+            if (verified.data.length > 0) {
+              await this.store.insert(verified.data);
+              totalSynced += verified.data.length;
+              cgTriples += verified.data.length;
+            }
+            if (verified.meta.length > 0) {
+              await this.store.insert(verified.meta);
+              totalSynced += verified.meta.length;
+              cgTriples += verified.meta.length;
+            }
+            onPhase?.('store', 'end');
+
+            if (verified.rejected > 0) {
+              this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
+              if (this.config.syncMode) {
+                this.pushSyncEvent('warn', `Rejected ${verified.rejected} KCs for "${pid}" from ${remotePeerId.slice(-8)}`);
+              }
+            }
+          }
         }
 
-        onPhase?.('verify', 'start');
-        const verified = verifySyncedData(dataQuads, metaQuads, ctx, this.log, isSystemContextGraph);
-        onPhase?.('verify', 'end');
-
-        onPhase?.('store', 'start');
-        if (verified.data.length > 0) {
-          await this.store.insert(verified.data);
-          totalSynced += verified.data.length;
-        }
-        if (verified.meta.length > 0) {
-          await this.store.insert(verified.meta);
-          totalSynced += verified.meta.length;
-        }
-        onPhase?.('store', 'end');
-
-        if (verified.rejected > 0) {
-          this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
+        {
+          const prev = this.syncProgress.get(pid);
+          const sources = prev?.peerSources ?? new Set<string>();
+          sources.add(remotePeerId);
+          // Full-state sync: cgTriples is the peer's total for this CG, not a
+          // delta. Use max() so gossip-added triples aren't lost if the peer
+          // hasn't received them yet.
+          const prevTotal = prev?.totalTriples ?? 0;
+          const newTotal = Math.max(prevTotal, cgTriples);
+          const actualDelta = newTotal - prevTotal;
+          this.syncProgress.set(pid, {
+            contextGraphId: pid,
+            totalTriples: newTotal,
+            lastSyncedAt: actualDelta > 0 ? Date.now() : (prev?.lastSyncedAt ?? 0),
+            lastCheckedAt: Date.now(),
+            lastDelta: actualDelta,
+            lastPeerSource: remotePeerId,
+            lastDurationMs: Date.now() - cgSyncStart,
+            syncCount: (prev?.syncCount ?? 0) + 1,
+            peerSources: sources,
+            lastGossipAt: prev?.lastGossipAt ?? 0,
+            lastGossipTriples: prev?.lastGossipTriples ?? 0,
+          });
+          if (this.config.syncMode) {
+            const cgName = this.subscribedContextGraphs.get(pid)?.name ?? pid;
+            const shortPeer = remotePeerId.slice(-8);
+            if (actualDelta > 0) {
+              this.pushSyncEvent('ok', `Synced +${actualDelta} triples for "${cgName}" from ${shortPeer}`);
+            } else {
+              this.pushSyncEvent('info', `Checked "${cgName}" from ${shortPeer} — no new data`);
+            }
+          }
         }
       }
       if (totalSynced > 0) {
@@ -1886,7 +2021,30 @@ export class DKGAgent {
         {
           contextGraphExists: (id) => this.contextGraphExists(id),
           getContextGraphOwner: (id) => this.getContextGraphOwner(id),
-          subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
+          subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, this.config.syncMode ? { trackSyncScope: true } : options),
+          onGossipData: this.config.syncMode ? (cgId, tripleCount, fromPeerId) => {
+            const prev = this.syncProgress.get(cgId);
+            const sources = prev?.peerSources ?? new Set<string>();
+            if (fromPeerId) sources.add(fromPeerId);
+            // Gossip data is pre-filtered (replays skipped), so tripleCount
+            // is mostly unique. Oxigraph silently deduplicates edge cases.
+            // Periodic catch-up will reconcile the count via max().
+            this.syncProgress.set(cgId, {
+              contextGraphId: cgId,
+              totalTriples: (prev?.totalTriples ?? 0) + tripleCount,
+              lastSyncedAt: Date.now(),
+              lastCheckedAt: prev?.lastCheckedAt ?? 0,
+              lastDelta: prev?.lastDelta ?? 0,
+              lastPeerSource: fromPeerId ?? prev?.lastPeerSource ?? '',
+              lastDurationMs: prev?.lastDurationMs ?? 0,
+              syncCount: prev?.syncCount ?? 0,
+              peerSources: sources,
+              lastGossipAt: Date.now(),
+              lastGossipTriples: tripleCount,
+            });
+            const cgName = this.subscribedContextGraphs.get(cgId)?.name ?? cgId;
+            this.pushSyncEvent('ok', `Gossip: +${tripleCount} triples for "${cgName}" from ${fromPeerId?.slice(-8) ?? 'unknown'}`);
+          } : undefined,
         },
       );
     }
@@ -3849,6 +4007,135 @@ export class DKGAgent {
     return this.subscribedContextGraphs;
   }
 
+  /** Returns per-context-graph sync progress stats. */
+  getSyncProgress(): ReadonlyMap<string, SyncProgressEntry> {
+    return this.syncProgress;
+  }
+
+  private static readonly SYNC_PROGRESS_FILE = 'sync-progress.json';
+
+  /** Persist sync progress to disk so triple counts survive restarts. */
+  private async saveSyncProgress(): Promise<void> {
+    if (!this.config.dataDir || this.syncProgress.size === 0) return;
+    const { join } = await import('node:path');
+    const { writeFile } = await import('node:fs/promises');
+    const path = join(this.config.dataDir, DKGAgent.SYNC_PROGRESS_FILE);
+    const entries = Array.from(this.syncProgress.values()).map((e) => ({
+      ...e,
+      peerSources: Array.from(e.peerSources),
+    }));
+    await writeFile(path, JSON.stringify(entries), 'utf-8');
+  }
+
+  /**
+   * Load sync progress: try JSON first, fall back to scanning store.nq.
+   * This ensures counters always reflect the actual data on disk.
+   */
+  private async loadSyncProgress(): Promise<void> {
+    if (!this.config.dataDir) return;
+    const { join } = await import('node:path');
+    const { readFile, stat } = await import('node:fs/promises');
+    const jsonPath = join(this.config.dataDir, DKGAgent.SYNC_PROGRESS_FILE);
+
+    // Try loading persisted JSON first
+    try {
+      const raw = await readFile(jsonPath, 'utf-8');
+      const entries: any[] = JSON.parse(raw);
+      for (const e of entries) {
+        this.syncProgress.set(e.contextGraphId, {
+          contextGraphId: e.contextGraphId,
+          totalTriples: e.totalTriples ?? 0,
+          lastSyncedAt: e.lastSyncedAt ?? 0,
+          lastCheckedAt: 0,
+          lastDelta: 0,
+          lastPeerSource: e.lastPeerSource ?? '',
+          lastDurationMs: 0,
+          syncCount: e.syncCount ?? 0,
+          peerSources: new Set(e.peerSources ?? []),
+          lastGossipAt: 0,
+          lastGossipTriples: 0,
+        });
+      }
+      const total = entries.reduce((s, e) => s + (e.totalTriples ?? 0), 0);
+      this.pushSyncEvent('info', `Restored sync progress: ${entries.length} CGs, ${total.toLocaleString()} triples`);
+      return;
+    } catch {
+      // No JSON — fall through to store scan
+    }
+
+    // Fall back: scan store.nq to count triples per CG
+    const storePath = join(this.config.dataDir, 'store.nq');
+    try {
+      const info = await stat(storePath);
+      if (info.size === 0) return;
+
+      this.pushSyncEvent('info', 'No saved progress — scanning store to count triples...');
+      const { createReadStream } = await import('node:fs');
+      const { createInterface } = await import('node:readline');
+
+      const counts = new Map<string, number>();
+      const rl = createInterface({ input: createReadStream(storePath), crlfDelay: Infinity });
+      // N-Quad graph term is the last <...> before the trailing " ."
+      // Graph URIs look like: urn:dkg:data:did:dkg:context-graph:CGID/data
+      // Strip known sub-graph suffixes (/data, /meta, /_meta) to get the CG ID.
+      const graphTermPattern = /<([^>]+)>\s*\.\s*$/;
+      const cgUriPattern = /did:dkg:context-graph:(.+)/;
+      const subGraphSuffix = /\/(data|meta|_meta)$/;
+
+      for await (const line of rl) {
+        const graphMatch = graphTermPattern.exec(line);
+        if (!graphMatch) continue;
+        const cgMatch = cgUriPattern.exec(graphMatch[1]);
+        if (cgMatch) {
+          const cgId = cgMatch[1].replace(subGraphSuffix, '');
+          counts.set(cgId, (counts.get(cgId) ?? 0) + 1);
+        }
+      }
+
+      for (const [cgId, count] of counts) {
+        this.syncProgress.set(cgId, {
+          contextGraphId: cgId,
+          totalTriples: count,
+          lastSyncedAt: 0,
+          lastCheckedAt: 0,
+          lastDelta: 0,
+          lastPeerSource: '',
+          lastDurationMs: 0,
+          syncCount: 0,
+          peerSources: new Set(),
+          lastGossipAt: 0,
+          lastGossipTriples: 0,
+        });
+      }
+
+      const total = Array.from(counts.values()).reduce((s, n) => s + n, 0);
+      this.pushSyncEvent('info', `Scanned store: ${counts.size} CGs, ${total.toLocaleString()} triples`);
+
+      // Persist so next restart is instant
+      await this.saveSyncProgress();
+    } catch {
+      // No store file — truly fresh start
+    }
+  }
+
+  /** Trigger a sync round from a specific peer (public entry point for API/timer). */
+  requestSyncFromPeer(remotePeerId: string): Promise<void> {
+    return this.trySyncFromPeer(remotePeerId);
+  }
+
+  /** Push an event to the in-memory sync log ring buffer. */
+  pushSyncEvent(level: SyncLogEvent['level'], message: string): void {
+    this.syncEventLog.push({ ts: Date.now(), level, message });
+    if (this.syncEventLog.length > DKGAgent.SYNC_LOG_MAX) {
+      this.syncEventLog.splice(0, this.syncEventLog.length - DKGAgent.SYNC_LOG_MAX);
+    }
+  }
+
+  /** Returns the in-memory sync event log. */
+  getSyncEventLog(): readonly SyncLogEvent[] {
+    return this.syncEventLog;
+  }
+
   /** Returns the latest health snapshot for all known peers. */
   getPeerHealth(): ReadonlyMap<string, PeerHealth> {
     return this.peerHealth;
@@ -3947,7 +4234,7 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToContextGraph(id, { trackSyncScope: true });
+        this.subscribeToContextGraph(id, { trackSyncScope: this.config.syncMode === true });
       }
 
       this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
@@ -4006,11 +4293,8 @@ export class DKGAgent {
         synced: false,
         onChainId: p.contextGraphId,
       });
-      this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+      this.subscribeToContextGraph(p.name, { trackSyncScope: this.config.syncMode === true });
 
-      // Persist the on-chain ID to the ontology graph so the publisher's
-      // VM registration guard can find it via RDF (it has no access to
-      // the in-memory subscribedContextGraphs map).
       const cgUri = paranetDataGraphUri(p.name);
       const ontoGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
       await this.store.insert([{
@@ -4019,7 +4303,6 @@ export class DKGAgent {
         object: `"${p.contextGraphId}"`,
         graph: ontoGraph,
       }]);
-
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }
@@ -4040,6 +4323,11 @@ export class DKGAgent {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
     }
+    if (this.periodicSyncTimer) {
+      clearTimeout(this.periodicSyncTimer);
+      this.periodicSyncTimer = null;
+    }
+    await this.saveSyncProgress();
     await this.node.stop();
     this.started = false;
   }
