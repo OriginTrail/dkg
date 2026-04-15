@@ -1189,15 +1189,22 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    subsequent calls in the same epoch are pure no-ops.
         convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
 
-        // TODO(Phase 11): transfer `rewardTotal` TRAC from Paymaster /
-        // EpochStorage into the StakingStorage vault. Phase 5 assumes the
-        // TRAC is already in the vault (via Phase 11's reward flow on
-        // mainnet, or via `Token.mint(stakingStorage, amount)` in unit
-        // tests). Claim bookkeeping does NOT revert on an under-funded
-        // vault — it is Phase 11's responsibility to keep the vault
-        // funded in step with reward accrual, and a later
-        // `finalizeWithdrawal` would surface the discrepancy as a
-        // `transferStake` underflow.
+        // WARNING: claim() increases StakingStorage accounting (nodeStake /
+        // totalStake / delegatorStakeBase) by `rewardTotal` ahead of the
+        // actual TRAC arriving in the StakingStorage vault. Phase 11 MUST
+        // land before ANY testnet/mainnet deployment — otherwise
+        // finalizeWithdrawal will underflow the vault and leave the
+        // totalStake invariant broken.
+        //
+        // Phase 11 wires Paymaster/EpochStorage to push reward TRAC into
+        // StakingStorage in the same transaction as this accounting update,
+        // restoring the invariant.
+        //
+        // For Phase 5 unit tests, the fixture pre-funds the vault via
+        // Token.mint(stakingStorage, amount).
+        //
+        // TODO(Phase 11): pull `rewardTotal` TRAC from Paymaster/EpochStorage
+        // into StakingStorage.
 
         emit RewardsClaimed(tokenId, uint96(rewardTotal));
     }
