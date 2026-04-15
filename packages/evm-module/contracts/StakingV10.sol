@@ -462,14 +462,21 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    string revert — no principal to re-lock.
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
 
-        // 2. Lock expiry. `pos.expiryEpoch` for a freshly-minted position
-        //    is always `createEpoch + lockEpochs > 0`, so no zero-guard is
-        //    needed here (a zero `expiryEpoch` only arises if the position
-        //    was created at lock==0, but that path is rejected by
-        //    `stake()`/`createConviction` upstream). Strict `>` matches the
-        //    roadmap phrasing "post-expiry re-commit".
+        // 2. Lock expiry boundary. `expiryEpoch` is the FIRST unboosted epoch
+        //    (set by `ConvictionStakingStorage.createPosition` as
+        //    `currentEpoch + lockEpochs`, and treated by `claim()` as the
+        //    first epoch where `e >= expiryEpoch` runs at 1x). The relock
+        //    gate must therefore allow re-commit at `currentEpoch ==
+        //    expiryEpoch`, not block it — strict `<` is the boundary check.
+        //    Forcing one extra epoch of wait (the previous `<=`) was an
+        //    off-by-one against the storage semantics. `pos.expiryEpoch`
+        //    for a freshly-minted position is always `createEpoch +
+        //    lockEpochs > 0`, so no zero-guard is needed here (a zero
+        //    `expiryEpoch` only arises if the position was created at
+        //    lock==0, but that path is rejected by
+        //    `stake()`/`createConviction` upstream).
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        if (currentEpoch <= pos.expiryEpoch) revert LockStillActive();
+        if (currentEpoch < pos.expiryEpoch) revert LockStillActive();
 
         // 3. Settle the delegator's score index at the current epoch BEFORE
         //    we mutate the effective-stake diff. `_prepareForStakeChange`
@@ -762,12 +769,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // Withdrawable:
         //   pre-expiry  : rewards only (raw is locked)
         //   post-expiry : raw + rewards (full drain allowed)
-        // `currentEpoch > pos.expiryEpoch` is the strict "lock elapsed"
-        // check — it matches the roadmap's "post-expiry" phrasing and the
-        // relock gate above.
+        // `expiryEpoch` is the FIRST unboosted epoch — `claim()` runs the
+        // raw at 1x once `e >= expiryEpoch`. The "lock elapsed" check must
+        // match: `>=` here, not `>` (the previous `>` was off-by-one and
+        // forced a one-epoch wait past the last boosted epoch).
         uint256 currentEpoch = chronos.getCurrentEpoch();
         uint256 withdrawable = uint256(pos.rewards);
-        if (currentEpoch > pos.expiryEpoch) {
+        if (currentEpoch >= pos.expiryEpoch) {
             withdrawable += uint256(pos.raw);
         }
         if (uint256(amount) > withdrawable) revert InsufficientWithdrawable();
