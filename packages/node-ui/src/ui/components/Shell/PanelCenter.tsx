@@ -14,6 +14,10 @@ const OperationsView = React.lazy(() =>
   import('../../pages/Operations.js').then((m) => ({ default: m.OperationsPage }))
 );
 
+const AgentHubView = React.lazy(() =>
+  import('../../pages/AgentHub.js').then((m) => ({ default: m.AgentHubPage }))
+);
+
 const GameView = React.lazy(() =>
   import('../../pages/Apps.js').then((m) => ({ default: m.AppsPage }))
 );
@@ -73,44 +77,6 @@ function MemoryStackView() {
   );
 }
 
-function AgentHubView() {
-  return (
-    <div style={{ maxWidth: 800 }}>
-      <h1 style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>Agent Hub</h1>
-      <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 24 }}>
-        Manage connected agents, permissions, and agent discovery.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {[
-          { name: 'OpenClaw', desc: 'Claude Code / MCP adapter', status: 'available' },
-          { name: 'Hermes', desc: 'Hermes Agora node', status: 'available' },
-          { name: 'ElizaOS', desc: 'ElizaOS agent adapter', status: 'coming soon' },
-        ].map((agent) => (
-          <div key={agent.name} style={{
-            display: 'flex', alignItems: 'center', gap: 12, padding: '14px 16px',
-            borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
-          }}>
-            <div style={{
-              width: 8, height: 8, borderRadius: '50%',
-              background: agent.status === 'available' ? 'var(--accent-green)' : 'var(--text-ghost)',
-            }} />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{agent.name}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>{agent.desc}</div>
-            </div>
-            <button className="dkg-btn-secondary" style={{
-              padding: '4px 12px', fontSize: 11, borderRadius: 6,
-              border: '1px solid var(--border-default)', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
-            }}>
-              {agent.status === 'available' ? 'Connect' : 'Coming soon'}
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
 
@@ -124,6 +90,14 @@ function ViewContainer() {
     );
   }
 
+  if (activeTabId === 'agent-hub') {
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
+        <AgentHubView />
+      </Suspense>
+    );
+  }
+
   if (activeTabId === 'game') {
     return (
       <Suspense fallback={<div className="lazy-spinner">Loading game...</div>}>
@@ -133,7 +107,6 @@ function ViewContainer() {
   }
 
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
-  if (activeTabId === 'agent-hub') return <AgentHubView />;
 
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);

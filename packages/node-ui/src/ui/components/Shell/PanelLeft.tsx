@@ -199,18 +199,6 @@ export function PanelLeft() {
             />
           ))}
 
-          {contextGraphs.length > 0 && (
-            <>
-              <div className="v10-tree-divider" />
-              <div
-                className={`v10-tree-dashboard ${activeTabId === 'agent-hub' ? 'active' : ''}`}
-                onClick={() => openTab({ id: 'agent-hub', label: 'Agent Hub', closable: true })}
-              >
-                <span>⚙</span> Agent Hub
-              </div>
-            </>
-          )}
-
           {stage >= 1 && <IntegrationsSection />}
         </div>
       )}

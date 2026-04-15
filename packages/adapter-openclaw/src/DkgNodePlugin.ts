@@ -14,9 +14,12 @@
 import { readFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { DkgDaemonClient } from './dkg-client.js';
+import {
+  DkgDaemonClient,
+  type LocalAgentIntegrationRecord,
+  type LocalAgentIntegrationTransport,
+} from './dkg-client.js';
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
-import { DkgGamePlugin } from './DkgGamePlugin.js';
 import { DkgMemoryPlugin } from './DkgMemoryPlugin.js';
 import { WriteCapture } from './write-capture.js';
 import type {
@@ -26,6 +29,22 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 
+const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
+  localChat: true,
+  chatAttachments: true,
+  connectFromUi: true,
+  installNode: true,
+  dkgPrimaryMemory: true,
+  wmImportPipeline: true,
+  nodeServedSkill: true,
+} as const;
+
+const OPENCLAW_LOCAL_AGENT_MANIFEST = {
+  packageName: '@origintrail-official/dkg-adapter-openclaw',
+  setupEntry: './setup-entry.mjs',
+} as const;
+const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
+
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
 
@@ -34,17 +53,18 @@ export class DkgNodePlugin {
 
   // Integration modules
   private channelPlugin: DkgChannelPlugin | null = null;
-  private gamePlugin: DkgGamePlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private writeCapture: WriteCapture | null = null;
   /** Guard: backlog import runs at most once per plugin lifecycle. */
   private backlogImportDone: Promise<void> | null = null;
+  private warnedLegacyGameConfig = false;
+  private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config?: DkgOpenClawConfig) {
     this.config = { ...config };
   }
 
-  /** Whether the first full registration (lifecycle hooks, daemon handshake, integration modules) has run. */
+  /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
 
   /**
@@ -53,69 +73,69 @@ export class DkgNodePlugin {
    * On subsequent calls (gateway multi-phase init): re-registers tools into the new registry.
    */
   register(api: OpenClawPluginApi): void {
-    // Always re-register tools into the current registry context
-    for (const tool of this.tools()) {
-      api.registerTool(tool);
+    this.warnOnLegacyGameConfig(api);
+
+    const registrationMode = api.registrationMode ?? 'full';
+    const fullRuntime = registrationMode === 'full';
+    const setupOnly = registrationMode === 'setup-only';
+    const setupRuntime = registrationMode === 'setup-runtime';
+    const cliMetadataOnly = registrationMode === 'cli-metadata';
+    const lightweightRuntime = setupOnly || setupRuntime;
+
+    // Only expose the DKG agent tool surface during full runtime.
+    if (fullRuntime) {
+      for (const tool of this.tools()) {
+        api.registerTool(tool);
+      }
     }
 
-    // First call: full initialization (lifecycle, daemon, integration modules)
-    // Subsequent calls (gateway multi-phase init): only re-register tools above
-    if (this.initialized) {
-      // Re-register integration module tools into the new registry,
-      // but don't recreate instances (avoids port conflicts, duplicate watchers, etc.)
-      this.reregisterIntegrationTools(api);
+    if (cliMetadataOnly) {
       return;
     }
-    this.initialized = true;
+
+    // Subsequent multi-phase calls should upgrade missing integrations without
+    // recreating servers/watchers, then re-register any tool surfaces.
+    if (this.initialized) {
+      this.registerIntegrationModules(api, { enableFullRuntime: fullRuntime });
+      if (fullRuntime || setupRuntime) {
+        this.registerLocalAgentIntegration(api, registrationMode);
+      }
+      return;
+    }
 
     // Create daemon client — used by all tools and integration modules
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
+    this.initialized = true;
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
-    // Self-register with daemon so the UI knows the OpenClaw adapter is in use.
-    // Fire-and-forget — non-fatal if daemon is temporarily unreachable.
-    this.client.registerAdapter('openclaw').catch(err => {
-      api.logger.warn?.(`[dkg] Adapter registration failed (will retry on next gateway start): ${err.message}`);
-    });
-
     // --- Integration modules ---
-    this.registerIntegrationModules(api);
+    this.registerIntegrationModules(api, { enableFullRuntime: !lightweightRuntime });
+
+    if (fullRuntime || setupRuntime) {
+      this.registerLocalAgentIntegration(api, registrationMode);
+    }
   }
 
   /**
    * Register DKG integration modules: channel, memory, write-capture.
    * Each module is optional — enabled via config flags.
    */
-  private registerIntegrationModules(api: OpenClawPluginApi): void {
+  private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {
     // --- Channel module ---
     const channelConfig = this.config.channel;
     if (channelConfig?.enabled) {
-      this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+      if (!this.channelPlugin) {
+        this.channelPlugin = new DkgChannelPlugin(channelConfig, this.client);
+      }
       this.channelPlugin.register(api);
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
     }
 
-    // --- Game module ---
-    const gameConfig = this.config.game;
-    if (gameConfig?.enabled) {
-      // Wire agent consultation through the channel bridge (if available).
-      // Uses per-game identity "game-autopilot-{swarmId}" → fresh session per game.
-      const consultAgent = this.channelPlugin
-        ? (prompt: string, correlationId: string, identity?: string) =>
-            this.channelPlugin!.processInbound(prompt, correlationId, identity || 'game-autopilot')
-              .then(reply => reply.text)
-        : undefined;
-
-      this.gamePlugin = new DkgGamePlugin(this.client, gameConfig, consultAgent);
-      this.gamePlugin.register(api);
-      if (!consultAgent) {
-        api.logger.warn?.(
-          '[dkg] Game module enabled but channel is disabled — autopilot unavailable, manual play only',
-        );
-      }
-      api.logger.info?.('[dkg] Game module enabled — OriginTrail Game tools active');
+    if (!opts?.enableFullRuntime) {
+      api.logger.info?.('[dkg] Lightweight OpenClaw registration — skipping full-runtime memory capture integrations');
+      return;
     }
 
     // --- Memory module ---
@@ -129,39 +149,263 @@ export class DkgNodePlugin {
       const effectiveConfig = { ...memoryConfig, memoryDir };
 
       // Memory search manager (reads)
-      this.memoryPlugin = new DkgMemoryPlugin(this.client, effectiveConfig);
+      if (!this.memoryPlugin) {
+        this.memoryPlugin = new DkgMemoryPlugin(this.client, effectiveConfig);
+      }
       this.memoryPlugin.register(api);
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed search active');
 
       // Write capture (writes)
-      this.writeCapture = new WriteCapture(this.client, effectiveConfig);
-      this.writeCapture.register(api);
+      if (!this.writeCapture) {
+        this.writeCapture = new WriteCapture(this.client, effectiveConfig);
+        this.writeCapture.register(api);
 
-      // Fire-and-forget: backlog import on first-ever install.
-      // Runs at gateway startup (not session_start) so it works regardless
-      // of which channel the user interacts through.
-      if (!this.backlogImportDone) {
-        this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
-          .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
+        // Fire-and-forget: backlog import on first-ever install.
+        // Runs at gateway startup (not session_start) so it works regardless
+        // of which channel the user interacts through.
+        if (!this.backlogImportDone) {
+          this.backlogImportDone = this.runBacklogImportIfNeeded(api, this.client, effectiveConfig)
+            .catch(err => api.logger.warn?.(`[dkg] Backlog import failed: ${err.message}`));
+        }
       }
-
       api.logger.info?.('[dkg] Write capture enabled — hooks + file watcher active');
     }
   }
 
-  /**
-   * Re-register integration module tools into a new registry context
-   * without recreating instances (avoids port conflicts, duplicate watchers, etc.).
-   */
-  private reregisterIntegrationTools(api: OpenClawPluginApi): void {
-    this.gamePlugin?.registerTools(api);
-    this.memoryPlugin?.registerTools(api);
-    // channelPlugin and writeCapture don't register agent tools
+  private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {
+    if (!this.config.channel?.enabled || !this.channelPlugin) {
+      return;
+    }
+
+    this.clearLocalAgentIntegrationRetry();
+    void this.syncLocalAgentIntegrationState(api, registrationMode);
+  }
+
+  private clearLocalAgentIntegrationRetry(): void {
+    if (!this.localAgentIntegrationRetryTimer) return;
+    clearTimeout(this.localAgentIntegrationRetryTimer);
+    this.localAgentIntegrationRetryTimer = null;
+  }
+
+  private scheduleLocalAgentIntegrationRetry(api: OpenClawPluginApi, registrationMode: string): void {
+    if (this.localAgentIntegrationRetryTimer) return;
+    this.localAgentIntegrationRetryTimer = setTimeout(() => {
+      this.localAgentIntegrationRetryTimer = null;
+      void this.syncLocalAgentIntegrationState(api, registrationMode);
+    }, LOCAL_AGENT_STATE_RETRY_DELAY_MS);
+  }
+
+  private warnOnLegacyGameConfig(api: OpenClawPluginApi): void {
+    if (this.warnedLegacyGameConfig) return;
+    const legacyGameConfig = (this.config as Record<string, unknown> | undefined)?.game as { enabled?: boolean } | undefined;
+    if (legacyGameConfig?.enabled) {
+      this.warnedLegacyGameConfig = true;
+      api.logger.warn?.(
+        '[dkg] Legacy dkg-node.game.enabled is no longer supported in the V10 OpenClaw adapter path; OriginTrail Game tools were intentionally removed.',
+      );
+    }
+  }
+
+  private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
+    const existing = await this.loadStoredOpenClawIntegration(api);
+    if (existing === undefined) {
+      api.logger.warn?.('[dkg] Stored OpenClaw integration state could not be loaded; aborting startup re-registration to preserve any persisted disconnect state');
+      this.scheduleLocalAgentIntegrationRetry(api, registrationMode);
+      return;
+    }
+    this.clearLocalAgentIntegrationRetry();
+    if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
+      api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
+      return;
+    }
+
+    const metadata = {
+      channelId: 'dkg-ui',
+      registrationMode,
+      transportMode: this.channelPlugin?.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
+    };
+    const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
+    const basePayload = {
+      id: 'openclaw',
+      enabled: true,
+      description: 'Connect a local OpenClaw agent through the DKG node.',
+      transport: this.buildOpenClawTransport(existing?.transport, api),
+      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
+      setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
+      metadata,
+    };
+
+    try {
+      await this.client.connectLocalAgentIntegration({
+        ...basePayload,
+        runtime: {
+          status: bridgeAlreadyReady ? 'ready' : 'connecting',
+          ready: bridgeAlreadyReady,
+          lastError: null,
+        },
+      });
+    } catch (err: any) {
+      api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
+      return;
+    }
+
+    if (bridgeAlreadyReady || !this.channelPlugin) {
+      return;
+    }
+
+    void this.channelPlugin.start()
+      .then(() => this.client.updateLocalAgentIntegration('openclaw', {
+        ...basePayload,
+        transport: this.buildOpenClawTransport(existing?.transport, api),
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      }))
+      .catch(async (err: any) => {
+        api.logger.warn?.(`[dkg] OpenClaw channel startup did not reach ready state: ${err.message}`);
+        try {
+          await this.client.updateLocalAgentIntegration('openclaw', {
+            ...basePayload,
+            transport: this.buildOpenClawTransport(existing?.transport, api),
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: err.message ?? String(err),
+            },
+          });
+        } catch (updateErr: any) {
+          api.logger.warn?.(`[dkg] Failed to persist OpenClaw channel error state: ${updateErr.message}`);
+        }
+      });
+  }
+
+  private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {
+    try {
+      return await this.client.getLocalAgentIntegration('openclaw');
+    } catch (err: any) {
+      api.logger.warn?.(`[dkg] Failed to load stored OpenClaw integration state: ${err.message}`);
+      return undefined;
+    }
+  }
+
+  private wasOpenClawExplicitlyUserDisconnected(existing: LocalAgentIntegrationRecord | null): boolean {
+    if (!existing) return false;
+    if (existing.metadata?.userDisabled === true) return true;
+    return Boolean(existing.connectedAt && existing.enabled === false && existing.runtime?.status === 'disconnected');
+  }
+
+  private buildOpenClawTransport(
+    existing?: LocalAgentIntegrationTransport,
+    api?: OpenClawPluginApi,
+  ): LocalAgentIntegrationTransport {
+    const transport: LocalAgentIntegrationTransport = { kind: 'openclaw-channel' };
+    if (!this.channelPlugin) return transport;
+
+    const gatewayBaseUrl = this.resolveGatewayBaseUrl(
+      api,
+      this.channelPlugin.isUsingGatewayRoute ? undefined : existing?.gatewayUrl,
+    );
+    if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
+      transport.gatewayUrl = gatewayBaseUrl;
+    }
+
+    const bridgePort = this.channelPlugin.bridgePort;
+    if (bridgePort > 0) {
+      transport.bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+      transport.healthUrl = `${transport.bridgeUrl}/health`;
+    } else {
+      const existingBridgeUrl = existing?.bridgeUrl?.trim();
+      const existingHealthUrl = existing?.healthUrl?.trim();
+      if (existingBridgeUrl) {
+        transport.bridgeUrl = existingBridgeUrl;
+      }
+      if (existingHealthUrl) {
+        transport.healthUrl = existingHealthUrl;
+      }
+    }
+
+    return transport;
+  }
+
+  private resolveGatewayBaseUrl(api?: OpenClawPluginApi, existingGatewayUrl?: string): string | undefined {
+    const rawGateway = api?.config && typeof api.config === 'object'
+      ? (api.config as Record<string, unknown>).gateway
+      : undefined;
+    const gateway = rawGateway && typeof rawGateway === 'object'
+      ? rawGateway as Record<string, unknown>
+      : undefined;
+    const rawPort = gateway?.port ?? process.env.OPENCLAW_GATEWAY_PORT;
+    const tls = gateway?.tls && typeof gateway.tls === 'object'
+      ? gateway.tls as Record<string, unknown>
+      : undefined;
+    const hasCurrentGatewayConfig = this.hasGatewayConfig(gateway, rawPort, tls);
+    if (!hasCurrentGatewayConfig && existingGatewayUrl?.trim()) {
+      return existingGatewayUrl.trim();
+    }
+
+    const port = this.normalizePort(rawPort) ?? 18789;
+    const rawCustomHost = typeof gateway?.customBindHost === 'string' ? gateway.customBindHost.trim() : '';
+    const configuredHost = rawCustomHost || '127.0.0.1';
+    const host = this.normalizeGatewayHost(configuredHost);
+    const protocol = tls?.enabled === true ? 'https' : 'http';
+    return this.formatGatewayBaseUrl(protocol, host, port);
+  }
+
+  private hasGatewayConfig(
+    gateway: Record<string, unknown> | undefined,
+    rawPort: unknown,
+    tls: Record<string, unknown> | undefined,
+  ): boolean {
+    if (rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '') {
+      return true;
+    }
+    if (!gateway) return false;
+    const hasCustomBindHost = typeof gateway.customBindHost === 'string' && gateway.customBindHost.trim() !== '';
+    if (hasCustomBindHost) return true;
+    if (!tls) return false;
+    const tlsKeys = Object.keys(tls);
+    if (tlsKeys.length === 0) return false;
+    if (tlsKeys.length === 1 && tls.enabled === false) return false;
+    return true;
+  }
+
+  private formatGatewayBaseUrl(protocol: 'http' | 'https', host: string, port: number): string {
+    const formattedHost = host.includes(':') && !host.startsWith('[')
+      ? `[${host}]`
+      : host;
+    const url = new URL(`${protocol}://${formattedHost}`);
+    url.port = String(port);
+    return url.toString().replace(/\/$/, '');
+  }
+
+  private normalizePort(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    }
+    return null;
+  }
+
+  private normalizeGatewayHost(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '0.0.0.0' || trimmed === '::' || trimmed === '[::]') {
+      return '127.0.0.1';
+    }
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      return trimmed.slice(1, -1);
+    }
+    return trimmed;
   }
 
   async stop(): Promise<void> {
     // Stop integration modules
-    await this.gamePlugin?.stop();
+    this.clearLocalAgentIntegrationRetry();
     this.writeCapture?.stop();
     await this.channelPlugin?.stop();
   }

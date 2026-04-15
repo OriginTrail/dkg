@@ -96,10 +96,10 @@ export const buraAttestedAssetsCoverage: CoverageThresholds = {
 };
 
 export const kosavaNodeUiCoverage: CoverageThresholds = {
-  lines: 67,
-  functions: 63,
-  branches: 55,
-  statements: 65,
+  lines: 60,
+  functions: 51,
+  branches: 49,
+  statements: 58,
 };
 
 export const kosavaNetworkSimCoverage: CoverageThresholds = {

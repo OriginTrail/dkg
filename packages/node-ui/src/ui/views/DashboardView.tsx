@@ -49,9 +49,10 @@ export function DashboardView() {
   const { data: opsData } = useFetch(() => api.fetchOperationsWithPhases({ limit: '6' }), [], 10_000);
   const { data: econ } = useFetch(api.fetchEconomics, [], 60_000);
   const { openTab } = useTabsStore();
-  const { setActiveProject } = useProjectsStore();
+  const { activeProjectId: activeProject, setActiveProject } = useProjectsStore();
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showImportFiles, setShowImportFiles] = useState(false);
+  const [importTargetId, setImportTargetId] = useState<string | null>(null);
 
   const totalKCs = metrics?.total_kcs ?? metrics?.totalKnowledgeCollections ?? 0;
   const peers = status?.connectedPeers ?? status?.peerCount ?? 0;
@@ -89,10 +90,12 @@ export function DashboardView() {
             <QuickAction icon="+" label="Create Project" onClick={() => setShowCreateProject(true)} />
             <QuickAction icon="↑" label="Import Memories" onClick={() => {
               const cgs = cgData?.contextGraphs ?? [];
-              if (cgs.length > 0) {
-                setShowImportFiles(true);
-              } else {
+              if (cgs.length === 0) {
                 setShowCreateProject(true);
+              } else {
+                const target = cgs.find((c: any) => c.id === activeProject) ?? cgs[0];
+                setImportTargetId(target.id);
+                setShowImportFiles(true);
               }
             }} />
             <QuickAction icon="⟐" label="Run SPARQL" onClick={() => openTab({ id: 'sparql', label: 'SPARQL', closable: true })} />
@@ -152,9 +155,9 @@ export function DashboardView() {
       <CreateProjectModal open={showCreateProject} onClose={() => setShowCreateProject(false)} />
       <ImportFilesModal
         open={showImportFiles}
-        onClose={() => setShowImportFiles(false)}
-        contextGraphId={(cgData?.contextGraphs ?? [])[0]?.id ?? ''}
-        contextGraphName={(cgData?.contextGraphs ?? [])[0]?.name}
+        onClose={() => { setShowImportFiles(false); setImportTargetId(null); }}
+        contextGraphId={importTargetId ?? ''}
+        contextGraphName={(cgData?.contextGraphs ?? []).find((c: any) => c.id === importTargetId)?.name}
       />
     </div>
   );

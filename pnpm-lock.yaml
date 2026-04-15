@@ -235,6 +235,9 @@ importers:
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
+      better-sqlite3:
+        specifier: ^11
+        version: 11.10.0
       commander:
         specifier: ^13
         version: 13.1.0
@@ -251,6 +254,9 @@ importers:
         specifier: ^5.7
         version: 5.9.3
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7
+        version: 7.6.13
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9

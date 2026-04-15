@@ -27,14 +27,175 @@ import type {
   DkgOpenClawConfig,
   OpenClawPluginApi,
 } from './types.js';
-import type { DkgDaemonClient } from './dkg-client.js';
+import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
+const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const STOP_DRAIN_TIMEOUT_MS = 1_500;
+const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
+const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
+const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function finalizeAgentReplyText(text: string): string {
+  if (text.trim().length === 0) {
+    throw new Error(NO_TEXT_RESPONSE_ERROR);
+  }
+  return text;
+}
+
+function normalizeAttachmentRef(raw: unknown): OpenClawAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  if (!assertionUri || !fileHash || !contextGraphId || !fileName) return null;
+
+  const normalized: OpenClawAttachmentRef = { assertionUri, fileHash, contextGraphId, fileName };
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed') {
+    normalized.extractionStatus = record.extractionStatus;
+  } else if (record.extractionStatus !== undefined) {
+    return null;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) {
+    normalized.rootEntity = record.rootEntity.trim();
+  }
+  return normalized;
+}
+
+function normalizeAttachmentRefs(raw: unknown): OpenClawAttachmentRef[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const refs: OpenClawAttachmentRef[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeAttachmentRef(entry);
+    if (!normalized) return undefined;
+    refs.push(normalized);
+  }
+  return refs;
+}
+
+function hasInboundChatTurnContent(
+  text: unknown,
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): text is string {
+  return typeof text === 'string' && (text.length > 0 || Boolean(attachmentRefs?.length));
+}
+
+function sanitizeAttachmentPromptField(raw: string | undefined, fallback: string): string {
+  const normalize = (value: string | undefined): string => (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return JSON.stringify(normalize(raw) || normalize(fallback));
+}
+
+function sanitizeAttachmentContextValue(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeAttachmentRefForContext(ref: OpenClawAttachmentRef): OpenClawAttachmentRef {
+  const sanitized: OpenClawAttachmentRef = {
+    assertionUri: sanitizeAttachmentContextValue(ref.assertionUri),
+    fileHash: sanitizeAttachmentContextValue(ref.fileHash),
+    contextGraphId: sanitizeAttachmentContextValue(ref.contextGraphId),
+    fileName: sanitizeAttachmentContextValue(ref.fileName),
+  };
+  if (ref.detectedContentType) {
+    sanitized.detectedContentType = sanitizeAttachmentContextValue(ref.detectedContentType);
+  }
+  if (ref.extractionStatus) {
+    sanitized.extractionStatus = ref.extractionStatus;
+  }
+  if (ref.tripleCount != null) {
+    sanitized.tripleCount = ref.tripleCount;
+  }
+  if (ref.rootEntity) {
+    sanitized.rootEntity = sanitizeAttachmentContextValue(ref.rootEntity);
+  }
+  return sanitized;
+}
+
+function sanitizeAttachmentRefsForContext(
+  attachmentRefs: OpenClawAttachmentRef[] | undefined,
+): OpenClawAttachmentRef[] | undefined {
+  return attachmentRefs?.map((ref) => sanitizeAttachmentRefForContext(ref));
+}
+
+function formatAttachmentContext(attachmentRefs: OpenClawAttachmentRef[]): string {
+  const lines = attachmentRefs.map((ref) => {
+    const label = sanitizeAttachmentPromptField(ref.fileName, ref.assertionUri || 'attachment');
+    const graph = ref.contextGraphId ? ` in ${sanitizeAttachmentPromptField(ref.contextGraphId, 'unknown context graph')}` : '';
+    const contentType = ref.detectedContentType
+      ? ` [${sanitizeAttachmentPromptField(ref.detectedContentType, 'unknown content type')}]`
+      : '';
+    const status = ref.extractionStatus ? ` (${ref.extractionStatus})` : '';
+    return `- ${label}${graph}${contentType}${status} -> ${sanitizeAttachmentPromptField(ref.assertionUri, 'unknown assertion')}`;
+  });
+  return ['Attached Working Memory items:', ...lines].join('\n');
+}
+
+interface ChatContextEntry {
+  key: string;
+  label: string;
+  value: string;
+}
+
+function sanitizeChatContextEntry(entry: ChatContextEntry): ChatContextEntry {
+  return {
+    key: sanitizeAttachmentContextValue(entry.key),
+    label: sanitizeAttachmentContextValue(entry.label),
+    value: sanitizeAttachmentContextValue(entry.value),
+  };
+}
+
+function sanitizeChatContextEntries(entries: ChatContextEntry[] | undefined): ChatContextEntry[] | undefined {
+  return entries?.map((entry) => sanitizeChatContextEntry(entry));
+}
+
+function formatChatContext(entries: ChatContextEntry[]): string {
+  const lines = entries.map((entry) => `- ${sanitizeAttachmentPromptField(entry.label, entry.key)}: ${sanitizeAttachmentPromptField(entry.value, 'unknown')}`);
+  return [
+    'Context for this chat turn:',
+    'If "target_context_graph" is present below, treat it as authoritative for this turn unless the user explicitly overrides it in the same message.',
+    ...lines,
+  ].join('\n');
+}
+
+function buildAgentBody(text: string, opts?: { attachmentRefs?: OpenClawAttachmentRef[]; contextEntries?: ChatContextEntry[] }): string {
+  const sections: string[] = [];
+  const trimmed = text.trim();
+  if (trimmed) {
+    sections.push(text);
+  }
+  if (opts?.contextEntries?.length) {
+    sections.push(formatChatContext(opts.contextEntries));
+  }
+  if (opts?.attachmentRefs?.length) {
+    sections.push(formatAttachmentContext(opts.attachmentRefs));
+  }
+  if (sections.length === 0) {
+    return 'User sent an empty chat turn.';
+  }
+  return sections.join('\n\n');
 }
 const moduleRequire = createRequire(import.meta.url);
 
@@ -42,6 +203,40 @@ interface PendingRequest {
   resolve: (reply: ChannelOutboundReply) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PersistTurnOptions {
+  persistenceState?: 'stored' | 'failed' | 'pending';
+  failureReason?: string | null;
+  attachmentRefs?: OpenClawAttachmentRef[];
+}
+
+interface InboundChatOptions {
+  attachmentRefs?: OpenClawAttachmentRef[];
+  contextEntries?: ChatContextEntry[];
+}
+
+function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const key = typeof record.key === 'string' ? record.key.trim() : '';
+  const label = typeof record.label === 'string' ? record.label.trim() : '';
+  const value = typeof record.value === 'string' ? record.value.trim() : '';
+  if (!key || !label || !value) return null;
+  return { key, label, value };
+}
+
+function normalizeChatContextEntries(raw: unknown): ChatContextEntry[] | undefined {
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) return undefined;
+  if (raw.length === 0) return [];
+  const entries: ChatContextEntry[] = [];
+  for (const entry of raw) {
+    const normalized = normalizeChatContextEntry(entry);
+    if (!normalized) return undefined;
+    entries.push(normalized);
+  }
+  return entries;
 }
 
 export class DkgChannelPlugin {
@@ -57,10 +252,20 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
+  private readonly pendingTurnPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+  }>();
   private readonly port: number;
   private useGatewayRoute = false;
+  private channelRegistered = false;
+  private gatewayRoutesRegistered = false;
   private inFlight = 0;
   private readonly maxInFlight = 3;
+  private stopping = false;
+  private readonly stopWaiters: Array<() => void> = [];
+  private stopDrainDeadlineAt: number | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
@@ -74,6 +279,8 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   register(api: OpenClawPluginApi): void {
+    this.stopping = false;
+    this.stopDrainDeadlineAt = null;
     this.api = api;
     const log = api.logger;
 
@@ -105,15 +312,16 @@ export class DkgChannelPlugin {
     }
 
     // --- Register as a first-class channel ---
-    if (typeof api.registerChannel === 'function') {
+    if (!this.channelRegistered && typeof api.registerChannel === 'function') {
       api.registerChannel({
         plugin: this.buildRegisteredChannelPlugin(),
       });
+      this.channelRegistered = true;
       log.info?.('[dkg-channel] Registered as OpenClaw channel via registerChannel()');
     }
 
     // --- Register an HTTP route on the gateway ---
-    if (typeof api.registerHttpRoute === 'function') {
+    if (!this.gatewayRoutesRegistered && typeof api.registerHttpRoute === 'function') {
       api.registerHttpRoute({
         method: 'POST',
         path: '/api/dkg-channel/inbound',
@@ -133,6 +341,7 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
@@ -184,11 +393,21 @@ export class DkgChannelPlugin {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
+
     // Reject all pending requests
     for (const [id, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Channel shutting down'));
       this.pendingRequests.delete(id);
+    }
+
+    for (const [id, job] of this.pendingTurnPersistence) {
+      if (job.allowDuringShutdown) continue;
+      if (!job.timer) continue;
+      clearTimeout(job.timer);
+      this.deletePendingTurnPersistence(id);
     }
 
     if (this.serverStart) {
@@ -201,6 +420,67 @@ export class DkgChannelPlugin {
       });
       this.server = null;
     }
+
+    const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
+    if (!drained) {
+      this.api?.logger.warn?.(
+        `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
+      );
+      this.clearPendingTurnPersistence();
+    }
+    this.stopDrainDeadlineAt = null;
+  }
+
+  private deletePendingTurnPersistence(correlationId: string): void {
+    const job = this.pendingTurnPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingTurnPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private clearPendingTurnPersistence(): void {
+    for (const job of this.pendingTurnPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingTurnPersistence.clear();
+    this.notifyStopIdle();
+  }
+
+  private notifyStopIdle(): void {
+    if (!this.stopping || this.inFlight > 0 || this.pendingTurnPersistence.size > 0) return;
+    while (this.stopWaiters.length > 0) {
+      this.stopWaiters.shift()?.();
+    }
+  }
+
+  private waitForStopDrain(timeoutMs: number): Promise<boolean> {
+    if (this.inFlight === 0 && this.pendingTurnPersistence.size === 0) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const waiter = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = this.stopWaiters.indexOf(waiter);
+        if (index >= 0) this.stopWaiters.splice(index, 1);
+        resolve(false);
+      }, timeoutMs);
+      this.stopWaiters.push(waiter);
+      this.notifyStopIdle();
+    });
+  }
+
+  private canContinuePersistenceAttempt(allowDuringShutdown: boolean): boolean {
+    if (!this.stopping) return true;
+    if (!allowDuringShutdown) return false;
+    return (this.stopDrainDeadlineAt ?? 0) > Date.now();
   }
 
   // ---------------------------------------------------------------------------
@@ -265,7 +545,7 @@ export class DkgChannelPlugin {
         id: CHANNEL_NAME,
         label: 'DKG UI',
         selectionLabel: 'DKG UI',
-        blurb: 'Local DKG Agent Hub bridge',
+        blurb: 'Local DKG UI bridge',
         displayName: 'DKG UI',
       },
       capabilities: {
@@ -319,22 +599,33 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
 
     const runtime = this.runtime;
     const cfg = this.cfg;
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
 
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
-        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity);
+        const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries);
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
-        this.persistTurn(text, reply.text, correlationId, identity).catch((err) => {
-          api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-        });
+        this.queueTurnPersistence(text, reply.text, correlationId, identity, {
+          attachmentRefs,
+        }, true);
         return reply;
       } catch (err: any) {
         api.logger.warn?.(`[dkg-channel] dispatchViaPluginSdk failed: ${err.message}`);
@@ -350,12 +641,12 @@ export class DkgChannelPlugin {
         channelName: CHANNEL_NAME,
         senderId: identity || 'owner',
         senderIsOwner: true,
-        text,
+        text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
         correlationId,
-      });
-      this.persistTurn(text, reply.text, correlationId, identity || 'owner').catch((err) => {
-        api.logger.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      } as any);
+      this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
+        attachmentRefs,
+      }, true);
       return reply;
     }
 
@@ -373,6 +664,8 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    attachmentRefs?: OpenClawAttachmentRef[],
+    contextEntries?: ChatContextEntry[],
   ): Promise<ChannelOutboundReply> {
     const log = this.api!.logger;
     const runtime = this.runtime;
@@ -390,7 +683,7 @@ export class DkgChannelPlugin {
       });
       // Clone to avoid mutating the runtime's cached route object
       route = { ...resolved };
-      // Give non-owner identities (e.g. game-autopilot) their own session
+      // Give non-owner identities (e.g. background workers) their own session
       // so they don't pollute the user's chat context.
       if (identity && identity !== 'owner') {
         route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -410,10 +703,12 @@ export class DkgChannelPlugin {
       storePath,
       sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs, contextEntries });
+    const commandBody = contextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
       channel: 'DKG UI',
       from: identity || 'Owner',
-      body: text,
+      body: agentBody,
       timestamp: Date.now(),
       previousTimestamp,
       envelope: envelopeOpts,
@@ -422,10 +717,11 @@ export class DkgChannelPlugin {
     // 4. Build FinalizedMsgContext (the context payload for the agent)
     const ctxPayload = {
       Body: formattedBody,
-      BodyForAgent: text,
-      RawBody: text,
-      CommandBody: text,
-      BodyForCommands: text,
+      BodyForAgent: agentBody,
+      RawBody: commandBody,
+      CommandBody: commandBody,
+      BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,
@@ -438,6 +734,14 @@ export class DkgChannelPlugin {
       SenderName: identity || 'Owner',
       Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(attachmentRefs?.length ? {
+        AttachmentRefs: attachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(attachmentRefs),
+      } : {}),
+      ...(contextEntries?.length ? {
+        ContextEntries: contextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(contextEntries),
+      } : {}),
     };
 
     // 5. Dispatch and collect reply
@@ -463,7 +767,7 @@ export class DkgChannelPlugin {
     const runtime = this.runtime;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -491,7 +795,7 @@ export class DkgChannelPlugin {
         },
       }).then(() => {
         clearTimeout(timer);
-        const replyText = replyChunks.join('\n') || '(no response)';
+        const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
         resolve({ text: replyText, correlationId });
       }).catch((err: any) => {
@@ -513,7 +817,7 @@ export class DkgChannelPlugin {
     const log = this.api!.logger;
 
     return new Promise<ChannelOutboundReply>((resolve, reject) => {
-      const TIMEOUT_MS = 120_000;
+      const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
         reject(new Error('Agent response timeout'));
       }, TIMEOUT_MS);
@@ -540,7 +844,7 @@ export class DkgChannelPlugin {
         ))
         .then(() => {
           clearTimeout(timer);
-          const replyText = replyChunks.join('\n') || '(no response)';
+          const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
           resolve({ text: replyText, correlationId });
         })
@@ -564,15 +868,26 @@ export class DkgChannelPlugin {
     text: string,
     correlationId: string,
     identity: string,
+    opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
 
     const log = this.api.logger;
     const runtime = this.runtime;
     const cfg = this.cfg;
+    const attachmentRefs = normalizeAttachmentRefs(opts?.attachmentRefs);
+    const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
+    const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
+    const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
+    if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
+      throw new Error('Invalid attachment refs');
+    }
+    if (opts?.contextEntries != null && contextEntries === undefined) {
+      throw new Error('Invalid context entries');
+    }
 
     if (!runtime?.channel || !cfg) {
-      const reply = await this.processInbound(text, correlationId, identity);
+      const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
       return;
     }
@@ -586,7 +901,7 @@ export class DkgChannelPlugin {
     });
     // Clone to avoid mutating the runtime's cached route object
     const route = { ...resolved };
-    // Give non-owner identities (e.g. game-autopilot) their own session
+    // Give non-owner identities (e.g. background workers) their own session
     // so they don't pollute the user's chat context.
     if (identity && identity !== 'owner') {
       route.sessionKey = `agent:${route.agentId}:${sanitizeIdentity(identity)}`;
@@ -596,19 +911,30 @@ export class DkgChannelPlugin {
     const previousTimestamp = runtime.channel.session.readSessionUpdatedAt?.({
       storePath, sessionKey: route.sessionKey,
     });
+    const agentBody = buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries });
+    const commandBody = sanitizedContextEntries?.length ? agentBody : text;
     const formattedBody = runtime.channel.reply.formatAgentEnvelope({
-      channel: 'DKG UI', from: identity || 'Owner', body: text,
+      channel: 'DKG UI', from: identity || 'Owner', body: agentBody,
       timestamp: Date.now(), previousTimestamp, envelope: envelopeOpts,
     });
     const ctxPayload = {
-      Body: formattedBody, BodyForAgent: text, RawBody: text,
-      CommandBody: text, BodyForCommands: text,
+      Body: formattedBody, BodyForAgent: agentBody, RawBody: commandBody,
+      CommandBody: commandBody, BodyForCommands: commandBody,
+      ...(commandBody !== text ? { OriginalRawBody: text } : {}),
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
       CommandAuthorized: true, SenderId: identity || 'owner',
       SenderName: identity || 'Owner', Timestamp: Date.now(),
       ConversationLabel: `DKG UI (${identity || 'Owner'})`,
+      ...(contextAttachmentRefs?.length ? {
+        AttachmentRefs: contextAttachmentRefs.map((ref) => ({ ...ref })),
+        AttachmentSummary: formatAttachmentContext(contextAttachmentRefs),
+      } : {}),
+      ...(sanitizedContextEntries?.length ? {
+        ContextEntries: sanitizedContextEntries.map((entry) => ({ ...entry })),
+        ContextSummary: formatChatContext(sanitizedContextEntries),
+      } : {}),
     };
 
     // Push-based async queue: deliver() pushes, generator yields
@@ -622,10 +948,12 @@ export class DkgChannelPlugin {
       if (resolve) { const r = resolve; resolve = null; r(); }
     };
 
-    const TIMEOUT_MS = 120_000;
+    const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
     const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
 
     let replyText = '';
+    let dispatchTerminal: 'done' | 'error' | null = null;
+    let dispatchFailureMessage: string | null = null;
     const deliver = async (payload: any) => {
       const t = payload?.text;
       if (t) {
@@ -659,11 +987,73 @@ export class DkgChannelPlugin {
           ),
         );
 
-    dispatchFn()
-      .then(() => push({ type: 'done' }))
-      .catch((err: any) => push({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) }));
+    const dispatchCompletion = dispatchFn()
+      .then(() => {
+        dispatchTerminal = 'done';
+        push({ type: 'done' });
+      })
+      .catch((err: any) => {
+        dispatchTerminal = 'error';
+        const dispatchFailure = err instanceof Error ? err : new Error(String(err));
+        dispatchFailureMessage = dispatchFailure.message;
+        push({ type: 'error', error: dispatchFailure });
+      });
+
+    const persistResolvedTerminalState = (): void => {
+      let resolvedTerminalState = terminalState;
+      let resolvedFinalText = finalText;
+      let resolvedFailureReason = failureReason;
+
+      if (resolvedTerminalState === 'cancelled') {
+        const queuedTerminal = [...queue].reverse().find(
+          (item): item is { type: 'done' } | { type: 'error'; error: Error } =>
+            item.type === 'done' || item.type === 'error',
+        );
+        if (queuedTerminal?.type === 'done' || dispatchTerminal === 'done') {
+          try {
+            resolvedFinalText = finalizeAgentReplyText(replyText);
+            resolvedTerminalState = 'completed';
+          } catch (err) {
+            resolvedTerminalState = 'failed';
+            resolvedFailureReason = getErrorMessage(err);
+          }
+        } else if (queuedTerminal?.type === 'error' || dispatchTerminal === 'error') {
+          const queuedTerminalError: Error | null =
+            queuedTerminal && queuedTerminal.type === 'error' ? queuedTerminal.error : null;
+          resolvedTerminalState = 'failed';
+          resolvedFailureReason = queuedTerminalError?.message ?? dispatchFailureMessage ?? resolvedFailureReason;
+        }
+      }
+
+      if (resolvedTerminalState === 'completed' && resolvedFinalText) {
+        this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
+          attachmentRefs,
+        }, true);
+      } else if (resolvedTerminalState === 'failed') {
+        this.queueTurnPersistence(
+          text,
+          this.buildFailedAssistantReply(resolvedFailureReason),
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
+          true,
+        );
+      } else {
+        this.queueTurnPersistence(
+          text,
+          CANCELLED_TURN_MESSAGE,
+          correlationId,
+          identity,
+          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
+          true,
+        );
+      }
+    };
 
     // Yield events as they arrive
+    let terminalState: 'cancelled' | 'completed' | 'failed' = 'cancelled';
+    let finalText: string | null = null;
+    let failureReason: string | null = null;
     let completed = false;
     try {
       while (true) {
@@ -672,9 +1062,19 @@ export class DkgChannelPlugin {
         if (item.type === 'text_delta') {
           yield item;
         } else if (item.type === 'done') {
+          try {
+            finalText = finalizeAgentReplyText(replyText);
+            terminalState = 'completed';
+          } catch (err) {
+            terminalState = 'failed';
+            failureReason = getErrorMessage(err);
+            throw err;
+          }
           completed = true;
           break;
         } else if (item.type === 'error') {
+          terminalState = 'failed';
+          failureReason = item.error.message;
           clearTimeout(timer);
           throw item.error;
         }
@@ -683,16 +1083,18 @@ export class DkgChannelPlugin {
       clearTimeout(timer);
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
-      // Persist turn even if the consumer cancelled early — use accumulated text
-      const persistText = replyText || '(no response)';
-      this.persistTurn(text, persistText, correlationId, identity).catch(err => {
-        log.warn?.(`[dkg-channel] Turn persistence failed: ${err.message}`);
-      });
+      if (terminalState === 'cancelled' && dispatchTerminal == null) {
+        void dispatchCompletion.finally(() => {
+          persistResolvedTerminalState();
+        });
+        return;
+      }
+
+      persistResolvedTerminalState();
     }
 
     // Only yield final if the stream completed normally (not cancelled)
-    if (completed) {
-      const finalText = replyText || '(no response)';
+    if (completed && finalText) {
       yield { type: 'final', text: finalText, correlationId };
     }
   }
@@ -826,8 +1228,9 @@ export class DkgChannelPlugin {
     assistantReply: string,
     correlationId: string,
     identity: string,
+    opts?: PersistTurnOptions,
   ): Promise<void> {
-    // Non-owner identities (e.g. game-autopilot) get their own session
+    // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
@@ -836,9 +1239,78 @@ export class DkgChannelPlugin {
       sessionId,
       userMessage,
       assistantReply,
-      { turnId: correlationId },
+      {
+        turnId: correlationId,
+        ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
+        ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
+        ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
+      },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private queueTurnPersistence(
+    userMessage: string,
+    assistantReply: string,
+    correlationId: string,
+    identity: string,
+    opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
+  ): void {
+    if (!this.canContinuePersistenceAttempt(allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
+
+    const attemptPersist = (attempt: number): void => {
+      if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
+      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null, allowDuringShutdown });
+      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
+        .then(() => {
+          this.deletePendingTurnPersistence(correlationId);
+        })
+        .catch((err: any) => {
+          const currentJob = this.pendingTurnPersistence.get(correlationId);
+          if (!currentJob) {
+            return;
+          }
+          if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+            this.deletePendingTurnPersistence(correlationId);
+            return;
+          }
+
+          const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+          if (retryDelayMs == null) {
+            this.deletePendingTurnPersistence(correlationId);
+            this.api?.logger.warn?.(
+              `[dkg-channel] Turn persistence failed permanently after ${attempt} attempt(s): ${err.message}`,
+            );
+            return;
+          }
+
+          this.api?.logger.warn?.(
+            `[dkg-channel] Turn persistence failed (attempt ${attempt}); retrying in ${retryDelayMs}ms: ${err.message}`,
+          );
+          const timer = setTimeout(() => {
+            if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+              this.deletePendingTurnPersistence(correlationId);
+              return;
+            }
+            const job = this.pendingTurnPersistence.get(correlationId);
+            if (!job) return;
+            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
+            attemptPersist(attempt + 1);
+          }, retryDelayMs);
+          this.pendingTurnPersistence.set(correlationId, { attempt, timer, allowDuringShutdown });
+        });
+    };
+
+    attemptPersist(1);
+  }
+
+  private buildFailedAssistantReply(reason?: string | null): string {
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason || normalizedReason === 'cancelled') {
+      return CANCELLED_TURN_MESSAGE;
+    }
+    return `${FAILED_TURN_MESSAGE_PREFIX}: ${normalizedReason}]`;
   }
 
   // ---------------------------------------------------------------------------
@@ -884,7 +1356,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -899,15 +1371,26 @@ export class DkgChannelPlugin {
         return;
       }
 
-      const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
-        return;
-      }
-
       try {
-        const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+        const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+        const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+        if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+          return;
+        }
+        if (parsed.contextEntries != null && contextEntries === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+          return;
+        }
+        const { text, correlationId, identity } = parsed;
+        if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
+          return;
+        }
+        const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
@@ -918,6 +1401,7 @@ export class DkgChannelPlugin {
       }
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundHttp completed in ${durationMs}ms`);
     }
@@ -935,7 +1419,7 @@ export class DkgChannelPlugin {
     const start = Date.now();
     this.inFlight++;
     try {
-      let parsed: { text?: string; correlationId?: string; identity?: string };
+      let parsed: { text?: string; correlationId?: string; identity?: string; attachmentRefs?: unknown; contextEntries?: unknown };
       try {
         const body = await readBody(req);
         parsed = JSON.parse(body);
@@ -950,8 +1434,20 @@ export class DkgChannelPlugin {
         return;
       }
 
+      const attachmentRefs = normalizeAttachmentRefs(parsed.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(parsed.contextEntries);
+      if (parsed.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (parsed.contextEntries != null && contextEntries === undefined) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
       const { text, correlationId, identity } = parsed;
-      if (!text || !correlationId) {
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
@@ -969,7 +1465,7 @@ export class DkgChannelPlugin {
       res.on('error', () => { clientDisconnected = true; });
 
       try {
-        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner')) {
+        for await (const event of this.processInboundStream(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries })) {
           if (clientDisconnected) break;
           const ok = res.write(`data: ${JSON.stringify(event)}\n\n`);
           if (!ok) await new Promise<void>((r) => res.once('drain', r));
@@ -982,6 +1478,7 @@ export class DkgChannelPlugin {
       if (!res.writableEnded) res.end();
     } finally {
       this.inFlight--;
+      this.notifyStopIdle();
       const durationMs = Date.now() - start;
       this.api?.logger.info?.(`[dkg-channel] handleInboundStreamHttp completed in ${durationMs}ms`);
     }
@@ -991,14 +1488,26 @@ export class DkgChannelPlugin {
   private async handleGatewayRoute(req: any, res: any): Promise<void> {
     try {
       const body = typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req));
+      const attachmentRefs = normalizeAttachmentRefs(body.attachmentRefs);
+      const contextEntries = normalizeChatContextEntries(body.contextEntries);
+      if (body.attachmentRefs != null && attachmentRefs === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "attachmentRefs"' }));
+        return;
+      }
+      if (body.contextEntries != null && contextEntries === undefined) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
+        return;
+      }
       const { text, correlationId, identity } = body;
-      if (!text || !correlationId) {
+      if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
         res.end?.(JSON.stringify({ error: 'Missing "text" or "correlationId"' }));
         return;
       }
 
-      const reply = await this.processInbound(text, correlationId, identity ?? 'owner');
+      const reply = await this.processInbound(text, correlationId, identity ?? 'owner', { attachmentRefs, contextEntries });
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {
@@ -1036,6 +1545,10 @@ export class DkgChannelPlugin {
     return typeof address === 'object' && address ? address.port : this.port;
   }
 
+  get isListening(): boolean {
+    return this.server?.listening === true;
+  }
+
   get isUsingGatewayRoute(): boolean {
     return this.useGatewayRoute;
   }
@@ -1069,6 +1582,13 @@ function readBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<string> {
 function formatError(err: unknown): string {
   if (err instanceof Error) {
     return err.stack ?? err.message;
+  }
+  return String(err);
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
   }
   return String(err);
 }

@@ -226,8 +226,8 @@ export class HexagonPainter {
     }
 
     // Label below hexagon — fade in/out with zoom
-    const fadeStart = 1.5;
-    const fadeFull = 2.5;
+    const fadeStart = 0.3;
+    const fadeFull = 0.8;
     if (globalScale > fadeStart) {
       const opacity = Math.min(1, (globalScale - fadeStart) / (fadeFull - fadeStart));
       const fontSize = styleConfig.fontSize / globalScale;

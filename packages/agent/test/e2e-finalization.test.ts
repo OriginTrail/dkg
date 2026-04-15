@@ -246,6 +246,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Finalization Chain Test', description: '' });
+    await nodeA.registerContextGraph(PARANET);
     nodeA.subscribeToContextGraph(PARANET);
     nodeB.subscribeToContextGraph(PARANET);
     await sleep(1000);

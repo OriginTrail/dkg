@@ -1,11 +1,15 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import {
   loadNetworkConfig,
+  loadConfig,
   removePid,
   removeApiPort,
+  saveConfig,
   writePid,
   writeApiPort,
   readPid,
@@ -110,5 +114,52 @@ describe('dkgDir', () => {
   it('respects DKG_HOME override', () => {
     process.env.DKG_HOME = '/tmp/custom-dkg';
     expect(dkgDir()).toBe('/tmp/custom-dkg');
+  });
+});
+
+describe('localAgentIntegrations config round-trip', () => {
+  const origHome = process.env.DKG_HOME;
+  let tempDir = '';
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `dkg-local-agents-${randomBytes(4).toString('hex')}`);
+    await mkdir(tempDir, { recursive: true });
+    process.env.DKG_HOME = tempDir;
+  });
+
+  afterEach(async () => {
+    if (origHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = origHome;
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('persists the generic local agent integration registry', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            gatewayUrl: 'http://gateway.local:3030',
+          },
+          manifest: {
+            packageName: '@dkg/openclaw-adapter',
+            version: '2026.4.12',
+          },
+          runtime: {
+            status: 'ready',
+          },
+        },
+      },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.localAgentIntegrations?.openclaw?.transport?.gatewayUrl).toBe('http://gateway.local:3030');
+    expect(loaded.localAgentIntegrations?.openclaw?.manifest?.version).toBe('2026.4.12');
+    expect(loaded.localAgentIntegrations?.openclaw?.runtime?.status).toBe('ready');
   });
 });

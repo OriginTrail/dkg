@@ -1097,19 +1097,24 @@ const contextGraphCmd = program
 
 contextGraphCmd
   .command('create <id>')
-  .description('Create a new context graph (publishes definition to the system ontology)')
+  .description('Create a new context graph (free, P2P — no chain transaction)')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
   .option('-d, --description <desc>', 'Description of the context graph')
+  .option('--invite <peer...>', 'Invite peers (allowlist for curated CGs)')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
   .option('--save', 'Persist subscription to config')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createContextGraph(id, opts.name ?? id, opts.description);
-      console.log(`Context graph created:`);
+      const result = await client.createContextGraph(id, opts.name ?? id, opts.description, opts.invite);
+      console.log(`Context graph created (free, P2P):`);
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
       console.log(`  Auto-subscribed to GossipSub topic.`);
+      if (opts.invite?.length) {
+        console.log(`  Invited ${opts.invite.length} peer(s) via allowlist.`);
+      }
+      console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verified Memory).`);
 
       if (opts.save) {
         const config = await loadConfig();
@@ -1120,6 +1125,51 @@ contextGraphCmd
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
+    } catch (err) {
+      const message = toErrorMessage(err);
+      if (message.includes('participantIdentityIds') && message.includes('requiredSignatures')) {
+        console.error('Context-graph contract mismatch — the daemon was built against an older ABI.');
+        console.error('Rebuild and restart the daemon, then retry:');
+        console.error('  pnpm --filter @origintrail-official/dkg build');
+        console.error('  node packages/cli/dist/cli.js start');
+        console.error('Or use an existing context graph from:');
+        console.error('  node packages/cli/dist/cli.js context-graph list');
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('register <id>')
+  .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
+  .option('--reveal', 'Reveal cleartext name and description on-chain')
+  .action(async (id: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.registerContextGraph(id, { revealOnChain: opts.reveal });
+      console.log(`Context graph registered on-chain:`);
+      console.log(`  ID:         ${id}`);
+      console.log(`  On-chain:   ${result.onChainId}`);
+      console.log(`  ${result.hint ?? 'You can now publish SWM to Verified Memory.'}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('invite <contextGraphId>')
+  .description('Invite a peer to join a context graph (adds to allowlist)')
+  .requiredOption('--peer <peerId>', 'Peer ID to invite')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.inviteToContextGraph(contextGraphId, opts.peer);
+      console.log(`Peer invited:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Peer:          ${opts.peer}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1179,6 +1229,161 @@ contextGraphCmd
       console.log(`  Type:        ${p.isSystem ? 'system' : 'user'}`);
       console.log(`  Creator:     ${p.creator ?? '—'}`);
       console.log(`  Created:     ${p.createdAt ?? '—'}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+// ─── dkg assertion ──────────────────────────────────────────────────
+
+const assertionCmd = program
+  .command('assertion')
+  .description('Assertion document import and extraction status');
+
+assertionCmd
+  .command('import-file <name>')
+  .description('Import a document into an assertion graph via multipart upload (PDF, Markdown, DOCX, etc.)')
+  .requiredOption('-f, --file <path>', 'Path to the source document')
+  .requiredOption('-c, --context-graph <id>', 'Target context graph')
+  .option('--content-type <type>', 'Override detected upload content type')
+  .option('--ontology-ref <uri>', 'Context graph _ontology URI for guided extraction')
+  .option('--sub-graph-name <name>', 'Target registered sub-graph inside the context graph')
+  .action(async (name: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.importAssertionFile(name, {
+        filePath: opts.file,
+        contextGraphId: opts.contextGraph,
+        contentType: opts.contentType,
+        ontologyRef: opts.ontologyRef,
+        subGraphName: opts.subGraphName,
+      });
+      console.log('Assertion import complete:');
+      console.log(`  Assertion URI:         ${result.assertionUri}`);
+      console.log(`  File hash:             ${result.fileHash}`);
+      if (result.detectedContentType) {
+        console.log(`  Detected content type: ${result.detectedContentType}`);
+      }
+      if (result.extraction) {
+        console.log(`  Extraction status:     ${result.extraction.status}`);
+        if (result.extraction.pipelineUsed) {
+          console.log(`  Pipeline:              ${result.extraction.pipelineUsed}`);
+        }
+        if (typeof result.extraction.tripleCount === 'number') {
+          console.log(`  Triples:               ${result.extraction.tripleCount}`);
+        }
+        if (result.extraction.mdIntermediateHash) {
+          console.log(`  Markdown hash:         ${result.extraction.mdIntermediateHash}`);
+        }
+        if (result.extraction.error) {
+          console.log(`  Extraction error:      ${result.extraction.error}`);
+        }
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+assertionCmd
+  .command('extraction-status <name>')
+  .description('Show the latest extraction status for an imported assertion document')
+  .requiredOption('-c, --context-graph <id>', 'Target context graph')
+  .option('--sub-graph-name <name>', 'Target registered sub-graph inside the context graph')
+  .action(async (name: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.assertionExtractionStatus(name, opts.contextGraph, opts.subGraphName);
+      console.log(`Extraction status for "${name}":`);
+      if (result.assertionUri) {
+        console.log(`  Assertion URI:  ${result.assertionUri}`);
+      }
+      if (result.fileHash) {
+        console.log(`  File hash:      ${result.fileHash}`);
+      }
+      console.log(`  Status:         ${result.status ?? 'unknown'}`);
+      if (result.pipelineUsed) {
+        console.log(`  Pipeline:       ${result.pipelineUsed}`);
+      }
+      if (typeof result.tripleCount === 'number') {
+        console.log(`  Triples:        ${result.tripleCount}`);
+      }
+      if (result.mdIntermediateHash) {
+        console.log(`  Markdown hash:  ${result.mdIntermediateHash}`);
+      }
+      if (result.error) {
+        console.log(`  Error:          ${result.error}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+assertionCmd
+  .command('promote <name>')
+  .description('Promote an assertion from local working memory into shared memory')
+  .requiredOption('-c, --context-graph <id>', 'Target context graph')
+  .option('--entity <uri...>', 'Promote only specific root entities (defaults to all)')
+  .option('--sub-graph-name <name>', 'Source sub-graph inside the context graph')
+  .action(async (name: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.promoteAssertion(name, {
+        contextGraphId: opts.contextGraph,
+        entities: opts.entity?.length ? opts.entity as string[] : 'all',
+        subGraphName: opts.subGraphName,
+      });
+      const promotedCount = result.promotedCount ?? result.count ?? 0;
+      if (promotedCount === 0) {
+        console.error(`No quads were promoted for assertion "${name}".`);
+        console.error('The assertion is empty, does not exist under that name, or only contains non-promotable bookkeeping quads.');
+        console.error(`Inspect it with: dkg assertion query ${name} --context-graph ${opts.contextGraph}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
+        process.exit(1);
+      }
+      console.log(`Assertion promoted to shared memory:`);
+      console.log(`  Name:           ${name}`);
+      console.log(`  Context graph:  ${result.contextGraphId ?? opts.contextGraph}`);
+      console.log(`  Triples:        ${promotedCount}`);
+      if (result.sharedMemoryGraph) {
+        console.log(`  Shared graph:   ${result.sharedMemoryGraph}`);
+      }
+      if (Array.isArray(result.rootEntities) && result.rootEntities.length > 0) {
+        console.log(`  Root entities:  ${result.rootEntities.join(', ')}`);
+      }
+      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+assertionCmd
+  .command('query <name>')
+  .description('Inspect the quads currently stored in an assertion graph (local memory before promote)')
+  .requiredOption('-c, --context-graph <id>', 'Target context graph')
+  .option('--sub-graph-name <name>', 'Target registered sub-graph inside the context graph')
+  .option('--json', 'Print JSON instead of N-Quads-like lines')
+  .action(async (name: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.queryAssertion(name, {
+        contextGraphId: opts.contextGraph,
+        subGraphName: opts.subGraphName,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      if (result.count === 0) {
+        console.log(`No quads found for assertion "${name}".`);
+        return;
+      }
+      for (const quad of result.quads) {
+        console.log(`<${quad.subject}> <${quad.predicate}> ${formatQuadObject(quad.object)} <${quad.graph}> .`);
+      }
+      console.log(`\n${result.count} quad(s)`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1600,6 +1805,7 @@ sharedMemoryCmd
   .description('Publish from shared memory to a context graph')
   .option('--keep', 'Keep shared memory triples after publishing')
   .option('--root <entity...>', 'Publish only specific root entities')
+  .option('--sub-graph-name <name>', 'Publish from a specific shared-memory sub-graph')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const targetContextGraph = contextGraph ?? 'dev-coordination';
@@ -1607,11 +1813,16 @@ sharedMemoryCmd
       const selection = opts.root?.length
         ? { rootEntities: opts.root as string[] }
         : 'all';
-      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep);
+      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep, {
+        subGraphName: opts.subGraphName,
+      });
       console.log(`Published from shared memory to "${targetContextGraph}":`);
       console.log(`  Status: ${result.status}`);
       console.log(`  KC ID:  ${result.kcId}`);
       console.log(`  KAs:    ${result.kas.length}`);
+      if (opts.subGraphName) {
+        console.log(`  Sub-graph: ${opts.subGraphName}`);
+      }
       if (result.txHash) {
         console.log(`  TX:     ${result.txHash}`);
       }
@@ -2268,6 +2479,10 @@ function stripQuotes(s: string): string {
   const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
   if (match) return match[1];
   return s;
+}
+
+function formatQuadObject(object: string): string {
+  return /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(object) ? `<${object}>` : object;
 }
 
 function sleep(ms: number): Promise<void> {

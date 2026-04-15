@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -8,7 +8,7 @@ import {
   writeDkgConfig,
   mergeOpenClawConfig,
   writeWorkspaceConfig,
-  copySkills,
+  installCanonicalNodeSkill,
 } from '../src/setup.js';
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,6 @@ describe('writeDkgConfig', () => {
       expect(config.nodeRole).toBe('edge');
       expect(config.contextGraphs).toEqual(['testing']);
       expect(config.chain.rpcUrl).toBe('https://rpc.test');
-      expect(config.openclawAdapter).toBe(true);
       expect(config.relay).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
@@ -134,8 +133,72 @@ describe('writeDkgConfig', () => {
       expect(config.contextGraphs).toEqual(['custom']);
       expect(config.relay).toBe('/ip4/5.6.7.8/tcp/9090/p2p/existing');
       expect(config.chain.rpcUrl).toBe('https://custom.rpc');
-      // But openclawAdapter is always set
-      expect(config.openclawAdapter).toBe(true);
+      expect(config.openclawAdapter).toBeUndefined();
+      expect(config.openclawChannel).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('removes stale legacy OpenClaw flags from an existing DKG config', () => {
+    const dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
+      name: 'existing-node',
+      apiPort: 9300,
+      openclawAdapter: true,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9201',
+      },
+    }));
+
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+
+    try {
+      writeDkgConfig('existing-node', fakeNetwork, 9200);
+
+      const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
+      expect(config.openclawAdapter).toBeUndefined();
+      expect(config.openclawChannel).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('migrates legacy OpenClaw transport hints into localAgentIntegrations before removing the old key', () => {
+    const dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({
+      name: 'existing-node',
+      apiPort: 9300,
+      openclawChannel: {
+        bridgeUrl: 'http://127.0.0.1:9301',
+        gatewayUrl: 'http://127.0.0.1:9300',
+      },
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+          },
+        },
+      },
+    }));
+
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+
+    try {
+      writeDkgConfig('existing-node', fakeNetwork, 9200);
+
+      const config = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf-8'));
+      expect(config.openclawChannel).toBeUndefined();
+      expect(config.localAgentIntegrations.openclaw.transport).toMatchObject({
+        kind: 'openclaw-channel',
+        bridgeUrl: 'http://127.0.0.1:9301',
+        gatewayUrl: 'http://127.0.0.1:9300',
+      });
     } finally {
       process.env.DKG_HOME = original;
     }
@@ -212,6 +275,32 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths[0]).toBe('C:/Users/test/adapter');
   });
+
+  it('replaces stale cached adapter-openclaw load paths with the current adapter path', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        allow: ['adapter-openclaw'],
+        load: {
+          paths: [
+            'C:/Users/test/AppData/Local/npm-cache/_npx/123/node_modules/@origintrail-official/dkg-adapter-openclaw',
+            '/other/plugin',
+          ],
+        },
+        entries: {
+          'adapter-openclaw': { enabled: true },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw');
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.load.paths).toEqual([
+      '/other/plugin',
+      'C:/Projects/dkg-v9/packages/adapter-openclaw',
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -229,7 +318,7 @@ describe('writeWorkspaceConfig', () => {
     expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
     expect(config['dkg-node'].memory.enabled).toBe(true);
     expect(config['dkg-node'].channel.enabled).toBe(true);
-    expect(config['dkg-node'].game.enabled).toBe(true);
+    expect(config['dkg-node'].game).toBeUndefined();
   });
 
   it('preserves existing workspace config keys', () => {
@@ -244,6 +333,24 @@ describe('writeWorkspaceConfig', () => {
     const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
     expect(config['some-other-plugin']).toEqual({ key: 'value' });
     expect(config['dkg-node']).toBeDefined();
+  });
+
+  it('removes legacy game config from the workspace dkg-node block', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'config.json'), JSON.stringify({
+      'dkg-node': {
+        daemonUrl: 'http://127.0.0.1:9200',
+        memory: { enabled: true },
+        channel: { enabled: true },
+        game: { enabled: true },
+      },
+    }));
+
+    writeWorkspaceConfig(ws, 9200);
+
+    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
+    expect(config['dkg-node'].game).toBeUndefined();
   });
 
   it('preserves existing daemonUrl when --port not explicit', () => {
@@ -284,55 +391,47 @@ describe('writeWorkspaceConfig', () => {
 });
 
 // ---------------------------------------------------------------------------
-// copySkills
+// installCanonicalNodeSkill
 // ---------------------------------------------------------------------------
 
-describe('copySkills', () => {
-  it('copies skill files from adapter root to workspace', () => {
-    // Create fake adapter root with skills
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    mkdirSync(join(fakeRoot, 'skills', 'origin-trail-game'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# DKG Node Skills');
-    writeFileSync(join(fakeRoot, 'skills', 'origin-trail-game', 'SKILL.md'), '# Game Skills');
-
+describe('installCanonicalNodeSkill', () => {
+  it('resolves the canonical skill from the current CLI package layout by default', () => {
     const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
 
-    // Use rootOverride to inject the fake adapter root
-    copySkills(ws, fakeRoot);
+    const targetPath = installCanonicalNodeSkill(ws);
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# DKG Node Skills');
-    expect(readFileSync(join(ws, 'skills', 'origin-trail-game', 'SKILL.md'), 'utf-8')).toBe('# Game Skills');
+    expect(targetPath).toBe(join(ws, 'skills', 'dkg-node', 'SKILL.md'));
+    const copied = readFileSync(targetPath, 'utf-8');
+    expect(copied).toContain('name: dkg-node');
+    expect(copied).toContain('# DKG V10 Node Skill');
+    expect(copied).toContain('OriginTrail');
   });
 
-  it('skips copy when files are already identical', () => {
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
-
+  it('copies the canonical CLI skill into the OpenClaw workspace', () => {
     const ws = join(testDir, 'workspace');
-    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Same Content');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
 
-    // Should not throw; just skip
-    copySkills(ws, fakeRoot);
+    const targetPath = installCanonicalNodeSkill(ws, sourcePath);
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Same Content');
+    expect(targetPath).toBe(join(ws, 'skills', 'dkg-node', 'SKILL.md'));
+    expect(readFileSync(targetPath, 'utf-8')).toBe('# Canonical DKG Node Skill\n');
   });
 
-  it('updates skill files when content differs', () => {
-    const fakeRoot = join(testDir, 'adapter');
-    mkdirSync(join(fakeRoot, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(fakeRoot, 'skills', 'dkg-node', 'SKILL.md'), '# Updated Content');
-
+  it('overwrites an existing workspace dkg-node skill with the canonical CLI copy', () => {
     const ws = join(testDir, 'workspace');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
     mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
-    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Old Content');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), '# Old Adapter Skill\n');
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
 
-    copySkills(ws, fakeRoot);
+    installCanonicalNodeSkill(ws, sourcePath);
 
-    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Updated Content');
+    expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Canonical DKG Node Skill\n');
   });
 });
 

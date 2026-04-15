@@ -188,6 +188,94 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
   });
 
+  it('passes session history limit and descending ordering through to memoryManager.getSession() without reordering the backend result', async () => {
+    const memoryManager = {
+      getSession: vi.fn().mockResolvedValue({
+        session: 'session-1',
+        messages: [
+          {
+            uri: 'urn:dkg:chat:msg:agent-2',
+            author: 'agent',
+            text: 'newest',
+            ts: '2026-04-14T08:00:01Z',
+          },
+          {
+            uri: 'urn:dkg:chat:msg:user-1',
+            author: 'user',
+            text: 'older',
+            ts: '2026-04-14T08:00:00Z',
+            failureReason: 'timeout',
+          },
+        ],
+      }),
+    } as any;
+
+    const { req, url } = createMockReq({
+      method: 'GET',
+      path: '/api/memory/sessions/session-1?limit=25&order=desc',
+    });
+    const { res, state } = createMockRes();
+
+    const handled = await handleNodeUIRequest(
+      req,
+      res,
+      url,
+      {} as any,
+      '.',
+      undefined,
+      undefined,
+      undefined,
+      memoryManager,
+      undefined,
+    );
+
+    expect(handled).toBe(true);
+    expect(state.statusCode).toBe(200);
+    expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
+    expect(parseJsonBody(state.body)).toMatchObject({
+      session: 'session-1',
+      messages: [
+        { uri: 'urn:dkg:chat:msg:agent-2', text: 'newest' },
+        { uri: 'urn:dkg:chat:msg:user-1', failureReason: 'timeout' },
+      ],
+    });
+  });
+
+  it('returns 400 for invalid session query parameters', async () => {
+    const memoryManager = {
+      getSession: vi.fn(),
+    } as any;
+
+    const invalidCases = [
+      '/api/memory/sessions/session-1?limit=0',
+      '/api/memory/sessions/session-1?limit=25xyz',
+      '/api/memory/sessions/session-1?order=sideways',
+    ];
+
+    for (const path of invalidCases) {
+      const { req, url } = createMockReq({ method: 'GET', path });
+      const { res, state } = createMockRes();
+
+      const handled = await handleNodeUIRequest(
+        req,
+        res,
+        url,
+        {} as any,
+        '.',
+        undefined,
+        undefined,
+        undefined,
+        memoryManager,
+        undefined,
+      );
+
+      expect(handled).toBe(true);
+      expect(state.statusCode).toBe(400);
+    }
+
+    expect(memoryManager.getSession).not.toHaveBeenCalled();
+  });
+
   it('returns publication status for a valid session id', async () => {
     const memoryManager = {
       getSessionPublicationStatus: vi.fn().mockResolvedValue({
@@ -406,81 +494,6 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     expect(handled).toBe(true);
     expect(state.statusCode).toBe(500);
     expect(parseJsonBody(state.body)).toMatchObject({ error: 'storage offline' });
-  });
-});
-
-describe('handleNodeUIRequest accept header normalization', () => {
-  it('detects text/event-stream from an array accept header', async () => {
-    const chatAssistant = {
-      answer: vi.fn(),
-      answerStream: vi.fn(async function* () {
-        yield { type: 'text', text: 'ok' };
-      }),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/chat-assistant',
-      body: JSON.stringify({ message: 'hello' }),
-      headers: { 'content-type': 'application/json' },
-    });
-    (req.headers as any).accept = ['text/event-stream', 'application/json'];
-    const { res, state } = createMockRes();
-    res.on = (() => res) as any;
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      chatAssistant,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.headers['Content-Type']).toMatch(/text\/event-stream/);
-  });
-});
-
-describe('handleNodeUIRequest Stage 5 sessionId validation', () => {
-  it('rejects invalid session id in /api/chat-assistant payload', async () => {
-    const chatAssistant = {
-      answer: vi.fn(),
-      answerStream: vi.fn(),
-    } as any;
-
-    const { req, url } = createMockReq({
-      method: 'POST',
-      path: '/api/chat-assistant',
-      body: JSON.stringify({
-        message: 'hello',
-        sessionId: 'bad/session-id',
-      }),
-      headers: { 'content-type': 'application/json' },
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      chatAssistant,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "sessionId" format' });
-    expect(chatAssistant.answer).not.toHaveBeenCalled();
   });
 });
 

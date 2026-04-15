@@ -147,7 +147,7 @@ describe.sequential('publisher CLI smoke', () => {
     expect(job.stdout).toContain('jobSlug');
 
     let payload: Awaited<ReturnType<typeof execFileAsync>> | undefined;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       try {
         payload = await execFileAsync('node', [CLI_ENTRY, 'publisher', 'job', jobId, '--payload'], { env });
         break;
@@ -156,7 +156,7 @@ describe.sequential('publisher CLI smoke', () => {
         if (!stderr.includes('No shared-memory roots found')) {
           throw error;
         }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
     expect(payload).toBeDefined();

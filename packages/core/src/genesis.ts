@@ -224,4 +224,7 @@ export const DKG_ONTOLOGY = {
   DKG_ENDORSED_AT: `${DKG}endorsedAt`,
   SKILL_OFFERS: 'https://dkg.origintrail.io/skill#offersSkill',
   SKILL_FRAMEWORK: 'https://dkg.origintrail.io/skill#framework',
+  DKG_REGISTRATION_STATUS: `${DKG}registrationStatus`,
+  DKG_CURATOR: `${DKG}curator`,
+  DKG_ALLOWED_PEER: `${DKG}allowedPeer`,
 } as const;

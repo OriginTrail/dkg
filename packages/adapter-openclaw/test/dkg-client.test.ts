@@ -1,21 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-type DkgDaemonClientCtor = typeof import('../src/dkg-client.js').DkgDaemonClient;
+import { DkgDaemonClient } from '../src/dkg-client.js';
 
 describe('DkgDaemonClient', () => {
-  let DkgDaemonClient: DkgDaemonClientCtor;
-  let client: InstanceType<DkgDaemonClientCtor>;
+  let client: DkgDaemonClient;
 
-  beforeEach(async () => {
-    vi.resetModules();
-    vi.doUnmock('node:fs');
-    vi.doUnmock('node:os');
-    vi.doUnmock('node:path');
-    ({ DkgDaemonClient } = await import('../src/dkg-client.js'));
+  beforeEach(() => {
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
   });
 
   afterEach(() => {
+    vi.doUnmock('node:fs');
+    vi.doUnmock('node:os');
+    vi.doUnmock('node:path');
     vi.restoreAllMocks();
   });
 

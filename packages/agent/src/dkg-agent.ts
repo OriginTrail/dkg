@@ -10,7 +10,7 @@ import {
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, withRetry, sparqlString,
+  Logger, createOperationContext, withRetry, sparqlString, escapeSparqlLiteral,
   type DKGNodeConfig, type OperationContext, type GetView,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -1861,9 +1861,9 @@ export class DKGAgent {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
-    this.gossip.onMessage(publishTopic, async (_topic, data) => {
+    this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
       const gph = this.getOrCreateGossipPublishHandler();
-      await gph.handlePublishMessage(data, contextGraphId);
+      await gph.handlePublishMessage(data, contextGraphId, undefined, from);
     });
 
     this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
@@ -1948,16 +1948,12 @@ export class DKGAgent {
   }
 
   /**
-   * Create a context graph by registering it on-chain (if a chain adapter is
-   * available) and publishing its definition triples into the system
-   * ontology context graph.
+   * Create a context graph. All CGs start as free, P2P collaborative spaces.
+   * No blockchain transaction is required. On-chain registration is a separate
+   * explicit step via {@link registerContextGraph}.
    *
-   * On-chain registration is privacy-preserving by default: only
-   * keccak256(bytes(name)) is stored. Set revealOnChain to also publish
-   * cleartext name and description to the contract.
-   *
-   * If the context graph already exists on-chain (another node registered it
-   * first), the local definition is created without a chain call.
+   * The `private` flag still works for truly local-only CGs (no gossip, no sync).
+   * For curated CGs, provide `allowedPeers` to restrict gossip writes to listed peers.
    */
   async createContextGraph(opts: {
     id: string;
@@ -1965,9 +1961,11 @@ export class DKGAgent {
     description?: string;
     replicationPolicy?: string;
     accessPolicy?: number;
-    revealOnChain?: boolean;
+    /** Peer allowlist for curated CGs. Omit for open CGs. */
+    allowedPeers?: string[];
+    /** Identity IDs for private CG access control (chain-based). */
     participantIdentityIds?: bigint[];
-    /** When true, skips on-chain registration, gossip subscription, and broadcast. Data stays local-only. */
+    /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
@@ -1981,30 +1979,10 @@ export class DKGAgent {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
 
-    // Register on chain if a real chain adapter is configured.
-    // Private context graphs skip on-chain registration and gossip entirely.
-    let onChainId: string | undefined;
     if (opts.private) {
-      this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no chain, no gossip)`);
-    } else if (this.chain.chainId !== 'none') {
-      try {
-        const result = await this.chain.createContextGraph({
-          name: opts.id,
-          description: opts.description,
-          accessPolicy: opts.accessPolicy ?? 0,
-          revealOnChain: opts.revealOnChain,
-        });
-        onChainId = result.contextGraphId;
-        this.log.info(ctx, `Context graph "${opts.id}" registered on-chain: ${onChainId}`);
-      } catch (err) {
-        const errorName = enrichEvmError(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
-          this.log.info(ctx, `Context graph "${opts.id}" already registered on-chain — creating local definition`);
-        } else {
-          this.log.warn(ctx, `On-chain context graph registration failed: ${msg} — creating locally without chain finality`);
-        }
-      }
+      this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no gossip)`);
+    } else {
+      this.log.info(ctx, `Creating context graph "${opts.id}" (P2P, no chain)`);
     }
 
     const quads: Quad[] = [
@@ -2017,28 +1995,48 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.accessPolicy === 1 || opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
     ];
 
+    const cgMetaGraph = paranetMetaGraphUri(opts.id);
+
+    // Store registration status and curator in _meta
+    quads.push(
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${this.peerId}`, graph: cgMetaGraph },
+    );
+
+    // Store peer allowlist for curated CGs (with validation)
+    if (opts.allowedPeers && opts.allowedPeers.length > 0) {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      for (const peer of opts.allowedPeers) {
+        try { peerIdFromString(peer); } catch {
+          throw new Error(`Invalid peer ID in allowedPeers: "${peer}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
+        }
+        quads.push({
+          subject: paranetUri,
+          predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+          object: `"${escapeSparqlLiteral(peer)}"`,
+          graph: cgMetaGraph,
+        });
+      }
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+        object: `"${this.peerId}"`,
+        graph: cgMetaGraph,
+      });
+    }
+
+    // Store participant identity IDs for private CG access control (chain-based)
     const creatorIdentityId = await this.chain.getIdentityId();
     const participantIdentityIds = new Set<bigint>(opts.participantIdentityIds ?? []);
     if (creatorIdentityId > 0n) {
       participantIdentityIds.add(creatorIdentityId);
     }
-    // Store participant IDs in the CG's meta graph (not the public ontology)
-    // to prevent leaking the allow-list to unauthorized peers.
-    const cgMetaGraph = paranetMetaGraphUri(opts.id);
     for (const participantIdentityId of participantIdentityIds) {
       quads.push({
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
         object: `"${participantIdentityId.toString()}"`,
         graph: cgMetaGraph,
-      });
-    }
-    if (onChainId) {
-      quads.push({
-        subject: paranetUri,
-        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
-        object: `"${onChainId}"`,
-        graph: ontologyGraph,
       });
     }
 
@@ -2060,26 +2058,21 @@ export class DKGAgent {
       { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: ontologyGraph },
     );
 
-    // Insert the definition triples
     await this.store.insert(quads);
-
-    // Create the actual named graphs for the context graph
     await gm.ensureParanet(opts.id);
 
     this.subscribedContextGraphs.set(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
-      onChainId: onChainId,
-      participantIdentityIds: participantIdentityIds.size > 0 ? [...participantIdentityIds] : undefined,
     });
 
     if (!opts.private) {
-      // Auto-subscribe to the new context graph's GossipSub topic
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast only the ontology-graph quads (not the private meta-graph
-      // participant IDs) so the allow-list doesn't leak to unauthorized peers.
+      // Broadcast only ontology quads via gossip. Security-critical _meta state
+      // (allowlist, registration status, curator) propagates via the authenticated
+      // sync protocol — discovered CGs now enter sync scope automatically.
       const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
       const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
       const nquads = broadcastQuads.map(q => {
@@ -2107,6 +2100,242 @@ export class DKGAgent {
         // No peers subscribed — ok for now
       }
     }
+  }
+
+  /**
+   * Register an existing context graph on-chain. This is the explicit upgrade
+   * step that unlocks Verified Memory, chain-based discovery, and economic
+   * participation. Requires a funded wallet with TRAC.
+   */
+  async registerContextGraph(id: string, opts?: {
+    revealOnChain?: boolean;
+    accessPolicy?: number;
+  }): Promise<{ onChainId: string; txHash?: string }> {
+    const ctx = createOperationContext('system');
+
+    const exists = await this.contextGraphExists(id);
+    if (!exists) {
+      throw new Error(`Context graph "${id}" does not exist locally. Create it first.`);
+    }
+
+    if (this.chain.chainId === 'none') {
+      throw new Error('On-chain registration requires a configured chain adapter');
+    }
+
+    // Only the curator/creator can register a CG on-chain
+    const owner = await this.getContextGraphOwner(id);
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (!owner) {
+      throw new Error(
+        `Context graph "${id}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    if (owner !== selfDid) {
+      throw new Error(
+        `Only the context graph creator can register it on-chain. ` +
+        `Creator=${owner}, current=${selfDid}`,
+      );
+    }
+
+    // Check if already registered
+    const cgMetaGraph = paranetMetaGraphUri(id);
+    const paranetUri = paranetDataGraphUri(id);
+    const statusResult = await this.store.query(
+      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+    );
+    if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
+      const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
+      throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
+    }
+
+    // Read existing description and access policy from ontology so we
+    // preserve locally-configured values on registration.
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const descResult = await this.store.query(
+      `SELECT ?desc WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } } LIMIT 1`,
+    );
+    const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
+
+    let resolvedAccessPolicy = opts?.accessPolicy;
+    if (resolvedAccessPolicy === undefined) {
+      const apResult = await this.store.query(
+        `SELECT ?ap WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } } LIMIT 1`,
+      );
+      const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
+      resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+    }
+
+    let onChainId: string;
+    try {
+      const result = await this.chain.createContextGraph({
+        name: id,
+        description,
+        accessPolicy: resolvedAccessPolicy,
+        revealOnChain: opts?.revealOnChain,
+      });
+      onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
+    } catch (err) {
+      const errorName = enrichEvmError(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
+        onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
+        this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
+      } else {
+        throw err;
+      }
+    }
+
+    this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId}`);
+
+    // Update _meta with registered status and on-chain ID
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+    });
+    await this.store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+    ]);
+
+    // Update in-memory subscription record and ensure we're subscribed
+    const sub = this.subscribedContextGraphs.get(id);
+    if (sub) {
+      sub.onChainId = onChainId;
+      if (!sub.subscribed) {
+        sub.subscribed = true;
+        this.subscribeToContextGraph(id, { trackSyncScope: true });
+        this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
+      }
+    }
+
+    // Registration status is in _meta — it propagates to peers via sync, not
+    // gossip, so that only the authenticated sync path can update it.
+    // Broadcast the ontology-graph OnChainId quad so peers see the link.
+    try {
+      const onChainNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
+      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const regMsg = encodePublishRequest({
+        ual: `did:dkg:context-graph:${id}`,
+        nquads: new TextEncoder().encode(onChainNquad),
+        paranetId: SYSTEM_PARANETS.ONTOLOGY,
+        kas: [],
+        publisherIdentity: this.wallet.keypair.publicKey,
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: '',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await this.gossip.publish(ontologyTopic, regMsg);
+    } catch {
+      // Peers may not be subscribed yet
+    }
+
+    return { onChainId };
+  }
+
+  /**
+   * Invite a peer to join an existing context graph.
+   * Adds the peer to the local allowlist in `_meta`.
+   */
+  async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<void> {
+    const ctx = createOperationContext('system');
+
+    // Validate peer ID format (libp2p Ed25519 base58btc, e.g. 12D3KooW…)
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      peerIdFromString(peerId);
+    } catch {
+      throw new Error(`Invalid peer ID format: "${peerId}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
+    }
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    // Only the curator/creator can manage the allowlist
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    if (owner !== selfDid) {
+      throw new Error(
+        `Only the context graph creator can manage invitations. ` +
+        `Creator=${owner}, current=${selfDid}`,
+      );
+    }
+
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const escapedPeerId = escapeSparqlLiteral(peerId);
+
+    // If this is the first allowlist entry (CG was open), also add our own
+    // peer ID so the curator doesn't lock themselves out.
+    const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
+    const quadsToInsert: Quad[] = [];
+
+    if (existingAllowlist === null || existingAllowlist.length === 0) {
+      const curatorPeerId = escapeSparqlLiteral(this.peerId);
+      quadsToInsert.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+        object: `"${curatorPeerId}"`,
+        graph: cgMetaGraph,
+      });
+    }
+
+    quadsToInsert.push({
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
+      object: `"${escapedPeerId}"`,
+      graph: cgMetaGraph,
+    });
+
+    await this.store.insert(quadsToInsert);
+
+    // Allowlist updates are in _meta and propagate to peers via the
+    // authenticated sync protocol, not unauthenticated gossip.
+
+    this.log.info(ctx, `Invited peer ${peerId} to context graph "${contextGraphId}"`);
+  }
+
+  /**
+   * Check whether a context graph has been registered on-chain.
+   */
+  async isContextGraphRegistered(contextGraphId: string): Promise<boolean> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+    );
+    return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
+  }
+
+  /**
+   * Get the peer allowlist for a context graph (if curated).
+   * Returns null if no allowlist is set (open CG).
+   */
+  async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?peer WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return null;
+    }
+    return result.bindings
+      .map(row => row['peer'])
+      .filter((v): v is string => typeof v === 'string')
+      .map(v => v.replace(/^"|"$/g, ''));
   }
 
   // ── Sub-Graph Management ───────────────────────────────────────────────
@@ -2247,22 +2476,18 @@ export class DKGAgent {
   /**
    * Idempotent "ensure" variant of createContextGraph for boot-time defaults.
    * If the context graph already exists locally, just ensures GossipSub subscription
-   * and registry entry. If not, inserts definition triples and optionally
-   * registers on-chain (or gracefully handles "already exists" on-chain).
-   * Unlike createContextGraph(), this never throws for duplicates and avoids
-   * re-claiming creator if the context graph is already on-chain.
+   * and registry entry. If not, inserts definition triples. No on-chain registration
+   * — use {@link registerContextGraph} for that.
    */
   async ensureContextGraphLocal(opts: {
     id: string;
     name: string;
     description?: string;
-    revealOnChain?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
 
     const exists = await this.contextGraphExists(opts.id);
     if (exists) {
-      // Already synced locally — just make sure we're subscribed
       this.subscribeToContextGraph(opts.id);
       this.subscribedContextGraphs.set(opts.id, {
         name: opts.name,
@@ -2273,67 +2498,23 @@ export class DKGAgent {
       return;
     }
 
-    // Not yet in local store — try chain registration (idempotent)
-    let onChainId: string | undefined;
-    let alreadyOnChain = false;
-    if (this.chain.chainId !== 'none') {
-      try {
-        const result = await this.chain.createContextGraph({
-          name: opts.id,
-          description: opts.description,
-          accessPolicy: 0,
-          revealOnChain: opts.revealOnChain,
-        });
-        onChainId = result.contextGraphId;
-        this.log.info(ctx, `Context graph "${opts.id}" registered on-chain: ${onChainId}`);
-      } catch (err) {
-        const errorName = enrichEvmError(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('ContextGraphAlreadyExists') || msg.includes('ParanetAlreadyExists') || msg.includes('already exists')) {
-          alreadyOnChain = true;
-          onChainId = ethers.keccak256(ethers.toUtf8Bytes(opts.id));
-          this.log.info(ctx, `Context graph "${opts.id}" already on-chain (${onChainId.slice(0, 16)}…) — creating local definition`);
-        } else {
-          this.log.warn(ctx, `On-chain registration for "${opts.id}" failed: ${msg}`);
-        }
-      }
-    }
-
-    // Insert local definition triples. Resolve the on-chain owner when the
-    // context graph already existed (so policy management uses the real owner).
     const gm = new GraphManager(this.store);
     const paranetUri = paranetDataGraphUri(opts.id);
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
-    let creator: string;
-    if (alreadyOnChain && typeof (this.chain as any).getContextGraphOwner === 'function') {
-      try {
-        const onChainOwner = await (this.chain as any).getContextGraphOwner(onChainId ?? opts.id);
-        creator = onChainOwner ? `did:dkg:agent:${onChainOwner}` : `did:dkg:agent:${this.peerId}`;
-      } catch {
-        creator = `did:dkg:agent:${this.peerId}`;
-      }
-    } else {
-      creator = `did:dkg:agent:${this.peerId}`;
-    }
 
+    // Bootstrap the minimal ontology definition. Do NOT write dkg:creator
+    // here — this is a local helper for both owned and subscribed CGs. The
+    // authoritative creator triple is written by createContextGraph() for
+    // CGs we own, and arrives via sync for CGs we subscribe to.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creator, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
     ];
-
-    if (onChainId) {
-      quads.push({
-        subject: paranetUri,
-        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
-        object: `"${onChainId}"`,
-        graph: ontologyGraph,
-      });
-    }
 
     if (opts.description) {
       quads.push({
@@ -2352,37 +2533,14 @@ export class DKGAgent {
       name: opts.name,
       subscribed: true,
       synced: true,
-      onChainId,
     });
 
-    this.log.info(ctx, `Ensured context graph "${opts.id}" locally (creator=${alreadyOnChain ? 'network' : 'self'})`);
+    this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
 
-    // Broadcast so peers learn about it
-    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-    const nquads = quads.map(q => {
-      const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-      return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
-    }).join('\n');
-
-    const msg = encodePublishRequest({
-      ual: `did:dkg:context-graph:${opts.id}`,
-      nquads: new TextEncoder().encode(nquads),
-      paranetId: SYSTEM_PARANETS.ONTOLOGY,
-      kas: [],
-      publisherIdentity: this.wallet.keypair.publicKey,
-      publisherAddress: '',
-      startKAId: 0,
-      endKAId: 0,
-      chainId: '',
-      publisherSignatureR: new Uint8Array(0),
-      publisherSignatureVs: new Uint8Array(0),
-    });
-
-    try {
-      await this.gossip.publish(ontologyTopic, msg);
-    } catch {
-      // No peers subscribed — ok during boot
-    }
+    // Do NOT broadcast ontology quads from ensureContextGraphLocal —
+    // this is a local bootstrapping helper. The real creator broadcasts
+    // via createContextGraph(). Broadcasting here would falsely claim
+    // dkg:creator = self for CGs we're merely subscribing to.
   }
 
   // ── ENDORSE ─���────────────────────────────────────────────────────────
@@ -3812,7 +3970,7 @@ export class DKGAgent {
       });
 
       if (!existing?.subscribed) {
-        this.subscribeToContextGraph(id, { trackSyncScope: false });
+        this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
       this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
@@ -3872,6 +4030,19 @@ export class DKGAgent {
         onChainId: p.contextGraphId,
       });
       this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+
+      // Persist the on-chain ID to the ontology graph so the publisher's
+      // VM registration guard can find it via RDF (it has no access to
+      // the in-memory subscribedContextGraphs map).
+      const cgUri = paranetDataGraphUri(p.name);
+      const ontoGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      await this.store.insert([{
+        subject: cgUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
+        object: `"${p.contextGraphId}"`,
+        graph: ontoGraph,
+      }]);
+
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }

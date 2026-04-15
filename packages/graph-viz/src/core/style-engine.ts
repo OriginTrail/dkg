@@ -33,6 +33,7 @@ export class StyleEngine {
     this._prefixManager = prefixManager;
     this._palette = palette ?? PALETTE_DARK;
     this._config = {
+      nodeColors: config?.nodeColors ?? {},
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
@@ -66,8 +67,17 @@ export class StyleEngine {
     return this._config;
   }
 
+  /** Update per-node color overrides (merges with existing) */
+  setNodeColors(colors: Record<string, string>): void {
+    this._config = { ...this._config, nodeColors: { ...this._config.nodeColors, ...colors } };
+  }
+
   /** Get the fill color for a node */
   getNodeColor(node: GraphNode): string {
+    // 0. Per-node color override (highest priority — used for trust-level coloring)
+    const nodeColor = this._config.nodeColors[node.id];
+    if (nodeColor) return nodeColor;
+
     // 1. Check per-class colors (user-supplied, using compact or full URIs)
     for (const type of node.types) {
       const compact = this._prefixManager.compact(type);

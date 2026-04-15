@@ -215,6 +215,18 @@ done
 
 #------------------------------------------------------------
 echo ""
+echo "--- Registering default CG on-chain (required for VM publish tests) ---"
+REG_DEFAULT=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" -d "{\"id\":\"$CONTEXT_GRAPH\"}")
+REG_DEF_ID=$(json_get "$REG_DEFAULT" registered)
+REG_DEF_OC=$(json_get "$REG_DEFAULT" onChainId)
+if [[ "$REG_DEF_ID" == "$CONTEXT_GRAPH" ]]; then
+  ok "Default CG '$CONTEXT_GRAPH' registered on-chain ($REG_DEF_OC)"
+else
+  warn "Default CG registration: $REG_DEFAULT (tests requiring VM publish may fail)"
+fi
+
+#------------------------------------------------------------
+echo ""
 echo "=== SECTION 2: Shared Memory Writes (free operations) ==="
 echo ""
 
@@ -1674,6 +1686,339 @@ if [[ "$SWM_ISO_CT" == "0" || "$SWM_ISO_CT" == "PARSE_ERR" ]]; then
 else
   warn "SWM view returned $SWM_ISO_CT bindings — may contain stale data"
 fi
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 26: Tri-Modal Memory (Conversation Turns) ==="
+echo ""
+
+MEMORY_CG="$CONTEXT_GRAPH"
+
+echo "--- 26a: Ingest a conversation turn via /api/memory/turn ---"
+TURN_MD="# Tri-Modal Memory Test\n\nThis turn tests the conversation ingest pipeline.\n\n## Key Concepts\n\n- Knowledge Assets share one UAL across text, graph, and vector\n- Conversation turns are stored as markdown files\n- The extraction pipeline derives RDF triples from markdown"
+TURN_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"markdown\":\"$TURN_MD\",
+  \"speaker\":\"devnet-test-agent\",
+  \"role\":\"assistant\"
+}")
+TURN_URI=$(json_get "$TURN_RESP" turnUri)
+TURN_HASH=$(json_get "$TURN_RESP" fileHash)
+TURN_LAYER=$(json_get "$TURN_RESP" layer)
+TURN_QUADS=$(json_get "$TURN_RESP" totalQuads)
+echo "  turnUri=$TURN_URI fileHash=$TURN_HASH layer=$TURN_LAYER quads=$TURN_QUADS"
+[[ "$TURN_URI" != "__NONE__" && "$TURN_URI" != "__ERR__" ]] && ok "Memory turn ingested: $TURN_URI" || fail "Memory turn ingest failed: ${TURN_RESP:0:300}"
+[[ "$TURN_HASH" != "__NONE__" && "$TURN_HASH" != "__ERR__" ]] && ok "Turn file hash returned ($TURN_HASH)" || fail "No turn file hash"
+[[ "$TURN_QUADS" != "__NONE__" && "$TURN_QUADS" != "0" ]] && ok "Turn generated $TURN_QUADS quads" || warn "Turn generated 0 quads"
+
+echo "--- 26b: Turn is queryable as ConversationTurn in SWM ---"
+MEMORY_SETTLE_S="${MEMORY_SETTLE_S:-3}"
+sleep "$MEMORY_SETTLE_S"
+TURN_TYPE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"ASK { <$TURN_URI> a <http://schema.org/ConversationTurn> }\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_TYPE_VAL=$(echo "$TURN_TYPE_Q" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null || echo "ERR")
+if [[ "$TURN_TYPE_VAL" == "yes" ]]; then
+  ok "Turn $TURN_URI is typed as ConversationTurn in SWM"
+elif [[ "$TURN_TYPE_VAL" == "ERR" ]]; then
+  fail "ConversationTurn type query returned unparseable response: ${TURN_TYPE_Q:0:200}"
+else
+  fail "Turn $TURN_URI not found as ConversationTurn in SWM"
+fi
+
+echo "--- 26c: Turn has schema:description quad ---"
+TURN_DESC_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?desc WHERE { <$TURN_URI> <http://schema.org/description> ?desc } LIMIT 1\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_DESC_CT=$(safe_bindings_count "$TURN_DESC_Q")
+if [[ "$TURN_DESC_CT" == "PARSE_ERR" ]]; then
+  fail "Turn description query returned unparseable response: ${TURN_DESC_Q:0:200}"
+elif [[ "$TURN_DESC_CT" -ge 1 ]]; then
+  ok "Turn has schema:description quad"
+else
+  warn "Turn missing schema:description ($TURN_DESC_CT)"
+fi
+
+echo "--- 26d: Turn has agent attribution ---"
+TURN_AGENT_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?agent WHERE { <$TURN_URI> <http://schema.org/agent> ?agent } LIMIT 1\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+TURN_AGENT_CT=$(safe_bindings_count "$TURN_AGENT_Q")
+if [[ "$TURN_AGENT_CT" == "PARSE_ERR" ]]; then
+  fail "Turn agent query returned unparseable response: ${TURN_AGENT_Q:0:200}"
+elif [[ "$TURN_AGENT_CT" -ge 1 ]]; then
+  ok "Turn has agent attribution"
+else
+  warn "Turn missing agent attribution ($TURN_AGENT_CT)"
+fi
+
+echo "--- 26e: Source file retrievable via /api/file ---"
+if [[ "$TURN_HASH" != "__NONE__" && "$TURN_HASH" != "__ERR__" ]]; then
+  FILE_CODE=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+    -H "Authorization: Bearer $AUTH" \
+    -o /dev/null -w "%{http_code}" \
+    "http://127.0.0.1:9201/api/file/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TURN_HASH', safe=''))")")
+  [[ "$FILE_CODE" == "200" ]] && ok "Source file retrievable (HTTP $FILE_CODE)" || fail "Source file not retrievable (HTTP $FILE_CODE)"
+else
+  skip "26e: no file hash to test"
+fi
+
+echo "--- 26f: Ingest a second turn with session linking ---"
+TURN2_MD="# Follow-up Discussion\n\nThis is a second turn in the same session to test session linking."
+SESSION_URI="urn:dkg:session:devnet-test-$(date +%s)"
+TURN2_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"markdown\":\"$TURN2_MD\",
+  \"speaker\":\"devnet-test-user\",
+  \"role\":\"user\",
+  \"sessionUri\":\"$SESSION_URI\"
+}")
+TURN2_URI=$(json_get "$TURN2_RESP" turnUri)
+TURN2_SESSION=$(json_get "$TURN2_RESP" sessionUri)
+[[ "$TURN2_URI" != "__NONE__" && "$TURN2_URI" != "__ERR__" ]] && ok "Second turn ingested: $TURN2_URI" || fail "Second turn ingest failed: ${TURN2_RESP:0:200}"
+[[ "$TURN2_SESSION" == "$SESSION_URI" ]] && ok "Session URI echoed back correctly" || warn "Session URI mismatch (expected=$SESSION_URI, got=$TURN2_SESSION)"
+
+echo "--- 26g: Session linking quads present ---"
+sleep "$LOCAL_SETTLE_S"
+SESSION_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?turn WHERE { ?turn <http://schema.org/isPartOf> <$SESSION_URI> } LIMIT 5\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"view\":\"shared-working-memory\"
+}")
+SESSION_CT=$(safe_bindings_count "$SESSION_Q")
+if [[ "$SESSION_CT" == "PARSE_ERR" ]]; then
+  fail "Session linking query returned unparseable response: ${SESSION_Q:0:200}"
+elif [[ "$SESSION_CT" -ge 1 ]]; then
+  ok "Session linking quads present ($SESSION_CT turns linked)"
+else
+  warn "Session linking quads not found ($SESSION_CT)"
+fi
+
+echo "--- 26h: /api/memory/search — SPARQL text match ---"
+SEARCH_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+  \"query\":\"Tri-Modal Memory\",
+  \"contextGraphId\":\"$MEMORY_CG\",
+  \"limit\":5,
+  \"memoryLayers\":[\"swm\"]
+}")
+SEARCH_CT=$(echo "$SEARCH_RESP" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print(len(d.get("results",[])))
+except: print("ERR")
+' 2>/dev/null || echo "ERR")
+echo "  Search results: $SEARCH_CT"
+if [[ "$SEARCH_CT" == "ERR" ]]; then
+  fail "Memory search returned unparseable response: ${SEARCH_RESP:0:200}"
+elif [[ "$SEARCH_CT" -ge 1 ]]; then
+  ok "Memory search returned $SEARCH_CT results for 'Tri-Modal Memory'"
+else
+  fail "Memory search returned 0 results — ingested turn not searchable via SPARQL/text"
+fi
+
+echo "--- 26i: Memory search scoped — no cross-CG leakage ---"
+FAKE_CG="nonexistent-memory-cg-$(date +%s)"
+LEAK_RESP=$(c -X POST "http://127.0.0.1:9201/api/memory/search" -d "{
+  \"query\":\"Tri-Modal Memory\",
+  \"contextGraphId\":\"$FAKE_CG\",
+  \"limit\":5
+}")
+LEAK_CT=$(echo "$LEAK_RESP" | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin)
+  print(len(d.get("results",[])))
+except: print("ERR")
+' 2>/dev/null || echo "ERR")
+if [[ "$LEAK_CT" == "ERR" ]]; then
+  warn "Cross-CG search returned unparseable response: ${LEAK_RESP:0:200}"
+elif [[ "$LEAK_CT" -eq 0 ]]; then
+  ok "Memory search correctly scoped — no cross-CG leakage"
+else
+  fail "Memory search leaked $LEAK_CT results to wrong CG"
+fi
+
+echo "--- 26j: Invalid sessionUri rejected with 400 ---"
+BAD_SESSION_RESP=$(curl -sS --max-time "$DEVNET_CURL_TIMEOUT" --connect-timeout "$DEVNET_CURL_CONNECT_TIMEOUT" \
+  -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" \
+  -o /dev/null -w "%{http_code}" \
+  -X POST "http://127.0.0.1:9201/api/memory/turn" -d "{
+    \"contextGraphId\":\"$MEMORY_CG\",
+    \"markdown\":\"test\",
+    \"speaker\":\"test\",
+    \"role\":\"user\",
+    \"sessionUri\":\"has spaces and {braces}\"
+  }")
+[[ "$BAD_SESSION_RESP" == "400" ]] && ok "Invalid sessionUri rejected (HTTP 400)" || fail "Invalid sessionUri returned HTTP $BAD_SESSION_RESP (expected 400)"
+
+echo "--- 26k: Turn gossips to other nodes via SWM ---"
+sleep "$GOSSIP_WAIT_S"
+for p in 9202 9203; do
+  GOS_TURN=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
+    \"sparql\":\"SELECT (COUNT(*) AS ?c) WHERE { ?s a <http://schema.org/ConversationTurn> . FILTER(CONTAINS(STR(?s),'turn/')) }\",
+    \"contextGraphId\":\"$MEMORY_CG\",
+    \"view\":\"shared-working-memory\"
+  }")
+  GOS_CT=$(echo "$GOS_TURN" | python3 -c "
+import sys,json,re
+b=json.load(sys.stdin).get('result',{}).get('bindings',[])
+if b:
+  v=str(b[0].get('c','0'))
+  m=re.search(r'(\d+)',v)
+  print(m.group(1) if m else '0')
+else: print('0')
+" 2>/dev/null)
+  [[ "$GOS_CT" -ge 1 ]] && ok "Node $p has $GOS_CT conversation turns via gossip" || warn "Node $p has $GOS_CT turns (gossip pending?)"
+done
+
+#------------------------------------------------------------
+echo ""
+echo "=== SECTION 27: Free CG Creation & Registration ==="
+echo ""
+
+FREE_CG_ID="free-cg-test-$(date +%s)"
+FREE_CG_NAME="Free CG Test"
+
+echo "--- 27a: Create a free CG (no chain tx) ---"
+FREE_CG_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
+  \"id\":\"$FREE_CG_ID\",
+  \"name\":\"$FREE_CG_NAME\",
+  \"description\":\"Test CG created for free (no chain)\"
+}")
+FREE_CG_CREATED=$(json_get "$FREE_CG_RESP" created)
+FREE_CG_URI=$(json_get "$FREE_CG_RESP" uri)
+if [[ "$FREE_CG_CREATED" == "$FREE_CG_ID" ]]; then
+  ok "Free CG created: id=$FREE_CG_CREATED uri=$FREE_CG_URI"
+else
+  fail "Free CG creation failed: $FREE_CG_RESP"
+fi
+
+echo "--- 27b: Verify free CG appears in list ---"
+LIST_RESP=$(c "http://127.0.0.1:9201/api/context-graph/list")
+LIST_HAS_CG=$(echo "$LIST_RESP" | python3 -c "
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  cgs=d.get('contextGraphs',[])
+  found=any(c.get('id')=='$FREE_CG_ID' for c in cgs)
+  print('true' if found else 'false')
+except: print('false')
+" 2>/dev/null)
+[[ "$LIST_HAS_CG" == "true" ]] && ok "Free CG found in context-graph list" || fail "Free CG not in list"
+
+echo "--- 27c: Write to SWM on free CG (should work without chain) ---"
+SWM_FREE_RESP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/write" -d "{
+  \"contextGraphId\":\"$FREE_CG_ID\",
+  \"quads\":[
+    $(ql "http://example.org/entity/free-test-1" "http://schema.org/name" "FreeCGEntity"),
+    $(q  "http://example.org/entity/free-test-1" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://schema.org/Thing")
+  ]
+}")
+SWM_FREE_OK=$(json_get "$SWM_FREE_RESP" triplesWritten)
+if [[ "$SWM_FREE_OK" != "__NONE__" && "$SWM_FREE_OK" != "0" && "$SWM_FREE_OK" != "__ERR__" ]]; then
+  ok "SWM write to free CG succeeded ($SWM_FREE_OK triples)"
+else
+  fail "SWM write to free CG failed: $SWM_FREE_RESP"
+fi
+
+echo "--- 27d: Query SWM on free CG ---"
+sleep "$LOCAL_SETTLE_S"
+SWM_FREE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+  \"sparql\":\"SELECT ?name WHERE { ?s <http://schema.org/name> ?name }\",
+  \"contextGraphId\":\"$FREE_CG_ID\",
+  \"view\":\"shared-working-memory\"
+}")
+SWM_FREE_QC=$(safe_bindings_count "$SWM_FREE_Q")
+if [[ "$SWM_FREE_QC" == "PARSE_ERR" ]]; then
+  fail "SWM query on free CG returned unparseable response"
+elif [[ "$SWM_FREE_QC" -ge 1 ]]; then
+  ok "SWM query on free CG returns $SWM_FREE_QC binding(s)"
+else
+  fail "SWM query on free CG returns 0 bindings"
+fi
+
+echo "--- 27e: VM publish on unregistered CG should fail ---"
+http_post_capture "http://127.0.0.1:9201/api/shared-memory/publish" \
+  "{\"contextGraphId\":\"$FREE_CG_ID\"}" \
+  VM_GUARD_BODY VM_GUARD_CODE
+if [[ "$VM_GUARD_CODE" == "500" ]] && echo "$VM_GUARD_BODY" | grep -qi "not registered"; then
+  ok "VM publish blocked on unregistered CG (HTTP $VM_GUARD_CODE)"
+elif [[ "$VM_GUARD_CODE" =~ ^[45] ]]; then
+  ok "VM publish blocked on unregistered CG (HTTP $VM_GUARD_CODE)"
+else
+  fail "VM publish should be blocked on unregistered CG (HTTP $VM_GUARD_CODE): ${VM_GUARD_BODY:0:200}"
+fi
+
+echo "--- 27f: Register CG on-chain ---"
+REG_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" -d "{
+  \"id\":\"$FREE_CG_ID\"
+}")
+REG_ONCHAIN=$(json_get "$REG_RESP" onChainId)
+REG_ID=$(json_get "$REG_RESP" registered)
+if [[ "$REG_ID" == "$FREE_CG_ID" && "$REG_ONCHAIN" != "__NONE__" && "$REG_ONCHAIN" != "__ERR__" ]]; then
+  ok "CG registered on-chain: onChainId=$REG_ONCHAIN"
+else
+  fail "CG registration failed: $REG_RESP"
+fi
+
+echo "--- 27g: Double-register should return 409 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/register" \
+  "{\"id\":\"$FREE_CG_ID\"}" \
+  DOUBLE_REG_BODY DOUBLE_REG_CODE
+if [[ "$DOUBLE_REG_CODE" == "409" ]]; then
+  ok "Double-register returns 409 Conflict"
+else
+  warn "Double-register returned HTTP $DOUBLE_REG_CODE (expected 409): ${DOUBLE_REG_BODY:0:200}"
+fi
+
+echo "--- 27h: VM publish after registration should work ---"
+PUB_RESP=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
+  \"contextGraphId\":\"$FREE_CG_ID\"
+}")
+PUB_ST=$(json_get "$PUB_RESP" status)
+if [[ "$PUB_ST" == "confirmed" || "$PUB_ST" == "finalized" || "$PUB_ST" == "tentative" ]]; then
+  ok "VM publish after registration succeeded (status=$PUB_ST)"
+else
+  fail "VM publish after registration failed (status=$PUB_ST): ${PUB_RESP:0:300}"
+fi
+
+echo "--- 27i: Create curated CG with allowedPeers ---"
+# Fetch real peer IDs from the running devnet nodes
+NODE1_PEER=$(json_get "$(c "http://127.0.0.1:9201/api/info")" peerId)
+NODE2_PEER=$(json_get "$(c "http://127.0.0.1:9202/api/info")" peerId)
+CURATED_CG_ID="curated-cg-test-$(date +%s)"
+CURATED_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
+  \"id\":\"$CURATED_CG_ID\",
+  \"name\":\"Curated Test CG\",
+  \"allowedPeers\":[\"$NODE1_PEER\",\"$NODE2_PEER\"]
+}")
+CURATED_OK=$(json_get "$CURATED_RESP" created)
+[[ "$CURATED_OK" == "$CURATED_CG_ID" ]] && ok "Curated CG created with allowedPeers" || fail "Curated CG creation: $CURATED_RESP"
+
+echo "--- 27j: Invite peer to context graph ---"
+INVITE_RESP=$(c -X POST "http://127.0.0.1:9201/api/context-graph/invite" -d "{
+  \"contextGraphId\":\"$CURATED_CG_ID\",
+  \"peerId\":\"$NODE2_PEER\"
+}")
+INVITE_OK=$(json_get "$INVITE_RESP" invited)
+[[ "$INVITE_OK" == "$NODE2_PEER" ]] && ok "Peer invited to curated CG" || fail "Peer invite: $INVITE_RESP"
+
+echo "--- 27k: Register non-existent CG should return 404 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/register" \
+  "{\"id\":\"does-not-exist-$(date +%s)\"}" \
+  REG404_BODY REG404_CODE
+[[ "$REG404_CODE" == "404" ]] && ok "Register non-existent CG returns 404" || warn "Register non-existent CG returned HTTP $REG404_CODE (expected 404)"
+
+echo "--- 27l: Create duplicate CG should return 409 ---"
+http_post_capture "http://127.0.0.1:9201/api/context-graph/create" \
+  "{\"id\":\"$FREE_CG_ID\",\"name\":\"duplicate\"}" \
+  DUP_BODY DUP_CODE
+[[ "$DUP_CODE" == "409" ]] && ok "Duplicate CG creation returns 409" || warn "Duplicate CG returned HTTP $DUP_CODE (expected 409): ${DUP_BODY:0:200}"
 
 #------------------------------------------------------------
 echo ""

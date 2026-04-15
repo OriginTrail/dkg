@@ -1,15 +1,72 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { executeQuery, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 
+const RdfGraph = lazy(() =>
+  import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
+);
+const NodePanel = lazy(() =>
+  import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.NodePanel }))
+);
+
 type MemoryLayer = 'wm' | 'swm' | 'vm';
+type ViewMode = 'table' | 'graph';
 
 const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: string; description: string }> = {
   wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: '◇', description: 'Private agent drafts. Fast local storage.' },
   swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
   vm: { label: 'Verified Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
 };
+
+const GRAPH_OPTIONS = {
+  labelMode: 'humanized' as const,
+  renderer: '2d' as const,
+  labels: {
+    predicates: [
+      'http://schema.org/text',
+      'http://schema.org/name',
+      'http://www.w3.org/2000/01/rdf-schema#label',
+      'http://purl.org/dc/terms/title',
+    ],
+  },
+  style: {
+    classColors: {
+      'http://schema.org/Person': '#f472b6',
+      'http://schema.org/Organization': '#fb923c',
+      'http://schema.org/Place': '#34d399',
+      'http://schema.org/Product': '#c084fc',
+      'http://schema.org/Event': '#facc15',
+      'http://schema.org/CreativeWork': '#7dd3fc',
+      'http://schema.org/Thing': '#94a3b8',
+    },
+    defaultNodeColor: '#94a3b8',
+    defaultEdgeColor: '#5f8598',
+    edgeWidth: 0.9,
+  },
+  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
+  focus: { maxNodes: 3000, hops: 999 },
+};
+
+const TABLE_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <line x1="3" y1="9" x2="21" y2="9" />
+    <line x1="3" y1="15" x2="21" y2="15" />
+    <line x1="9" y1="3" x2="9" y2="21" />
+  </svg>
+);
+
+const GRAPH_ICON = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="18" cy="6" r="3" />
+    <circle cx="6" cy="18" r="3" />
+    <circle cx="18" cy="18" r="3" />
+    <line x1="8.5" y1="7.5" x2="15.5" y2="16.5" />
+    <line x1="15.5" y1="7.5" x2="8.5" y2="16.5" />
+  </svg>
+);
 
 interface MemoryLayerViewProps {
   layer: MemoryLayer;
@@ -18,27 +75,102 @@ interface MemoryLayerViewProps {
 
 export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps) {
   const meta = LAYER_META[layer];
-  const [customQuery, setCustomQuery] = useState('');
+  const [viewMode, setViewMode] = useState<ViewMode>('graph');
+  const [draftQuery, setDraftQuery] = useState('');
+  const [activeQuery, setActiveQuery] = useState('');
+  const [draftSearch, setDraftSearch] = useState('');
+  const [draftField, setDraftField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
+  const [draftLimit, setDraftLimit] = useState(50);
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [appliedField, setAppliedField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
+  const [appliedLimit, setAppliedLimit] = useState(50);
+  const [showAdvancedQuery, setShowAdvancedQuery] = useState(layer !== 'vm');
+
+  const prevLayerRef = React.useRef(layer);
+  React.useEffect(() => {
+    if (prevLayerRef.current !== layer) {
+      prevLayerRef.current = layer;
+      setShowAdvancedQuery(layer !== 'vm');
+      setDraftQuery('');
+      setActiveQuery('');
+      setDraftSearch('');
+      setDraftField('any');
+      setDraftLimit(50);
+      setAppliedSearch('');
+      setAppliedField('any');
+      setAppliedLimit(50);
+    }
+  }, [layer]);
 
   const defaultSparql = useMemo(() => {
     if (layer === 'wm') {
-      return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } } LIMIT 200`;
+      const cgUri = `did:dkg:context-graph:${contextGraphId}`;
+      return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1000`;
     }
-    return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 50`;
-  }, [layer]);
+    if (layer === 'vm') {
+      return buildVerifiedMemorySearchQuery({
+        query: appliedSearch,
+        field: appliedField,
+        limit: appliedLimit,
+      });
+    }
+    return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
+  }, [contextGraphId, layer, appliedField, appliedLimit, appliedSearch]);
 
-  const sparql = customQuery || defaultSparql;
+  const sparql = activeQuery || defaultSparql;
 
   const graphSuffix = layer === 'swm' ? '_shared_memory' as const : undefined;
   const includeShared = layer === 'swm';
+  const queryView = layer === 'vm' ? 'verified-memory' as const : undefined;
 
   const { data, loading, error, refresh } = useFetch(
-    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix),
-    [sparql, contextGraphId, layer],
+    () => executeQuery(sparql, contextGraphId, includeShared, graphSuffix, queryView),
+    [sparql, contextGraphId, includeShared, graphSuffix, queryView],
     0
   );
 
+  const runQuery = useCallback(() => {
+    const next = draftQuery.trim();
+    if (next === activeQuery) {
+      refresh();
+      return;
+    }
+    setActiveQuery(next);
+  }, [activeQuery, draftQuery, refresh]);
+
+  const runVerifiedSearch = useCallback(() => {
+    const changed =
+      draftSearch !== appliedSearch ||
+      draftField !== appliedField ||
+      draftLimit !== appliedLimit;
+    if (changed) {
+      setAppliedSearch(draftSearch);
+      setAppliedField(draftField);
+      setAppliedLimit(draftLimit);
+    }
+    if (activeQuery) {
+      setActiveQuery('');
+      return;
+    }
+    if (!changed) refresh();
+  }, [activeQuery, appliedField, appliedLimit, appliedSearch, draftField, draftLimit, draftSearch, refresh]);
+
   const results = data?.result?.bindings ?? data?.results?.bindings ?? [];
+
+  const triples = useMemo(() =>
+    results.map((row: any) => ({
+      subject: bv(row.s) ?? '',
+      predicate: bv(row.p) ?? '',
+      object: bv(row.o) ?? '',
+    })).filter((t: any) => t.subject && t.predicate && t.object),
+    [results]
+  );
+
+  const handleNodeClick = useCallback((node: any) => {
+    if (node?.id) {
+      setActiveQuery(`SELECT (<${node.id}> AS ?s) ?p ?o WHERE { <${node.id}> ?p ?o } LIMIT 100`);
+    }
+  }, []);
 
   return (
     <div className="v10-memory-layer-view">
@@ -58,19 +190,100 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
         <PublishPanel contextGraphId={contextGraphId} onPublished={refresh} />
       )}
 
-      <div className="v10-mlv-query-bar">
-        <input
-          type="text"
-          className="v10-mlv-query-input"
-          placeholder="Custom SPARQL query..."
-          value={customQuery}
-          onChange={(e) => setCustomQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') refresh(); }}
-        />
-        <button className="v10-mlv-run-btn" onClick={refresh}>
-          Run
-        </button>
-      </div>
+      {layer === 'vm' && (
+        <div className="v10-vm-search-panel">
+          <div className="v10-vm-search-header">
+            <div>
+              <div className="v10-vm-search-title">Search Verified Memory</div>
+              <div className="v10-vm-search-desc">
+                Search published triples by subject, predicate, object, or across all fields.
+              </div>
+            </div>
+            <button
+              className="v10-vm-search-toggle"
+              type="button"
+              onClick={() => setShowAdvancedQuery((prev) => !prev)}
+            >
+              {showAdvancedQuery ? 'Hide SPARQL' : 'Advanced SPARQL'}
+            </button>
+          </div>
+
+          <div className="v10-vm-search-controls">
+            <input
+              type="text"
+              className="v10-mlv-query-input"
+              placeholder="Search verified memory..."
+              value={draftSearch}
+              onChange={(e) => setDraftSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
+            />
+            <select
+              className="v10-vm-search-select"
+              value={draftField}
+              onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
+            >
+              <option value="any">Any field</option>
+              <option value="subject">Subject</option>
+              <option value="predicate">Predicate</option>
+              <option value="object">Object</option>
+            </select>
+            <select
+              className="v10-vm-search-select"
+              value={String(draftLimit)}
+              onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
+            >
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="200">200 rows</option>
+            </select>
+            <button className="v10-mlv-run-btn" onClick={runVerifiedSearch}>
+              Search
+            </button>
+          </div>
+        </div>
+      )}
+
+      {(layer !== 'vm' || showAdvancedQuery) && (
+        <div className="v10-mlv-query-bar">
+          <input
+            type="text"
+            className="v10-mlv-query-input"
+            placeholder="Custom SPARQL query..."
+            value={draftQuery}
+            onChange={(e) => setDraftQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
+          />
+          <button className="v10-mlv-run-btn" onClick={runQuery}>
+            Run
+          </button>
+          {activeQuery && (
+            <button
+              className="v10-mlv-clear-btn"
+              onClick={() => setActiveQuery('')}
+              title="Reset to full layer overview"
+            >
+              Reset
+            </button>
+          )}
+          <div className="v10-mlv-view-toggle">
+            <button
+              className={`v10-mlv-toggle-btn ${viewMode === 'table' ? 'active' : ''}`}
+              onClick={() => setViewMode('table')}
+              title="Table view"
+            >
+              {TABLE_ICON}
+            </button>
+            <button
+              className={`v10-mlv-toggle-btn ${viewMode === 'graph' ? 'active' : ''}`}
+              onClick={() => setViewMode('graph')}
+              title="Graph view"
+            >
+              {GRAPH_ICON}
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading && <p className="v10-mlv-status">Loading...</p>}
       {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
@@ -86,8 +299,9 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
         </div>
       )}
 
-      {results.length > 0 && (
+      {!loading && results.length > 0 && viewMode === 'table' && (
         <div className="v10-mlv-table-wrap">
+          <div className="v10-mlv-result-count">{results.length} triples</div>
           <table className="v10-mlv-table">
             <thead>
               <tr>
@@ -106,6 +320,34 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {!loading && triples.length > 0 && viewMode === 'graph' && (
+        <div className="v10-mlv-graph-container">
+          <div className="v10-mlv-graph-info">
+            <span>{triples.length} triples</span>
+            {activeQuery && <span className="v10-mlv-graph-info-custom">filtered</span>}
+          </div>
+          <Suspense fallback={<div className="v10-mlv-graph-loading">Loading graph renderer...</div>}>
+            <RdfGraph
+              data={triples}
+              format="triples"
+              options={GRAPH_OPTIONS}
+              style={{ width: '100%', height: '100%' }}
+              onNodeClick={handleNodeClick}
+              initialFit
+            >
+              <NodePanel
+                className="v10-mlv-node-panel"
+                showUri
+                showTypes
+                showProperties
+                showMetadata={false}
+                maxValueLength={150}
+              />
+            </RdfGraph>
+          </Suspense>
         </div>
       )}
     </div>
@@ -407,4 +649,34 @@ function shorten(uri?: string): string {
   const slash = uri.lastIndexOf('/');
   const cut = Math.max(hash, slash);
   return cut >= 0 ? uri.slice(cut + 1) : uri;
+}
+
+function buildVerifiedMemorySearchQuery(opts: {
+  query: string;
+  field: 'any' | 'subject' | 'predicate' | 'object';
+  limit: number;
+}): string {
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 50;
+  const trimmed = opts.query.trim();
+  if (!trimmed) {
+    return `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT ${limit}`;
+  }
+  const needle = escapeSparqlString(trimmed.toLowerCase());
+  const filters = {
+    subject: `CONTAINS(LCASE(STR(?s)), "${needle}")`,
+    predicate: `CONTAINS(LCASE(STR(?p)), "${needle}")`,
+    object: `CONTAINS(LCASE(STR(?o)), "${needle}")`,
+  };
+  const filter = opts.field === 'any'
+    ? `(${filters.subject} || ${filters.predicate} || ${filters.object})`
+    : filters[opts.field];
+  return `SELECT ?s ?p ?o WHERE { ?s ?p ?o . FILTER(${filter}) } LIMIT ${limit}`;
+}
+
+function escapeSparqlString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
 }

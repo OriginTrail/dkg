@@ -1,15 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fetchMemorySessionGraphDelta, streamChatMessage, streamChatPersistenceEvents } from '../src/ui/api.js';
+import { fetchMemorySessionGraphDelta, streamLocalAgentChat, streamOpenClawLocalChat } from '../src/ui/api.js';
 
-describe('ui chat stream api', () => {
-  it('parses SSE frames and resolves final payload', async () => {
+describe('ui local-agent stream api', () => {
+  it('parses OpenClaw SSE frames and resolves the final payload', async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"type":"meta","sessionId":"s1"}\n\n'));
         controller.enqueue(encoder.encode('data: {"type":"text_delta","delta":"Hel"}\n\n'));
         controller.enqueue(encoder.encode('data: {"type":"text_delta","delta":"lo"}\n\n'));
-        controller.enqueue(encoder.encode('data: {"type":"final","reply":"Hello","sessionId":"s1","responseMode":"streaming"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"final","text":"Hello","correlationId":"c1"}\n\n'));
         controller.close();
       },
     });
@@ -21,42 +20,40 @@ describe('ui chat stream api', () => {
     );
 
     const events: string[] = [];
-    const res = await streamChatMessage('hi', {
+    const res = await streamOpenClawLocalChat('hi', {
       onEvent: (event) => events.push(event.type),
     });
 
-    expect(res.reply).toBe('Hello');
-    expect(res.sessionId).toBe('s1');
-    expect(events).toContain('meta');
-    expect(events).toContain('text_delta');
-    expect(events).toContain('final');
+    expect(res.text).toBe('Hello');
+    expect(res.correlationId).toBe('c1');
+    expect(events).toEqual(['text_delta', 'text_delta', 'final']);
     fetchSpy.mockRestore();
   });
 
-  it('falls back to plain JSON payload when endpoint responds in blocking mode', async () => {
+  it('falls back to plain JSON payload when the OpenClaw stream endpoint responds in blocking mode', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(
-        JSON.stringify({ reply: 'Blocking response', sessionId: 's2', responseMode: 'blocking' }),
+        JSON.stringify({ text: 'Blocking response', correlationId: 'c2' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),
     );
 
     const events: string[] = [];
-    const res = await streamChatMessage('hello', {
+    const res = await streamOpenClawLocalChat('hello', {
       onEvent: (event) => events.push(event.type),
     });
 
-    expect(res.reply).toBe('Blocking response');
-    expect(res.responseMode).toBe('blocking');
+    expect(res.text).toBe('Blocking response');
+    expect(res.correlationId).toBe('c2');
     expect(events).toEqual(['final']);
     fetchSpy.mockRestore();
   });
 
-  it('throws when stream emits error event', async () => {
+  it('throws when the OpenClaw stream emits an error event', async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode('data: {"type":"error","error":"provider unavailable"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"error","error":"bridge unavailable"}\n\n'));
         controller.close();
       },
     });
@@ -67,32 +64,7 @@ describe('ui chat stream api', () => {
       }),
     );
 
-    await expect(streamChatMessage('hello')).rejects.toThrow('provider unavailable');
-    fetchSpy.mockRestore();
-  });
-
-  it('parses persistence SSE status and health events', async () => {
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(encoder.encode('data: {"type":"persist_health","ts":1,"pending":2,"inProgress":0,"stored":4,"failed":0,"overduePending":0,"oldestPendingAgeMs":12}\n\n'));
-        controller.enqueue(encoder.encode('data: {"type":"persist_status","turnId":"t1","sessionId":"s1","status":"stored","attempts":1,"maxAttempts":4,"queuedAt":1,"updatedAt":2,"storeMs":8}\n\n'));
-        controller.close();
-      },
-    });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(stream, {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      }),
-    );
-
-    const events: string[] = [];
-    await streamChatPersistenceEvents({
-      onEvent: (event) => events.push(event.type),
-    });
-
-    expect(events).toEqual(['persist_health', 'persist_status']);
+    await expect(streamOpenClawLocalChat('hello')).rejects.toThrow('bridge unavailable');
     fetchSpy.mockRestore();
   });
 
@@ -120,6 +92,37 @@ describe('ui chat stream api', () => {
     const res = await fetchMemorySessionGraphDelta('s1', 't2', { baseTurnId: 't1' });
     expect(res.mode).toBe('delta');
     expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/api/memory/sessions/s1/graph-delta?turnId=t2&baseTurnId=t1');
+    fetchSpy.mockRestore();
+  });
+
+  it('forwards attachment refs through the generic local-agent chat transport', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ text: 'Attached response', correlationId: 'c3' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const attachments = [{
+      id: 'att-1',
+      fileName: 'notes.md',
+      contextGraphId: 'project-1',
+      assertionName: 'assert-1',
+      assertionUri: 'urn:dkg:assertion:1',
+      fileHash: 'abc123',
+      detectedContentType: 'text/markdown',
+      extractionStatus: 'completed' as const,
+      tripleCount: 12,
+    }];
+
+    const result = await streamLocalAgentChat('openclaw', 'hello', {
+      attachments,
+    });
+
+    expect(result.text).toBe('Attached response');
+    const payload = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    expect(payload.attachmentRefs).toEqual(attachments);
+    expect(payload.text).toBe('hello');
     fetchSpy.mockRestore();
   });
 });

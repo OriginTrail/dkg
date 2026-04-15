@@ -31,7 +31,6 @@ describe('dkg_list_context_graphs tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -58,7 +57,7 @@ describe('dkg_list_context_graphs tool', () => {
 
     expect(parsed.contextGraphs).toEqual(SAMPLE_CONTEXT_GRAPHS);
     expect(parsed.count).toBe(2);
-    expect(fetchSpy.mock.calls[1][0]).toBe('http://localhost:9200/api/context-graph/list');
+    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
   });
 
   it('returns error when daemon request fails', async () => {
@@ -88,7 +87,6 @@ describe('dkg_status tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -145,7 +143,6 @@ describe('dkg_publish tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -169,7 +166,7 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaCount).toBe(1);
     expect(parsed.quadsPublished).toBe(2);
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(writeBody.contextGraphId).toBe('testing');
     expect(writeBody.quads).toHaveLength(2);
     expect(writeBody.quads[0].subject).toBe('https://example.org/wine');
@@ -187,7 +184,7 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-uri', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
   });
 
@@ -207,7 +204,7 @@ describe('dkg_publish tool', () => {
 
     expect(parsed.quadsPublished).toBe(3);
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
     expect(writeBody.quads[1].object).toBe('"Cabernet"');
     expect(writeBody.quads[2].object).toBe('urn:winemaker:alice');
@@ -219,7 +216,7 @@ describe('dkg_publish tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('non-empty array');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
   });
 
   it('returns error for missing quads', async () => {
@@ -241,7 +238,7 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-esc', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
@@ -256,7 +253,7 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(writeBody.quads[0].graph).toBe('urn:my-graph');
   });
 });
@@ -266,7 +263,6 @@ describe('dkg_query tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -284,7 +280,7 @@ describe('dkg_query tool', () => {
 
     expect(parsed.result.bindings).toHaveLength(1);
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.sparql).toContain('SELECT');
     expect(body.contextGraphId).toBe('testing');
   });
@@ -297,7 +293,7 @@ describe('dkg_query tool', () => {
     const tool = findTool('dkg_query');
     await tool.execute('call-2', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.contextGraphId).toBeUndefined();
   });
 
@@ -309,7 +305,7 @@ describe('dkg_query tool', () => {
     const tool = findTool('dkg_query');
     await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: 'true' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(true);
   });
 
@@ -321,7 +317,7 @@ describe('dkg_query tool', () => {
     const tool = findTool('dkg_query');
     await tool.execute('call-4', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBeUndefined();
   });
 });
@@ -331,7 +327,6 @@ describe('dkg_context_graph_create tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -358,7 +353,7 @@ describe('dkg_context_graph_create tool', () => {
     expect(parsed.created).toBe('my-research');
     expect(parsed.uri).toBe('did:dkg:context-graph:my-research');
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
     expect(body.description).toBe('A context graph');
@@ -375,7 +370,7 @@ describe('dkg_context_graph_create tool', () => {
 
     expect(parsed.created).toBe('my-research-paranet');
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.id).toBe('my-research-paranet');
     expect(body.name).toBe('My Research Paranet');
   });
@@ -388,7 +383,7 @@ describe('dkg_context_graph_create tool', () => {
     const tool = findTool('dkg_context_graph_create');
     await tool.execute('call-special', { name: "Alice's Data (2024)" });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.id).toBe('alice-s-data-2024');
   });
 
@@ -418,7 +413,7 @@ describe('dkg_context_graph_create tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.created).toBe('test');
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.id).toBe('test');
   });
 
@@ -466,7 +461,6 @@ describe('dkg_subscribe tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -513,7 +507,7 @@ describe('dkg_subscribe tool', () => {
     const tool = findTool('dkg_subscribe');
     await tool.execute('call-3', { context_graph_id: 'p1', include_shared_memory: 'false' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[1][1]?.body as string);
+    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(false);
   });
 });
@@ -523,7 +517,6 @@ describe('dkg_wallet_balances tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -572,7 +565,6 @@ describe('dkg_publish SWM-first flow', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -593,10 +585,10 @@ describe('dkg_publish SWM-first flow', () => {
     expect(parsed.kcId).toBe('kc-1');
     expect(parsed.quadsPublished).toBe(1);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(3);
-    const writeUrl = fetchSpy.mock.calls[1][0] as string;
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const writeUrl = fetchSpy.mock.calls[0][0] as string;
     expect(writeUrl).toContain('/api/shared-memory/write');
-    const pubUrl = fetchSpy.mock.calls[2][0] as string;
+    const pubUrl = fetchSpy.mock.calls[1][0] as string;
     expect(pubUrl).toContain('/api/shared-memory/publish');
   });
 
@@ -618,7 +610,6 @@ describe('dkg_read_messages tool', () => {
 
   beforeEach(() => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce(new Response('{}', { status: 200 }));
   });
 
   afterEach(() => {
@@ -633,7 +624,7 @@ describe('dkg_read_messages tool', () => {
     const tool = findTool('dkg_read_messages');
     await tool.execute('call-1', { peer: 'agent-bob', limit: '10', since: '1710000000000' });
 
-    const url = fetchSpy.mock.calls[1][0] as string;
+    const url = fetchSpy.mock.calls[0][0] as string;
     expect(url).toContain('peer=agent-bob');
     expect(url).toContain('limit=10');
     expect(url).toContain('since=1710000000000');
@@ -648,7 +639,7 @@ describe('dkg_read_messages tool', () => {
     await tool.execute('call-2', { limit: 'abc', since: '' });
 
     // Non-numeric values should not appear in URL
-    const url = fetchSpy.mock.calls[1][0] as string;
+    const url = fetchSpy.mock.calls[0][0] as string;
     expect(url).not.toContain('limit=');
     expect(url).not.toContain('since=');
   });

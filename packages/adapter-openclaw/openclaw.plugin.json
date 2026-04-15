@@ -1,39 +1,53 @@
 {
   "id": "adapter-openclaw",
-  "name": "DKG Node — Decentralized Knowledge Graph",
+  "name": "DKG Node UI Bridge",
   "version": "0.0.1",
-  "description": "Connects your OpenClaw agent to a DKG V9 node. Enables verifiable memory, publishing knowledge, querying the graph, discovering agents, and invoking remote skills over a decentralized P2P network.",
+  "description": "Connects a local OpenClaw agent to a DKG V10 node for node-backed chat, memory, and agent-network capabilities.",
+  "channels": ["dkg-ui"],
   "configSchema": {
     "type": "object",
     "properties": {
-      "daemonUrl": { "type": "string", "default": "http://127.0.0.1:9200", "description": "DKG daemon HTTP URL" },
+      "daemonUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:9200",
+        "description": "DKG daemon HTTP URL"
+      },
       "memory": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG memory tools and file-watcher sync" },
-          "memoryDir": { "type": "string", "description": "Override watched memory directory" },
-          "watchDebounceMs": { "type": "number", "default": 1500, "description": "File watcher debounce interval (ms)" }
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable DKG memory tools and file-watcher sync"
+          },
+          "memoryDir": {
+            "type": "string",
+            "description": "Override watched memory directory"
+          },
+          "watchDebounceMs": {
+            "type": "number",
+            "default": 1500,
+            "description": "File watcher debounce interval (ms)"
+          }
         },
         "description": "DKG memory integration"
       },
       "channel": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable DKG UI ↔ OpenClaw bridge" },
-          "port": { "type": "number", "default": 9201, "description": "Standalone bridge port (when gateway route registration unavailable)" }
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable DKG UI to OpenClaw chat bridge"
+          },
+          "port": {
+            "type": "number",
+            "default": 9201,
+            "description": "Standalone bridge port when gateway route registration is unavailable"
+          }
         },
         "description": "DKG UI channel bridge"
-      },
-      "game": {
-        "type": "object",
-        "properties": {
-          "enabled": { "type": "boolean", "default": false, "description": "Enable OriginTrail Game tools (lobby, join, play, autopilot)" },
-          "pollIntervalMs": { "type": "number", "default": 2000, "description": "Autopilot poll interval in ms" },
-          "decisionTimeoutMs": { "type": "number", "default": 15000, "description": "Agent consultation timeout per turn in ms" }
-        },
-        "description": "OriginTrail Game integration"
       }
     }
-  },
-  "skills": ["skills"]
+  }
 }

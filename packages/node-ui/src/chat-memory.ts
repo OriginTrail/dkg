@@ -101,12 +101,92 @@ const DKG_ONT = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
+const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
+
+interface ChatAttachmentRef {
+  id?: string;
+  fileName: string;
+  contextGraphId: string;
+  assertionName?: string;
+  assertionUri: string;
+  fileHash: string;
+  detectedContentType?: string;
+  extractionStatus?: 'completed' | 'skipped' | 'failed';
+  tripleCount?: number;
+  rootEntity?: string;
+}
 
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
+}
+
+function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const fileName = typeof record.fileName === 'string' ? record.fileName.trim() : '';
+  const contextGraphId = typeof record.contextGraphId === 'string' ? record.contextGraphId.trim() : '';
+  const assertionUri = typeof record.assertionUri === 'string' ? record.assertionUri.trim() : '';
+  const fileHash = typeof record.fileHash === 'string' ? record.fileHash.trim() : '';
+  if (!fileName || !contextGraphId || !assertionUri || !fileHash) return null;
+
+  const normalized: ChatAttachmentRef = {
+    fileName,
+    contextGraphId,
+    assertionUri,
+    fileHash,
+  };
+  if (typeof record.id === 'string' && record.id.trim()) normalized.id = record.id.trim();
+  if (typeof record.assertionName === 'string' && record.assertionName.trim()) normalized.assertionName = record.assertionName.trim();
+  if (typeof record.detectedContentType === 'string' && record.detectedContentType.trim()) {
+    normalized.detectedContentType = record.detectedContentType.trim();
+  }
+  if (record.extractionStatus === 'completed' || record.extractionStatus === 'skipped' || record.extractionStatus === 'failed') {
+    normalized.extractionStatus = record.extractionStatus;
+  }
+  if (typeof record.tripleCount === 'number' && Number.isFinite(record.tripleCount) && record.tripleCount >= 0) {
+    normalized.tripleCount = record.tripleCount;
+  }
+  if (typeof record.rootEntity === 'string' && record.rootEntity.trim()) normalized.rootEntity = record.rootEntity.trim();
+  return normalized;
+}
+
+function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const refs = raw
+    .map((entry) => normalizeChatAttachmentRef(entry))
+    .filter((entry): entry is ChatAttachmentRef => entry != null);
+  return refs.length > 0 ? refs : undefined;
+}
+
+function parseNestedJsonLiteral(value: string): unknown {
+  let current: unknown = value;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== 'string') return current;
+    const trimmed = current.trim();
+    if (!trimmed) return undefined;
+    try {
+      current = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatAttachmentRefs(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
 }
 
 function parseRdfInt(value: string): number {
@@ -300,7 +380,12 @@ export class ChatMemoryManager {
     userMessage: string,
     assistantReply: string,
     toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
-    opts?: { turnId?: string; persistenceState?: 'stored' | 'failed' | 'pending' },
+    opts?: {
+      turnId?: string;
+      persistenceState?: 'stored' | 'failed' | 'pending';
+      failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
+    },
   ): Promise<void> {
     await this.ensureInitialized();
     const userTs = new Date();
@@ -312,6 +397,9 @@ export class ChatMemoryManager {
     const assistantMsgUri = `${CHAT_NS}msg:${assistantMsgId}`;
     const turnId = opts?.turnId?.trim();
     const persistenceState = opts?.persistenceState ?? 'stored';
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
     const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
@@ -350,9 +438,22 @@ export class ChatMemoryManager {
         { subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
         { subject: turnUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+        ...(persistenceState === 'failed' && failureReason
+          ? [{ subject: turnUri, predicate: `${DKG_ONT}failureReason`, object: JSON.stringify(failureReason), graph: '' }]
+          : []),
         { subject: userMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
         { subject: assistantMsgUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(turnId), graph: '' },
       );
+    }
+
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: userMsgUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
     }
 
     if (toolCalls?.length) {
@@ -616,33 +717,49 @@ export class ChatMemoryManager {
 
   async getSession(
     sessionId: string,
+    opts: {
+      limit?: number;
+      order?: 'asc' | 'desc';
+    } = {},
   ): Promise<{
     session: string;
     messages: Array<{
+      uri: string;
       author: string;
       text: string;
       ts: string;
       turnId?: string;
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+      failureReason?: string | null;
+      attachmentRefs?: ChatAttachmentRef[];
     }>;
   } | null> {
     await this.ensureInitialized();
     try {
+      const requestedLimit = typeof opts.limit === 'number' && Number.isInteger(opts.limit) && opts.limit > 0
+        ? opts.limit
+        : null;
+      const limit = requestedLimit != null
+        ? Math.min(requestedLimit, 500)
+        : 500;
+      const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?author ?text ?ts ?turnId ?persistenceState WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
+          OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
             ?turn <${DKG_ONT}turnId> ?turnId .
             ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+            OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
           }
-        } ORDER BY ?ts LIMIT 500`,
+        } ORDER BY ${order}(?ts) LIMIT ${limit}`,
         { contextGraphId: MEMORY_CONTEXT_GRAPH, includeSharedMemory: true },
       );
       const bindings = msgsResult.bindings ?? [];
@@ -650,16 +767,22 @@ export class ChatMemoryManager {
       return {
         session: sessionId,
         messages: bindings.map((mb: any) => ({
+          uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),
           turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+          attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
           persistStatus: (() => {
             const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
             if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
               return status;
             }
             return undefined;
+          })(),
+          failureReason: (() => {
+            const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
+            return reason.length > 0 ? reason : undefined;
           })(),
         })),
       };

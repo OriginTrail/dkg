@@ -22,8 +22,6 @@ export { handleNodeUIRequest } from './api.js';
 export type { LlmSettingsCallbacks, TelemetrySettingsCallbacks } from './api.js';
 export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';
-export { ChatAssistant } from './chat-assistant.js';
-export type { ChatRequest, ChatResponse, ChatStreamEvent, ChatLlmDiagnostics } from './chat-assistant.js';
 export { ChatMemoryManager } from './chat-memory.js';
 export type {
   MemoryToolContext,

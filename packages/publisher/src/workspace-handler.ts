@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm, validateSubGraphName, contextGraphSubGraphUri } from '@origintrail-official/dkg-core';
 import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
@@ -131,6 +131,13 @@ export class SharedMemoryHandler {
 
       if (publisherPeerId !== fromPeerId) {
         this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
+        return;
+      }
+
+      // Enforce peer allowlist for curated CGs
+      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+      if (allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
+        this.log.warn(ctx, `SWM write rejected: peer "${fromPeerId}" not in allowlist for context graph "${contextGraphId}"`);
         return;
       }
 
@@ -294,6 +301,26 @@ export class SharedMemoryHandler {
     } catch (err) {
       this.log.error(ctx, `SWM handle failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Returns the peer allowlist for a context graph, or null if no allowlist
+   * is set (open CG — all peers allowed).
+   */
+  private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    const DKG_ALLOWED_PEER = 'https://dkg.network/ontology#allowedPeer';
+    const cgMeta = contextGraphMetaUri(contextGraphId);
+    const cgData = contextGraphDataUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ALLOWED_PEER}> ?peer } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return null;
+    }
+    return result.bindings
+      .map(row => row['peer'])
+      .filter((v): v is string => typeof v === 'string')
+      .map(v => v.replace(/^"|"$/g, ''));
   }
 
   /**

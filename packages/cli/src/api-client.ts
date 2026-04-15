@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
@@ -138,6 +140,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
+    options?: { subGraphName?: string },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -145,7 +148,12 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.post('/api/shared-memory/publish', { contextGraphId, selection, clearAfter });
+    return this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      selection,
+      clearAfter,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+    });
   }
 
   /** @deprecated Use publishFromSharedMemory */
@@ -153,6 +161,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
+    options?: { subGraphName?: string },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -160,7 +169,7 @@ export class ApiClient {
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter);
+    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter, options);
   }
 
   async publisherEnqueue(request: {
@@ -297,11 +306,26 @@ export class ApiClient {
     return this.post('/api/connect', { multiaddr });
   }
 
-  async createContextGraph(id: string, name: string, description?: string): Promise<{
+  async createContextGraph(id: string, name: string, description?: string, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
   }> {
-    return this.post('/api/context-graph/create', { id, name, description });
+    return this.post('/api/context-graph/create', { id, name, description, allowedPeers });
+  }
+
+  async registerContextGraph(id: string, opts?: { revealOnChain?: boolean; accessPolicy?: number }): Promise<{
+    registered: string;
+    onChainId: string;
+    hint?: string;
+  }> {
+    return this.post('/api/context-graph/register', { id, ...opts });
+  }
+
+  async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<{
+    invited: string;
+    contextGraphId: string;
+  }> {
+    return this.post('/api/context-graph/invite', { contextGraphId, peerId });
   }
 
   /** @deprecated Use createContextGraph */
@@ -366,6 +390,81 @@ export class ApiClient {
     agentAddress: string;
   }): Promise<{ endorsed: boolean; endorserAddress: string }> {
     return this.post('/api/endorse', request);
+  }
+
+  async importAssertionFile(name: string, request: {
+    filePath: string;
+    contextGraphId: string;
+    contentType?: string;
+    ontologyRef?: string;
+    subGraphName?: string;
+  }): Promise<{
+    assertionUri: string;
+    fileHash: string;
+    detectedContentType?: string;
+    extraction?: {
+      status: string;
+      tripleCount?: number;
+      pipelineUsed?: string;
+      mdIntermediateHash?: string;
+      error?: string;
+    };
+  }> {
+    const fileBytes = await readFile(request.filePath);
+    const form = new FormData();
+    const contentType = request.contentType ?? inferUploadContentType(request.filePath);
+    const file = contentType
+      ? new Blob([fileBytes], { type: contentType })
+      : new Blob([fileBytes]);
+
+    form.append('file', file, basename(request.filePath));
+    form.append('contextGraphId', request.contextGraphId);
+    if (request.contentType) form.append('contentType', request.contentType);
+    if (request.ontologyRef) form.append('ontologyRef', request.ontologyRef);
+    if (request.subGraphName) form.append('subGraphName', request.subGraphName);
+
+    return this.postForm(`/api/assertion/${encodeURIComponent(name)}/import-file`, form);
+  }
+
+  async assertionExtractionStatus(name: string, contextGraphId: string, subGraphName?: string): Promise<{
+    assertionUri?: string;
+    fileHash?: string;
+    status?: string;
+    tripleCount?: number;
+    pipelineUsed?: string;
+    mdIntermediateHash?: string;
+    error?: string;
+  }> {
+    const params = new URLSearchParams({ contextGraphId });
+    if (subGraphName) params.set('subGraphName', subGraphName);
+    return this.get(
+      `/api/assertion/${encodeURIComponent(name)}/extraction-status?${params.toString()}`,
+    );
+  }
+
+  async promoteAssertion(name: string, request: {
+    contextGraphId: string;
+    entities?: 'all' | string[];
+    subGraphName?: string;
+  }): Promise<{
+    promoted?: boolean;
+    promotedCount?: number;
+    contextGraphId?: string;
+    count?: number;
+    sharedMemoryGraph?: string;
+    rootEntities?: string[];
+  }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/promote`, request);
+  }
+
+  async queryAssertion(name: string, request: {
+    contextGraphId: string;
+    subGraphName?: string;
+  }): Promise<{
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+    count: number;
+  }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/query`, request);
   }
 
   async publishCclPolicy(request: {
@@ -485,7 +584,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, (body as Record<string, unknown>).error as string);
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
     }
     return res.json() as Promise<T>;
   }
@@ -498,16 +597,70 @@ export class ApiClient {
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, (data as Record<string, unknown>).error as string);
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  private async postForm<T>(path: string, body: FormData): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
     }
     return res.json() as Promise<T>;
   }
 
   /** Create an Error with an `httpStatus` property so callers can distinguish
    *  application-level responses from connection failures. */
-  static httpError(status: number, message?: string): Error & { httpStatus: number } {
-    const err = new Error(message ?? `HTTP ${status}`) as Error & { httpStatus: number };
+  static httpError(status: number, message?: string, responseBody?: unknown): Error & { httpStatus: number; responseBody?: unknown } {
+    const err = new Error(message ?? `HTTP ${status}`) as Error & { httpStatus: number; responseBody?: unknown };
     err.httpStatus = status;
+    if (responseBody !== undefined) err.responseBody = responseBody;
     return err;
   }
+
+  private static errorMessageFromBody(body: unknown, fallback?: string): string | undefined {
+    if (!body || typeof body !== 'object') return fallback;
+    const record = body as Record<string, unknown>;
+    const extraction = record.extraction;
+    if (extraction && typeof extraction === 'object') {
+      const extractionError = (extraction as Record<string, unknown>).error;
+      if (typeof extractionError === 'string' && extractionError.length > 0) {
+        return extractionError;
+      }
+    }
+    if (typeof record.error === 'string' && record.error.length > 0) {
+      return record.error;
+    }
+    return fallback;
+  }
+}
+
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.md': 'text/markdown',
+  '.markdown': 'text/markdown',
+  '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xml': 'application/xml',
+  '.epub': 'application/epub+zip',
+};
+
+function inferUploadContentType(filePath: string): string | undefined {
+  const lower = filePath.toLowerCase();
+  for (const [ext, ct] of Object.entries(UPLOAD_CONTENT_TYPES)) {
+    if (lower.endsWith(ext)) return ct;
+  }
+  return undefined;
 }
