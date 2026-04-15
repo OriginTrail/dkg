@@ -156,6 +156,101 @@ before sharing it to SWM (team) or promoting it to VM (chain-anchored).
 - `POST /api/assertion/{name}/import-file` — import a document (multipart/form-data) — see §7
 - `GET /api/assertion/{name}/extraction-status?contextGraphId=...` — poll the status of an import-file extraction job
 
+### Canonical project-memory write contract
+
+Memories that you want the node's slot-backed recall to surface automatically
+on future chat turns MUST be written in a specific canonical shape. Memories
+written outside this shape will still persist, but they will NOT be returned
+by recall — the node won't find them when deciding what context to inject on
+the next turn.
+
+**Why the shape is fixed.** On every chat turn, the node's memory slot fans
+out four parallel SPARQL queries against the turn's context graphs — one
+against `agent-context/chat-turns` (chat history) and three against the
+user's selected project CG's `memory` assertion, one per memory view
+(`working-memory`, `shared-working-memory`, `verified-memory`). Those
+queries are narrowly scoped for precision and performance: they look
+specifically at the `memory` assertion and match on a specific predicate.
+Memories written to other assertion names, or with other predicates, will
+not be returned.
+
+**The contract**:
+
+1. **Assertion name**: `memory` (literally the string `"memory"` — not a
+   semantic variant like `project-access-phrase` or `user-preferences`).
+   All recallable project memories for a given context graph go into the
+   single `memory` assertion on that CG.
+
+2. **Bootstrap the assertion once per CG**: the first time you write a
+   memory to a fresh project CG, create the assertion via
+   `POST /api/assertion/create` with `{ "contextGraphId": "<cg>", "name": "memory" }`.
+   The route is idempotent — calling it on an already-existing assertion is
+   a safe no-op — so if you aren't sure whether the assertion exists yet,
+   it's fine to call create first and then write.
+
+3. **Write with `POST /api/assertion/memory/write`** against the target
+   project CG. Use the `quads` body field with the canonical triple shape
+   below.
+
+4. **Canonical triple shape** — each memory entry is one subject with a
+   `schema:description` string literal object:
+
+   ```
+   <urn:memory:<unique-id>>  <http://schema.org/description>  "the memory text"
+   ```
+
+   - **Subject**: any URI you choose. A fresh `urn:memory:<uuid>` per
+     memory is the cleanest default. If the memory is about an existing
+     named entity (a project, a person, a file), you MAY use that entity's
+     URI as the subject so the memory attaches to the existing node.
+   - **Predicate**: `http://schema.org/description` (the full IRI form, or
+     `schema:description` if your body supports prefixed names). This
+     predicate is non-negotiable — the slot-backed recall's SPARQL matches
+     on it specifically.
+   - **Object**: a plain string literal containing the memory text. The
+     text is what the user will search against (case-insensitive substring
+     match), so phrase it the way you'd want it recalled — include
+     keywords, names, and any facts you want to be searchable.
+
+5. **Optional type annotation**: you MAY also write
+   `<urn:memory:<id>> a <http://schema.org/Thing>` alongside the description
+   triple. The slot-backed recall tolerates both typed and untyped memory
+   entries — adding the type is harmless but not required.
+
+**When to use a different assertion name instead**. The `memory` assertion
+is for free-form memories you want to be recalled automatically by the
+slot. Do NOT use it for structured domain data that you plan to query
+explicitly by assertion name (e.g., a custom `user-preferences` assertion
+with typed preference triples you'll read with a specific SPARQL query).
+Custom assertion names are fine for typed domain data — they just won't
+participate in slot-backed recall.
+
+**Example: remembering a user-stated fact**:
+
+```json
+POST /api/assertion/create
+Body: { "contextGraphId": "my-project", "name": "memory" }
+
+POST /api/assertion/memory/write
+Body: {
+  "contextGraphId": "my-project",
+  "quads": [
+    {
+      "subject":   "urn:memory:7f3c2a1e-...",
+      "predicate": "http://schema.org/description",
+      "object":    "User prefers Python over TypeScript for data pipeline work.",
+      "graph":     "did:dkg:context-graph:my-project/assertion/memory"
+    }
+  ]
+}
+```
+
+On a later chat turn, if the user asks "what language do I prefer?", the
+slot-backed recall will fan out against `my-project/memory` (the project
+CG stamped on the turn envelope via `target_context_graph`), the SPARQL
+query will match the substring `python`, and the memory entry will land
+in the turn's injected context for you to read and answer from.
+
 > If `subGraphName` is provided but the sub-graph is not registered in the CG's
 > `_meta` graph, all assertion operations throw
 > `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
