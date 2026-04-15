@@ -101,7 +101,8 @@ export function contextGraphRulesUri(contextGraphId: string): string {
  * Persists across WM → SWM → VM transitions so assertions remain
  * queryable by identity after promotion.
  */
-export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string): string {
+export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${agentAddress}:${name}`;
   return `urn:dkg:assertion:${contextGraphId}:${agentAddress}:${name}`;
 }
 

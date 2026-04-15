@@ -553,13 +553,14 @@ export interface AssertionCreatedMeta {
   contextGraphId: string;
   agentAddress: string;
   assertionName: string;
+  subGraphName?: string;
   timestamp: Date;
 }
 
 export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Quad[] {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
-  const graphUri = contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const graphUri = contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
 
@@ -589,6 +590,7 @@ export interface AssertionPromotedMeta {
   contextGraphId: string;
   agentAddress: string;
   assertionName: string;
+  subGraphName?: string;
   shareOperationId: string;
   rootEntities: string[];
   timestamp: Date;
@@ -596,7 +598,7 @@ export interface AssertionPromotedMeta {
 
 export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
 
@@ -628,13 +630,14 @@ export interface AssertionPublishedMeta {
   contextGraphId: string;
   agentAddress: string;
   assertionName: string;
+  subGraphName?: string;
   kcUal: string;
   timestamp: Date;
 }
 
 export function generateAssertionPublishedMetadata(meta: AssertionPublishedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
   return {
@@ -661,12 +664,13 @@ export interface AssertionDiscardedMeta {
   contextGraphId: string;
   agentAddress: string;
   assertionName: string;
+  subGraphName?: string;
   timestamp: Date;
 }
 
 export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta): { insert: Quad[]; delete: Quad[] } {
   const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
-  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName);
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = `did:dkg:agent:${meta.agentAddress}`;
   const eventUri = `${subject}/event/${nextEventId()}`;
   return {

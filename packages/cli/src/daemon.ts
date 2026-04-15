@@ -4404,6 +4404,12 @@ async function handleRequest(
     if (!parsed) return;
     const { id } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (typeof id !== "string") return jsonResponse(res, 400, { error: '"id" must be a string' });
+    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: "Invalid context graph id" });
+    if (parsed.revealOnChain != null && typeof parsed.revealOnChain !== "boolean")
+      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
+    if (parsed.accessPolicy != null && typeof parsed.accessPolicy !== "number")
+      return jsonResponse(res, 400, { error: '"accessPolicy" must be a number' });
     try {
       const result = await agent.registerContextGraph(id, {
         revealOnChain: parsed.revealOnChain,
@@ -4687,12 +4693,16 @@ async function handleRequest(
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-    const agentAddress = qs.get("agentAddress") ?? undefined;
+    const rawAgentAddress = qs.get("agentAddress") ?? undefined;
+    if (rawAgentAddress && !/^[\w:.\-]+$/.test(rawAgentAddress)) {
+      return jsonResponse(res, 400, { error: "Invalid agentAddress format" });
+    }
+    const subGraphName = qs.get("subGraphName") ?? undefined;
     try {
       const descriptor = await agent.assertion.history(
         contextGraphId!,
         assertionName,
-        agentAddress ? { agentAddress } : undefined,
+        { ...(rawAgentAddress ? { agentAddress: rawAgentAddress } : {}), ...(subGraphName ? { subGraphName } : {}) },
       );
       if (!descriptor) {
         return jsonResponse(res, 404, {

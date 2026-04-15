@@ -5380,9 +5380,9 @@ export class DKGAgent {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
 
-      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string }): Promise<AssertionDescriptor | null> {
+      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionDescriptor | null> {
         const addr = opts?.agentAddress ?? agentAddress;
-        const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name);
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name, opts?.subGraphName);
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const PROV_NS = 'http://www.w3.org/ns/prov#';
