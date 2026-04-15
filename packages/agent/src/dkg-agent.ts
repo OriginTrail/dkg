@@ -119,6 +119,13 @@ export interface ContextGraphSub {
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
+  /**
+   * Whether the `_meta` graph (allowlist, registration status) has been
+   * fetched via authenticated sync or is known from local creation.
+   * When false, the gossip handler denies writes to prevent unauthorized
+   * access during the window before _meta arrives.
+   */
+  metaSynced?: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
   /** Local participant identities used for private SWM authorization before anchoring. */
@@ -761,6 +768,21 @@ export class DKGAgent {
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+
+      // Only flip metaSynced for CGs whose _meta was actually fetched
+      // during this sync (i.e., those in the sync scope). Chain-discovered
+      // CGs added with trackSyncScope: false are NOT in scope and their
+      // _meta hasn't arrived yet.
+      const syncScope = new Set<string>([
+        SYSTEM_PARANETS.AGENTS,
+        SYSTEM_PARANETS.ONTOLOGY,
+        ...(this.config.syncContextGraphs ?? []),
+      ]);
+      for (const [id, sub] of this.subscribedContextGraphs) {
+        if (sub.metaSynced === false && syncScope.has(id)) {
+          sub.metaSynced = true;
+        }
+      }
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
@@ -1840,9 +1862,14 @@ export class DKGAgent {
       this.trackSyncContextGraph(contextGraphId);
     }
 
-    // Idempotent: skip if gossip handlers already installed for this context graph
+    // Idempotent: skip if gossip handlers already installed for this context graph.
+    // Re-subscribing upgrades metaSynced → true: the caller is explicitly
+    // trusting this CG, so the deny-until-meta-synced gate can open.
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
+      if (existing && existing.metaSynced === false) {
+        existing.metaSynced = true;
+      }
       if (!existing?.subscribed) {
         this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
@@ -2065,6 +2092,7 @@ export class DKGAgent {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
+      metaSynced: true,
     });
 
     if (!opts.private) {
@@ -2164,6 +2192,16 @@ export class DKGAgent {
       );
       const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
       resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+
+      // A CG created with allowedPeers but no explicit accessPolicy stores
+      // "public" in the ontology graph. Detect the allowlist and promote to
+      // private so the on-chain policy matches the curator's intent.
+      if (resolvedAccessPolicy === 0) {
+        const peers = await this.getContextGraphAllowedPeers(id);
+        if (peers !== null && peers.length > 0) {
+          resolvedAccessPolicy = 1;
+        }
+      }
     }
 
     let onChainId: string;
@@ -2230,8 +2268,8 @@ export class DKGAgent {
         publisherSignatureVs: new Uint8Array(0),
       });
       await this.gossip.publish(ontologyTopic, regMsg);
-    } catch {
-      // Peers may not be subscribed yet
+    } catch (err) {
+      this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return { onChainId };
@@ -2277,11 +2315,11 @@ export class DKGAgent {
     const paranetUri = paranetDataGraphUri(contextGraphId);
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
-    // If this is the first allowlist entry (CG was open), also add our own
-    // peer ID so the curator doesn't lock themselves out.
     const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
     const quadsToInsert: Quad[] = [];
 
+    // If this is the first allowlist entry (CG was open), also add our own
+    // peer ID so the curator doesn't lock themselves out.
     if (existingAllowlist === null || existingAllowlist.length === 0) {
       const curatorPeerId = escapeSparqlLiteral(this.peerId);
       quadsToInsert.push({
@@ -2290,6 +2328,12 @@ export class DKGAgent {
         object: `"${curatorPeerId}"`,
         graph: cgMetaGraph,
       });
+    }
+
+    // Skip if already in the allowlist (idempotent)
+    if (existingAllowlist?.includes(peerId)) {
+      this.log.info(ctx, `Peer ${peerId} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
     }
 
     quadsToInsert.push({
@@ -2493,6 +2537,7 @@ export class DKGAgent {
         name: opts.name,
         subscribed: true,
         synced: true,
+        metaSynced: true,
         onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
       });
       return;
@@ -2533,6 +2578,7 @@ export class DKGAgent {
       name: opts.name,
       subscribed: true,
       synced: true,
+      metaSynced: true,
     });
 
     this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
@@ -3966,6 +4012,7 @@ export class DKGAgent {
         name,
         subscribed: true,
         synced: true,
+        metaSynced: false,
         onChainId: existing?.onChainId,
       });
 
@@ -3973,7 +4020,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed (metaSynced pending)`);
       discovered++;
     }
 
@@ -4027,6 +4074,7 @@ export class DKGAgent {
         name: p.name,
         subscribed: true,
         synced: false,
+        metaSynced: false,
         onChainId: p.contextGraphId,
       });
       this.subscribeToContextGraph(p.name, { trackSyncScope: false });

@@ -4076,7 +4076,7 @@ async function handleRequest(
       }
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedPeers } = parsed;
+    const { id, name, description, allowedPeers, register } = parsed;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -4103,10 +4103,100 @@ async function handleRequest(
       }
       throw err;
     }
-    return jsonResponse(res, 200, {
-      created: id,
-      uri: `did:dkg:context-graph:${id}`,
-    });
+    // Registration is opt-in: callers that want on-chain registration
+    // pass `register: true`. Otherwise CG stays local-only and can be
+    // registered later via POST /api/context-graph/register.
+    if (register === true) {
+      try {
+        const regResult = await agent.registerContextGraph(id);
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: true,
+          onChainId: regResult.onChainId,
+        });
+      } catch (regErr: any) {
+        process.stderr.write(`[DKG-Daemon] WARN: Context graph "${id}" created locally but on-chain registration failed: ${regErr?.message ?? 'unknown error'}\n`);
+        return jsonResponse(res, 200, {
+          created: id,
+          uri: `did:dkg:context-graph:${id}`,
+          registered: false,
+          registerError: regErr?.message ?? 'Registration failed',
+          hint: 'CG created locally. Use POST /api/context-graph/register to retry on-chain registration.',
+        });
+      }
+    }
+    return jsonResponse(res, 200, { created: id, uri: `did:dkg:context-graph:${id}` });
+  }
+
+  // POST /api/context-graph/register — on-chain registration (upgrade from free CG)
+  if (req.method === 'POST' && path === '/api/context-graph/register') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { id, revealOnChain, accessPolicy } = parsed;
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
+    }
+    if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
+      return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
+    }
+    try {
+      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });
+      return jsonResponse(res, 200, {
+        registered: id,
+        onChainId: result.onChainId,
+        hint: 'Context graph registered on-chain. You can now publish SWM to Verified Memory.',
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('already registered')) {
+        return jsonResponse(res, 409, { error: msg });
+      }
+      if (msg.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      if (msg.includes('no known creator')) {
+        return jsonResponse(res, 503, { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' });
+      }
+      if (msg.includes('Only the context graph creator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
+  }
+
+  // POST /api/context-graph/invite — invite a peer to a context graph
+  if (req.method === 'POST' && path === '/api/context-graph/invite') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, peerId: targetPeerId } = parsed;
+    if (!contextGraphId || !targetPeerId) {
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "peerId"' });
+    }
+    if (!isValidContextGraphId(contextGraphId)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    try {
+      await agent.inviteToContextGraph(contextGraphId, targetPeerId);
+      return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: msg });
+      }
+      if (msg.includes('no known creator')) {
+        return jsonResponse(res, 503, { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' });
+      }
+      if (msg.includes('Only the context graph creator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('Invalid peer ID format')) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, { error: msg });
+    }
   }
 
   // POST /api/sub-graph/create  { contextGraphId, subGraphName }
