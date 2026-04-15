@@ -112,6 +112,39 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
+  it('registers only the memory slot capability, no conventional memory tools (Codex B-retire)', () => {
+    // Regression guard against accidentally re-introducing
+    // `dkg_memory_import` / `dkg_memory_search` on the modern-gateway
+    // path. Both explicit tool surfaces were retired in the
+    // openclaw-dkg-primary-memory workstream; the memory slot is the
+    // single entry point for reads and writes. This test exhaustively
+    // asserts that `plugin.register` does not call `api.registerTool`
+    // at all — if a future change adds a memory tool by accident, this
+    // fails fast instead of shipping a duplicate recall/write surface.
+    const api = makeApi();
+    plugin.register(api);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+    expect(api.registerTool).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to a compat memory tool on legacy gateways (Codex B-retire)', () => {
+    // Complement of the modern-gateway regression guard above: on a
+    // legacy gateway where `api.registerMemoryCapability` is absent,
+    // the adapter must NOT fall back to a compat `dkg_memory_search`
+    // tool registration. The compat surface was retired alongside
+    // `dkg_memory_import`; legacy gateways get no memory surface from
+    // this adapter at all (operators must upgrade the gateway to
+    // restore recall). This locks down the legacy-gateway branch of
+    // `registerCapability` against accidental re-introduction of a
+    // fallback tool registration.
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    plugin.register(legacyApi);
+
+    expect(legacyApi.registerTool).not.toHaveBeenCalled();
+  });
+
   it('DkgMemorySearchManager.search floors fractional maxResults into a valid SPARQL LIMIT (Codex B37)', async () => {
     // B37: the clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause. A fractional input like `2.5` would produce
