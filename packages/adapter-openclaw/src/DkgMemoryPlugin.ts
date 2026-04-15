@@ -318,12 +318,6 @@ export function buildDkgMemoryRuntime(
 // DkgMemoryPlugin — register-side container: capability + import tool
 // ---------------------------------------------------------------------------
 
-const ASSERTION_ENSURED = new Set<string>();
-
-function assertionCacheKey(contextGraphId: string, name: string): string {
-  return `${contextGraphId}::${name}`;
-}
-
 export class DkgMemoryPlugin {
   private api: OpenClawPluginApi | null = null;
 
@@ -441,6 +435,30 @@ export class DkgMemoryPlugin {
     const maxResults = typeof params.maxResults === 'number' ? params.maxResults : undefined;
     const minScore = typeof params.minScore === 'number' ? params.minScore : undefined;
 
+    // B15: Preflight the agent address the same way `getMemorySearchManager`
+    // does in the slot-routed factory. Without this guard, the legacy
+    // `dkg_memory_search` compat tool would construct a manager against an
+    // unresolved peer ID, the WM query would fail in the query engine
+    // (`agentAddress is required for the working-memory view`), and the
+    // in-search `.catch` would swallow the throw and return `status: 'ok',
+    // results: []` — indistinguishable from "no memories found". Surface
+    // the transient state as a retryable error instead so legacy gateways
+    // see the same "backend not ready" contract that modern slot-routed
+    // gateways see via the null-manager factory path.
+    const sessionAgentAddress = this.resolver.getSession(undefined)?.agentAddress;
+    const defaultAgentAddress = this.resolver.getDefaultAgentAddress();
+    const resolvedAgentAddress = sessionAgentAddress ?? defaultAgentAddress;
+    if (!resolvedAgentAddress) {
+      return toolJson({
+        status: 'needs_clarification',
+        reason: 'Agent address is not yet available (node identity probe pending).',
+        retryable: true,
+        guidance:
+          'The adapter has not yet resolved the node peer identity from the daemon. ' +
+          'Retry the search on the next turn; the probe typically completes within a few seconds of attach.',
+      });
+    }
+
     const manager = new DkgMemorySearchManager({
       client: this.client,
       resolver: this.resolver,
@@ -495,16 +513,21 @@ export class DkgMemoryPlugin {
       });
     }
 
-    const ensureKey = assertionCacheKey(resolvedCg, PROJECT_MEMORY_ASSERTION);
-    if (!ASSERTION_ENSURED.has(ensureKey)) {
-      try {
-        await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION);
-        ASSERTION_ENSURED.add(ensureKey);
-      } catch (err) {
-        return toolError(
-          `Failed to create memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
-        );
-      }
+    // B14: Always call createAssertion. The previous implementation used a
+    // process-global `ASSERTION_ENSURED` Set keyed by `${cg}::${name}`, but
+    // WM assertions are scoped per agent/node — a cached hit from one
+    // (cg, name) pair does not prove the assertion exists on a different
+    // daemon/peer, nor does it prove the assertion survived a daemon state
+    // reset. Relying on the daemon's idempotent `createAssertion` semantics
+    // each time is correct regardless of which daemon/agent is behind the
+    // client, at the cost of one extra create call per write (the daemon
+    // short-circuits on already-created assertions).
+    try {
+      await this.client.createAssertion(resolvedCg, PROJECT_MEMORY_ASSERTION);
+    } catch (err) {
+      return toolError(
+        `Failed to create memory assertion on ${resolvedCg}: ${errorMessage(err)}`,
+      );
     }
 
     const memoryUri = `urn:dkg:memory:item:${crypto.randomUUID()}`;

@@ -651,6 +651,38 @@ describe('DkgChannelPlugin', () => {
     );
   });
 
+  it('processInbound wraps the routeInboundMessage fallback in an ALS dispatch scope so slot-backed recall sees the UI-selected CG (Codex B13)', async () => {
+    // B13 regression guard. When the gateway has no `runtime.channel` and
+    // the adapter falls back to `api.routeInboundMessage`, the fallback
+    // must run inside the same AsyncLocalStorage dispatch scope that
+    // `dispatchViaPluginSdk` uses — otherwise slot-backed memory tool
+    // calls fired during that dispatch read an empty ALS store and
+    // silently degrade recall to `agent-context` only. This test uses a
+    // `routeInboundMessage` mock that captures
+    // `plugin.getSessionProjectContextGraphId(undefined)` from inside the
+    // callback (i.e. while the ALS scope is active) and asserts the
+    // captured value matches the stamped `uiContextGraphId`.
+    const capture: { inScope?: string | undefined } = {};
+    const routeInboundMessage = vi.fn().mockImplementation(async () => {
+      capture.inScope = plugin.getSessionProjectContextGraphId(undefined);
+      return { correlationId: 'corr-b13', text: 'Reply from route' };
+    });
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    // Before the turn, nothing is observable.
+    expect(plugin.getSessionProjectContextGraphId(undefined)).toBeUndefined();
+
+    await plugin.processInbound('Hello', 'corr-b13', 'owner', {
+      uiContextGraphId: 'research-b13',
+    });
+
+    // While the fallback was running, the ALS scope was populated.
+    expect(capture.inScope).toBe('research-b13');
+    // After the dispatch resolves, the ALS is torn down.
+    expect(plugin.getSessionProjectContextGraphId(undefined)).toBeUndefined();
+  });
+
   it('processInbound should append attachment context for legacy routeInboundMessage fallback', async () => {
     const routeInboundMessage = vi.fn().mockResolvedValue({
       correlationId: 'corr-legacy-attach',

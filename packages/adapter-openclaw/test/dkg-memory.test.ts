@@ -41,19 +41,27 @@ function makeResolver(
   overrides?: Partial<DkgMemorySession> & {
     available?: string[];
     /**
-     * When set to `null`, `getDefaultAgentAddress` returns `undefined` to
-     * simulate the node peer-id probe being pending. Used by B2 tests.
+     * When set to `null`, `getDefaultAgentAddress` returns `undefined` AND
+     * `getSession().agentAddress` is also undefined, simulating the node
+     * peer-id probe being pending. This mirrors the real resolver in
+     * `DkgNodePlugin.memorySessionResolver` where session.agentAddress is
+     * always `this.nodePeerId`, so both surfaces are unresolved together.
+     * Used by the B2 and B15 tests.
      */
     defaultAgentAddress?: string | null;
   },
 ): DkgMemorySessionResolver {
-  const defaultAgentAddress = overrides?.defaultAgentAddress === null
+  const pending = overrides?.defaultAgentAddress === null;
+  const defaultAgentAddress = pending
     ? undefined
     : overrides?.defaultAgentAddress ?? overrides?.agentAddress ?? 'did:dkg:agent:test';
+  const sessionAgentAddress = pending
+    ? undefined
+    : overrides?.agentAddress ?? 'did:dkg:agent:test';
   return {
     getSession: () => ({
       projectContextGraphId: overrides?.projectContextGraphId,
-      agentAddress: overrides?.agentAddress ?? 'did:dkg:agent:test',
+      agentAddress: sessionAgentAddress,
     }),
     getDefaultAgentAddress: () => defaultAgentAddress,
     listAvailableContextGraphs: () => overrides?.available ?? [],
@@ -213,11 +221,13 @@ describe('DkgMemoryPlugin.register', () => {
     // at dkg-query-engine.ts:120-124, so the data would be silently
     // unreadable. Retired until V10.x supports subgraph + view together.
     //
-    // Use a fresh context graph id for this test. The plugin caches
-    // `${cg}::${assertion}` in a module-level ASSERTION_ENSURED Set
-    // across all DkgMemoryPlugin instances, so reusing 'research-x'
-    // from the previous test would skip the createAssertion call and
-    // make this test's write-args assertion a no-op.
+    // Historical note: a previous revision of this file used a module-
+    // level `ASSERTION_ENSURED` cache keyed by `${cg}::${assertion}` to
+    // skip redundant createAssertion calls. That cache was removed in
+    // the B14 fix because it was keyed by the wrong identity shape
+    // (process-global, not per-agent/node). Every write now calls
+    // createAssertion unconditionally; the daemon short-circuits on
+    // already-created assertions.
     const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
       assertionUri: 'urn:test:assertion',
       alreadyExists: false,
@@ -270,6 +280,71 @@ describe('DkgMemoryPlugin.register', () => {
     // No durable `did:dkg:agent:unknown` provenance triple was written.
     expect(createSpy).not.toHaveBeenCalled();
     expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('dkg_memory_import calls createAssertion on every write, not just the first (Codex B14)', async () => {
+    // B14: previously a process-global `ASSERTION_ENSURED` Set skipped
+    // subsequent createAssertion calls on the same (cg, name) pair. That
+    // cache was wrong-shaped — WM assertions are per agent/node, and a
+    // cached hit from a different daemon/peer or a post-reset run could
+    // let a write hit an assertion that was never created. The fix
+    // removes the cache and relies on the daemon's idempotent
+    // createAssertion semantics each time. This test writes twice on
+    // the same CG within the same plugin instance and asserts both
+    // writes triggered a createAssertion call.
+    const createSpy = vi.spyOn(client, 'createAssertion').mockResolvedValue({
+      assertionUri: 'urn:test:assertion',
+      alreadyExists: false,
+    });
+    const writeSpy = vi.spyOn(client, 'writeAssertion').mockResolvedValue({ written: 4 });
+
+    const api = makeApi();
+    plugin.register(api);
+    const importTool = api.registerTool.mock.calls.find((c: any) => c[0].name === 'dkg_memory_import')[0];
+
+    await importTool.execute('call-1', { text: 'first memory', contextGraphId: 'research-b14' });
+    await importTool.execute('call-2', { text: 'second memory', contextGraphId: 'research-b14' });
+
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(writeSpy).toHaveBeenCalledTimes(2);
+    // Both calls target the same CG + assertion name.
+    expect(createSpy.mock.calls[0]).toEqual(['research-b14', PROJECT_MEMORY_ASSERTION]);
+    expect(createSpy.mock.calls[1]).toEqual(['research-b14', PROJECT_MEMORY_ASSERTION]);
+  });
+
+  it('dkg_memory_search compat tool returns retryable needs_clarification when peer-id probe is pending (Codex B15)', async () => {
+    // B15: the legacy `dkg_memory_search` compat tool on older gateways
+    // must apply the same peer-id preflight that `getMemorySearchManager`
+    // uses on the slot-routed path. Without the guard, an early-turn
+    // search on a legacy gateway would hit the WM query engine with
+    // `agentAddress: undefined`, the engine would throw
+    // `'agentAddress is required for the working-memory view'`, and
+    // `search()`'s in-loop `.catch` would swallow the throw and return
+    // `status: 'ok', results: []` — indistinguishable from "no memories
+    // found". The guard surfaces the transient state as a retryable
+    // clarification instead.
+    const querySpy = vi.spyOn(client, 'query');
+
+    const legacyApi = makeApi();
+    (legacyApi as any).registerMemoryCapability = undefined;
+    const pluginWithUndefinedAddress = new DkgMemoryPlugin(
+      client,
+      { enabled: true },
+      makeResolver({ defaultAgentAddress: null }),
+    );
+    pluginWithUndefinedAddress.register(legacyApi);
+    const searchTool = legacyApi.registerTool.mock.calls.find(
+      (c: any) => c[0].name === 'dkg_memory_search',
+    )[0];
+
+    const result = await searchTool.execute('call-1', { query: 'alpha beta' });
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(payload.status).toBe('needs_clarification');
+    expect(payload.retryable).toBe(true);
+    expect(payload.reason).toMatch(/agent address|peer identity|pending/i);
+    // CRITICAL: no WM query fired while the probe was unresolved.
+    expect(querySpy).not.toHaveBeenCalled();
   });
 
   it('dkg_memory_import rejects empty text with a tool-level error', async () => {

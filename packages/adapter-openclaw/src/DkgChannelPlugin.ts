@@ -734,13 +734,28 @@ export class DkgChannelPlugin {
 
     if (typeof api.routeInboundMessage === 'function') {
       api.logger.info?.(`[dkg-channel] Dispatching via api.routeInboundMessage for: ${correlationId}`);
-      const reply = await api.routeInboundMessage({
-        channelName: CHANNEL_NAME,
-        senderId: identity || 'owner',
-        senderIsOwner: true,
-        text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
+      // B13: The plugin-sdk dispatch path (dispatchViaPluginSdk) runs the
+      // turn inside an ALS scope so slot-backed tool calls can observe the
+      // UI-selected `uiContextGraphId`. The `routeInboundMessage` fallback
+      // used when `runtime.channel` is unavailable must do the same, or
+      // tool calls fired during this dispatch will read an empty ALS store
+      // and silently degrade recall to `agent-context` only. We don't have
+      // a resolved sessionKey on this path (routing lives in
+      // runtime.channel), so the context carries only `uiContextGraphId`
+      // and `correlationId`.
+      const dispatchContext: DkgDispatchContext = {
+        uiContextGraphId,
         correlationId,
-      } as any);
+      };
+      const reply = await this.runWithDispatchContext(dispatchContext, () =>
+        api.routeInboundMessage!({
+          channelName: CHANNEL_NAME,
+          senderId: identity || 'owner',
+          senderIsOwner: true,
+          text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
+          correlationId,
+        } as any),
+      );
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
       }, true);
