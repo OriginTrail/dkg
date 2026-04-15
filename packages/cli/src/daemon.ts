@@ -1055,6 +1055,16 @@ async function runDaemonInner(
     }
   });
 
+  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
+  const sseClients = new Set<ServerResponse>();
+  function sseBroadcast(event: string, payload: Record<string, unknown>) {
+    const data = JSON.stringify(payload);
+    const msg = `event: ${event}\ndata: ${data}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(msg); } catch { sseClients.delete(client); }
+    }
+  }
+
   agent.eventBus.on(DKGEvent.JOIN_REQUEST_RECEIVED, (data: any) => {
     try {
       dashDb.insertNotification({
@@ -1068,6 +1078,45 @@ async function runDaemonInner(
           agentAddress: data.agentAddress,
           agentName: data.agentName,
         }),
+      });
+      sseBroadcast("join_request", {
+        contextGraphId: data.contextGraphId,
+        agentAddress: data.agentAddress,
+        agentName: data.agentName,
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
+  agent.eventBus.on(DKGEvent.JOIN_APPROVED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: "join_approved",
+        title: "Join approved",
+        message: `You have been approved to join project ${shortId(data.contextGraphId)}`,
+        source: "access-control",
+        meta: JSON.stringify({
+          contextGraphId: data.contextGraphId,
+          agentAddress: data.agentAddress,
+        }),
+      });
+      sseBroadcast("join_approved", {
+        contextGraphId: data.contextGraphId,
+        agentAddress: data.agentAddress,
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
+  agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
+    try {
+      sseBroadcast("project_synced", {
+        contextGraphId: data.contextGraphId,
+        dataSynced: data.dataSynced,
+        sharedMemorySynced: data.sharedMemorySynced,
       });
     } catch {
       /* never crash */
@@ -1345,6 +1394,23 @@ async function runDaemonInner(
         )
       )
         return;
+
+      // GET /api/events — SSE stream for real-time UI updates
+      if (req.method === "GET" && reqUrl.pathname === "/api/events") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          ...corsHeaders(resolveCorsOrigin(req, corsAllowed)),
+        });
+        res.write(`event: connected\ndata: {}\n\n`);
+        sseClients.add(res);
+        const heartbeat = setInterval(() => {
+          try { res.write(`: heartbeat\n\n`); } catch { /* closed */ }
+        }, 30_000);
+        req.on("close", () => { sseClients.delete(res); clearInterval(heartbeat); });
+        return;
+      }
 
       // Shared memory (workspace) TTL settings — V10 and legacy routes
       if (

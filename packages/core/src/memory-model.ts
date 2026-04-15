@@ -58,19 +58,36 @@ export const VALID_ASSERTION_TRANSITIONS: ReadonlyMap<AssertionState, readonly A
   ['published', ['finalized'] as const],
 ]);
 
+/**
+ * Maps each assertion lifecycle state to the memory layer where the
+ * assertion's data resides.
+ */
+export const ASSERTION_STATE_TO_LAYER: ReadonlyMap<AssertionState, MemoryLayer | null> = new Map([
+  ['created', MemoryLayer.WorkingMemory],
+  ['promoted', MemoryLayer.SharedWorkingMemory],
+  ['published', MemoryLayer.VerifiedMemory],
+  ['finalized', MemoryLayer.VerifiedMemory],
+  ['discarded', null],
+]);
+
+export interface AssertionEvent {
+  type: AssertionState;
+  timestamp: string;
+  fromLayer: string;
+  toLayer: string;
+  shareOperationId?: string;
+  rootEntities?: string[];
+  kcUal?: string;
+}
+
 export interface AssertionDescriptor {
   contextGraphId: string;
   agentAddress: string;
   name: string;
   state: AssertionState;
-  createdAt: string;
-  promotedAt?: string;
-  shareOperationId?: string;
-  publishedAt?: string;
-  kcUal?: string;
-  finalizedAt?: string;
-  discardedAt?: string;
-  rootEntities?: string[];
+  memoryLayer: MemoryLayer | null;
+  assertionGraph: string;
+  events: AssertionEvent[];
 }
 
 

@@ -315,7 +315,10 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-header-notif-item-text { font-size: 12px; color: var(--text-primary); }
 .v10-header-notif-item-time { font-size: 10px; color: var(--text-tertiary); margin-top: 2px; font-family: var(--font-mono); }
 .v10-notif-join { border-left: 3px solid #f59e0b; padding-left: 9px; }
+.v10-notif-approved { border-left: 3px solid #10b981; padding-left: 9px; }
 .v10-notif-join-icon { margin-right: 4px; }
+.v10-notif-clickable { cursor: pointer; }
+.v10-notif-clickable:hover { background: var(--bg-hover); }
 
 /* ── Body ── */
 .v10-app-body {

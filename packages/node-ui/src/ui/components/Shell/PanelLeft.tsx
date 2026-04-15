@@ -7,6 +7,7 @@ import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
 import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
+import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 
 const CHEVRON_ICON = '▸';
 const COLLAPSE_ICON = '◂';
@@ -126,9 +127,15 @@ export function PanelLeft() {
 
   useEffect(() => {
     loadCGs();
-    const iv = setInterval(loadCGs, 30_000);
+    const iv = setInterval(loadCGs, 60_000);
     return () => clearInterval(iv);
   }, [loadCGs]);
+
+  useNodeEvents(useCallback((event) => {
+    if (event.type === 'join_approved' || event.type === 'project_synced') {
+      loadCGs();
+    }
+  }, [loadCGs]));
 
   return (
     <div className="v10-panel-left">

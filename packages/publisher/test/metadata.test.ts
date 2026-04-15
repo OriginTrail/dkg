@@ -14,6 +14,7 @@ import {
   generateAssertionPublishedMetadata,
   generateAssertionDiscardedMetadata,
   assertionStateQuad,
+  assertionLayerQuad,
   type KCMetadata,
   type KAMetadata,
   type OnChainProvenance,
@@ -25,10 +26,11 @@ import {
   type AssertionPublishedMeta,
   type AssertionDiscardedMeta,
 } from '../src/metadata.js';
-import { assertionLifecycleUri } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphAssertionUri, MemoryLayer } from '@origintrail-official/dkg-core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG = 'http://dkg.io/ontology/';
+const PROV = 'http://www.w3.org/ns/prov#';
 
 const PARANET = 'agent-registry';
 const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
@@ -341,11 +343,23 @@ describe('generateShareTransitionMetadata', () => {
   });
 });
 
-// ── Assertion Lifecycle Metadata ────────────────────────────────────────
+// ── Assertion Lifecycle Metadata (Event-Sourced, PROV-O) ────────────────
 
 const AGENT_ADDR = '0x1234567890abcdef1234567890abcdef12345678';
+const AGENT_URI = `did:dkg:agent:${AGENT_ADDR}`;
 const ASSERTION = 'game-turn-42';
 const LIFECYCLE_URI = assertionLifecycleUri(PARANET, AGENT_ADDR, ASSERTION);
+const ASSERTION_GRAPH = contextGraphAssertionUri(PARANET, AGENT_ADDR, ASSERTION);
+
+function findEventUri(quads: { subject: string; predicate: string; object: string }[]): string {
+  const q = quads.find(q => q.predicate === `${PROV}generated` && q.object === LIFECYCLE_URI);
+  return q!.subject;
+}
+
+function findEventUriFromInsert(insert: { subject: string; predicate: string; object: string }[]): string {
+  const q = insert.find(q => q.predicate === `${PROV}used` && q.object === LIFECYCLE_URI);
+  return q!.subject;
+}
 
 describe('generateAssertionCreatedMetadata', () => {
   const meta: AssertionCreatedMeta = {
@@ -355,31 +369,64 @@ describe('generateAssertionCreatedMetadata', () => {
     timestamp: new Date('2026-04-15T10:00:00Z'),
   };
 
-  it('generates correct rdf:type', () => {
+  it('assertion entity is dual-typed prov:Entity + dkg:Assertion', () => {
     const quads = generateAssertionCreatedMetadata(meta);
-    const typeQuad = quads.find(q => q.predicate === RDF_TYPE);
-    expect(typeQuad).toBeDefined();
-    expect(typeQuad!.object).toBe(`${DKG}Assertion`);
+    const types = quads.filter(q => q.subject === LIFECYCLE_URI && q.predicate === RDF_TYPE).map(q => q.object);
+    expect(types).toContain(`${PROV}Entity`);
+    expect(types).toContain(`${DKG}Assertion`);
   });
 
-  it('subject is the lifecycle URI', () => {
+  it('assertion entity uses prov:wasAttributedTo for agent', () => {
     const quads = generateAssertionCreatedMetadata(meta);
-    expect(quads[0].subject).toBe(LIFECYCLE_URI);
+    const attr = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${PROV}wasAttributedTo`);
+    expect(attr!.object).toBe(AGENT_URI);
   });
 
-  it('state is "created"', () => {
+  it('assertion entity uses prov:wasGeneratedBy to link to creation event', () => {
     const quads = generateAssertionCreatedMetadata(meta);
-    const stateQuad = quads.find(q => q.predicate === `${DKG}state`);
+    const genBy = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${PROV}wasGeneratedBy`);
+    expect(genBy).toBeDefined();
+  });
+
+  it('assertion entity includes state "created" and memoryLayer "WM"', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const stateQuad = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}state`);
+    const layerQuad = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}memoryLayer`);
     expect(stateQuad!.object).toBe('"created"');
+    expect(layerQuad!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
   });
 
-  it('includes contextGraph, agent, assertionName, and createdAt', () => {
+  it('assertion entity includes assertionGraph link', () => {
     const quads = generateAssertionCreatedMetadata(meta);
-    const preds = quads.map(q => q.predicate);
-    expect(preds).toContain(`${DKG}contextGraph`);
-    expect(preds).toContain(`${DKG}agent`);
-    expect(preds).toContain(`${DKG}assertionName`);
-    expect(preds).toContain(`${DKG}createdAt`);
+    const graphQuad = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}assertionGraph`);
+    expect(graphQuad!.object).toBe(ASSERTION_GRAPH);
+  });
+
+  it('event entity is dual-typed prov:Activity + dkg:AssertionCreated', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const eventUri = findEventUri(quads);
+    const types = quads.filter(q => q.subject === eventUri && q.predicate === RDF_TYPE).map(q => q.object);
+    expect(types).toContain(`${PROV}Activity`);
+    expect(types).toContain(`${DKG}AssertionCreated`);
+  });
+
+  it('event uses prov:startedAtTime and prov:wasAssociatedWith', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const eventUri = findEventUri(quads);
+    const time = quads.find(q => q.subject === eventUri && q.predicate === `${PROV}startedAtTime`);
+    expect(time).toBeDefined();
+    expect(time!.object).toContain('2026-04-15');
+    const assoc = quads.find(q => q.subject === eventUri && q.predicate === `${PROV}wasAssociatedWith`);
+    expect(assoc!.object).toBe(AGENT_URI);
+  });
+
+  it('event includes DKG layer transition (fromLayer/toLayer)', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    const eventUri = findEventUri(quads);
+    const from = quads.find(q => q.subject === eventUri && q.predicate === `${DKG}fromLayer`);
+    const to = quads.find(q => q.subject === eventUri && q.predicate === `${DKG}toLayer`);
+    expect(from!.object).toBe('"none"');
+    expect(to!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
   });
 
   it('all quads target the _meta graph', () => {
@@ -400,27 +447,44 @@ describe('generateAssertionPromotedMetadata', () => {
     timestamp: new Date('2026-04-15T10:05:00Z'),
   };
 
-  it('inserts state "promoted" and deletes state "created"', () => {
+  it('transitions state created → promoted and layer WM → SWM', () => {
     const { insert, delete: del } = generateAssertionPromotedMetadata(meta);
-    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
-    expect(stateInsert!.object).toBe('"promoted"');
-    expect(del).toHaveLength(1);
-    expect(del[0].object).toBe('"created"');
+    expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}state`)!.object).toBe('"promoted"');
+    expect(del.find(q => q.predicate === `${DKG}state`)!.object).toBe('"created"');
+    expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.SharedWorkingMemory}"`);
+    expect(del.find(q => q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
   });
 
-  it('includes promotedAt and shareOperationId', () => {
+  it('event is prov:Activity + dkg:AssertionPromoted with prov:used', () => {
     const { insert } = generateAssertionPromotedMetadata(meta);
-    const preds = insert.map(q => q.predicate);
-    expect(preds).toContain(`${DKG}promotedAt`);
-    expect(preds).toContain(`${DKG}shareOperationId`);
+    const eventUri = findEventUriFromInsert(insert);
+    const types = insert.filter(q => q.subject === eventUri && q.predicate === RDF_TYPE).map(q => q.object);
+    expect(types).toContain(`${PROV}Activity`);
+    expect(types).toContain(`${DKG}AssertionPromoted`);
   });
 
-  it('includes one rootEntity quad per entity', () => {
+  it('event uses prov:startedAtTime and prov:wasAssociatedWith', () => {
     const { insert } = generateAssertionPromotedMetadata(meta);
-    const entityQuads = insert.filter(q => q.predicate === `${DKG}rootEntity`);
-    expect(entityQuads).toHaveLength(2);
-    expect(entityQuads.map(q => q.object)).toContain('urn:test:alice');
-    expect(entityQuads.map(q => q.object)).toContain('urn:test:bob');
+    const eventUri = findEventUriFromInsert(insert);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${PROV}startedAtTime`)).toBeDefined();
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${PROV}wasAssociatedWith`)!.object).toBe(AGENT_URI);
+  });
+
+  it('event includes DKG layer transition WM → SWM', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    const eventUri = findEventUriFromInsert(insert);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}fromLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}toLayer`)!.object).toBe(`"${MemoryLayer.SharedWorkingMemory}"`);
+  });
+
+  it('event includes shareOperationId and rootEntities', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    const eventUri = findEventUriFromInsert(insert);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}shareOperationId`)!.object).toBe('"op-123"');
+    const entities = insert.filter(q => q.subject === eventUri && q.predicate === `${DKG}rootEntity`);
+    expect(entities).toHaveLength(2);
+    expect(entities.map(q => q.object)).toContain('urn:test:alice');
+    expect(entities.map(q => q.object)).toContain('urn:test:bob');
   });
 });
 
@@ -433,18 +497,18 @@ describe('generateAssertionPublishedMetadata', () => {
     timestamp: new Date('2026-04-15T10:10:00Z'),
   };
 
-  it('inserts state "published" and deletes state "promoted"', () => {
+  it('transitions state promoted → published and layer SWM → VM', () => {
     const { insert, delete: del } = generateAssertionPublishedMetadata(meta);
-    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
-    expect(stateInsert!.object).toBe('"published"');
-    expect(del[0].object).toBe('"promoted"');
+    expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}state`)!.object).toBe('"published"');
+    expect(del.find(q => q.predicate === `${DKG}state`)!.object).toBe('"promoted"');
+    expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.VerifiedMemory}"`);
+    expect(del.find(q => q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.SharedWorkingMemory}"`);
   });
 
-  it('includes publishedAt and kcUal', () => {
+  it('event is prov:Activity with kcUal', () => {
     const { insert } = generateAssertionPublishedMetadata(meta);
-    const preds = insert.map(q => q.predicate);
-    expect(preds).toContain(`${DKG}publishedAt`);
-    expect(preds).toContain(`${DKG}kcUal`);
+    const eventUri = findEventUriFromInsert(insert);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}kcUal`)!.object).toBe('did:dkg:kc:test-kc-001');
   });
 });
 
@@ -456,17 +520,24 @@ describe('generateAssertionDiscardedMetadata', () => {
     timestamp: new Date('2026-04-15T10:15:00Z'),
   };
 
-  it('inserts state "discarded" and deletes state "created"', () => {
+  it('transitions state created → discarded and removes memoryLayer', () => {
     const { insert, delete: del } = generateAssertionDiscardedMetadata(meta);
-    const stateInsert = insert.find(q => q.predicate === `${DKG}state`);
-    expect(stateInsert!.object).toBe('"discarded"');
-    expect(del[0].object).toBe('"created"');
+    expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}state`)!.object).toBe('"discarded"');
+    expect(del.find(q => q.predicate === `${DKG}state`)!.object).toBe('"created"');
+    expect(del.find(q => q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
   });
 
-  it('includes discardedAt', () => {
+  it('uses prov:wasInvalidatedBy to link assertion to discard event', () => {
     const { insert } = generateAssertionDiscardedMetadata(meta);
-    const preds = insert.map(q => q.predicate);
-    expect(preds).toContain(`${DKG}discardedAt`);
+    const inv = insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${PROV}wasInvalidatedBy`);
+    expect(inv).toBeDefined();
+  });
+
+  it('event has fromLayer WM and toLayer none', () => {
+    const { insert } = generateAssertionDiscardedMetadata(meta);
+    const eventUri = findEventUriFromInsert(insert);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}fromLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
+    expect(insert.find(q => q.subject === eventUri && q.predicate === `${DKG}toLayer`)!.object).toBe('"none"');
   });
 });
 
@@ -476,6 +547,16 @@ describe('assertionStateQuad', () => {
     expect(q.subject).toBe(LIFECYCLE_URI);
     expect(q.predicate).toBe(`${DKG}state`);
     expect(q.object).toBe('"promoted"');
+    expect(q.graph).toBe(META_GRAPH);
+  });
+});
+
+describe('assertionLayerQuad', () => {
+  it('produces a quad with dkg:memoryLayer predicate and correct value', () => {
+    const q = assertionLayerQuad(LIFECYCLE_URI, MemoryLayer.SharedWorkingMemory, META_GRAPH);
+    expect(q.subject).toBe(LIFECYCLE_URI);
+    expect(q.predicate).toBe(`${DKG}memoryLayer`);
+    expect(q.object).toBe(`"${MemoryLayer.SharedWorkingMemory}"`);
     expect(q.graph).toBe(META_GRAPH);
   });
 });

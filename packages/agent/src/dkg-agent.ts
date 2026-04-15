@@ -5,14 +5,15 @@ import {
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
-  contextGraphMetaUri, assertionLifecycleUri,
+  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  MemoryLayer,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry, sparqlString, escapeSparqlLiteral,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor,
+  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -673,17 +674,56 @@ export class DKGAgent {
         const metaGraph = paranetMetaGraphUri(contextGraphId);
 
         if (phase === 'meta') {
-          // Exclude _meta triples about WM-only assertions: any triple
-          // whose subject is an assertion graph that has memoryLayer="WM"
-          // (or no memoryLayer at all) should not be leaked to peers.
-          const DKG_ML = 'http://dkg.io/ontology/memoryLayer';
+          // Whitelist approach: only sync _meta triples that are either
+          // CG-level metadata (always safe) or assertion metadata for
+          // assertions that have been promoted out of WM.
+          //
+          // CG-level subjects (always included):
+          //  - did:dkg:context-graph:{id}  (CG definition)
+          //  - did:dkg:activity:*           (CG creation provenance)
+          //  - did:dkg:join-request:*       (access control)
+          //
+          // Assertion-level subjects (only if memoryLayer != WM):
+          //  - urn:dkg:assertion:*          (lifecycle entities)
+          //  - urn:dkg:assertion:*/event/*  (event entities)
+          //  - */assertion/*                (import metadata)
+          //
+          // Everything else is excluded by default.
+          const DKG_NS = 'http://dkg.io/ontology/';
+          const cgEntity = `did:dkg:context-graph:${contextGraphId}`;
           const metaResult = await this.store.query(
             `SELECT ?s ?p ?o WHERE {
               GRAPH <${metaGraph}> { ?s ?p ?o }
               FILTER(
-                !CONTAINS(STR(?s), "/assertion/") ||
+                STR(?s) = "${cgEntity}" ||
+                STRSTARTS(STR(?s), "did:dkg:activity:") ||
+                STRSTARTS(STR(?s), "did:dkg:join-request:") ||
                 EXISTS {
-                  GRAPH <${metaGraph}> { ?s <${DKG_ML}> ?layer . FILTER(?layer != "WM") }
+                  GRAPH <${metaGraph}> {
+                    ?lc <${DKG_NS}memoryLayer> ?layer .
+                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
+                    {
+                      FILTER(?lc = ?s)
+                    } UNION {
+                      ?lc <${DKG_NS}assertionGraph> ?s .
+                    } UNION {
+                      ?lc <${DKG_NS}assertionName> ?aname .
+                      FILTER(
+                        CONTAINS(STR(?s), "/assertion/") &&
+                        STRENDS(STR(?s), CONCAT("/", STR(?aname)))
+                      )
+                    }
+                  }
+                } ||
+                EXISTS {
+                  GRAPH <${metaGraph}> {
+                    { ?evt_src <http://www.w3.org/ns/prov#generated> ?parent }
+                    UNION
+                    { ?evt_src <http://www.w3.org/ns/prov#used> ?parent }
+                    FILTER(?evt_src = ?s)
+                    ?parent <${DKG_NS}memoryLayer> ?elayer .
+                    FILTER(?elayer != "${MemoryLayer.WorkingMemory}")
+                  }
                 }
               )
             } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
@@ -700,13 +740,13 @@ export class DKGAgent {
           //  - _private graphs (never shared)
           //  - assertion graphs still in Working Memory (WM)
           //
-          // Assertions that have been promoted to SWM or VM ARE included.
-          // An assertion's layer is tracked via <assertionGraph> dkg:memoryLayer
-          // "WM"/"SWM"/"VM" in _meta. Assertion graphs with NO layer triple
-          // are treated as WM (safe default — never leak unpromoted data).
+          // Assertions promoted to SWM or VM ARE included. The lifecycle
+          // entity links to the graph via dkg:assertionGraph and tracks
+          // the current layer via dkg:memoryLayer. Assertion graphs with
+          // no lifecycle record are treated as WM (safe default).
           const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}`;
           const metaGraph = `${cgUriPrefix}/_meta`;
-          const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+          const DKG_NS = 'http://dkg.io/ontology/';
           const dataResult = await this.store.query(
             `SELECT ?s ?p ?o ?g WHERE {
               GRAPH ?g { ?s ?p ?o }
@@ -715,16 +755,13 @@ export class DKGAgent {
                 !STRENDS(STR(?g), "/_meta") &&
                 !CONTAINS(STR(?g), "/_private")
               )
-              FILTER NOT EXISTS {
-                GRAPH <${metaGraph}> {
-                  ?g <${DKG_MEMORY_LAYER}> "WM"
-                }
-              }
               FILTER(
                 !CONTAINS(STR(?g), "/assertion/") ||
                 EXISTS {
                   GRAPH <${metaGraph}> {
-                    ?g <${DKG_MEMORY_LAYER}> ?layer
+                    ?lifecycle <${DKG_NS}assertionGraph> ?g .
+                    ?lifecycle <${DKG_NS}memoryLayer> ?layer .
+                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
                   }
                 }
               )
@@ -750,13 +787,22 @@ export class DKGAgent {
       try {
         const payload = JSON.parse(new TextDecoder().decode(data));
 
-        // Handle "join-approved" notifications from curator → requester
+        // Handle "join-approved" notifications from curator → requester.
+        // Only process if this node owns the target agentAddress.
         if (payload.type === 'join-approved') {
-          const { contextGraphId } = payload;
+          const { contextGraphId, agentAddress: approvedAddr } = payload;
           if (contextGraphId) {
+            const localAddr = await this.getDefaultAgentAddress();
+            if (approvedAddr && localAddr?.toLowerCase() !== approvedAddr.toLowerCase()) {
+              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+            }
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
             this.syncContextGraphFromConnectedPeers(contextGraphId).catch(() => {});
+            this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
+              contextGraphId,
+              agentAddress: approvedAddr,
+            });
           }
           return new TextEncoder().encode(JSON.stringify({ ok: true }));
         }
@@ -1243,6 +1289,14 @@ export class DKGAgent {
       `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
     );
 
+    if (dataSynced > 0 || sharedMemorySynced > 0) {
+      this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+        contextGraphId,
+        dataSynced,
+        sharedMemorySynced,
+      });
+    }
+
     return {
       connectedPeers: peers.length,
       syncCapablePeers,
@@ -1537,6 +1591,22 @@ export class DKGAgent {
           authToken: strip(row['token']),
           createdAt: strip(row['createdAt']) || '',
         };
+        // Restore private key for custodial agents from operational wallet keys
+        // (private keys are intentionally not persisted to the triple store)
+        if (record.mode === 'custodial' && !record.privateKey) {
+          const opKeys = this.config.chainConfig?.operationalKeys;
+          if (opKeys?.length) {
+            for (const key of opKeys) {
+              try {
+                const w = new ethers.Wallet(key);
+                if (w.address.toLowerCase() === record.agentAddress.toLowerCase()) {
+                  record.privateKey = key;
+                  break;
+                }
+              } catch { /* skip invalid keys */ }
+            }
+          }
+        }
         this.localAgents.set(record.agentAddress, record);
         this.agentTokenIndex.set(record.authToken, record.agentAddress);
       }
@@ -3087,19 +3157,33 @@ export class DKGAgent {
    * automatically retries the subscription.
    */
   private async notifyJoinApproval(contextGraphId: string, agentAddress: string): Promise<void> {
-    const agents = await this.discovery.findAgents();
-    const target = agents.find(a => a.agentAddress?.toLowerCase() === agentAddress.toLowerCase());
-    if (!target) return;
-
     const payload = JSON.stringify({
       type: 'join-approved',
       contextGraphId,
       agentAddress,
     });
-    try {
-      await this.router.send(target.peerId, PROTOCOL_JOIN_REQUEST, new TextEncoder().encode(payload), 5000);
-    } catch {
-      // Best-effort; the requester can also manually re-join
+    const payloadBytes = new TextEncoder().encode(payload);
+    const ctx = createOperationContext('system');
+
+    // Broadcast to all connected peers — each peer's handler checks the
+    // agentAddress and only the matching node auto-subscribes. This avoids
+    // relying on the agent registry which may be incomplete.
+    const peers = this.node.libp2p.getPeers();
+    let delivered = 0;
+    for (const pid of peers) {
+      const remotePeerId = pid.toString();
+      if (remotePeerId === this.peerId) continue;
+      try {
+        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+        delivered++;
+      } catch {
+        // Peer doesn't support protocol or timeout — skip
+      }
+    }
+    if (delivered === 0) {
+      this.log.warn(ctx, `Could not deliver join-approval notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
+    } else {
+      this.log.info(ctx, `Broadcasted join-approval for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
     }
   }
 
@@ -5243,7 +5327,7 @@ export class DKGAgent {
 
   get assertion() {
     const agent = this;
-    const agentAddress = this.peerId;
+    const agentAddress = this.defaultAgentAddress ?? this.peerId;
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
         return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
@@ -5300,46 +5384,84 @@ export class DKGAgent {
         const addr = opts?.agentAddress ?? agentAddress;
         const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name);
         const metaGraph = contextGraphMetaUri(contextGraphId);
-        const DKG = 'http://dkg.io/ontology/';
-        const result = await agent.store.query(
-          `SELECT ?state ?createdAt ?promotedAt ?shareOperationId ?publishedAt ?kcUal ?finalizedAt ?discardedAt WHERE {
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const PROV_NS = 'http://www.w3.org/ns/prov#';
+
+        const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
+
+        // Query assertion entity (current state + layer)
+        const entityResult = await agent.store.query(
+          `SELECT ?state ?memoryLayer ?assertionGraph WHERE {
             GRAPH <${metaGraph}> {
-              <${lifecycleUri}> <${DKG}state> ?state .
-              OPTIONAL { <${lifecycleUri}> <${DKG}createdAt> ?createdAt }
-              OPTIONAL { <${lifecycleUri}> <${DKG}promotedAt> ?promotedAt }
-              OPTIONAL { <${lifecycleUri}> <${DKG}shareOperationId> ?shareOperationId }
-              OPTIONAL { <${lifecycleUri}> <${DKG}publishedAt> ?publishedAt }
-              OPTIONAL { <${lifecycleUri}> <${DKG}kcUal> ?kcUal }
-              OPTIONAL { <${lifecycleUri}> <${DKG}finalizedAt> ?finalizedAt }
-              OPTIONAL { <${lifecycleUri}> <${DKG}discardedAt> ?discardedAt }
+              <${lifecycleUri}> <${DKG_NS}state> ?state .
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}assertionGraph> ?assertionGraph }
             }
           } LIMIT 1`,
         );
-        if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+        if (entityResult.type !== 'bindings' || entityResult.bindings.length === 0) return null;
 
-        const row = result.bindings[0];
-        const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
+        const row = entityResult.bindings[0];
+        const stateStr = strip(row['state']) as AssertionState;
+        const layerStr = strip(row['memoryLayer']);
+        const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
 
-        const entityResult = await agent.store.query(
-          `SELECT ?entity WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${DKG}rootEntity> ?entity } }`,
+        // Query all prov:Activity events that acted on this assertion
+        // (linked via prov:used or prov:generated)
+        const eventsResult = await agent.store.query(
+          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?kcUal ?rootEntity WHERE {
+            GRAPH <${metaGraph}> {
+              { ?event <${PROV_NS}generated> <${lifecycleUri}> }
+              UNION
+              { ?event <${PROV_NS}used> <${lifecycleUri}> }
+              ?event a <${PROV_NS}Activity> .
+              ?event a ?type .
+              FILTER(STRSTARTS(STR(?type), "${DKG_NS}"))
+              ?event <${PROV_NS}startedAtTime> ?timestamp .
+              ?event <${DKG_NS}fromLayer> ?fromLayer .
+              ?event <${DKG_NS}toLayer> ?toLayer .
+              OPTIONAL { ?event <${DKG_NS}shareOperationId> ?shareOpId }
+              OPTIONAL { ?event <${DKG_NS}kcUal> ?kcUal }
+              OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
+            }
+          } ORDER BY ?timestamp`,
         );
-        const rootEntities = entityResult.type === 'bindings'
-          ? entityResult.bindings.map((b) => b['entity']).filter((e): e is string => !!e)
-          : [];
+
+        // Group event rows by event URI (rootEntity may produce multiple rows)
+        const eventMap = new Map<string, AssertionEvent>();
+        if (eventsResult.type === 'bindings') {
+          for (const b of eventsResult.bindings) {
+            const eventUri = b['event'];
+            if (!eventUri) continue;
+            if (!eventMap.has(eventUri)) {
+              const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
+              eventMap.set(eventUri, {
+                type: (typeSuffix || stateStr) as AssertionState,
+                timestamp: strip(b['timestamp']) ?? '',
+                fromLayer: strip(b['fromLayer']) ?? '',
+                toLayer: strip(b['toLayer']) ?? '',
+                shareOperationId: strip(b['shareOpId']),
+                kcUal: strip(b['kcUal']),
+                rootEntities: b['rootEntity'] ? [b['rootEntity']] : undefined,
+              });
+            } else if (b['rootEntity']) {
+              const existing = eventMap.get(eventUri)!;
+              if (!existing.rootEntities) existing.rootEntities = [];
+              if (!existing.rootEntities.includes(b['rootEntity'])) {
+                existing.rootEntities.push(b['rootEntity']);
+              }
+            }
+          }
+        }
 
         return {
           contextGraphId,
           agentAddress: addr,
           name,
-          state: strip(row['state']) as AssertionDescriptor['state'],
-          createdAt: strip(row['createdAt']) ?? '',
-          promotedAt: strip(row['promotedAt']),
-          shareOperationId: strip(row['shareOperationId']),
-          publishedAt: strip(row['publishedAt']),
-          kcUal: strip(row['kcUal']),
-          finalizedAt: strip(row['finalizedAt']),
-          discardedAt: strip(row['discardedAt']),
-          rootEntities: rootEntities.length > 0 ? rootEntities : undefined,
+          state: stateStr,
+          memoryLayer: (layerStr as MemoryLayer) ?? null,
+          assertionGraph: graphUri,
+          events: [...eventMap.values()],
         };
       },
     };
