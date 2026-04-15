@@ -757,7 +757,7 @@ export class DKGAgent {
             `SELECT ?s ?p ?o ?g WHERE {
               GRAPH ?g { ?s ?p ?o }
               FILTER(
-                STRSTARTS(STR(?g), "${cgUriPrefix}/") &&
+                (STR(?g) = "${cgUriPrefix}" || STRSTARTS(STR(?g), "${cgUriPrefix}/")) &&
                 !STRENDS(STR(?g), "/_meta") &&
                 !CONTAINS(STR(?g), "/_private")
               )
@@ -2287,8 +2287,11 @@ export class DKGAgent {
     }
 
     const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
+
+    // No participant list at all → allow creator / locally-subscribed nodes
     if (!participants || participants.length === 0) {
-      return false;
+      return this.subscribedContextGraphs.has(contextGraphId)
+        || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     }
 
     // Check if any local agent address is in the participants list
@@ -2297,9 +2300,23 @@ export class DKGAgent {
       return true;
     }
 
-    // Fallback: allow reads for locally subscribed CGs
-    return this.subscribedContextGraphs.has(contextGraphId)
-      || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    // Check if the local identity ID is in the participants list
+    let myIdentityId = 0n;
+    try {
+      myIdentityId = await this.chain.getIdentityId();
+      if (myIdentityId > 0n && participants.includes(String(myIdentityId))) {
+        return true;
+      }
+    } catch { /* identity lookup failed — continue to deny */ }
+
+    // Edge nodes without an on-chain identity (identityId 0n) fall back to
+    // subscription-based access — the subscription itself is an authorization
+    // (the node was invited or created this CG).
+    if (myIdentityId === 0n) {
+      return this.subscribedContextGraphs.has(contextGraphId);
+    }
+
+    return false;
   }
 
   /**

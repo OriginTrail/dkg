@@ -1694,6 +1694,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         participantIdentityIds: [1n],
       });
       vi.spyOn(agent as any, 'isPrivateContextGraph').mockResolvedValue(true);
+      vi.spyOn(agent as any, 'getPrivateContextGraphParticipants').mockResolvedValue([
+        wallet.address, '1',
+      ]);
       const syncSpy = vi.spyOn(chain, 'verifySyncIdentity').mockResolvedValue(true);
       const ackSpy = vi.spyOn(chain, 'verifyACKIdentity');
 
@@ -1740,6 +1743,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
     try {
       await agent.start();
+      (agent as any).subscribedContextGraphs.set('public-cg', {
+        name: 'public-cg', subscribed: true, synced: true,
+      });
       const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
       const text = new TextDecoder().decode(bytes);
       expect(text).toBe('public-cg|5|100|meta');

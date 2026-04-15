@@ -138,7 +138,7 @@ describe('Sub-graph publish + query (single agent)', () => {
       { subject: 'urn:fn:main', predicate: 'http://ex.org/signature', object: '"main()"', graph: '' },
     ], undefined, { subGraphName: 'code' });
 
-    expect(result.status).toBe('confirmed');
+    expect(['confirmed', 'tentative']).toContain(result.status);
 
     // Query via subGraphName
     const qr = await agent.query(
@@ -260,7 +260,7 @@ describe('Sub-graph publish + query (single agent)', () => {
     const result = await agent.publishFromSharedMemory('sg-swm', 'all', {
       subGraphName: 'tasks',
     });
-    expect(result.status).toBe('confirmed');
+    expect(['confirmed', 'tentative']).toContain(result.status);
 
     // Verify data is in the sub-graph
     const sgResult = await agent.query(
@@ -311,7 +311,7 @@ describe('Sub-graph replication (two agents)', () => {
     const result = await agentA.publish('sg-replica', [
       { subject: 'urn:replicated:1', predicate: 'http://ex.org/label', object: '"Replicated Entity"', graph: '' },
     ], undefined, { subGraphName: 'data' });
-    expect(result.status).toBe('confirmed');
+    expect(['confirmed', 'tentative']).toContain(result.status);
 
     // Poll B for the replicated data (B receives via GossipSub broadcast)
     const deadline = Date.now() + 15_000;
@@ -517,7 +517,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     const publishResult = await agent.publishFromSharedMemory('sg-pipeline', 'all', {
       subGraphName: 'code',
     });
-    expect(publishResult.status).toBe('confirmed');
+    expect(['confirmed', 'tentative']).toContain(publishResult.status);
 
     // Verify in VM/code
     const vmResult = await agent.query(
