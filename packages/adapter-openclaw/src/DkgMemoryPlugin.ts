@@ -318,6 +318,32 @@ export function buildDkgMemoryRuntime(
 // DkgMemoryPlugin — register-side container: capability + import tool
 // ---------------------------------------------------------------------------
 
+/**
+ * **BREAKING API CHANGE (openclaw-dkg-primary-memory workstream)** — the
+ * exported `DkgMemoryPlugin` class no longer implements the legacy
+ * `OpenClawMemorySearchManager` surface. Previous revisions of this class
+ * exposed `search`, `readFile`, `status`, `sync`, and `close` methods
+ * directly so external consumers could instantiate a plugin and query it
+ * as a search manager. Those methods have moved to the new
+ * `DkgMemorySearchManager` class (exported from this same module), which
+ * is instantiated internally by `buildDkgMemoryRuntime` when the gateway
+ * calls `api.registerMemoryCapability`. See the module-level comment at
+ * the top of this file for the new reads-through-slot /
+ * writes-through-explicit-tool architecture.
+ *
+ * The constructor signature has also changed from `(client, config)` to
+ * `(client, config, resolver)` so the change is an unavoidable compile
+ * break for any TypeScript consumer — we document it here explicitly
+ * rather than shipping deprecated forwarding methods. External callers
+ * that need programmatic search should either:
+ *   1. register the plugin through the standard `DkgNodePlugin`
+ *      lifecycle so reads route through the slot-backed recall path, or
+ *   2. instantiate `DkgMemorySearchManager` directly with a
+ *      `DkgMemorySessionResolver`, which gives the same search semantics
+ *      the slot uses.
+ *
+ * The only in-tree consumer of this class is `DkgNodePlugin`.
+ */
 export class DkgMemoryPlugin {
   private api: OpenClawPluginApi | null = null;
 

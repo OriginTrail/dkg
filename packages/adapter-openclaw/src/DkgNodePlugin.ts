@@ -54,6 +54,17 @@ const LOCAL_AGENT_STATE_RETRY_DELAY_MS = 1_000;
  * resolver when an actual call needs the peerId. Codex Bug B9.
  */
 const NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS = 5_000;
+/**
+ * Wall-clock TTL for the subscribed-context-graph cache consulted by
+ * `memorySessionResolver.listAvailableContextGraphs`. Once the cache is
+ * older than this, the next resolver call fires a best-effort background
+ * refresh so newly-created or newly-subscribed CGs flow into the
+ * `needs_clarification` choices returned by `dkg_memory_import`. Set
+ * conservatively: the refresh is a single `/api/context-graphs` listing,
+ * cheap enough to run every few turns but not so frequent that it
+ * stampedes the daemon. Codex Bug B23.
+ */
+const AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS = 30_000;
 
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
@@ -65,6 +76,7 @@ export class DkgNodePlugin {
   private channelPlugin: DkgChannelPlugin | null = null;
   private memoryPlugin: DkgMemoryPlugin | null = null;
   private warnedLegacyGameConfig = false;
+  private warnedLegacyMemoryFileWatcherConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private nodePeerId: string | undefined;
   /**
@@ -117,23 +129,44 @@ export class DkgNodePlugin {
       }
       return this.nodePeerId;
     },
-    // B17: The cache is populated fire-and-forget from
-    // `refreshMemoryResolverState` at register time. If `dkg_memory_import`
-    // fires before the register-time probe lands, or after the agent
-    // creates/subscribes a new context graph later in the session, the
-    // cache is stale and the `needs_clarification` payload advertises an
-    // empty or outdated project list to the agent. When the cache is
-    // empty we fire a best-effort lazy refresh; the current call still
-    // returns synchronously with whatever we have, and the next call
-    // sees the refreshed result once the probe completes.
+    // B17 + B23: The cache is populated fire-and-forget from
+    // `refreshMemoryResolverState` at register time. Two failure modes
+    // this lazy-refresh path covers:
+    //
+    // 1. (B17) If `dkg_memory_import` fires before the register-time
+    //    probe lands, the cache is empty and the `needs_clarification`
+    //    payload advertises an empty project list.
+    // 2. (B23) Once the cache is populated, any context graph that
+    //    gets created or subscribed later in the session (via the
+    //    `/api/context-graphs/*` endpoints) never appears in the cache,
+    //    so the clarification payload has stale choices until restart.
+    //
+    // Fix: lazy-refresh on EMPTY cache (case 1) OR on STALE cache
+    // (case 2) using a wall-clock TTL. The current call still returns
+    // synchronously with whatever we have; the next call sees the
+    // refreshed result once the probe completes. `refreshMemoryResolverState`
+    // already short-circuits concurrent calls via its own in-flight guard.
     listAvailableContextGraphs: () => {
-      if (this.availableContextGraphCache.length === 0 && this.memoryResolverApi) {
+      const now = Date.now();
+      const cacheAge = now - this.availableContextGraphCacheAt;
+      const shouldRefresh =
+        this.availableContextGraphCache.length === 0 ||
+        cacheAge >= AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS;
+      if (shouldRefresh && this.memoryResolverApi) {
         void this.refreshMemoryResolverState(this.memoryResolverApi);
       }
       return this.availableContextGraphCache;
     },
   };
   private availableContextGraphCache: string[] = [];
+  /**
+   * Wall-clock timestamp (ms epoch) of the last successful context-graph
+   * cache populate. `0` means never populated. Compared against
+   * `AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS` in
+   * `memorySessionResolver.listAvailableContextGraphs` to decide when to
+   * fire a lazy refresh. Codex Bug B23.
+   */
+  private availableContextGraphCacheAt = 0;
   private availableContextGraphsRefreshing = false;
 
   constructor(config?: DkgOpenClawConfig) {
@@ -150,6 +183,7 @@ export class DkgNodePlugin {
    */
   register(api: OpenClawPluginApi): void {
     this.warnOnLegacyGameConfig(api);
+    this.warnOnLegacyMemoryFileWatcherConfig(api);
 
     const registrationMode = api.registrationMode ?? 'full';
     const fullRuntime = registrationMode === 'full';
@@ -272,6 +306,37 @@ export class DkgNodePlugin {
         '[dkg] Legacy dkg-node.game.enabled is no longer supported in the V10 OpenClaw adapter path; OriginTrail Game tools were intentionally removed.',
       );
     }
+  }
+
+  /**
+   * Warn on legacy memory config keys. `memoryDir` and `watchDebounceMs`
+   * used to drive the file-watcher / `/api/memory/import` ingestion path
+   * that was retired in the openclaw-dkg-primary-memory workstream. The
+   * keys are still tolerated in config (for forward-compat with stale
+   * workspace files) but are now no-ops. Emit a one-shot warning at
+   * register time so operators know to drop them — otherwise they see
+   * `memory.enabled: true`, assume writes to `MEMORY.md` / `memory/*.md`
+   * will be picked up, and silently lose new memories after upgrade.
+   * Codex Bug B22.
+   */
+  private warnOnLegacyMemoryFileWatcherConfig(api: OpenClawPluginApi): void {
+    if (this.warnedLegacyMemoryFileWatcherConfig) return;
+    const memoryConfig = this.config.memory as Record<string, unknown> | undefined;
+    if (!memoryConfig) return;
+    const hasLegacyKey =
+      'memoryDir' in memoryConfig || 'watchDebounceMs' in memoryConfig;
+    if (!hasLegacyKey) return;
+    this.warnedLegacyMemoryFileWatcherConfig = true;
+    api.logger.warn?.(
+      '[dkg] Legacy memory config keys detected in dkg-node.memory — the ' +
+      'openclaw-dkg-primary-memory workstream retired the file-watcher / ' +
+      'backlog-import ingestion flow that memoryDir and watchDebounceMs ' +
+      'configured. These keys are now ignored. Memories must be recorded ' +
+      'via the `dkg_memory_import` tool (writes to a project CG working ' +
+      'memory assertion) or through chat-turn persistence. Any `MEMORY.md` ' +
+      'or `memory/*.md` files on disk will NOT be ingested after upgrade. ' +
+      'Remove these keys from your workspace config to silence this warning.',
+    );
   }
 
   private async syncLocalAgentIntegrationState(api: OpenClawPluginApi, registrationMode: string): Promise<void> {
@@ -521,6 +586,9 @@ export class DkgNodePlugin {
           if (id && id !== 'agent-context') ids.push(id);
         }
         this.availableContextGraphCache = ids;
+        // B23: record the successful-populate wall-clock time so the
+        // resolver's lazy-refresh path can TTL-check staleness.
+        this.availableContextGraphCacheAt = Date.now();
       } catch (err: any) {
         api.logger.debug?.(`[dkg-memory] Could not refresh context-graph cache: ${err?.message ?? err}`);
       }
