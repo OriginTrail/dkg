@@ -491,11 +491,19 @@ export class DkgMemoryPlugin {
   }
 
   /**
-   * Registers the memory-slot capability. On gateways that do not
-   * implement `api.registerMemoryCapability`, logs a diagnostic warning
-   * and returns — legacy-gateway compatibility via `dkg_memory_search`
-   * was retired along with `dkg_memory_import` when the memory slot
-   * became the single recall/write surface.
+   * Registers the memory-slot capability. Two gates must pass:
+   *
+   * 1. The gateway must expose `api.registerMemoryCapability` — older
+   *    gateways predate the memory-slot contract and have no entry
+   *    point to call.
+   *
+   * 2. The workspace config must have elected this adapter into the
+   *    memory slot (`plugins.slots.memory === 'adapter-openclaw'`).
+   *    Merely loading the plugin must not silently override whatever
+   *    memory provider the operator elected via `dkg setup`; if the
+   *    slot points at another plugin (or is unset), this adapter
+   *    no-ops the registration and logs a diagnostic so the operator
+   *    can rerun setup if they meant to elect it.
    */
   private registerCapability(api: OpenClawPluginApi): void {
     if (typeof api.registerMemoryCapability !== 'function') {
@@ -506,12 +514,45 @@ export class DkgMemoryPlugin {
       return;
     }
 
+    if (!isMemorySlotOwnedByThisAdapter(api)) {
+      api.logger.warn?.(
+        '[dkg-memory] plugins.slots.memory is not set to "adapter-openclaw" in the workspace config — ' +
+        'skipping memory-capability registration so this adapter does not silently override the elected ' +
+        'memory provider. Rerun `dkg setup` to elect adapter-openclaw into the memory slot if that was the intent.',
+      );
+      return;
+    }
+
     const capability: MemoryPluginCapability = {
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);
     api.logger.info?.('[dkg-memory] registerMemoryCapability called');
   }
+}
+
+/**
+ * Reads the workspace-config memory-slot owner and returns `true` only
+ * when the slot is explicitly pointing at this adapter's plugin id
+ * (`'adapter-openclaw'`, matching the manifest and the value setup.ts
+ * writes during slot election).
+ *
+ * Some OpenClaw gateway versions expose the merged config on `api.cfg`
+ * instead of `api.config` — `DkgChannelPlugin.register` already handles
+ * this divergence, so mirror the same fallback order here to avoid
+ * false negatives on those runtimes.
+ */
+function isMemorySlotOwnedByThisAdapter(api: OpenClawPluginApi): boolean {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  const mergedConfig =
+    (anyApi?.cfg as Record<string, unknown> | undefined) ??
+    (anyApi?.config as Record<string, unknown> | undefined) ??
+    (runtime?.cfg as Record<string, unknown> | undefined) ??
+    (runtime?.config as Record<string, unknown> | undefined);
+  const plugins = mergedConfig?.plugins as Record<string, unknown> | undefined;
+  const slots = plugins?.slots as Record<string, unknown> | undefined;
+  return slots?.memory === 'adapter-openclaw';
 }
 
 

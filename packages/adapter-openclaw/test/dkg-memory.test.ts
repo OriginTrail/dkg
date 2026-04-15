@@ -145,6 +145,49 @@ describe('DkgMemoryPlugin.register', () => {
     expect(legacyApi.registerTool).not.toHaveBeenCalled();
   });
 
+  it('skips registerMemoryCapability when plugins.slots.memory points at another plugin (Codex B58)', () => {
+    // B58: register() must not silently override the operator's elected
+    // memory provider. If plugins.slots.memory points at a different
+    // plugin, this adapter must no-op the capability registration and
+    // log a diagnostic — not steal the slot by merely being loaded.
+    const api = makeApi();
+    (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
+    plugin.register(api);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.registerTool).not.toHaveBeenCalled();
+    expect(api.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('plugins.slots.memory is not set to "adapter-openclaw"'),
+    );
+  });
+
+  it('skips registerMemoryCapability when plugins.slots.memory is unset (Codex B58)', () => {
+    // B58 second branch: an unelected slot (fresh install, no setup run
+    // yet, or partial migration) must also no-op. Operators have to
+    // explicitly elect this adapter via `dkg setup` before it claims
+    // the slot.
+    const api = makeApi();
+    (api.config as any).plugins.slots.memory = undefined;
+    plugin.register(api);
+
+    expect(api.registerMemoryCapability).not.toHaveBeenCalled();
+    expect(api.registerTool).not.toHaveBeenCalled();
+  });
+
+  it('reads plugins.slots.memory from api.cfg when api.config is missing (Codex B58 gateway shim)', () => {
+    // Some OpenClaw gateway builds expose the merged config on `api.cfg`
+    // instead of `api.config`. The slot-ownership gate mirrors the same
+    // fallback order as DkgChannelPlugin.register so those runtimes
+    // still resolve correctly and don't get a false negative that would
+    // leave the adapter unregistered after a successful setup.
+    const api = makeApi();
+    (api as any).cfg = api.config;
+    (api as any).config = undefined;
+    plugin.register(api);
+
+    expect(api.registerMemoryCapability).toHaveBeenCalledTimes(1);
+  });
+
   it('DkgMemorySearchManager.search floors fractional maxResults into a valid SPARQL LIMIT (Codex B37)', async () => {
     // B37: the clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause. A fractional input like `2.5` would produce

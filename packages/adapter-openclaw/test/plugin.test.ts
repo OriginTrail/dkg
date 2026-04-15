@@ -1167,7 +1167,11 @@ describe('DkgNodePlugin', () => {
 
     let registeredCapability: any = null;
     const mockApi = {
-      config: {},
+      // Codex B58: slot-ownership gate requires plugins.slots.memory to
+      // name adapter-openclaw before DkgMemoryPlugin.register will claim
+      // the slot. Stamp it here so this dispatch-context test exercises
+      // the full registration path.
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
       registrationMode: 'full' as const,
       registerTool: () => {},
       registerHook: () => {},
