@@ -3,6 +3,8 @@ import { create } from 'zustand';
 export interface AgentInfo {
   name: string;
   peerId?: string;
+  agentAddress?: string;
+  agentDid?: string;
   framework?: string;
   status?: 'active' | 'idle' | 'offline';
 }

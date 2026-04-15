@@ -4,6 +4,7 @@ import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { CreateProjectModal } from '../components/Modals/CreateProjectModal.js';
+import { JoinProjectModal } from '../components/Modals/JoinProjectModal.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 
 function StatCard({ label, value, sub, accentColor }: { label: string; value: string | number; sub?: string; accentColor?: string }) {
@@ -51,6 +52,7 @@ export function DashboardView() {
   const { openTab } = useTabsStore();
   const { activeProjectId: activeProject, setActiveProject } = useProjectsStore();
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [showJoinProject, setShowJoinProject] = useState(false);
   const [showImportFiles, setShowImportFiles] = useState(false);
   const [importTargetId, setImportTargetId] = useState<string | null>(null);
 
@@ -88,6 +90,7 @@ export function DashboardView() {
           </div>
           <div className="v10-quick-actions">
             <QuickAction icon="+" label="Create Project" onClick={() => setShowCreateProject(true)} />
+            <QuickAction icon="↗" label="Join Project" onClick={() => setShowJoinProject(true)} />
             <QuickAction icon="↑" label="Import Memories" onClick={() => {
               const cgs = cgData?.contextGraphs ?? [];
               if (cgs.length === 0) {
@@ -153,6 +156,7 @@ export function DashboardView() {
       </div>
 
       <CreateProjectModal open={showCreateProject} onClose={() => setShowCreateProject(false)} />
+      <JoinProjectModal open={showJoinProject} onClose={() => setShowJoinProject(false)} />
       <ImportFilesModal
         open={showImportFiles}
         onClose={() => { setShowImportFiles(false); setImportTargetId(null); }}

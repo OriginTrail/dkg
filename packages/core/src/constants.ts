@@ -8,6 +8,8 @@ export const PROTOCOL_MESSAGE = '/dkg/10.0.0/message';
 export const PROTOCOL_ACCESS = '/dkg/10.0.0/private-access';
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.0/query-remote';
 
+export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.0/join-request';
+
 export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.0/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
 export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.0/storage-ack';
@@ -99,7 +101,8 @@ export function contextGraphRulesUri(contextGraphId: string): string {
  * Persists across WM → SWM → VM transitions so assertions remain
  * queryable by identity after promotion.
  */
-export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string): string {
+export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
+  if (subGraphName) return `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${agentAddress}:${name}`;
   return `urn:dkg:assertion:${contextGraphId}:${agentAddress}:${name}`;
 }
 

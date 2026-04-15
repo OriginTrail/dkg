@@ -430,7 +430,7 @@ sequenceDiagram
     participant CGPeers as Context Graph Participants
     participant Chain as EVM Adapter
 
-    Note over App,Chain: Prerequisites: context graph already created on-chain<br/>with participantIdentityIds[] and requiredSignatures (M of N)
+    Note over App,Chain: Prerequisites: context graph already created on-chain<br/>with participantAgents[] (Ethereum addresses) and requiredSignatures (M of N)
 
     App->>Agent: publish(paranetId, quads, {contextGraphId})
     Agent->>Pub: publish(paranetId, quads, {contextGraphId})
@@ -478,10 +478,10 @@ sequenceDiagram
         ParaPeers->>ParaPeers: Verify kcMerkleRoot and publicByteSize match
         ParaPeers->>ParaPeers: Sign keccak256(kcMerkleRoot, publicByteSize)
         ParaPeers->>Agent: Dial publisher's peerId via /dkg/attest/1.0.0
-        Note over ParaPeers,Agent: Send: {operationId, identityId, signatureR, signatureVs}
+        Note over ParaPeers,Agent: Send: {operationId, agentAddress, signatureR, signatureVs}
 
         Note over Agent: Publisher collects incoming attestations:
-        Agent->>Agent: Deduplicate by identityId
+        Agent->>Agent: Deduplicate by agentAddress
         Agent->>Agent: Accumulate until quorum reached or deadline expires
     end
 
@@ -495,7 +495,7 @@ sequenceDiagram
 
         CGPeers->>CGPeers: Verify data matches proposal
         CGPeers->>CGPeers: Sign keccak256(contextGraphId, kcMerkleRoot)
-        CGPeers-->>App: Participant signature {identityId, r, vs}
+        CGPeers-->>App: Participant signature {agentAddress, r, vs}
 
         App->>App: Collect M-of-N participant signatures
         App->>Agent: Pass participantSignatures[] to Agent
@@ -715,7 +715,7 @@ sequenceDiagram
 | `UALRangeReserved` | KnowledgeAssetsStorage | publisher, startId, endId | UAL allocation |
 | `ParanetCreated` | ParanetV9Registry | paranetId, creator, accessPolicy | Discover new paranets |
 | `KnowledgeBatchUpdated` | KnowledgeAssetsStorage | batchId, newMerkleRoot | Confirm data updates |
-| `ContextGraphCreated` | ContextGraphStorage | contextGraphId, manager, participantIds, M | Context graph creation |
+| `ContextGraphCreated` | ContextGraphStorage | contextGraphId, manager, participantAgents (address[]), M | Context graph creation |
 | `ContextGraphExpanded` | ContextGraphStorage | contextGraphId, batchId | Context graph data addition |
 
 

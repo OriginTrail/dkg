@@ -247,8 +247,8 @@ The `ChainEventPoller` (already implemented) watches for these events:
 | Event | Trigger | Node Response |
 |---|---|---|
 | `ParanetCreated(bytes32 paranetId, address creator, string name, uint8 policy)` | New paranet registered | Create local graphs, optionally auto-subscribe if in config |
-| `ParanetMemberJoined(bytes32 paranetId, uint72 identityId)` | Node joined paranet | Update local membership view |
-| `ParanetMemberLeft(bytes32 paranetId, uint72 identityId)` | Node left paranet | Update local membership view |
+| `ParanetMemberJoined(bytes32 paranetId, address agent)` | Agent joined paranet | Update local membership view |
+| `ParanetMemberLeft(bytes32 paranetId, address agent)` | Agent left paranet | Update local membership view |
 | `ParanetDeactivated(bytes32 paranetId)` | Paranet deactivated | Stop accepting publishes, mark inactive |
 | `ParanetMetadataUpdated(bytes32 paranetId)` | Metadata changed | Update local paranet definition |
 
@@ -371,8 +371,8 @@ function leaveParanetV9(bytes32 paranetId) external;
 
 // Views
 function getParanetV9Info(bytes32 paranetId) external view returns (...);
-function getParanetV9Members(bytes32 paranetId) external view returns (uint72[] memory);
-function isParanetV9Member(bytes32 paranetId, uint72 identityId) external view returns (bool);
+function getParanetV9Members(bytes32 paranetId) external view returns (address[] memory);
+function isParanetV9Member(bytes32 paranetId, address agent) external view returns (bool);
 ```
 
 ### Option B: New ParanetV9.sol contract

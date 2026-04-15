@@ -1865,13 +1865,37 @@ export class DKGPublisher implements Publisher {
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.createGraph(graphUri);
 
+    // Clear any stale lifecycle data from a previous create/discard cycle
+    // so re-using the same assertion name doesn't leave orphaned triples.
+    // This removes the assertion entity AND its prov:Activity event
+    // sub-entities (whose URIs are prefixed with the lifecycle URI).
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const staleEvents = await this.store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+    );
+    if (staleEvents.type === 'bindings') {
+      for (const row of staleEvents.bindings) {
+        const subj = row['s'];
+        if (subj) await this.store.deleteByPattern({ graph: metaGraph, subject: subj });
+      }
+    }
+
     const lifecycleQuads = generateAssertionCreatedMetadata({
       contextGraphId,
       agentAddress,
       assertionName: name,
+      subGraphName,
       timestamp: new Date(),
     });
     await this.store.insert(lifecycleQuads);
+
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: 'http://dkg.io/ontology/memoryLayer',
+      object: '"WM"',
+      graph: metaGraph,
+    }]);
 
     return graphUri;
   }
@@ -2101,6 +2125,21 @@ export class DKGPublisher implements Publisher {
       : quadsToPromote;
     await this.store.delete(effectivePromoteQuads.map((q) => ({ ...q, graph: graphUri })));
 
+    // Update the assertion's memory layer from WM → SWM in _meta
+    const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
+    const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+    await this.store.deleteByPattern({
+      graph: assertionMetaGraph,
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+    });
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+      object: '"SWM"',
+      graph: assertionMetaGraph,
+    }]);
+
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
     const entities = [...new Set(effectiveQuads.map((q) => q.subject))];
     const shareTransition = generateShareTransitionMetadata({
@@ -2118,6 +2157,7 @@ export class DKGPublisher implements Publisher {
       contextGraphId,
       agentAddress,
       assertionName: name,
+      subGraphName: opts?.subGraphName,
       shareOperationId: operationId,
       rootEntities: effectiveRoots,
       timestamp: new Date(),
@@ -2195,6 +2235,7 @@ export class DKGPublisher implements Publisher {
       contextGraphId,
       agentAddress,
       assertionName: name,
+      subGraphName,
       timestamp: new Date(),
     });
     await this.store.delete(discarded.delete);

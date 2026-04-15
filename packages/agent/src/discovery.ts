@@ -13,6 +13,7 @@ export interface DiscoveredAgent {
   framework?: string;
   nodeRole?: string;
   relayAddress?: string;
+  agentAddress?: string;
 }
 
 export interface DiscoveredOffering {
@@ -53,13 +54,14 @@ export class DiscoveryClient {
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress WHERE {
+      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
         OPTIONAL { ?agent <${SKILL}framework> ?framework }
         OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
+        OPTIONAL { ?agent <${DKG}agentAddress> ?agentAddress }
       }
       ${limitClause}
     `;
@@ -73,6 +75,7 @@ export class DiscoveryClient {
       framework: row['framework'] ? stripQuotes(row['framework']) : undefined,
       nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
+      agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
     }));
   }
 

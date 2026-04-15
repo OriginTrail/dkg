@@ -1,7 +1,9 @@
 import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
+import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type PendingJoinRequest } from '../api.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
+import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../hooks/useMemoryEntities.js';
 import { TrustSummaryBar, TrustBadge } from '../components/MemoryExplorer/TrustIndicator.js';
 
@@ -144,7 +146,49 @@ function ProjectHome({ cg, memory }: {
   cg: any;
   memory: ReturnType<typeof useMemoryEntities>;
 }) {
-  const agents = useMemo(() => {
+  const [allowedAgents, setAllowedAgents] = useState<string[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<PendingJoinRequest[]>([]);
+  const [processingRequest, setProcessingRequest] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cg?.id) {
+      import('../api.js').then(({ listParticipants }) =>
+        listParticipants(cg.id)
+          .then((data) => setAllowedAgents(data.allowedAgents))
+          .catch(() => setAllowedAgents([]))
+      );
+      listJoinRequests(cg.id)
+        .then((data) => setPendingRequests(data.requests.filter(r => r.status === 'pending')))
+        .catch(() => setPendingRequests([]));
+    }
+  }, [cg?.id]);
+
+  const handleApproveRequest = async (addr: string) => {
+    setProcessingRequest(addr);
+    try {
+      await approveJoinRequest(cg.id, addr);
+      setPendingRequests(prev => prev.filter(r => r.agentAddress !== addr));
+      setAllowedAgents(prev => [...prev, addr]);
+    } catch {
+      // silently fail
+    } finally {
+      setProcessingRequest(null);
+    }
+  };
+
+  const handleRejectRequest = async (addr: string) => {
+    setProcessingRequest(addr);
+    try {
+      await rejectJoinRequest(cg.id, addr);
+      setPendingRequests(prev => prev.filter(r => r.agentAddress !== addr));
+    } catch {
+      // silently fail
+    } finally {
+      setProcessingRequest(null);
+    }
+  };
+
+  const knowledgeAgents = useMemo(() => {
     const found: Array<{ uri: string; label: string; tool: string | null }> = [];
     const seen = new Set<string>();
     for (const [, e] of memory.entities) {
@@ -159,6 +203,8 @@ function ProjectHome({ cg, memory }: {
     }
     return found;
   }, [memory.entities]);
+
+  const participantCount = allowedAgents.length || knowledgeAgents.length;
 
   const turnCount = useMemo(() => {
     let c = 0;
@@ -185,19 +231,61 @@ function ProjectHome({ cg, memory }: {
           <span className="v10-ph-stat-label">turns</span>
         </div>
         <div className="v10-ph-stat">
-          <span className="v10-ph-stat-val">{agents.length}</span>
+          <span className="v10-ph-stat-val">{participantCount}</span>
           <span className="v10-ph-stat-label">participants</span>
         </div>
       </div>
-      {agents.length > 0 && (
+      {(allowedAgents.length > 0 || knowledgeAgents.length > 0) && (
         <div className="v10-ph-agents">
           <span className="v10-ph-agents-label">Participants</span>
           <div className="v10-ph-agents-list">
-            {agents.map(a => (
-              <span key={a.uri} className="v10-ph-agent-chip">
-                {a.label}
-                {a.tool && <span className="v10-ph-agent-tool">{a.tool}</span>}
-              </span>
+            {allowedAgents.length > 0
+              ? allowedAgents.map(addr => (
+                  <span key={addr} className="v10-ph-agent-chip" title={`did:dkg:agent:${addr}`}>
+                    {addr.slice(0, 6)}…{addr.slice(-4)}
+                  </span>
+                ))
+              : knowledgeAgents.map(a => (
+                  <span key={a.uri} className="v10-ph-agent-chip">
+                    {a.label}
+                    {a.tool && <span className="v10-ph-agent-tool">{a.tool}</span>}
+                  </span>
+                ))
+            }
+          </div>
+        </div>
+      )}
+
+      {pendingRequests.length > 0 && (
+        <div className="v10-ph-join-requests">
+          <span className="v10-ph-agents-label">
+            Pending Join Requests
+            <span className="v10-ph-join-badge">{pendingRequests.length}</span>
+          </span>
+          <div className="v10-ph-join-list">
+            {pendingRequests.map(req => (
+              <div key={req.agentAddress} className="v10-ph-join-item">
+                <div className="v10-ph-join-info">
+                  <span className="v10-ph-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
+                  <span className="v10-ph-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
+                </div>
+                <div className="v10-ph-join-actions">
+                  <button
+                    className="v10-ph-join-btn approve"
+                    onClick={() => handleApproveRequest(req.agentAddress)}
+                    disabled={processingRequest === req.agentAddress}
+                  >
+                    {processingRequest === req.agentAddress ? '…' : '✓ Approve'}
+                  </button>
+                  <button
+                    className="v10-ph-join-btn reject"
+                    onClick={() => handleRejectRequest(req.agentAddress)}
+                    disabled={processingRequest === req.agentAddress}
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         </div>
@@ -789,6 +877,7 @@ function matchesSearch(e: MemoryEntity, q: string): boolean {
 export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const { data: cgData } = useFetch(api.fetchContextGraphs, [], 30_000);
   const [showImport, setShowImport] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [activeTab, setActiveTab] = useState<ViewTab>('timeline');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -846,6 +935,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           </div>
         </div>
         <div className="v10-me-header-actions">
+          <button className="v10-me-action-btn" onClick={() => setShowShare(true)}>⤴ Share</button>
           <button className="v10-me-action-btn" onClick={() => setShowImport(true)}>↑ Import</button>
           <button className="v10-me-action-btn" onClick={memory.refresh}>↻</button>
         </div>
@@ -929,6 +1019,12 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       <ImportFilesModal
         open={showImport}
         onClose={() => setShowImport(false)}
+        contextGraphId={cg.id}
+        contextGraphName={cg.name}
+      />
+      <ShareProjectModal
+        open={showShare}
+        onClose={() => setShowShare(false)}
         contextGraphId={cg.id}
         contextGraphName={cg.name}
       />

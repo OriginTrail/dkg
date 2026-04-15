@@ -1097,16 +1097,23 @@ const contextGraphCmd = program
 
 contextGraphCmd
   .command('create <id>')
-  .description('Create a new context graph (free, P2P — no chain transaction)')
+  .description('Create a new context graph (free, P2P — no chain transaction). If <id> has no "/" it is auto-prefixed with your agent address.')
   .option('-n, --name <name>', 'Human-readable name (defaults to id)')
   .option('-d, --description <desc>', 'Description of the context graph')
-  .option('--invite <peer...>', 'Invite peers (allowlist for curated CGs)')
+  .option('--access-policy <n>', 'Access policy: 0 = open (default), 1 = curated/private', parseInt)
+  .option(
+    '--allowed-agent <address>',
+    'Agent address to add to allowlist (repeatable, implies --access-policy 1)',
+    (value: string, previous: string[] = []) => [...previous, value],
+    [] as string[],
+  )
+  .option('--invite <peer...>', 'Invite peers by peer ID (deprecated — use --allowed-agent)')
   .option('--private', 'Create a private local-only context graph')
   .option(
     '--participant-identity-id <id>',
     'Participant identity ID to include for private access control (repeatable)',
-    (value, previous: string[] = []) => [...previous, value],
-    [],
+    (value: string, previous: string[] = []) => [...previous, value],
+    [] as string[],
   )
   .option('--required-signatures <n>', 'Required signatures threshold for participant-based context graphs')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
@@ -1114,9 +1121,21 @@ contextGraphCmd
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
+
+      // Auto-namespace: bare slug -> {agentAddress}/{slug}
+      if (!id.includes('/')) {
+        const identity = await client.getAgentIdentity();
+        id = `${identity.agentAddress}/${id}`;
+      }
+
       const participantIdentityIds = (opts.participantIdentityId as string[] | undefined) ?? [];
+      const allowedAgents = (opts.allowedAgent as string[] | undefined) ?? [];
+      const accessPolicy = allowedAgents.length > 0 ? 1 : (opts.accessPolicy as number | undefined);
+
       const result = await client.createContextGraph(id, opts.name ?? id, opts.description, {
         private: !!opts.private,
+        accessPolicy,
+        allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
         participantIdentityIds,
         requiredSignatures: opts.requiredSignatures != null ? Number(opts.requiredSignatures) : undefined,
       }, opts.invite as string[] | undefined);
@@ -1124,8 +1143,11 @@ contextGraphCmd
       console.log(`  ID:   ${result.created}`);
       console.log(`  URI:  ${result.uri}`);
       console.log(`  ${opts.private ? 'Private local-only graph created.' : 'Auto-subscribed to GossipSub topic.'}`);
+      if (allowedAgents.length > 0) {
+        console.log(`  Allowed agents: ${allowedAgents.join(', ')}`);
+      }
       if (opts.invite?.length) {
-        console.log(`  Invited ${opts.invite.length} peer(s) via allowlist.`);
+        console.log(`  Invited ${(opts.invite as string[]).length} peer(s) via allowlist (legacy).`);
       }
       if (opts.private && participantIdentityIds.length > 0) {
         console.log(`  Participants: ${participantIdentityIds.join(', ')}`);
@@ -1180,15 +1202,148 @@ contextGraphCmd
 
 contextGraphCmd
   .command('invite <contextGraphId>')
-  .description('Invite a peer to join a context graph (adds to allowlist)')
+  .description('[DEPRECATED] Invite a peer by peer ID — use "add-agent" instead')
   .requiredOption('--peer <peerId>', 'Peer ID to invite')
   .action(async (contextGraphId: string, opts: ActionOpts) => {
+    console.error('Warning: "context-graph invite --peer" is deprecated. Use "context-graph add-agent --agent" instead.');
     try {
       const client = await ApiClient.connect();
       await client.inviteToContextGraph(contextGraphId, opts.peer);
       console.log(`Peer invited:`);
       console.log(`  Context Graph: ${contextGraphId}`);
       console.log(`  Peer:          ${opts.peer}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('add-agent <contextGraphId>')
+  .description('Add an agent to a curated context graph allowlist')
+  .requiredOption('--agent <address>', 'Agent Ethereum address (0x...)')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.addAgent(contextGraphId, opts.agent);
+      console.log(`Agent added to allowlist:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Agent:         ${opts.agent}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('remove-agent <contextGraphId>')
+  .description('Remove an agent from a context graph allowlist')
+  .requiredOption('--agent <address>', 'Agent Ethereum address (0x...)')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.removeAgent(contextGraphId, opts.agent);
+      console.log(`Agent removed from allowlist:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Agent:         ${opts.agent}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('agents <contextGraphId>')
+  .description('List agents allowed in a context graph')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.listAgents(contextGraphId);
+      if (!result.allowedAgents || result.allowedAgents.length === 0) {
+        console.log(`No allowlist configured for "${contextGraphId}" (open access).`);
+        return;
+      }
+      console.log(`Allowed agents for "${contextGraphId}":`);
+      for (const addr of result.allowedAgents) {
+        console.log(`  ${addr}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('request-join <contextGraphId>')
+  .description('Send a signed join request to the context graph curator')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.signJoinRequest(contextGraphId);
+      if (result.status === 'already-member') {
+        console.log(`Already a member of "${contextGraphId}".`);
+      } else {
+        console.log(`Join request sent for "${contextGraphId}".`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('approve-join <contextGraphId>')
+  .description('Approve a pending join request (curator only)')
+  .requiredOption('--agent <address>', 'Agent address to approve')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.approveJoin(contextGraphId, opts.agent);
+      console.log(`Join request approved:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Agent:         ${opts.agent}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('reject-join <contextGraphId>')
+  .description('Reject a pending join request (curator only)')
+  .requiredOption('--agent <address>', 'Agent address to reject')
+  .action(async (contextGraphId: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      await client.rejectJoin(contextGraphId, opts.agent);
+      console.log(`Join request rejected:`);
+      console.log(`  Context Graph: ${contextGraphId}`);
+      console.log(`  Agent:         ${opts.agent}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('join-requests <contextGraphId>')
+  .description('List pending join requests for a context graph (curator only)')
+  .action(async (contextGraphId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.listJoinRequests(contextGraphId);
+      if (!result.requests || result.requests.length === 0) {
+        console.log(`No pending join requests for "${contextGraphId}".`);
+        return;
+      }
+      console.log(`Join requests for "${contextGraphId}":`);
+      for (const req of result.requests) {
+        const name = req.agentName ? ` (${req.agentName})` : '';
+        const ts = req.timestamp ? ` — ${req.timestamp}` : '';
+        console.log(`  [${req.status}] ${req.agentAddress}${name}${ts}`);
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

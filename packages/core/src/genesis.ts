@@ -227,4 +227,8 @@ export const DKG_ONTOLOGY = {
   DKG_REGISTRATION_STATUS: `${DKG}registrationStatus`,
   DKG_CURATOR: `${DKG}curator`,
   DKG_ALLOWED_PEER: `${DKG}allowedPeer`,
+  DKG_ALLOWED_AGENT: `${DKG}allowedAgent`,
+  DKG_AGENT_ADDRESS: `${DKG}agentAddress`,
+  DKG_AGENT_MODE: `${DKG}agentMode`,
+  DKG_AGENT_AUTH_TOKEN: `${DKG}agentAuthToken`,
 } as const;
