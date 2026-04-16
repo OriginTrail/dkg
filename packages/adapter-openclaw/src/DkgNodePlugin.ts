@@ -229,7 +229,7 @@ export class DkgNodePlugin {
     }
     this.client.setLocalAgentRequestContext({
       integrationId: 'openclaw',
-      semanticEnrichmentSupported: this.channelPlugin?.supportsSemanticEnrichment() === true,
+      semanticEnrichmentSupported: this.channelPlugin?.isSemanticEnrichmentActive() === true,
     });
   }
   /**
@@ -520,6 +520,7 @@ export class DkgNodePlugin {
     const existing = await this.loadStoredOpenClawIntegration(api);
     if (existing === undefined) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.syncClientLocalAgentRequestContext();
       // Log dedup: emit exactly one `warn` per distinct failure reason,
       // then downgrade repeats of the same reason to `debug` (silent at
       // default log level) until either the reason changes or the load
@@ -551,6 +552,7 @@ export class DkgNodePlugin {
     this.lastLocalAgentIntegrationLoadError = null;
     if (this.wasOpenClawExplicitlyUserDisconnected(existing)) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.syncClientLocalAgentRequestContext();
       api.logger.info?.('[dkg] Stored OpenClaw integration was explicitly disconnected by the user; skipping startup re-registration');
       return;
     }
@@ -583,6 +585,7 @@ export class DkgNodePlugin {
       });
     } catch (err: any) {
       await this.channelPlugin?.stopSemanticEnrichmentWorker();
+      this.syncClientLocalAgentRequestContext();
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
     }
@@ -590,6 +593,7 @@ export class DkgNodePlugin {
     await this.channelPlugin?.startSemanticEnrichmentWorker().catch((err: any) => {
       api.logger.warn?.(`[dkg] Semantic enrichment worker failed to start after integration sync: ${err?.message ?? String(err)}`);
     });
+    this.syncClientLocalAgentRequestContext();
 
     if (bridgeAlreadyReady || !this.channelPlugin) {
       return;

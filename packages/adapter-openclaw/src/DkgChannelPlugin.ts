@@ -459,6 +459,11 @@ export class DkgChannelPlugin {
     return worker?.getRuntimeProbe().supported === true;
   }
 
+  isSemanticEnrichmentActive(): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    return worker?.isActive() === true;
+  }
+
   async startSemanticEnrichmentWorker(): Promise<void> {
     const semanticWorker = this.ensureSemanticEnrichmentWorker();
     if (!semanticWorker) return;

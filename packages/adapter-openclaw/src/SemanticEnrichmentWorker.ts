@@ -354,6 +354,10 @@ export class SemanticEnrichmentWorker {
     };
   }
 
+  isActive(): boolean {
+    return this.started && !this.stopped && this.getRuntimeProbe().supported;
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
     this.stopSignal = this.createStopSignal();
@@ -833,6 +837,7 @@ export class SemanticEnrichmentWorker {
       ? payload.attachmentRefs.map((ref) => JSON.stringify(ref))
       : ['none'];
     const turnMessageAnchors = await this.loadChatTurnMessageAnchors(payload).catch(() => null);
+    const includeAssistantReply = payload.persistenceState === 'stored';
     const section = [
       'Source material:',
       `- Assertion graph: ${payload.assertionUri}`,
@@ -851,12 +856,16 @@ export class SemanticEnrichmentWorker {
       ...attachmentLines.map((line) => `  ${line}`),
       '- User message:',
       truncate(payload.userMessage, MAX_SOURCE_TEXT_CHARS),
-      '- Assistant reply:',
-      truncate(payload.assistantReply, MAX_SOURCE_TEXT_CHARS),
+      ...(includeAssistantReply
+        ? [
+            '- Assistant reply:',
+            truncate(payload.assistantReply, MAX_SOURCE_TEXT_CHARS),
+          ]
+        : ['- Assistant reply: omitted because no grounded assistant reply was stored for this turn.']),
     ].join('\n');
     return {
       section,
-      text: `${payload.userMessage}\n${payload.assistantReply}`,
+      text: includeAssistantReply ? `${payload.userMessage}\n${payload.assistantReply}` : payload.userMessage,
     };
   }
 

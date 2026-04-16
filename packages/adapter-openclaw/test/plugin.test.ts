@@ -272,6 +272,99 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('advertises semantic enrichment to daemon requests only after the worker becomes active', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'setup-runtime',
+        runtime: {
+          subagent: {
+            run: vi.fn(),
+            waitForRun: vi.fn(),
+            getSessionMessages: vi.fn(),
+            deleteSession: vi.fn(),
+          },
+        } as any,
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      } as any;
+
+      plugin.register(mockApi);
+      const clientContext = (plugin.getClient() as any).localAgentRequestContext;
+      expect(clientContext).toMatchObject({
+        integrationId: 'openclaw',
+        semanticEnrichmentSupported: false,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect((plugin.getClient() as any).localAgentRequestContext).toMatchObject({
+        integrationId: 'openclaw',
+        semanticEnrichmentSupported: true,
+      });
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps semantic enrichment request advertising disabled when local-agent sync fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockRejectedValue(new Error('daemon offline'));
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'setup-runtime',
+        runtime: {
+          subagent: {
+            run: vi.fn(),
+            waitForRun: vi.fn(),
+            getSessionMessages: vi.fn(),
+            deleteSession: vi.fn(),
+          },
+        } as any,
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      } as any;
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect((plugin.getClient() as any).localAgentRequestContext).toMatchObject({
+        integrationId: 'openclaw',
+        semanticEnrichmentSupported: false,
+      });
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('stamps live semantic-enrichment request headers on daemon calls when runtime support is available', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockResolvedValue({

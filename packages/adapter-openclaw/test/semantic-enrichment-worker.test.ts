@@ -1242,6 +1242,77 @@ describe('SemanticEnrichmentWorker', () => {
     expect(worker.getPendingSummaries()).toHaveLength(0);
   });
 
+  it('omits synthetic assistant fallback text from failed chat-turn extraction prompts', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-chat-failed',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'session-failed',
+            turnId: 'turn-failed',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:session-failed',
+            turnUri: 'urn:dkg:chat:turn:turn-failed',
+            userMessage: 'Please summarize the roadmap blockers.',
+            assistantReply: 'The assistant response could not be persisted because the upstream provider failed.',
+            persistenceState: 'failed',
+            failureReason: 'provider offline',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-chat-failed' });
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: vi.fn().mockResolvedValue({
+          applied: true,
+          completed: true,
+          semanticEnrichment: {
+            eventId: 'evt-chat-failed',
+            status: 'completed',
+            semanticTripleCount: 0,
+            updatedAt: new Date().toISOString(),
+          },
+        }),
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-chat-failed',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    const prompt = String(run.mock.calls[0]?.[0]?.message ?? '');
+    expect(prompt).toContain('- Persistence state: failed');
+    expect(prompt).toContain('- Failure reason: provider offline');
+    expect(prompt).toContain('- Assistant reply: omitted because no grounded assistant reply was stored for this turn.');
+    expect(prompt).not.toContain('The assistant response could not be persisted because the upstream provider failed.');
+    expect(prompt).toContain('Please summarize the roadmap blockers.');
+  });
+
   it('preserves valid opaque ontology override names with spaces', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
