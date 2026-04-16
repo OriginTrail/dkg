@@ -12,6 +12,8 @@ extendEnvironment((hre: HardhatRuntimeEnvironment) => {
   hre.helpers = lazyObject(() => new Helpers(hre));
 });
 
+const isCoverage = process.argv.includes('coverage');
+
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
   namedAccounts: {
@@ -27,9 +29,9 @@ const config: HardhatUserConfig = {
     hardhat: {
       environment: 'development',
       chainId: 31337,
-      gas: 15_000_000,
+      gas: isCoverage ? 100_000_000 : 15_000_000,
       gasMultiplier: 1,
-      blockGasLimit: 30_000_000,
+      blockGasLimit: isCoverage ? 100_000_000 : 30_000_000,
       hardfork: 'shanghai',
       accounts: { count: 200 },
       throwOnTransactionFailures: true,
