@@ -99,6 +99,50 @@
         "type": "uint256"
       },
       {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "rewardsPortion",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "releaseAt",
+        "type": "uint64"
+      }
+    ],
+    "name": "PendingWithdrawalCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "PendingWithdrawalDeleted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
         "indexed": true,
         "internalType": "uint72",
         "name": "identityId",
@@ -202,6 +246,106 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRaw",
+        "type": "uint96"
+      }
+    ],
+    "name": "RawDecreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRaw",
+        "type": "uint96"
+      }
+    ],
+    "name": "RawIncreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRewards",
+        "type": "uint96"
+      }
+    ],
+    "name": "RewardsDecreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRewards",
+        "type": "uint96"
+      }
+    ],
+    "name": "RewardsIncreased",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -212,6 +356,34 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "rewardsPortion",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint64",
+        "name": "releaseAt",
+        "type": "uint64"
+      }
+    ],
+    "name": "createPendingWithdrawal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -243,6 +415,55 @@
       }
     ],
     "name": "createPosition",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "decreaseRaw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "decreaseRewards",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "deletePendingWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -406,6 +627,42 @@
         "type": "uint256"
       }
     ],
+    "name": "getPendingWithdrawal",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "amount",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "rewardsPortion",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint64",
+            "name": "releaseAt",
+            "type": "uint64"
+          }
+        ],
+        "internalType": "struct ConvictionStakingStorage.PendingWithdrawal",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
     "name": "getPosition",
     "outputs": [
       {
@@ -429,6 +686,11 @@
             "internalType": "uint72",
             "name": "identityId",
             "type": "uint72"
+          },
+          {
+            "internalType": "uint96",
+            "name": "rewards",
+            "type": "uint96"
           },
           {
             "internalType": "uint64",
@@ -479,6 +741,42 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "increaseRaw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "increaseRewards",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -608,6 +906,35 @@
         "type": "uint256"
       }
     ],
+    "name": "pendingWithdrawals",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "rewardsPortion",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint64",
+        "name": "releaseAt",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
     "name": "positions",
     "outputs": [
       {
@@ -629,6 +956,11 @@
         "internalType": "uint72",
         "name": "identityId",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "rewards",
+        "type": "uint96"
       },
       {
         "internalType": "uint64",
