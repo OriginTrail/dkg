@@ -175,6 +175,50 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('does not persist semanticEnrichment false during setup-runtime registration', async () => {
+    const originalFetch = globalThis.fetch;
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    });
+    globalThis.fetch = fakeFetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'setup-runtime',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const connectCall = fakeFetch.mock.calls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(connectCall).toBeTruthy();
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody.capabilities).toMatchObject({
+        localChat: true,
+        connectFromUi: true,
+        dkgPrimaryMemory: true,
+      });
+      expect(connectBody.capabilities.semanticEnrichment).toBeUndefined();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('persists gatewayUrl on first registration when gateway routing is available', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockResolvedValue({

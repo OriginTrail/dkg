@@ -31,6 +31,7 @@ import type {
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
 import {
   SemanticEnrichmentWorker,
+  type SemanticEnrichmentWakeRequest,
 } from './SemanticEnrichmentWorker.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
