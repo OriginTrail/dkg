@@ -1166,38 +1166,41 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
             // Step 1: delegator's score for this epoch
             uint256 delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
-            if (delegatorScore18 == 0) continue;
 
             uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
-            if (nodeScore18 == 0) continue;
 
             // Step 2: convert score → TRAC (V8 pattern from Staking.sol:568-593)
-            uint256 netNodeRewards;
-            if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, e)) {
-                uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
-                if (allNodesScore18 > 0) {
-                    uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
-                        * nodeScore18) / allNodesScore18;
-                    uint96 operatorFeeAmount = uint96(
-                        (grossNodeRewards
-                            * profileStorage.getLatestOperatorFeePercentage(identityId))
-                            / parametersStorage.maxOperatorFee()
-                    );
-                    netNodeRewards = grossNodeRewards - operatorFeeAmount;
-                    delegatorsInfo.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
-                    delegatorsInfo.setNetNodeEpochRewards(identityId, e, netNodeRewards);
-                    stakingStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
+            uint256 epochReward = 0;
+            if (delegatorScore18 > 0 && nodeScore18 > 0) {
+                uint256 netNodeRewards;
+                if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, e)) {
+                    uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
+                    if (allNodesScore18 > 0) {
+                        uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
+                            * nodeScore18) / allNodesScore18;
+                        uint96 operatorFeeAmount = uint96(
+                            (grossNodeRewards
+                                * profileStorage.getLatestOperatorFeePercentage(identityId))
+                                / parametersStorage.maxOperatorFee()
+                        );
+                        netNodeRewards = grossNodeRewards - operatorFeeAmount;
+                        delegatorsInfo.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
+                        delegatorsInfo.setNetNodeEpochRewards(identityId, e, netNodeRewards);
+                        stakingStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
+                    }
+                } else {
+                    netNodeRewards = delegatorsInfo.getNetNodeEpochRewards(identityId, e);
                 }
-            } else {
-                netNodeRewards = delegatorsInfo.getNetNodeEpochRewards(identityId, e);
+                epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
             }
 
-            // Set operator fee flag for scoreless epochs to not block Profile.updateOperatorFee
+            // Unconditional fee-flag write — mirrors V8 Staking.sol:596-600.
+            // Ensures Profile.updateOperatorFee is never blocked by rewardless epochs.
             if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, e)) {
                 delegatorsInfo.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
             }
 
-            rewardTotal += (delegatorScore18 * netNodeRewards) / nodeScore18;
+            rewardTotal += epochReward;
         }
 
         if (rewardTotal == 0) {
