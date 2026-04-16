@@ -103,10 +103,30 @@ export async function resolveLiftWorkspaceSlice(params: {
     selection: { rootEntities: requestedRoots },
   });
 
+  const publishContextGraphId = await resolveOnChainContextGraphId({
+    store: params.store,
+    contextGraphId: request.contextGraphId,
+  });
+
   return {
     quads,
     publisherPeerId: operation.publisherPeerId,
+    publishContextGraphId,
   };
+}
+
+async function resolveOnChainContextGraphId(params: {
+  store: TripleStore;
+  contextGraphId: string;
+}): Promise<string | undefined> {
+  const ontologyGraph = 'did:dkg:context-graph:ontology';
+  const contextGraphUri = `did:dkg:context-graph:${params.contextGraphId}`;
+  const result = await params.store.query(
+    `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ParanetOnChainId> ?id } } LIMIT 1`,
+  );
+  if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+  const value = stripLiteral(result.bindings[0]?.['id']);
+  return value ? value.trim() : undefined;
 }
 
 function buildWorkspaceSelectionQuery(

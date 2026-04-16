@@ -170,6 +170,33 @@ export class EVMChainAdapter implements ChainAdapter {
     return s;
   }
 
+  /**
+   * Pick the next signer in the pool that the on-chain ContextGraphs contract
+   * authorizes for the target context graph. Falls back to round-robin only
+   * when the auth surface is unavailable.
+   */
+  private async nextAuthorizedSigner(contextGraphId: bigint): Promise<Wallet> {
+    if (!this.contracts.contextGraphs) {
+      return this.nextSigner();
+    }
+
+    const start = this.signerIndex % this.signerPool.length;
+    for (let i = 0; i < this.signerPool.length; i += 1) {
+      const idx = (start + i) % this.signerPool.length;
+      const signer = this.signerPool[idx];
+      const authorized = await this.contracts.contextGraphs.isAuthorizedPublisher(contextGraphId, signer.address);
+      if (authorized) {
+        this.signerIndex = idx + 1;
+        return signer;
+      }
+    }
+
+    throw new Error(
+      `No authorized publisher wallet found in signer pool for context graph ${contextGraphId.toString()}. ` +
+      'Ensure at least one configured wallet is permitted by on-chain publish authority.',
+    );
+  }
+
   /** All operational wallet addresses (for display / funding). */
   getSignerAddresses(): string[] {
     return this.signerPool.map((s) => s.address);
@@ -1033,7 +1060,7 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
     }
 
-    const signer = await this.nextSigner();
+    const signer = await this.nextAuthorizedSigner(params.contextGraphId);
     const receiverIdentityIds = params.receiverSignatures.map((s) => s.identityId);
     const receiverRs = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
     const receiverVSs = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
@@ -1176,7 +1203,7 @@ export class EVMChainAdapter implements ChainAdapter {
       );
     }
 
-    const txSigner = this.nextSigner();
+    const txSigner = await this.nextAuthorizedSigner(params.contextGraphId);
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 
