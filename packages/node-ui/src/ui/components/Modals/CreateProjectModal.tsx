@@ -30,17 +30,24 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
+  const [identityLoading, setIdentityLoading] = useState(false);
+  const [identityError, setIdentityError] = useState(false);
 
   const { setContextGraphs, contextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
+  const loadAgentIdentity = () => {
+    setIdentityLoading(true);
+    setIdentityError(false);
+    fetchCurrentAgent()
+      .then((a) => { setAgentAddress(a.agentAddress); setIdentityError(false); })
+      .catch(() => { setAgentAddress(null); setIdentityError(true); })
+      .finally(() => setIdentityLoading(false));
+  };
+
   useEffect(() => {
-    if (open) {
-      fetchCurrentAgent()
-        .then((a) => setAgentAddress(a.agentAddress))
-        .catch(() => setAgentAddress(null));
-    }
+    if (open) loadAgentIdentity();
   }, [open]);
 
   if (!open) return null;
@@ -59,8 +66,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     setProgress('Registering project on the network…');
 
     const finalSlug = slugify(trimmedName);
-    const resolvedAddr = agentAddress ?? '0x0000000000000000000000000000000000000000';
-    const cgId = `${resolvedAddr}/${finalSlug}`;
+    if (!agentAddress) {
+      setError('Agent identity is still loading. Please wait a moment and try again.');
+      setCreating(false);
+      return;
+    }
+    const cgId = `${agentAddress}/${finalSlug}`;
 
     try {
       const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
@@ -244,12 +255,17 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
         <div className="v10-modal-footer">
           <button className="v10-modal-btn" onClick={onClose}>Cancel</button>
+          {identityError && (
+            <button className="v10-modal-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
+              {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
+            </button>
+          )}
           <button
             className="v10-modal-btn primary"
             onClick={handleCreate}
-            disabled={!name.trim() || creating}
+            disabled={!name.trim() || creating || !agentAddress || identityLoading}
           >
-            {creating ? progress || 'Creating…' : 'Create Project'}
+            {creating ? progress || 'Creating…' : identityLoading ? 'Loading agent…' : !agentAddress ? 'Agent unavailable' : 'Create Project'}
           </button>
         </div>
       </div>

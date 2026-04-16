@@ -2907,7 +2907,9 @@ export class DKGAgent {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
 
-    const isCurated = opts.accessPolicy === 1 || (opts.allowedAgents && opts.allowedAgents.length > 0);
+    const isCurated = opts.accessPolicy === 1
+      || (opts.allowedAgents && opts.allowedAgents.length > 0)
+      || (opts.allowedPeers && opts.allowedPeers.length > 0);
 
     if (opts.private) {
       this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no gossip)`);
@@ -2922,10 +2924,17 @@ export class DKGAgent {
     // will see them. Open CGs go to ONTOLOGY for network-wide discovery.
     const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
 
+    // Use the caller's identity when provided so non-default agents on
+    // multi-agent nodes own the CGs they create. On-chain operations
+    // (registerContextGraph, verify) still bind to the node wallet — this is
+    // a known limitation until per-agent chain signers are implemented.
+    // Downstream owner checks (isCallerOrNodeOwner, assertCallerIsOwner) accept
+    // the caller DID when callerAgentAddress is threaded through daemon routes.
+    const creatorDid = `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorDid, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
@@ -2935,7 +2944,7 @@ export class DKGAgent {
     // Store registration status and curator in _meta
     quads.push(
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: creatorDid, graph: cgMetaGraph },
     );
 
     // Store peer allowlist for curated CGs (with validation)
@@ -3129,6 +3138,7 @@ export class DKGAgent {
   async registerContextGraph(id: string, opts?: {
     revealOnChain?: boolean;
     accessPolicy?: number;
+    callerAgentAddress?: string;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
 
@@ -3141,19 +3151,19 @@ export class DKGAgent {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
 
-    // Only the curator/creator can register a CG on-chain
+    // Only the curator/creator can register a CG on-chain.
+    // The owner DID may be peerId-based or agent-address-based, so check both.
     const owner = await this.getContextGraphOwner(id);
-    const selfDid = `did:dkg:agent:${this.peerId}`;
     if (!owner) {
       throw new Error(
         `Context graph "${id}" has no known creator. ` +
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    if (owner !== selfDid) {
+    if (!this.isCallerOrNodeOwner(owner, opts?.callerAgentAddress)) {
       throw new Error(
         `Only the context graph creator can register it on-chain. ` +
-        `Creator=${owner}, current=${selfDid}`,
+        `Creator=${owner}, caller=${`did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`,
       );
     }
 
@@ -3315,7 +3325,7 @@ export class DKGAgent {
    * Invite a peer to join an existing context graph.
    * Adds the peer to the local allowlist in `_meta`.
    */
-  async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<void> {
+  async inviteToContextGraph(contextGraphId: string, peerId: string, callerAgentAddress?: string): Promise<void> {
     const ctx = createOperationContext('system');
 
     // Validate peer ID format (libp2p Ed25519 base58btc, e.g. 12D3KooW…)
@@ -3333,19 +3343,13 @@ export class DKGAgent {
 
     // Only the curator/creator can manage the allowlist
     const owner = await this.getContextGraphOwner(contextGraphId);
-    const selfDid = `did:dkg:agent:${this.peerId}`;
     if (!owner) {
       throw new Error(
         `Context graph "${contextGraphId}" has no known creator. ` +
         `Wait for sync to complete or create it locally first.`,
       );
     }
-    if (owner !== selfDid) {
-      throw new Error(
-        `Only the context graph creator can manage invitations. ` +
-        `Creator=${owner}, current=${selfDid}`,
-      );
-    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage peer invitations');
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
@@ -4185,12 +4189,15 @@ export class DKGAgent {
         vs: ethers.getBytes(proposerSig.yParityAndS),
       },
     ];
+    const resolvedSignerAddresses: string[] = [proposerAddress];
     for (const a of result.approvals) {
       let id = a.identityId;
       if ((!id || id === 0n) && typeof (this.chain as any).getIdentityIdForAddress === 'function') {
         try { id = await (this.chain as any).getIdentityIdForAddress(a.approverAddress); } catch { /* use 0n */ }
       }
+      if (!id || id === 0n) continue;
       resolvedSignatures.push({ identityId: id, r: a.signatureR, vs: a.signatureVS });
+      resolvedSignerAddresses.push(a.approverAddress);
     }
     if (resolvedSignatures.length < requiredSignatures) {
       throw new Error(`verify_identity_resolution: only ${resolvedSignatures.length}/${requiredSignatures} signers have resolvable identities (including proposer)`);
@@ -4203,14 +4210,14 @@ export class DKGAgent {
       signerSignatures: resolvedSignatures,
     });
 
-    // 7. Promote triples to Verified Memory
+    // 7. Promote triples to Verified Memory (only include signers actually sent on-chain)
     await this.promoteToVerifiedMemory(
       opts.contextGraphId,
       opts.verifiedMemoryId,
       opts.batchId,
       txResult.hash,
       txResult.blockNumber,
-      [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
+      resolvedSignerAddresses,
     );
 
     this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
@@ -4219,7 +4226,7 @@ export class DKGAgent {
       txHash: txResult.hash,
       blockNumber: txResult.blockNumber,
       verifiedMemoryId: opts.verifiedMemoryId,
-      signers: [proposerAddress, ...result.approvals.map((a: { approverAddress: string }) => a.approverAddress)],
+      signers: resolvedSignerAddresses,
     };
   }
 
@@ -4333,9 +4340,10 @@ export class DKGAgent {
     paranetId: string;
     policyUri: string;
     contextType?: string;
+    callerAgentAddress?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
     const ctx = createOperationContext('system');
-    await this.assertParanetOwner(opts.paranetId);
+    await this.assertParanetOwner(opts.paranetId, opts.callerAgentAddress);
     const record = await this.getCclPolicyByUri(opts.policyUri, { includeBody: true });
     if (!record) throw new Error(`CCL policy not found: ${opts.policyUri}`);
     if (record.paranetId !== opts.paranetId) {
@@ -4360,11 +4368,15 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const approvedAt = new Date().toISOString();
     const effectiveContextType = opts.contextType ?? record.contextType;
+    // Use the persisted owner DID for metadata so gossip-publish-handler
+    // accepts the binding (it validates approvedBy matches the paranet owner).
+    const ownerDid = await this.getContextGraphOwner(opts.paranetId)
+      ?? `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
     const { bindingUri, quads } = buildPolicyApprovalQuads({
       paranetId: opts.paranetId,
       policyUri: opts.policyUri,
       policyName: record.name,
-      creator: `did:dkg:agent:${this.peerId}`,
+      creator: ownerDid,
       graph: ontologyGraph,
       approvedAt,
       contextType: effectiveContextType,
@@ -4372,7 +4384,7 @@ export class DKGAgent {
 
     quads.push(
       { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_POLICY_STATUS, object: sparqlString('approved'), graph: ontologyGraph },
-      { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_BY, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
+      { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_BY, object: ownerDid, graph: ontologyGraph },
       { subject: opts.policyUri, predicate: DKG_ONTOLOGY.DKG_APPROVED_AT, object: sparqlString(approvedAt), graph: ontologyGraph },
     );
 
@@ -4386,9 +4398,10 @@ export class DKGAgent {
     paranetId: string;
     policyUri: string;
     contextType?: string;
+    callerAgentAddress?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
     const ctx = createOperationContext('system');
-    await this.assertParanetOwner(opts.paranetId);
+    await this.assertParanetOwner(opts.paranetId, opts.callerAgentAddress);
 
     const target = await this.getActiveCclPolicyBinding({
       paranetId: opts.paranetId,
@@ -4401,9 +4414,11 @@ export class DKGAgent {
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const revokedAt = new Date().toISOString();
+    const ownerDid = await this.getContextGraphOwner(opts.paranetId)
+      ?? `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
     const quads = buildPolicyRevocationQuads({
       bindingUri: target.bindingUri,
-      revoker: `did:dkg:agent:${this.peerId}`,
+      revoker: ownerDid,
       graph: ontologyGraph,
       revokedAt,
       paranetUri: `did:dkg:context-graph:${opts.paranetId}`,
@@ -5503,9 +5518,9 @@ export class DKGAgent {
       authorized = owner === callerDid ||
         (callerAgentAddress === this.defaultAgentAddress && owner === selfDid);
     } else {
-      // No explicit caller (node-level token): allow any local identity
-      authorized = owner === selfDid ||
-        [...this.localAgents.keys()].some(addr => owner === `did:dkg:agent:${addr}`);
+      // No explicit caller (node-level token): allow peerId and default agent only
+      const defaultDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
+      authorized = owner === selfDid || (defaultDid != null && owner === defaultDid);
     }
 
     if (!authorized) {
@@ -5516,15 +5531,35 @@ export class DKGAgent {
     }
   }
 
-  private async assertParanetOwner(paranetId: string): Promise<void> {
+  private async assertParanetOwner(paranetId: string, callerAgentAddress?: string): Promise<void> {
     const owner = await this.getContextGraphOwner(paranetId);
-    const current = `did:dkg:agent:${this.peerId}`;
     if (!owner) {
       throw new Error(`Paranet "${paranetId}" has no registered owner; cannot manage policies.`);
     }
-    if (owner !== current) {
-      throw new Error(`Only the paranet owner can manage policies for "${paranetId}". Owner=${owner}, current=${current}`);
+    if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
+      throw new Error(`Only the paranet owner can manage policies for "${paranetId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
     }
+  }
+
+  /**
+   * Check if the given owner DID matches the caller or the node's own identity.
+   * When `callerAgentAddress` is provided, only that exact address is accepted
+   * (plus legacy peerId compat only for the default agent).
+   * Without a caller (node-level token), falls back to defaultAgentAddress and peerId.
+   */
+  private isCallerOrNodeOwner(ownerDid: string, callerAgentAddress?: string): boolean {
+    const peerDid = `did:dkg:agent:${this.peerId}`;
+    if (callerAgentAddress) {
+      if (ownerDid === `did:dkg:agent:${callerAgentAddress}`) return true;
+      if (callerAgentAddress === this.defaultAgentAddress && ownerDid === peerDid) return true;
+      return false;
+    }
+    // No explicit caller (SDK / node-level token): accept only the node's
+    // own identities (peerId + defaultAgentAddress). On multi-agent nodes,
+    // callers must supply callerAgentAddress to operate on non-default CGs.
+    if (ownerDid === peerDid) return true;
+    if (this.defaultAgentAddress && ownerDid === `did:dkg:agent:${this.defaultAgentAddress}`) return true;
+    return false;
   }
 
   private async getContextGraphOwner(paranetId: string): Promise<string | null> {
