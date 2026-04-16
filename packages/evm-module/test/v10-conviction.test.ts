@@ -10,15 +10,12 @@
 // this file is deliberately short.
 //
 // Legacy note: previous revisions tested `Staking.convictionMultiplier`
-// (V8 pure math) and `PublishingConvictionAccount` basic flows. Both are
-// covered elsewhere:
-//   - V8 `convictionMultiplier` snap-down math is checked in
-//     `test/v10-e2e-conviction.test.ts::Flow 1::verifies all conviction
-//     multiplier tiers`.
-//   - `PublishingConvictionAccount` flows are the `Flow 2` suite in the
-//     same e2e file.
-// The previous scope is removed here to avoid duplication and keep this
-// file focused on the Phase 5 NFT + StakingV10 stack.
+// (V8 pure math, now deleted in Phase 11) and `PublishingConvictionAccount`
+// basic flows. The canonical tier table now lives in
+// `DKGStakingConvictionNFT._convictionMultiplier` (exact-match semantics),
+// tested in `test/unit/DKGStakingConvictionNFT.test.ts`.
+// `PublishingConvictionAccount` flows are the `Flow 2` suite in the e2e file.
+// This file is focused on the Phase 5 NFT + StakingV10 stack.
 
 import { randomBytes } from 'crypto';
 
