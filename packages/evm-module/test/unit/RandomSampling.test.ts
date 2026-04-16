@@ -1081,7 +1081,7 @@ describe('@unit RandomSampling', () => {
       expect(counts.A).to.be.greaterThan(6500).and.lessThan(7500);
       expect(counts.B).to.be.greaterThan(1500).and.lessThan(2500);
       expect(counts.C).to.be.greaterThan(500).and.lessThan(1500);
-    }).timeout(120_000);
+    }).timeout(600_000);
 
     // -----------------------------------------------------------------------
     // Test 6 — Inactive (deactivated) CGs must be excluded even if they

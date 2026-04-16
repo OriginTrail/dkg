@@ -37,11 +37,11 @@ const config: HardhatUserConfig = {
       throwOnTransactionFailures: true,
       throwOnCallFailures: true,
       loggingEnabled: false,
-      allowUnlimitedContractSize: false,
+      allowUnlimitedContractSize: isCoverage,
       saveDeployments: false,
       mining: {
         auto: true,
-        interval: [3000, 5000],
+        interval: isCoverage ? 0 : [3000, 5000],
       },
     },
     base_sepolia_dev: {
