@@ -2738,9 +2738,10 @@ export class DKGAgent {
       metaSynced: true,
     });
 
-    // Auto-register on-chain when the chain adapter supports it and the node
-    // has an on-chain identity. This enables Verified Memory (publishFromSWM)
-    // without a separate registerContextGraph call.
+    // Auto-register on-chain (V10 ContextGraphs contract) when the chain
+    // adapter supports it and the node has an on-chain identity. This gives
+    // the context graph a numeric on-chain ID required by publishDirect and
+    // enables Verified Memory (publishFromSWM).
     if (
       this.chain.chainId !== 'none' &&
       !this.chain.chainId.startsWith('mock') &&
@@ -2748,8 +2749,27 @@ export class DKGAgent {
       typeof this.chain.createOnChainContextGraph === 'function'
     ) {
       try {
-        await this.registerContextGraph(opts.id);
-        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain`);
+        const result = await this.chain.createOnChainContextGraph({
+          participantIdentityIds: [...participantIdentityIds],
+          requiredSignatures: opts.requiredSignatures ?? 1,
+          publishPolicy: 0,
+        });
+        const numericId = result.contextGraphId.toString();
+        const sub = this.subscribedContextGraphs.get(opts.id);
+        if (sub) sub.onChainId = numericId;
+
+        const cgMetaGraph = paranetMetaGraphUri(opts.id);
+        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+        await this.store.deleteByPattern({
+          graph: cgMetaGraph,
+          subject: paranetUri,
+          predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+        });
+        await this.store.insert([
+          { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+          { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${numericId}"`, graph: ontologyGraph },
+        ]);
+        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain (V10 id=${numericId})`);
       } catch (err) {
         this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
