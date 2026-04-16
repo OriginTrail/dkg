@@ -420,7 +420,9 @@ export class DkgNodePlugin {
       const toolCalls = extractToolCalls(messages);
 
       try {
-        await client.persistTurn({ sessionId, userMessage, assistantReply, toolCalls });
+        await client.storeChatTurn(sessionId, userMessage, assistantReply, {
+          toolCalls: toolCalls?.length ? toolCalls : undefined,
+        });
         api.logger.debug?.(`[dkg] Cross-channel turn persisted (${channelId})`);
       } catch (err: any) {
         api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
