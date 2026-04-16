@@ -1214,7 +1214,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    `setDelegatorStakeBase` (not `increaseDelegatorStakeBase`)
         //    keeps the write shape symmetric with the withdrawal path
         //    that shrinks the base.
-        uint96 newBase = uint96(raw + rewardsSnapshot + rewardTotal);
+        uint256 newBaseU256 = raw + rewardsSnapshot + rewardTotal;
+        if (newBaseU256 > type(uint96).max) revert RewardOverflow();
+        uint96 newBase = uint96(newBaseU256);
         stakingStorage.setDelegatorStakeBase(identityId, delegatorKey, newBase);
 
         // 3. Node + total stake increments. These track the full
