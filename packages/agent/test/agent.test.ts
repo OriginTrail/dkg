@@ -1496,6 +1496,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       (agent as any).isPrivateContextGraph = async () => true;
       (chain as any).getContextGraphParticipants = async () => [1n];
+      (chain as any).verifySyncIdentity = async () => true;
       (chain as any).verifyACKIdentity = async () => true;
 
       const request = {

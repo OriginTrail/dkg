@@ -301,9 +301,12 @@ export class DKGAgent {
     }
 
     let chain: ChainAdapter;
-    const opKeys = config.chainConfig?.operationalKeys;
+    let opKeys = config.chainConfig?.operationalKeys;
     if (config.chainAdapter) {
       chain = config.chainAdapter;
+      if (!opKeys?.length && typeof (chain as any).getOperationalPrivateKey === 'function') {
+        opKeys = [(chain as any).getOperationalPrivateKey()];
+      }
     } else if (config.chainConfig && opKeys?.length) {
       chain = new EVMChainAdapter({
         rpcUrl: config.chainConfig.rpcUrl,
@@ -2724,6 +2727,23 @@ export class DKGAgent {
 
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
+
+    // Auto-register on-chain when the chain adapter supports it and the node
+    // has an on-chain identity. This enables Verified Memory (publishFromSWM)
+    // without a separate registerContextGraph call.
+    if (
+      this.chain.chainId !== 'none' &&
+      !this.chain.chainId.startsWith('mock') &&
+      creatorIdentityId > 0n &&
+      typeof this.chain.createOnChainContextGraph === 'function'
+    ) {
+      try {
+        await this.registerContextGraph(opts.id);
+        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain`);
+      } catch (err) {
+        this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     this.subscribedContextGraphs.set(opts.id, {
       name: opts.name,

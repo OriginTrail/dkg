@@ -205,6 +205,11 @@ export class EVMChainAdapter implements ChainAdapter {
     return this.signerPool.map((s) => s.address);
   }
 
+  /** Primary operational private key (hex string with 0x prefix). */
+  getOperationalPrivateKey(): string {
+    return this.signer.privateKey;
+  }
+
   private async resolveContract(name: string, abiName?: string): Promise<Contract> {
     const address: string = await this.contracts.hub.getContractAddress(name);
     if (address === ethers.ZeroAddress) {
