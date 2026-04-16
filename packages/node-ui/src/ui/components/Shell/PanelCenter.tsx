@@ -78,10 +78,15 @@ function MemoryStackView() {
   );
 }
 
+const TEXT_CONTENT_TYPES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
+function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.startsWith(t)); }
+
 function DocumentViewer({ docRef }: { docRef: string }) {
   const { tabs, activeTabId, closeTab } = useTabsStore();
   const setActiveTab = useTabsStore(s => s.setActiveTab);
   const [content, setContent] = useState<string | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [contentType, setContentType] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,17 +102,52 @@ function DocumentViewer({ docRef }: { docRef: string }) {
   };
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
+    setContent(null);
+    setBlobUrl(null);
+    setContentType('');
+
     const fileHash = docRef.replace('urn:dkg:file:', '');
-    fetch(`/api/file/${encodeURIComponent(fileHash)}`, { headers: authHeaders() })
-      .then(res => {
+    const controller = new AbortController();
+
+    fetch(`/api/file/${encodeURIComponent(fileHash)}`, { headers: authHeaders(), signal: controller.signal })
+      .then(async res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.text();
+        const ct = res.headers.get('content-type') ?? 'application/octet-stream';
+        if (cancelled) return;
+        setContentType(ct);
+
+        if (isTextContentType(ct)) {
+          const text = await res.text();
+          if (!cancelled) { setContent(text); setLoading(false); }
+        } else if (ct.startsWith('image/')) {
+          const blob = await res.blob();
+          if (!cancelled) { setBlobUrl(URL.createObjectURL(blob)); setLoading(false); }
+        } else if (ct === 'application/pdf') {
+          const blob = await res.blob();
+          if (!cancelled) { setBlobUrl(URL.createObjectURL(blob)); setLoading(false); }
+        } else {
+          const text = await res.text();
+          if (!cancelled) { setContent(text); setLoading(false); }
+        }
       })
-      .then(text => { setContent(text); setLoading(false); })
-      .catch(err => { setError(err.message); setLoading(false); });
+      .catch(err => { if (!cancelled) { setError(err.message); setLoading(false); } });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [docRef]);
+
+  useEffect(() => {
+    const url = blobUrl;
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [blobUrl]);
+
+  const isImage = contentType.startsWith('image/');
+  const isPdf = contentType === 'application/pdf';
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -130,7 +170,13 @@ function DocumentViewer({ docRef }: { docRef: string }) {
       <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
         {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
         {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
-        {content && (
+        {!loading && isImage && blobUrl && (
+          <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 8 }} />
+        )}
+        {!loading && isPdf && blobUrl && (
+          <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
+        )}
+        {content && !isImage && !isPdf && (
           <pre style={{
             fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
             color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
@@ -182,7 +228,9 @@ function ViewContainer() {
   }
 
   if (activeTabId.startsWith('doc:')) {
-    const docRef = activeTabId.slice(4);
+    const raw = activeTabId.slice(4);
+    const lastColon = raw.lastIndexOf(':');
+    const docRef = lastColon > 0 ? raw.slice(lastColon + 1) : raw;
     return <DocumentViewer docRef={docRef} />;
   }
 

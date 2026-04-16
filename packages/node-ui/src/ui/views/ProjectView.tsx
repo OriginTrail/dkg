@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipants, type PendingJoinRequest } from '../api.js';
+import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipants, listAssertions, promoteAssertion, publishSharedMemory, type PendingJoinRequest } from '../api.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../hooks/useMemoryEntities.js';
@@ -16,7 +16,7 @@ interface ProjectViewProps {
 }
 
 type LayerView = 'overview' | 'wm' | 'swm' | 'vm';
-type LayerContentTab = 'items' | 'graph' | 'docs';
+type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 
 const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',
@@ -170,10 +170,11 @@ function ProjectOverviewCard({ cg, memory, participants }: {
   memory: ReturnType<typeof useMemoryEntities>;
   participants: string[];
 }) {
-  const { wm: working, swm: shared, vm: verified, total } = memory.counts;
-  const pctVm = total > 0 ? Math.round((verified / total) * 100) : 0;
-  const pctSwm = total > 0 ? Math.round((shared / total) * 100) : 0;
-  const pctWm = total > 0 ? 100 - pctVm - pctSwm : 0;
+  const { wm: working, swm: shared, vm: verified } = memory.counts;
+  const layerSum = working + shared + verified;
+  const pctVm = layerSum > 0 ? Math.round((verified / layerSum) * 100) : 0;
+  const pctSwm = layerSum > 0 ? Math.round((shared / layerSum) * 100) : 0;
+  const pctWm = layerSum > 0 ? Math.max(0, 100 - pctVm - pctSwm) : 0;
 
   return (
     <div className="v10-po">
@@ -185,7 +186,7 @@ function ProjectOverviewCard({ cg, memory, participants }: {
         </div>
       </div>
       <div className="v10-po-stats">
-        <div className="v10-po-stat"><span className="v10-po-stat-val">{total}</span><span className="v10-po-stat-label">KAs total</span></div>
+        <div className="v10-po-stat"><span className="v10-po-stat-val">{layerSum}</span><span className="v10-po-stat-label">Entities total</span></div>
         <div className="v10-po-stat"><span className="v10-po-stat-val">{working}</span><span className="v10-po-stat-label">in Working</span></div>
         <div className="v10-po-stat"><span className="v10-po-stat-val">{shared}</span><span className="v10-po-stat-label">in Shared</span></div>
         <div className="v10-po-stat"><span className="v10-po-stat-val">{verified}</span><span className="v10-po-stat-label">in Verified</span></div>
@@ -204,7 +205,7 @@ function ProjectOverviewCard({ cg, memory, participants }: {
           </div>
         </div>
       )}
-      {total > 0 && (
+      {layerSum > 0 && (
         <div className="v10-po-progress">
           <div className="v10-po-progress-label">
             <span>Knowledge Progress</span>
@@ -228,7 +229,7 @@ function ProjectOverviewCard({ cg, memory, participants }: {
 
 // ─── Pending Join Requests ───────────────────────────────────
 
-function PendingJoinRequestsBar({ contextGraphId }: { contextGraphId: string }) {
+function PendingJoinRequestsBar({ contextGraphId, onParticipantsChanged }: { contextGraphId: string; onParticipantsChanged?: () => void }) {
   const [requests, setRequests] = useState<PendingJoinRequest[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
 
@@ -245,6 +246,7 @@ function PendingJoinRequestsBar({ contextGraphId }: { contextGraphId: string }) 
     try {
       await approveJoinRequest(contextGraphId, addr);
       setRequests(prev => prev.filter(r => r.agentAddress !== addr));
+      onParticipantsChanged?.();
     } catch { /* noop */ } finally { setProcessing(null); }
   };
 
@@ -253,6 +255,7 @@ function PendingJoinRequestsBar({ contextGraphId }: { contextGraphId: string }) 
     try {
       await rejectJoinRequest(contextGraphId, addr);
       setRequests(prev => prev.filter(r => r.agentAddress !== addr));
+      onParticipantsChanged?.();
     } catch { /* noop */ } finally { setProcessing(null); }
   };
 
@@ -345,10 +348,11 @@ function MemoryStripGraph({ layerKey, memory }: {
 
 // ─── Memory Strip (expandable layer rows) ────────────────────
 
-function MemoryStrip({ memory, onSwitchLayer, onSelectEntity }: {
+function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: {
   memory: ReturnType<typeof useMemoryEntities>;
   onSwitchLayer: (layer: LayerView) => void;
   onSelectEntity: (uri: string) => void;
+  contextGraphId: string;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [expandTab, setExpandTab] = useState<Record<string, string>>({ wm: 'items', swm: 'items', vm: 'items' });
@@ -443,7 +447,13 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity }: {
                     <button
                       className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
                       onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'items' })); }}
-                    >Knowledge Assets</button>
+                    >{layer.key === 'vm' ? 'Knowledge Assets' : 'Entities'}</button>
+                    {layer.key !== 'vm' && (
+                      <button
+                        className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
+                        onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'assertions' })); }}
+                      >Assertions</button>
+                    )}
                     <button
                       className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
                       onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'graph' })); }}
@@ -453,6 +463,9 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity }: {
                       onClick={e => { e.stopPropagation(); setExpandTab(prev => ({ ...prev, [layer.key]: 'docs' })); }}
                     >Documents</button>
                   </div>
+                  {activeTab === 'assertions' && layer.key !== 'vm' && (
+                    <AssertionsList contextGraphId={contextGraphId} layer={layer.key as 'wm' | 'swm'} onComplete={memory.refresh} />
+                  )}
                   {activeTab === 'items' && (
                     <>
                       <div className="v10-layer-expand-items">
@@ -476,11 +489,6 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity }: {
                         })}
                       </div>
                       <div className="v10-layer-expand-footer">
-                        {layer.promoteLabel && (
-                          <button className={`v10-layer-expand-footer-btn ${layer.key === 'swm' ? 'publish' : 'promote'}`} onClick={e => e.stopPropagation()}>
-                            {layer.promoteLabel}
-                          </button>
-                        )}
                         <button className="v10-layer-expand-footer-btn" onClick={e => { e.stopPropagation(); onSwitchLayer(layer.viewLayer); }}>
                           View full layer →
                         </button>
@@ -492,7 +500,7 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity }: {
                   )}
                   {activeTab === 'docs' && (
                     <div style={{ maxHeight: 300, overflow: 'auto' }}>
-                      <DocumentsList entities={layer.entities} />
+                      <DocumentsList entities={layer.entities} contextGraphId={contextGraphId} />
                     </div>
                   )}
                 </div>
@@ -618,38 +626,79 @@ function LayerStatsWidget({ entities, triples, layer }: {
   );
 }
 
-function LayerActionsWidget({ layer, count }: { layer: 'wm' | 'swm'; count: number }) {
+function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
+  layer: 'wm' | 'swm';
+  count: number;
+  contextGraphId: string;
+  onComplete: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   if (count === 0) return null;
   const isWm = layer === 'wm';
   const color = isWm ? '#f59e0b' : '#22c55e';
   const target = isWm ? 'Shared Memory' : 'Verified Memory';
 
+  const handleAction = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      if (isWm) {
+        const assertions = await listAssertions(contextGraphId);
+        let promoted = 0;
+        for (const a of assertions) {
+          const res = await promoteAssertion(contextGraphId, a.name);
+          promoted += res.promotedCount;
+        }
+        setResult(`Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory`);
+      } else {
+        await publishSharedMemory(contextGraphId);
+        setResult('Published to Verified Memory');
+      }
+      onComplete();
+    } catch (err: any) {
+      setError(err.message ?? 'Action failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [isWm, contextGraphId, onComplete]);
+
   return (
-    <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves ${count} asset${count !== 1 ? 's' : ''} to ${target}.`}>
+    <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves assets from this layer to ${target}.`}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>
         {count} asset{count !== 1 ? 's' : ''} in this layer can be {isWm ? 'promoted to Shared Memory for collaborative review' : 'published to Verified Memory on-chain'}.
       </div>
+      {result && <div style={{ fontSize: 11, color: 'var(--accent-green)', marginBottom: 8 }}>✓ {result}</div>}
+      {error && <div style={{ fontSize: 11, color: 'var(--accent-red)', marginBottom: 8 }}>✕ {error}</div>}
       <div className="v10-decision-actions">
-        <button className="v10-decision-btn approve" style={{ borderColor: `${color}50`, color, background: `${color}15` }}>
-          ✓ {isWm ? 'Promote All → Shared' : 'Publish All → VM'}
+        <button
+          className="v10-decision-btn approve"
+          style={{ borderColor: `${color}50`, color, background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+          disabled={busy}
+          onClick={handleAction}
+        >
+          {busy ? '...' : `✓ ${isWm ? 'Promote All → Shared' : 'Publish All → VM'}`}
         </button>
-        <button className="v10-decision-btn discuss">Review First</button>
       </div>
     </GenWidget>
   );
 }
 
-function CanvasPanel({ layer, entities, tripleCount }: {
+function CanvasPanel({ layer, entities, tripleCount, contextGraphId, onComplete }: {
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   tripleCount: number;
+  contextGraphId: string;
+  onComplete: () => void;
 }) {
   return (
     <div className="v10-split-canvas">
       <LayerStatsWidget entities={entities} triples={tripleCount} layer={layer} />
       <TypeBreakdownWidget entities={entities} />
       {(layer === 'wm' || layer === 'swm') && (
-        <LayerActionsWidget layer={layer} count={entities.length} />
+        <LayerActionsWidget layer={layer} count={entities.length} contextGraphId={contextGraphId} onComplete={onComplete} />
       )}
       {entities.length === 0 && (
         <div className="v10-canvas-empty">
@@ -663,14 +712,127 @@ function CanvasPanel({ layer, entities, tripleCount }: {
   );
 }
 
+// ─── Assertions List (WM/SWM named graphs) ──────────────────
+
+function AssertionsList({ contextGraphId, layer, onComplete }: {
+  contextGraphId: string;
+  layer: 'wm' | 'swm';
+  onComplete: () => void;
+}) {
+  const { data: assertions, loading, refresh } = useFetch(
+    () => listAssertions(contextGraphId),
+    [contextGraphId],
+    0
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handlePromote = useCallback(async (name: string) => {
+    setBusy(name);
+    setResult(null);
+    setError(null);
+    try {
+      if (layer === 'wm') {
+        const res = await promoteAssertion(contextGraphId, name);
+        setResult(`Promoted ${res.promotedCount} triples to Shared Memory`);
+      } else {
+        await publishSharedMemory(contextGraphId);
+        setResult('Published to Verified Memory');
+      }
+      refresh();
+      onComplete();
+    } catch (err: any) {
+      setError(err.message ?? 'Action failed');
+    } finally {
+      setBusy(null);
+    }
+  }, [contextGraphId, layer, refresh, onComplete]);
+
+  const handlePromoteAll = useCallback(async () => {
+    if (!assertions?.length) return;
+    setBusy('__all__');
+    setResult(null);
+    setError(null);
+    try {
+      if (layer === 'wm') {
+        let total = 0;
+        for (const a of assertions) {
+          const res = await promoteAssertion(contextGraphId, a.name);
+          total += res.promotedCount;
+        }
+        setResult(`Promoted ${total} triples across ${assertions.length} assertion${assertions.length !== 1 ? 's' : ''}`);
+      } else {
+        await publishSharedMemory(contextGraphId);
+        setResult('Published all to Verified Memory');
+      }
+      refresh();
+      onComplete();
+    } catch (err: any) {
+      setError(err.message ?? 'Action failed');
+    } finally {
+      setBusy(null);
+    }
+  }, [assertions, contextGraphId, layer, refresh, onComplete]);
+
+  if (loading) {
+    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>Loading assertions...</div>;
+  }
+
+  if (!assertions?.length) {
+    return <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-ghost)', fontSize: 12 }}>No assertions in this layer</div>;
+  }
+
+  const actionLabel = layer === 'wm' ? 'Promote → Shared' : 'Publish → VM';
+  const actionAllLabel = layer === 'wm' ? 'Promote All → Shared' : 'Publish All → VM';
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto' }}>
+      <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+        <button
+          className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+          disabled={busy !== null}
+          onClick={handlePromoteAll}
+          style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
+        >
+          {busy === '__all__' ? '...' : actionAllLabel}
+        </button>
+      </div>
+      {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--accent-green)' }}>✓ {result}</div>}
+      {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--accent-red)' }}>✕ {error}</div>}
+      {assertions.map(a => (
+        <div key={a.name} className="v10-item-row">
+          <span className="v10-item-icon">▤</span>
+          <div className="v10-item-info">
+            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
+            <div className="v10-item-meta-row">
+              {a.tripleCount != null && <span className="v10-item-count">{a.tripleCount} triples</span>}
+            </div>
+          </div>
+          <button
+            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            disabled={busy !== null}
+            onClick={ev => { ev.stopPropagation(); handlePromote(a.name); }}
+            style={{ opacity: busy === a.name ? 0.5 : 1, flexShrink: 0 }}
+          >
+            {busy === a.name ? '...' : actionLabel}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── Full Layer Detail View (WM / SWM / VM) ─────────────────
 
-function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntity }: {
+function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntity, contextGraphId }: {
   layer: 'wm' | 'swm' | 'vm';
   memory: ReturnType<typeof useMemoryEntities>;
   nodeColors: Record<string, string>;
   onNodeClick: (node: any) => void;
   onSelectEntity: (uri: string) => void;
+  contextGraphId: string;
 }) {
   const [contentTab, setContentTab] = useState<LayerContentTab>('items');
 
@@ -724,14 +886,19 @@ function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntit
     <div className="v10-layer-detail">
       <div className="v10-split-pane">
         {/* Left: Generative Canvas */}
-        <CanvasPanel layer={layer} entities={entities} tripleCount={layerTriples.length} />
+        <CanvasPanel layer={layer} entities={entities} tripleCount={layerTriples.length} contextGraphId={contextGraphId} onComplete={memory.refresh} />
 
         {/* Right: Content Tabs */}
         <div className="v10-split-content">
           <div className="v10-content-tabs">
             <button className={`v10-content-tab ${contentTab === 'items' ? 'active' : ''}`} onClick={() => setContentTab('items')}>
-              <span className="v10-content-tab-icon">◈</span> Knowledge Assets
+              <span className="v10-content-tab-icon">◈</span> {layer === 'vm' ? 'Knowledge Assets' : 'Entities'}
             </button>
+            {layer !== 'vm' && (
+              <button className={`v10-content-tab ${contentTab === 'assertions' ? 'active' : ''}`} onClick={() => setContentTab('assertions')}>
+                <span className="v10-content-tab-icon">▤</span> Assertions
+              </button>
+            )}
             <button className={`v10-content-tab ${contentTab === 'graph' ? 'active' : ''}`} onClick={() => setContentTab('graph')}>
               <span className="v10-content-tab-icon">⬡</span> Graph
             </button>
@@ -748,11 +915,7 @@ function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntit
                   <div className="v10-layer-detail-title">{config.title}</div>
                   <div className="v10-layer-detail-desc">{config.desc}</div>
                 </div>
-                <div className="v10-layer-detail-actions">
-                  {config.actionLabel && (
-                    <button className={`v10-layer-action-btn ${config.actionClass}`}>{config.actionLabel}</button>
-                  )}
-                </div>
+                <div className="v10-layer-detail-actions" />
               </div>
               <div className="v10-layer-detail-content">
                 <div className="v10-items-list">
@@ -772,8 +935,6 @@ function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntit
                         <span className={`v10-trust-badge ${layer}`}>
                           {config.icon} {layer === 'vm' ? 'Verified' : layer === 'swm' ? 'Shared' : 'Working'}
                         </span>
-                        {layer === 'wm' && <button className="v10-item-promote-btn" onClick={ev => ev.stopPropagation()}>→ Shared</button>}
-                        {layer === 'swm' && <button className="v10-item-promote-btn" onClick={ev => ev.stopPropagation()}>→ VM</button>}
                       </div>
                     );
                   })}
@@ -785,6 +946,10 @@ function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntit
                 </div>
               </div>
             </>
+          )}
+
+          {contentTab === 'assertions' && layer !== 'vm' && (
+            <AssertionsList contextGraphId={contextGraphId} layer={layer} onComplete={memory.refresh} />
           )}
 
           {contentTab === 'graph' && (
@@ -807,7 +972,7 @@ function LayerDetailView({ layer, memory, nodeColors, onNodeClick, onSelectEntit
           )}
 
           {contentTab === 'docs' && (
-            <DocumentsList entities={entities} />
+            <DocumentsList entities={entities} contextGraphId={contextGraphId} />
           )}
         </div>
       </div>
@@ -822,7 +987,7 @@ const MARKDOWN_FORM = 'http://dkg.io/ontology/markdownForm';
 const SOURCE_FILE = 'http://dkg.io/ontology/sourceFile';
 const DKG_SIZE = 'http://dkg.io/ontology/size';
 
-function DocumentsList({ entities }: { entities: MemoryEntity[] }) {
+function DocumentsList({ entities, contextGraphId }: { entities: MemoryEntity[]; contextGraphId?: string }) {
   const openTab = useTabsStore(s => s.openTab);
 
   const docs = useMemo(() => {
@@ -832,8 +997,9 @@ function DocumentsList({ entities }: { entities: MemoryEntity[] }) {
   const handleOpenDoc = (e: MemoryEntity) => {
     const fileRef = e.connections.find(c => c.predicate === MARKDOWN_FORM || c.predicate === SOURCE_FILE)?.targetUri;
     const fileHash = fileRef?.replace('urn:dkg:file:', '') ?? '';
+    const scope = contextGraphId ? `${contextGraphId}:` : '';
     openTab({
-      id: `doc:${fileHash || e.uri}`,
+      id: `doc:${scope}${fileHash || e.uri}`,
       label: e.label,
       closable: true,
       icon: '📄',
@@ -1146,13 +1312,15 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   const memory = useMemoryEntities(contextGraphId);
 
-  useEffect(() => {
+  const refreshParticipants = useCallback(() => {
     if (cg?.id) {
       listParticipants(cg.id)
         .then(data => setParticipants(data.allowedAgents))
         .catch(() => setParticipants([]));
     }
   }, [cg?.id]);
+
+  useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
   const selectedEntity = useMemo(
     () => selectedUri ? memory.entities.get(selectedUri) ?? null : null,
@@ -1205,14 +1373,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       {activeLayer === 'overview' && !selectedEntity && (
         <>
           <ProjectOverviewCard cg={cg} memory={memory} participants={participants} />
-          <PendingJoinRequestsBar contextGraphId={contextGraphId} />
+          <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
           {memory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}
           {memory.error && (
             <div className="v10-me-error">Error: {memory.error}</div>
           )}
-          <MemoryStrip memory={memory} onSwitchLayer={setActiveLayer} onSelectEntity={handleNavigate} />
+          <MemoryStrip memory={memory} onSwitchLayer={setActiveLayer} onSelectEntity={handleNavigate} contextGraphId={contextGraphId} />
         </>
       )}
 
@@ -1224,6 +1392,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           nodeColors={nodeColors}
           onNodeClick={handleNodeClick}
           onSelectEntity={handleNavigate}
+          contextGraphId={contextGraphId}
         />
       )}
 
