@@ -32,14 +32,6 @@
     "@origintrail-official/dkg-core": "workspace:*",
     "commander": "^13"
   },
-  "peerDependencies": {
-    "@origintrail-official/dkg": "*"
-  },
-  "peerDependenciesMeta": {
-    "@origintrail-official/dkg": {
-      "optional": true
-    }
-  },
   "openclaw": {
     "extensions": [
       "./openclaw-entry.mjs"
