@@ -233,6 +233,8 @@ export class DkgNodePlugin {
 
   /** Whether the base runtime (daemon client, lifecycle hooks) has been initialized. */
   private initialized = false;
+  private crossChannelHookRegistered = false;
+  private crossChannelHookCleanup: (() => void) | null = null;
 
   /**
    * Register the DKG plugin with an OpenClaw plugin API instance.
@@ -277,6 +279,12 @@ export class DkgNodePlugin {
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
+      // api.on (typed plugin hooks) is only wired in `full` mode.
+      // The first call is usually `setup-runtime` (noop); a later
+      // multi-phase call may arrive with `full` — register then.
+      if (!this.crossChannelHookRegistered && runtimeEnabled) {
+        this.registerCrossChannelPersistence(api);
+      }
       return;
     }
 
@@ -286,6 +294,11 @@ export class DkgNodePlugin {
     this.initialized = true;
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
+
+    // --- Cross-channel turn persistence ---
+    if (runtimeEnabled) {
+      this.registerCrossChannelPersistence(api);
+    }
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
@@ -355,6 +368,99 @@ export class DkgNodePlugin {
       // surprise `/api/status` probe.
       void this.refreshMemoryResolverState(api);
     }
+  }
+
+  /**
+   * Register cross-channel turn persistence via the gateway's internal
+   * hook system (`message:received` + `message:sent`). Fires for ALL
+   * OpenClaw channels (Telegram, WhatsApp, API, etc.). The DKG UI
+   * channel bridge already persists with richer data (correlation IDs,
+   * attachment refs) via DkgChannelPlugin.queueTurnPersistence, so
+   * `dkg-ui` is skipped here.
+   *
+   * Registers directly into the gateway's global hook map because
+   * external plugins only receive `setup-runtime` mode where both
+   * `api.on` and `api.registerHook` are noops.
+   */
+  private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
+    if (this.crossChannelHookRegistered) return;
+
+    // The gateway only exposes api.on (typed plugin hooks) in
+    // registrationMode === 'full'. External plugins get 'setup-runtime'
+    // where both api.on and api.registerHook are noops.
+    //
+    // Workaround: register directly into the gateway's internal hook
+    // map (a global singleton on `globalThis`) for the 'message:sent'
+    // event. This fires after every outbound message across ALL channels
+    // and carries channelId + message content on the event context.
+    const hookKey = Symbol.for('openclaw.internalHookHandlers');
+    const hookMap = (globalThis as any)[hookKey] as Map<string, Array<(event: any) => void>> | undefined;
+    if (!hookMap) {
+      api.logger.debug?.('[dkg] Cross-channel persistence: internal hook map not found (not in gateway)');
+      return;
+    }
+
+    const DKG_UI_CHANNEL = 'dkg-ui';
+    const client = this.client;
+    const pendingUserMessages = new Map<string, string>();
+
+    const conversationKey = (ctx: any): string => {
+      const parts = [ctx?.channelId ?? 'unknown'];
+      if (ctx?.accountId) parts.push(ctx.accountId);
+      parts.push(ctx?.conversationId ?? 'default');
+      return parts.join(':');
+    };
+
+    const onReceived = (event: any) => {
+      const ctx = event?.context;
+      const channelId = ctx?.channelId;
+      if (!channelId || channelId === DKG_UI_CHANNEL) return;
+      const content = typeof ctx?.content === 'string' ? ctx.content : '';
+      if (!content) return;
+      pendingUserMessages.set(conversationKey(ctx), content);
+    };
+
+    const onSent = async (event: any) => {
+      const ctx = event?.context;
+      const channelId = ctx?.channelId;
+      if (!channelId || channelId === DKG_UI_CHANNEL) return;
+      const key = conversationKey(ctx);
+      if (ctx?.success === false) {
+        pendingUserMessages.delete(key);
+        return;
+      }
+
+      const content = typeof ctx?.content === 'string' ? ctx.content : '';
+      const userMessage = pendingUserMessages.get(key) ?? '';
+      pendingUserMessages.delete(key);
+
+      if (!userMessage && !content) return;
+
+      const sessionId = `openclaw:${key}`;
+
+      try {
+        await client.storeChatTurn(sessionId, userMessage, content);
+        api.logger.info?.(`[dkg] Cross-channel turn persisted (${channelId})`);
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
+      }
+    };
+
+    if (!hookMap.has('message:received')) hookMap.set('message:received', []);
+    hookMap.get('message:received')!.push(onReceived);
+
+    if (!hookMap.has('message:sent')) hookMap.set('message:sent', []);
+    hookMap.get('message:sent')!.push(onSent);
+
+    this.crossChannelHookCleanup = () => {
+      const recv = hookMap.get('message:received');
+      if (recv) hookMap.set('message:received', recv.filter(h => h !== onReceived));
+      const sent = hookMap.get('message:sent');
+      if (sent) hookMap.set('message:sent', sent.filter(h => h !== onSent));
+    };
+
+    this.crossChannelHookRegistered = true;
+    api.logger.info?.('[dkg] Cross-channel persistence registered (internal hooks: message:received + message:sent)');
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {
@@ -644,11 +750,15 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
-    // Stop integration modules
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
       this.peerIdDeferredRetryTimer = null;
+    }
+    if (this.crossChannelHookCleanup) {
+      this.crossChannelHookCleanup();
+      this.crossChannelHookCleanup = null;
+      this.crossChannelHookRegistered = false;
     }
     await this.channelPlugin?.stop();
   }
