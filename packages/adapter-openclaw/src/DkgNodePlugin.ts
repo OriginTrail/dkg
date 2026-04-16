@@ -404,14 +404,20 @@ export class DkgNodePlugin {
     const client = this.client;
     const pendingUserMessages = new Map<string, string>();
 
+    const conversationKey = (ctx: any): string => {
+      const parts = [ctx?.channelId ?? 'unknown'];
+      if (ctx?.accountId) parts.push(ctx.accountId);
+      parts.push(ctx?.conversationId ?? 'default');
+      return parts.join(':');
+    };
+
     const onReceived = (event: any) => {
       const ctx = event?.context;
       const channelId = ctx?.channelId;
       if (!channelId || channelId === DKG_UI_CHANNEL) return;
       const content = typeof ctx?.content === 'string' ? ctx.content : '';
       if (!content) return;
-      const key = `${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
-      pendingUserMessages.set(key, content);
+      pendingUserMessages.set(conversationKey(ctx), content);
     };
 
     const onSent = async (event: any) => {
@@ -421,13 +427,13 @@ export class DkgNodePlugin {
       if (ctx?.success === false) return;
 
       const content = typeof ctx?.content === 'string' ? ctx.content : '';
-      const key = `${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+      const key = conversationKey(ctx);
       const userMessage = pendingUserMessages.get(key) ?? '';
       pendingUserMessages.delete(key);
 
       if (!userMessage && !content) return;
 
-      const sessionId = `openclaw:${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+      const sessionId = `openclaw:${key}`;
 
       try {
         await client.storeChatTurn(sessionId, userMessage, content);
