@@ -2249,13 +2249,50 @@ export async function notifyLocalAgentIntegrationWake(
 export function canQueueLocalAgentSemanticEnrichment(
   config: DkgConfig,
   integrationId: string,
+  opts?: { liveSemanticEnrichmentSupported?: boolean },
 ): boolean {
   const normalizedId = normalizeIntegrationId(integrationId);
+  if (opts?.liveSemanticEnrichmentSupported === true && normalizedId === 'openclaw') return true;
   const stored = getStoredLocalAgentIntegrations(config)[normalizedId];
   if (!stored?.enabled) return false;
   if (stored.capabilities?.semanticEnrichment === false) return false;
   if (stored.capabilities?.semanticEnrichment === true) return true;
   return false;
+}
+
+function readSingleHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  if (!Array.isArray(value)) return undefined;
+  for (const entry of value) {
+    const trimmed = typeof entry === 'string' ? entry.trim() : '';
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function parseBooleanHeaderValue(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+export function requestAdvertisesLocalAgentSemanticEnrichment(
+  req: IncomingMessage,
+  integrationId: string,
+): boolean {
+  const requestedIntegrationId = normalizeIntegrationId(integrationId);
+  const headerIntegrationId = normalizeIntegrationId(
+    readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
+  );
+  if (!requestedIntegrationId || headerIntegrationId !== requestedIntegrationId) {
+    return false;
+  }
+  return parseBooleanHeaderValue(
+    readSingleHeaderValue(req.headers['x-dkg-local-agent-semantic-enrichment']),
+  );
 }
 
 export function reconcileOpenClawSemanticAvailability(
@@ -2278,10 +2315,16 @@ export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
   payload: SemanticEnrichmentEventPayload;
   bridgeAuthToken?: string;
   skipWhenUnavailable?: boolean;
+  liveSemanticEnrichmentSupported?: boolean;
   logLabel: string;
   semanticTripleCount?: number;
 }): SemanticEnrichmentDescriptor | undefined {
-  if (args.skipWhenUnavailable && !canQueueLocalAgentSemanticEnrichment(args.config, args.integrationId)) {
+  if (
+    args.skipWhenUnavailable &&
+    !canQueueLocalAgentSemanticEnrichment(args.config, args.integrationId, {
+      liveSemanticEnrichmentSupported: args.liveSemanticEnrichmentSupported,
+    })
+  ) {
     return undefined;
   }
   try {
@@ -4584,6 +4627,7 @@ async function handleRequest(
         }),
         bridgeAuthToken,
         skipWhenUnavailable: true,
+        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
         logLabel: `chat event for turn ${normalizedTurnId}`,
       });
       return jsonResponse(res, 200, {
@@ -6809,6 +6853,7 @@ async function handleRequest(
         }),
         bridgeAuthToken,
         skipWhenUnavailable: true,
+        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
         logLabel: `file import semantic event for ${assertionUri}`,
       });
       if (semanticEnrichment) {

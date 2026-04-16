@@ -134,10 +134,17 @@ export class DkgNodePlugin {
     const capabilities = {
       ...OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES,
     };
+    const semanticEnrichmentSupported = this.channelPlugin?.supportsSemanticEnrichment() === true;
     if (registrationMode === 'full') {
       return {
         ...capabilities,
-        semanticEnrichment: this.channelPlugin?.supportsSemanticEnrichment() === true,
+        semanticEnrichment: semanticEnrichmentSupported,
+      } as const;
+    }
+    if (registrationMode === 'setup-runtime' && semanticEnrichmentSupported) {
+      return {
+        ...capabilities,
+        semanticEnrichment: true,
       } as const;
     }
     return capabilities;
@@ -146,9 +153,28 @@ export class DkgNodePlugin {
   private inferWakeAuthFromUrl(wakeUrl: string | undefined): 'bridge-token' | 'gateway' | undefined {
     const trimmed = wakeUrl?.trim();
     if (!trimmed) return undefined;
-    if (trimmed.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
-    if (trimmed.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
+    let pathname = trimmed;
+    try {
+      pathname = new URL(trimmed).pathname;
+    } catch {
+      pathname = trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]+/i, '');
+    }
+    const normalizedPath = (pathname || '/').replace(/\/+$/, '');
+    if (normalizedPath.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
+    if (normalizedPath.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
     return undefined;
+  }
+
+  private syncClientLocalAgentRequestContext(): void {
+    if (!this.initialized) return;
+    if (!this.channelPlugin || !this.config.channel?.enabled) {
+      this.client.setLocalAgentRequestContext(null);
+      return;
+    }
+    this.client.setLocalAgentRequestContext({
+      integrationId: 'openclaw',
+      semanticEnrichmentSupported: this.channelPlugin?.supportsSemanticEnrichment() === true,
+    });
   }
   /**
    * Resolver wired to the live channel-plugin session-state map + a cached
@@ -295,6 +321,7 @@ export class DkgNodePlugin {
     // recreating servers/watchers, then re-register any tool surfaces.
     if (this.initialized) {
       this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+      this.syncClientLocalAgentRequestContext();
       if (runtimeEnabled) {
         this.registerLocalAgentIntegration(api, registrationMode);
       }
@@ -310,6 +337,7 @@ export class DkgNodePlugin {
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+    this.syncClientLocalAgentRequestContext();
 
     if (runtimeEnabled) {
       this.registerLocalAgentIntegration(api, registrationMode);

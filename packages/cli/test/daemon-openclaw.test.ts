@@ -443,6 +443,52 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
   });
 
+  it('allows queueing when the live adapter request advertises semantic enrichment support before stored capability sync lands', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig(), 'openclaw', {
+      liveSemanticEnrichmentSupported: true,
+    })).toBe(true);
+
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn().mockReturnValue(null),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-live-hint',
+        status: 'pending',
+        updated_at: Date.now(),
+        last_error: null,
+      }),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig(),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-live-hint',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-live-hint',
+        userMessage: 'remember this',
+        assistantReply: 'noted',
+        persistenceState: 'stored',
+      },
+      skipWhenUnavailable: true,
+      liveSemanticEnrichmentSupported: true,
+      logLabel: 'chat live semantic hint',
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).toHaveBeenCalledOnce();
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-live-hint',
+      status: 'pending',
+    });
+  });
+
   it('does not queue semantic jobs from stale ready OpenClaw state when explicit capability support is missing', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {

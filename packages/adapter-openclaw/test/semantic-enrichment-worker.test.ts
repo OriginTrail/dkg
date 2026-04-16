@@ -565,6 +565,87 @@ describe('SemanticEnrichmentWorker', () => {
     );
   });
 
+  it('drops unsafe IRIs from subagent output before appending triples', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-safe-iris-only',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-safe-iris-only',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-safe-iris-only',
+            userMessage: 'Link Alice to Acme.',
+            assistantReply: 'Done.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-safe-iris-only',
+        status: 'completed',
+        semanticTripleCount: 1,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-safe-iris-only' }),
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({
+            messages: [
+              {
+                role: 'assistant',
+                text: '{"triples":[{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"https://schema.org/about","object":"https://schema.org/Person"},{"subject":"urn:dkg:chat:turn:turn-safe-iris-only","predicate":"https://schema.org/knows","object":"https://schema.org/Person bad"}]}',
+              },
+            ],
+          }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-safe-iris-only',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(append).toHaveBeenCalledWith(
+      'evt-safe-iris-only',
+      worker.getWorkerInstanceId(),
+      [
+        {
+          subject: 'urn:dkg:chat:turn:turn-safe-iris-only',
+          predicate: 'https://schema.org/about',
+          object: 'https://schema.org/Person',
+        },
+      ],
+    );
+  });
+
   it('treats already-applied semantic append responses as successful no-ops', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({

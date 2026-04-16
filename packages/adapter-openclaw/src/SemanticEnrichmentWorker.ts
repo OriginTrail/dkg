@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
+import { assertSafeRdfTerm, isSafeIri } from '@origintrail-official/dkg-core';
 import type {
   ChatTurnSemanticEventPayload,
   DkgDaemonClient,
@@ -228,11 +229,25 @@ function truncateInline(value: string, maxLength: number): string {
 }
 
 function isIriLike(value: string): boolean {
+  return isSafeIri(value);
+}
+
+function looksLikeSchemePrefixedIri(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(value);
 }
 
 function isQuotedLiteral(value: string): boolean {
   return value.startsWith('"');
+}
+
+function isSafeLiteral(value: string): boolean {
+  if (!isQuotedLiteral(value)) return false;
+  try {
+    assertSafeRdfTerm(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function unwrapBracketedIri(value: string): string {
@@ -247,8 +262,11 @@ function unwrapBracketedIri(value: string): string {
 function toObjectTerm(value: string): string {
   const trimmed = unwrapBracketedIri(value);
   if (!trimmed) return '';
-  if (isIriLike(trimmed) || isQuotedLiteral(trimmed)) return trimmed;
-  return JSON.stringify(trimmed);
+  if (isIriLike(trimmed) || isSafeLiteral(trimmed)) return trimmed;
+  if (looksLikeSchemePrefixedIri(trimmed)) return '';
+  if (isQuotedLiteral(trimmed)) return '';
+  const literal = JSON.stringify(trimmed);
+  return isSafeLiteral(literal) ? literal : '';
 }
 
 function normalizeTriples(raw: unknown): SemanticTripleInput[] {

@@ -17,6 +17,11 @@ export interface DkgClientOptions {
   timeoutMs?: number;
 }
 
+interface LocalAgentRequestContext {
+  integrationId: string;
+  semanticEnrichmentSupported?: boolean;
+}
+
 export interface OpenClawAttachmentRef {
   assertionUri: string;
   fileHash: string;
@@ -148,6 +153,7 @@ export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly apiToken: string | undefined;
+  private localAgentRequestContext: LocalAgentRequestContext | null = null;
 
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
@@ -166,6 +172,18 @@ export class DkgDaemonClient {
 
   getAuthToken(): string | undefined {
     return this.apiToken;
+  }
+
+  setLocalAgentRequestContext(context: LocalAgentRequestContext | null | undefined): void {
+    const integrationId = typeof context?.integrationId === 'string' ? context.integrationId.trim() : '';
+    if (!integrationId) {
+      this.localAgentRequestContext = null;
+      return;
+    }
+    this.localAgentRequestContext = {
+      integrationId,
+      ...(context?.semanticEnrichmentSupported === true ? { semanticEnrichmentSupported: true } : {}),
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -560,7 +578,7 @@ export class DkgDaemonClient {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json', ...this.authHeaders() },
+      headers: { 'Accept': 'application/json', ...this.authHeaders(), ...this.localAgentHeaders() },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
@@ -573,7 +591,7 @@ export class DkgDaemonClient {
   private async getText(path: string): Promise<string> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: this.authHeaders(),
+      headers: { ...this.authHeaders(), ...this.localAgentHeaders() },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
@@ -586,7 +604,12 @@ export class DkgDaemonClient {
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...this.authHeaders(),
+        ...this.localAgentHeaders(),
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
@@ -600,7 +623,12 @@ export class DkgDaemonClient {
   private async put<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...this.authHeaders(),
+        ...this.localAgentHeaders(),
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
@@ -609,6 +637,17 @@ export class DkgDaemonClient {
       throw new Error(`DKG daemon ${path} responded ${res.status}: ${text}`);
     }
     return res.json() as Promise<T>;
+  }
+
+  private localAgentHeaders(): Record<string, string> {
+    const integrationId = this.localAgentRequestContext?.integrationId?.trim();
+    if (!integrationId) return {};
+    return {
+      'X-DKG-Local-Agent-Integration': integrationId,
+      ...(this.localAgentRequestContext?.semanticEnrichmentSupported === true
+        ? { 'X-DKG-Local-Agent-Semantic-Enrichment': 'true' }
+        : {}),
+    };
   }
 }
 
