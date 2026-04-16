@@ -1460,11 +1460,11 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
-  async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
-    await this.init();
-    const staking = this.contracts.staking!;
-    const multiplier18: bigint = await staking.getDelegatorConvictionMultiplier(identityId, delegator);
-    return { multiplier: Number(multiplier18) / 1e18 };
+  async getDelegatorConvictionMultiplier(_identityId: bigint, _delegator: string): Promise<{ multiplier: number }> {
+    // V8 address-keyed stakers have no conviction multiplier (always 1x).
+    // V10 per-position multipliers are queried by tokenId via
+    // ConvictionStakingStorage.getPosition(), not this address-keyed function.
+    return { multiplier: 1 };
   }
 
   // =====================================================================
