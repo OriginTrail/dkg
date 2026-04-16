@@ -18,6 +18,7 @@ import {
   canQueueLocalAgentSemanticEnrichment,
   queueLocalAgentSemanticEnrichmentBestEffort,
   reconcileOpenClawSemanticAvailability,
+  saveConfigAndReconcileOpenClawSemanticAvailability,
   fileImportSourceIdentityMatchesCurrentState,
   normalizeQueriedLiteralValue,
   normalizeOntologyQuadObjectInput,
@@ -640,6 +641,60 @@ describe('best-effort semantic enqueue helper', () => {
 
     expect(count).toBe(0);
     expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('dead-letters queued semantic events at reconciliation time when the stored OpenClaw integration is missing', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig(),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+  });
+
+  it('saves config before reconciling OpenClaw semantic availability', async () => {
+    const extractionStatus = new Map<string, any>();
+    const saveConfig = vi.fn().mockResolvedValue(undefined);
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    await saveConfigAndReconcileOpenClawSemanticAvailability({
+      config: makeConfig(),
+      extractionStatus: extractionStatus as any,
+      dashDb: dashDb as any,
+      saveConfig,
+    });
+
+    expect(saveConfig).toHaveBeenCalledOnce();
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+    expect(saveConfig.mock.invocationCallOrder[0]).toBeLessThan(
+      dashDb.deadLetterActiveSemanticEnrichmentEvents.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not reconcile OpenClaw semantic availability when saving config fails', async () => {
+    const extractionStatus = new Map<string, any>();
+    const saveConfig = vi.fn().mockRejectedValue(new Error('disk full'));
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn(),
+    };
+
+    await expect(saveConfigAndReconcileOpenClawSemanticAvailability({
+      config: makeConfig(),
+      extractionStatus: extractionStatus as any,
+      dashDb: dashDb as any,
+      saveConfig,
+    })).rejects.toThrow('disk full');
+
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
   });
 
   it('does not dead-letter queued semantic events at reconciliation time when support is merely unknown', () => {

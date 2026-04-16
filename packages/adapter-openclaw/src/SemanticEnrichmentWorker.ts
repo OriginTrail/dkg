@@ -99,6 +99,12 @@ interface ScoredOntologyTermCard extends OntologyTermCard {
   relevanceSignal: number;
 }
 
+type LeaseHeartbeatController = {
+  stop: () => void;
+  hasLostLease: () => boolean;
+  waitForLoss: () => Promise<void>;
+};
+
 const SUBAGENT_SESSION_PREFIX = 'agent';
 const SUBAGENT_SESSION_SCOPE = 'subagent';
 const SUBAGENT_SESSION_NAME = 'semantic-enrichment';
@@ -493,16 +499,24 @@ export class SemanticEnrichmentWorker {
     subagent: OpenClawRuntimeSubagent,
   ): Promise<void> {
     const sessionKey = this.buildSubagentSessionKey(event);
-    const stopLeaseHeartbeat = this.startLeaseHeartbeat(event.id);
+    const leaseHeartbeat = this.startLeaseHeartbeat(event.id);
     let leaseLost = false;
+    const syncLeaseState = (): boolean => {
+      if (!leaseLost && leaseHeartbeat.hasLostLease()) {
+        leaseLost = true;
+      }
+      return leaseLost;
+    };
 
     try {
       const prompt = await this.buildSubagentPrompt(event);
+      if (syncLeaseState()) return;
       const runResult = await subagent.run({
         sessionKey,
         message: prompt,
         deliver: false,
       });
+      if (syncLeaseState()) return;
       const runId = typeof runResult?.runId === 'string' && runResult.runId.trim()
         ? runResult.runId.trim()
         : undefined;
@@ -510,10 +524,12 @@ export class SemanticEnrichmentWorker {
         throw new Error('OpenClaw subagent run did not return a runId');
       }
 
-      const waitResult = await subagent.waitForRun({
-        runId,
-        timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
-      });
+      const waitResult = await this.waitForRunUntilLeaseLoss(runId, subagent, leaseHeartbeat);
+      if (!waitResult) {
+        leaseLost = true;
+        return;
+      }
+      if (syncLeaseState()) return;
       const waitStatus = typeof waitResult?.status === 'string' ? waitResult.status.trim().toLowerCase() : '';
       if (!waitStatus) {
         throw new Error(`OpenClaw subagent run ${runId} did not report a terminal success status`);
@@ -525,6 +541,7 @@ export class SemanticEnrichmentWorker {
         sessionKey,
         limit: DEFAULT_SUBAGENT_MESSAGE_LIMIT,
       });
+      if (syncLeaseState()) return;
       const assistantText = this.extractAssistantText(messages.messages ?? []);
       const triples = this.parseTriplesFromAssistantText(assistantText);
       const appendResult = await this.client.appendSemanticEnrichmentEvent(
@@ -551,7 +568,7 @@ export class SemanticEnrichmentWorker {
         `[semantic-enrichment] execution failed for ${event.kind}:${event.id}: ${message}`,
       );
     } finally {
-      stopLeaseHeartbeat();
+      leaseHeartbeat.stop();
       await subagent.deleteSession({ sessionKey }).catch((err: any) => {
         this.api.logger.warn?.(
           `[semantic-enrichment] session cleanup failed for ${event.id}: ${err?.message ?? String(err)}`,
@@ -565,22 +582,57 @@ export class SemanticEnrichmentWorker {
     }
   }
 
-  private startLeaseHeartbeat(eventId: string): () => void {
+  private async waitForRunUntilLeaseLoss(
+    runId: string,
+    subagent: OpenClawRuntimeSubagent,
+    leaseHeartbeat: LeaseHeartbeatController,
+  ): Promise<{ status?: string } | null> {
+    const result = await Promise.race([
+      subagent.waitForRun({
+        runId,
+        timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
+      }).then((value) => ({ kind: 'wait' as const, value })),
+      leaseHeartbeat.waitForLoss().then(() => ({ kind: 'lease-lost' as const })),
+    ]);
+    return result.kind === 'wait' ? result.value : null;
+  }
+
+  private startLeaseHeartbeat(eventId: string): LeaseHeartbeatController {
     let stopped = false;
+    let leaseLost = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let notifyLeaseLoss!: () => void;
+    const leaseLostPromise = new Promise<void>((resolve) => {
+      notifyLeaseLoss = resolve;
+    });
+
+    const markLeaseLost = (): void => {
+      if (leaseLost) return;
+      leaseLost = true;
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      notifyLeaseLoss();
+    };
 
     const renew = async (): Promise<void> => {
       if (stopped || this.stopped) return;
       try {
         const result = await this.client.renewSemanticEnrichmentEvent(eventId, this.workerInstanceId);
         if (!result.renewed) {
-          stopped = true;
+          markLeaseLost();
           return;
         }
       } catch (err: any) {
         this.api.logger.warn?.(
           `[semantic-enrichment] lease renew failed for ${eventId}: ${err?.message ?? String(err)}`,
         );
+        if ((err?.message ?? String(err)).includes('responded 409')) {
+          markLeaseLost();
+          return;
+        }
       }
       if (!stopped && !this.stopped) {
         timer = setTimeout(() => void renew(), LEASE_RENEW_INTERVAL_MS);
@@ -588,9 +640,13 @@ export class SemanticEnrichmentWorker {
     };
 
     timer = setTimeout(() => void renew(), LEASE_RENEW_INTERVAL_MS);
-    return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
+    return {
+      stop: () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      },
+      hasLostLease: () => leaseLost,
+      waitForLoss: () => leaseLostPromise,
     };
   }
 
@@ -1078,6 +1134,7 @@ export class SemanticEnrichmentWorker {
       SUBAGENT_SESSION_NAME,
       event.kind,
       event.id,
+      `attempt-${Math.max(1, event.attempts || 1)}`,
     ].join(':');
   }
 

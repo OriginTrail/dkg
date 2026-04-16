@@ -205,6 +205,7 @@ describe('SemanticEnrichmentWorker', () => {
 
     expect(claim.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]?.sessionKey).toContain(':attempt-1');
     expect(waitForRun).toHaveBeenCalledTimes(1);
     expect(getSessionMessages).toHaveBeenCalledTimes(1);
     expect(deleteSession).toHaveBeenCalledTimes(1);
@@ -258,6 +259,129 @@ describe('SemanticEnrichmentWorker', () => {
       ],
     );
     expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
+  it('stops processing after lease renewal reports the event was reclaimed', async () => {
+    vi.useFakeTimers();
+
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-lease-lost',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-lease-lost',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-lease-lost',
+            userMessage: 'Lease-sensitive turn',
+            assistantReply: 'pending',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const getSessionMessages = vi.fn();
+    const append = vi.fn();
+    const fail = vi.fn();
+    const deleteSession = vi.fn().mockResolvedValue(undefined);
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-lease-lost' }),
+          waitForRun: vi.fn(() => new Promise(() => {})),
+          getSessionMessages,
+          deleteSession,
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        renewSemanticEnrichmentEvent: vi.fn().mockResolvedValue({ renewed: false }),
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-lease-lost',
+      triggerSource: 'daemon',
+    });
+
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await worker.flush();
+
+    expect(getSessionMessages).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes the attempt number in the subagent session key for retries', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-attempt-2',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-attempt-2',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-attempt-2',
+            userMessage: 'Retry-safe turn',
+            assistantReply: 'captured',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 2,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const run = vi.fn().mockResolvedValue({ runId: 'run-attempt-2' });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({ messages: [{ role: 'assistant', text: '{"triples":[]}' }] }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-attempt-2',
+      triggerSource: 'daemon',
+    });
+
+    await worker.flush();
+
+    expect(run.mock.calls[0]?.[0]?.sessionKey).toContain(':attempt-2');
   });
 
   it('clears late duplicate wake summaries when the daemon no longer has a claimable event', async () => {

@@ -2323,9 +2323,34 @@ export function reconcileOpenClawSemanticAvailability(
   reason = 'OpenClaw semantic enrichment is unavailable on this runtime',
 ): number {
   const stored = getStoredLocalAgentIntegrations(config).openclaw;
-  if (!stored) return 0;
+  if (!stored) {
+    return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
+  }
   if (stored.enabled === true && stored.capabilities?.semanticEnrichment !== false) return 0;
   return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
+}
+
+export async function saveConfigAndReconcileOpenClawSemanticAvailability(args: {
+  config: DkgConfig;
+  extractionStatus: Map<string, ExtractionStatusRecord>;
+  dashDb: DashboardDB;
+  saveConfig: (config: DkgConfig) => Promise<void>;
+  reason?: string;
+}): Promise<number> {
+  await args.saveConfig(args.config);
+  try {
+    return reconcileOpenClawSemanticAvailability(
+      args.config,
+      args.extractionStatus,
+      args.dashDb,
+      args.reason,
+    );
+  } catch (err: any) {
+    console.warn(
+      `[semantic-enrichment] Failed to reconcile OpenClaw semantic availability after saving config: ${err?.message ?? String(err)}`,
+    );
+    return 0;
+  }
 }
 
 export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
@@ -7525,8 +7550,12 @@ async function handleRequest(
       const result = source === 'node-ui'
         ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
-      reconcileOpenClawSemanticAvailability(config, extractionStatus, dashDb);
-      await saveConfig(config);
+      await saveConfigAndReconcileOpenClawSemanticAvailability({
+        config,
+        extractionStatus,
+        dashDb,
+        saveConfig,
+      });
       return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
     } catch (err: any) {
       try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
@@ -7550,9 +7579,15 @@ async function handleRequest(
       }
       const integration = updateLocalAgentIntegration(config, id, parsed);
       if (normalizedId === 'openclaw') {
-        reconcileOpenClawSemanticAvailability(config, extractionStatus, dashDb);
+        await saveConfigAndReconcileOpenClawSemanticAvailability({
+          config,
+          extractionStatus,
+          dashDb,
+          saveConfig,
+        });
+      } else {
+        await saveConfig(config);
       }
-      await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
