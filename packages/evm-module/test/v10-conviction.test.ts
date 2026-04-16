@@ -29,6 +29,7 @@ import {
   ConvictionStakingStorage,
   DelegatorsInfo,
   DKGStakingConvictionNFT,
+  EpochStorage,
   Hub,
   ParametersStorage,
   Profile,
@@ -264,11 +265,13 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   // Test 3 — claim after time advance banks rewards
   // --------------------------------------------------------------------------
   //
-  // Inject a per-epoch `nodeEpochScorePerStake` via the hub-owner-privileged
-  // `RandomSamplingStorage.setNodeEpochScorePerStake`, advance one epoch,
-  // and call `NFT.claim`. The Phase 5 stub formula is:
-  //     reward = effStake * scorePerStake36 / 1e18
-  // where `effStake = raw * multiplier18 / 1e18` pre-expiry. We verify the
+  // Inject per-epoch `nodeEpochScorePerStake`, `nodeEpochScore`,
+  // `allNodesEpochScore`, and `epochPool` via hub-owner-privileged setters,
+  // advance one epoch, and call `NFT.claim`. The Phase 11 TRAC formula is:
+  //     delegatorScore18 = effStake * scorePerStake36 / 1e18
+  //     grossNodeRewards = epochPool * nodeScore18 / allNodesScore18
+  //     reward = delegatorScore18 * grossNodeRewards / nodeScore18
+  // (with operatorFee = 0 for a fresh profile). We verify the
   // `RewardsClaimed` event fires and the position's `rewards` bucket
   // matches.
   it('claim: reward accrues after one-epoch advance and banks into position.rewards', async () => {
@@ -283,14 +286,33 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     await time.increase(Number(epochLength));
 
     // Inject score for the single walkable epoch (creationEpoch).
-    // Pre-expiry, 12-epoch lock → multiplier 6x.
+    // Pre-expiry, 12-epoch lock -> multiplier 6x. Single node, opFee=0.
     const scorePerStake36 = hre.ethers.parseEther('0.001'); // 1e15
+    const nodeScore18 = hre.ethers.parseEther('100');
+    const allNodesScore18 = nodeScore18;
+    const epochPool = hre.ethers.parseEther('1000');
+
     await RandomSamplingStorageContract.connect(
       accounts[0],
     ).setNodeEpochScorePerStake(creationEpoch, identityId, scorePerStake36);
+    await RandomSamplingStorageContract.connect(
+      accounts[0],
+    ).setNodeEpochScore(creationEpoch, identityId, nodeScore18);
+    await RandomSamplingStorageContract.connect(
+      accounts[0],
+    ).setAllNodesEpochScore(creationEpoch, allNodesScore18);
+    const EpochStorageContract = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    await EpochStorageContract.connect(accounts[0]).addTokensToEpochRange(
+      1,
+      creationEpoch,
+      creationEpoch,
+      epochPool,
+    );
 
     const effStake = (amount * SIX_X) / SCALE18;
-    const expectedReward = (effStake * scorePerStake36) / SCALE18;
+    const delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
+    const grossNodeRewards = (epochPool * nodeScore18) / allNodesScore18;
+    const expectedReward = (delegatorScore18 * grossNodeRewards) / nodeScore18;
 
     // Pre-fund the StakingStorage vault with the anticipated reward so the
     // post-claim node-stake bookkeeping stays tied to on-chain TRAC.
