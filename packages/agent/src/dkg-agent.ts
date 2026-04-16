@@ -4937,14 +4937,16 @@ export class DKGAgent {
       const metaQuads = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
       if (metaQuads.length > 0) {
         await this.store.insert(metaQuads);
-        this.metaRefreshTimestamps.set(contextGraphId, now);
         this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaQuads.length} triples from curator ${curatorPeerId.slice(-8)}`);
         return true;
       }
+      return false;
     } catch (err) {
       this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    } finally {
+      this.metaRefreshTimestamps.set(contextGraphId, now);
     }
-    return false;
   }
 
   /**
