@@ -551,7 +551,10 @@ export class DKGPublisher implements Publisher {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
+      /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
+      /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
+      onChainContextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
       subGraphName?: string;
@@ -632,27 +635,19 @@ export class DKGPublisher implements Publisher {
     }
 
     const ctxGraphId = options?.publishContextGraphId;
-    if (ctxGraphId !== undefined && ctxGraphId !== null) {
-      // Validate at the public entry so the caller sees one clear error
-      // instead of watching it decay through ACK collection, self-sign
-      // digests, and finally the evm-adapter pre-tx guard. Mirrors the
-      // `<= 0n` gate at `packages/chain/src/evm-adapter.ts:createKnowledgeAssetsV10`
-      // and the 3 other round-4 boundaries (ACK provider, async
-      // publisher-runner, core-node storage-ack-handler) so the whole
-      // pipeline agrees on the legal domain. `BigInt("-1")` returns `-1n`
-      // without throwing — the old try/catch-only check would let
-      // negative ids through, the publisher digests got built with the
-      // wrong value, and the publish ended in a misleading `tentative`
-      // status with the root error three layers deep.
+    const chainCgId = options?.onChainContextGraphId ?? ctxGraphId;
+
+    const idToValidate = chainCgId ?? ctxGraphId;
+    if (idToValidate !== undefined && idToValidate !== null) {
       let parsed: bigint;
       try {
-        parsed = BigInt(ctxGraphId);
+        parsed = BigInt(idToValidate);
       } catch {
-        throw new Error(`Invalid publishContextGraphId: ${String(ctxGraphId)} (must be a numeric value)`);
+        throw new Error(`Invalid context graph id: ${String(idToValidate)} (must be a numeric value)`);
       }
       if (parsed <= 0n) {
         throw new Error(
-          `Invalid publishContextGraphId: ${String(ctxGraphId)} ` +
+          `Invalid context graph id: ${String(idToValidate)} ` +
           `(must be a positive integer; V10 contract rejects cgId <= 0 at ` +
           `KnowledgeAssetsV10.sol:379 with ZeroContextGraphId)`,
         );
@@ -666,22 +661,14 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
-    // Round 12 Bug 34: mint the internal-origin token so the guard
-    // in `publish()` recognizes this as a legitimate internal
-    // promote→publish path and bypasses the reserved-namespace check.
-    // SWM quads are already filtered by `assertionPromote`'s Round 4
-    // safety net, so re-checking here would reject legitimate internal
-    // bookkeeping. The public `fromSharedMemory: true` is still set
-    // for its V10 ACK-path semantic (core nodes verify against their
-    // local SWM copy, no inline staging quads).
+    this.log.info(ctx, `Publishing ${quads.length} quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${chainCgId && !ctxGraphId ? ` (on-chain CG ${chainCgId})` : ''}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
     const internalPublishOptions: InternalPublishOptions = {
       contextGraphId,
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
       v10ACKProvider: options?.v10ACKProvider,
-      publishContextGraphId: ctxGraphId ?? undefined,
+      publishContextGraphId: chainCgId ?? undefined,
       fromSharedMemory: true,
       subGraphName: options?.subGraphName,
       [INTERNAL_ORIGIN_TOKEN]: true,

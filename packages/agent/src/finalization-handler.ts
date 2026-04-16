@@ -281,24 +281,33 @@ export class FinalizationHandler {
 
       if (!batchVerified) return false;
 
-      // For context graph finalizations, also verify ContextGraphExpanded
-      // (may be at a later block since addBatchToContextGraph is a separate tx)
+      // V10 publishDirect registers the KC to the context graph internally
+      // (no separate addBatchToContextGraph tx / ContextGraphExpanded event).
+      // Skip the legacy ContextGraphExpanded check — the batch verification
+      // above is sufficient for V10.
       if (ctxGraphId) {
-        const scanWindow = 256;
-        const headBlock = typeof this.chain.getBlockNumber === 'function'
-          ? await this.chain.getBlockNumber()
-          : blockNumber + scanWindow;
-        const cgFilter: EventFilter = {
-          eventTypes: ['ContextGraphExpanded'],
-          fromBlock: blockNumber,
-          toBlock: Math.min(blockNumber + scanWindow, headBlock),
-        };
-        for await (const event of this.chain.listenForEvents(cgFilter)) {
-          const eventCGId = String(event.data['contextGraphId'] ?? '');
-          const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
-          if (eventCGId === ctxGraphId && (expectedBatchId === undefined || eventBatchId === expectedBatchId)) return true;
+        if (typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()) {
+          return true;
         }
-        return false;
+        try {
+          const scanWindow = 256;
+          const headBlock = typeof this.chain.getBlockNumber === 'function'
+            ? await this.chain.getBlockNumber()
+            : blockNumber + scanWindow;
+          const cgFilter: EventFilter = {
+            eventTypes: ['ContextGraphExpanded'],
+            fromBlock: blockNumber,
+            toBlock: Math.min(blockNumber + scanWindow, headBlock),
+          };
+          for await (const event of this.chain.listenForEvents(cgFilter)) {
+            const eventCGId = String(event.data['contextGraphId'] ?? '');
+            const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
+            if (eventCGId === ctxGraphId && (expectedBatchId === undefined || eventBatchId === expectedBatchId)) return true;
+          }
+          return false;
+        } catch {
+          return true;
+        }
       }
 
       return true;

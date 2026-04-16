@@ -321,9 +321,15 @@ describe('Access protocol denial', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    // Publish with public triples ONLY (no private)
+    const cgResult = await chainA.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
+      requiredSignatures: 1,
+      publishPolicy: 1,
+    });
+
     await publisherA.publish({
       contextGraphId: 'no-priv-test',
+      publishContextGraphId: cgResult.contextGraphId.toString(),
       quads: [
         { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:context-graph:no-priv-test' },
       ],
@@ -449,9 +455,17 @@ describe('Access protocol round-trip', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
+    const cgResult = await chainA.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
+      requiredSignatures: 1,
+      publishPolicy: 1,
+    });
+    const onChainCgId = cgResult.contextGraphId.toString();
+
     const result = await publisherA.publish({
       contextGraphId: PARANET,
       publisherPeerId: nodeA.peerId.toString(),
+      publishContextGraphId: onChainCgId,
       quads: [
         { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:context-graph:${PARANET}` },
       ],
