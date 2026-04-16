@@ -287,6 +287,11 @@ export class DkgNodePlugin {
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
+    // --- Cross-channel turn persistence ---
+    if (runtimeEnabled) {
+      this.registerCrossChannelPersistence(api);
+    }
+
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
 
@@ -355,6 +360,55 @@ export class DkgNodePlugin {
       // surprise `/api/status` probe.
       void this.refreshMemoryResolverState(api);
     }
+  }
+
+  /**
+   * Register cross-channel turn persistence hooks. Fires for ALL
+   * OpenClaw channels (Telegram, WhatsApp, API, etc.) except the DKG UI
+   * channel bridge (which already persists with richer data via
+   * DkgChannelPlugin.queueTurnPersistence).
+   *
+   * Strategy: stash the user message on `message_received`, then pair
+   * it with the assistant reply on `message_sent` and persist the turn
+   * to the DKG via the daemon's persist-turn endpoint.
+   */
+  private registerCrossChannelPersistence(api: OpenClawPluginApi): void {
+    const DKG_UI_CHANNEL = 'dkg-ui';
+    const pendingUserMessages = new Map<string, { from: string; content: string; timestamp: number }>();
+    const client = this.client;
+
+    api.registerHook('message_received', async (event: any, ctx: any) => {
+      const channelId = ctx?.channelId;
+      if (!channelId || channelId === DKG_UI_CHANNEL) return;
+      const key = `${channelId}:${ctx?.conversationId ?? 'default'}`;
+      pendingUserMessages.set(key, {
+        from: event?.from ?? 'unknown',
+        content: typeof event?.content === 'string' ? event.content : '',
+        timestamp: event?.timestamp ?? Date.now(),
+      });
+    }, { name: 'dkg-cross-channel-receive' });
+
+    api.registerHook('message_sent', async (event: any, ctx: any) => {
+      const channelId = ctx?.channelId;
+      if (!channelId || channelId === DKG_UI_CHANNEL) return;
+      if (!event?.success) return;
+      const key = `${channelId}:${ctx?.conversationId ?? 'default'}`;
+      const pending = pendingUserMessages.get(key);
+      pendingUserMessages.delete(key);
+
+      const userMessage = pending?.content ?? '';
+      const assistantReply = typeof event?.content === 'string' ? event.content : '';
+      if (!userMessage && !assistantReply) return;
+
+      const sessionId = `openclaw:${channelId}:${ctx?.conversationId ?? ctx?.accountId ?? 'default'}`;
+
+      try {
+        await client.persistTurn({ sessionId, userMessage, assistantReply });
+        api.logger.debug?.(`[dkg] Cross-channel turn persisted (${channelId})`);
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg] Cross-channel persist failed: ${err.message}`);
+      }
+    }, { name: 'dkg-cross-channel-persist' });
   }
 
   private registerLocalAgentIntegration(api: OpenClawPluginApi, registrationMode: string): void {

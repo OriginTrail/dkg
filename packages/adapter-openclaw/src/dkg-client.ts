@@ -6,6 +6,7 @@
  * and Node UI.
  */
 
+import { randomUUID } from 'node:crypto';
 import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
 
 export interface DkgClientOptions {
@@ -273,6 +274,24 @@ export class DkgDaemonClient {
 
   async getFullStatus(): Promise<Record<string, unknown>> {
     return this.get('/api/status');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cross-channel turn persistence
+  // ---------------------------------------------------------------------------
+
+  async persistTurn(params: {
+    sessionId: string;
+    userMessage: string;
+    assistantReply: string;
+    turnId?: string;
+  }): Promise<void> {
+    await this.post('/api/openclaw-channel/persist-turn', {
+      sessionId: params.sessionId,
+      userMessage: params.userMessage,
+      assistantReply: params.assistantReply,
+      turnId: params.turnId ?? randomUUID(),
+    });
   }
 
   // ---------------------------------------------------------------------------
