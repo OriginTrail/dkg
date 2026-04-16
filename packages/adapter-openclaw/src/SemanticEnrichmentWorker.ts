@@ -596,6 +596,22 @@ export class SemanticEnrichmentWorker {
           `[semantic-enrichment] session cleanup failed for ${event.id}: ${err?.message ?? String(err)}`,
         );
       });
+      if (stoppedDuringRun && !leaseLost) {
+        await this.client
+          .releaseSemanticEnrichmentEvent(event.id, this.workerInstanceId)
+          .then((result) => {
+            if (!result.released) {
+              this.api.logger.warn?.(
+                `[semantic-enrichment] stop could not release lease for ${event.kind}:${event.id}; another worker may need to wait for reclaim`,
+              );
+            }
+          })
+          .catch((err: any) => {
+            this.api.logger.warn?.(
+              `[semantic-enrichment] failed to release lease for ${event.kind}:${event.id} during shutdown: ${err?.message ?? String(err)}`,
+            );
+          });
+      }
       if (stoppedDuringRun) return;
       if (leaseLost) {
         this.api.logger.warn?.(

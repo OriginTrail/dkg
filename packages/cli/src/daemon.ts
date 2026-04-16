@@ -4783,6 +4783,45 @@ async function handleRequest(
     return jsonResponse(res, renewed ? 200 : 409, { renewed });
   }
 
+  if (req.method === 'POST' && path === '/api/semantic-enrichment/events/release') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const eventId = typeof payload.eventId === 'string' ? payload.eventId.trim() : '';
+    const leaseOwner = typeof payload.leaseOwner === 'string' ? payload.leaseOwner.trim() : '';
+    if (!eventId || !leaseOwner) {
+      return jsonResponse(res, 400, { error: 'Missing "eventId" or "leaseOwner"' });
+    }
+    const row = dashDb.getSemanticEnrichmentEvent(eventId);
+    if (!row) {
+      return jsonResponse(res, 404, { error: `Semantic enrichment event not found: ${eventId}` });
+    }
+    const released = dashDb.releaseSemanticEnrichmentLease(eventId, leaseOwner, Date.now());
+    if (!released) {
+      return jsonResponse(res, 409, { released: false });
+    }
+    const updated = dashDb.getSemanticEnrichmentEvent(eventId);
+    const eventPayload = updated ? parseSemanticEnrichmentEventPayload(updated.payload_json) : undefined;
+    if (updated && eventPayload?.kind === 'file_import') {
+      const descriptor = semanticEnrichmentDescriptorFromRow(updated);
+      updateExtractionStatusSemanticDescriptor(
+        extractionStatus,
+        dashDb,
+        eventPayload.assertionUri,
+        descriptor,
+      );
+      return jsonResponse(res, 200, { released: true, semanticEnrichment: descriptor });
+    }
+    return jsonResponse(res, 200, {
+      released: true,
+      ...(updated ? { semanticEnrichment: semanticEnrichmentDescriptorFromRow(updated) } : {}),
+    });
+  }
+
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/complete') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;

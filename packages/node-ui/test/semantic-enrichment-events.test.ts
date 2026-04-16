@@ -154,6 +154,27 @@ describe('DashboardDB — semantic enrichment events', () => {
     expect(db.getRunnableSemanticEnrichmentEvents(nextAttemptAt)).toHaveLength(1);
   });
 
+  it('releases a leased event back to pending immediately for same-owner restart recovery', () => {
+    insertEvent();
+
+    const claimed = db.claimNextRunnableSemanticEnrichmentEvent(1_000, 'worker-a');
+    expect(claimed).toBeDefined();
+
+    const released = db.releaseSemanticEnrichmentLease(claimed!.id, 'worker-a', 1_250);
+    expect(released).toBe(true);
+
+    const row = db.getSemanticEnrichmentEvent(claimed!.id);
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('pending');
+    expect(row!.attempts).toBe(1);
+    expect(row!.next_attempt_at).toBe(1_250);
+    expect(row!.lease_owner).toBeNull();
+    expect(row!.lease_expires_at).toBeNull();
+    expect(row!.last_error).toBeNull();
+    expect(db.getRunnableSemanticEnrichmentEvents(1_250)).toHaveLength(1);
+    expect(db.releaseSemanticEnrichmentLease(claimed!.id, 'worker-b', 1_300)).toBe(false);
+  });
+
   it('moves to dead_letter after the final attempt and reports health accurately', () => {
     insertEvent({ max_attempts: 1 });
 

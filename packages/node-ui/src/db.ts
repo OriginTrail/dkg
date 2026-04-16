@@ -1126,6 +1126,24 @@ export class DashboardDB {
     return result.changes > 0;
   }
 
+  releaseSemanticEnrichmentLease(
+    id: string,
+    leaseOwner: string,
+    now: number,
+  ): boolean {
+    const result = this.stmt('releaseSemanticEnrichmentLease', `
+      UPDATE semantic_enrichment_events
+      SET status = 'pending',
+          next_attempt_at = ?,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = ?,
+          last_error = NULL
+      WHERE id = ? AND status = 'leased' AND lease_owner = ?
+    `).run(now, now, id, leaseOwner);
+    return result.changes > 0;
+  }
+
   completeSemanticEnrichmentEvent(
     id: string,
     leaseOwner: string,

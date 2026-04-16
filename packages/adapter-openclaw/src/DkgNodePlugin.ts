@@ -159,6 +159,40 @@ export class DkgNodePlugin {
     return undefined;
   }
 
+  private normalizeWakeUrl(wakeUrl: string | undefined): string | undefined {
+    const trimmed = wakeUrl?.trim();
+    if (!trimmed) return undefined;
+    return trimmed.replace(/\/+$/, '');
+  }
+
+  private resolveWakeTransport(
+    existingWakeUrl: string | undefined,
+    existingWakeAuth: 'bridge-token' | 'gateway' | 'none' | undefined,
+    candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }>,
+  ): { url: string; auth?: 'bridge-token' | 'gateway' | 'none' } | undefined {
+    const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
+    if (!normalizedExistingWakeUrl) {
+      return candidates[0];
+    }
+
+    const matchingCandidate = candidates.find((candidate) =>
+      this.normalizeWakeUrl(candidate.url) === normalizedExistingWakeUrl,
+    );
+    if (!matchingCandidate) {
+      return {
+        url: normalizedExistingWakeUrl,
+        auth: existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl),
+      };
+    }
+    if (existingWakeAuth && existingWakeAuth !== matchingCandidate.auth) {
+      return {
+        url: normalizedExistingWakeUrl,
+        auth: existingWakeAuth,
+      };
+    }
+    return matchingCandidate;
+  }
+
   private syncClientLocalAgentRequestContext(): void {
     if (!this.initialized) return;
     if (!this.channelPlugin || !this.config.channel?.enabled) {
@@ -614,18 +648,31 @@ export class DkgNodePlugin {
       }
     }
 
+    const wakeCandidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
     if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
-      transport.wakeUrl = `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`;
-      transport.wakeAuth = 'gateway';
-    } else if (liveBridgeUrl) {
-      transport.wakeUrl = `${liveBridgeUrl}/semantic-enrichment/wake`;
-      transport.wakeAuth = 'bridge-token';
+      wakeCandidates.push({
+        url: `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`,
+        auth: 'gateway',
+      });
+    }
+    if (liveBridgeUrl) {
+      wakeCandidates.push({
+        url: `${liveBridgeUrl}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
     } else if (transport.bridgeUrl) {
-      transport.wakeUrl = `${transport.bridgeUrl}/semantic-enrichment/wake`;
-      transport.wakeAuth = 'bridge-token';
-    } else if (existingWakeUrl) {
-      transport.wakeUrl = existingWakeUrl;
-      transport.wakeAuth = existingWakeAuth ?? this.inferWakeAuthFromUrl(existingWakeUrl);
+      wakeCandidates.push({
+        url: `${transport.bridgeUrl}/semantic-enrichment/wake`,
+        auth: 'bridge-token',
+      });
+    }
+
+    const wakeTransport = this.resolveWakeTransport(existingWakeUrl, existingWakeAuth, wakeCandidates);
+    if (wakeTransport) {
+      transport.wakeUrl = wakeTransport.url;
+      if (wakeTransport.auth) {
+        transport.wakeAuth = wakeTransport.auth;
+      }
     }
 
     return transport;

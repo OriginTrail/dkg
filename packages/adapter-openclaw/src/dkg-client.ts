@@ -359,6 +359,16 @@ export class DkgDaemonClient {
     return this.post('/api/semantic-enrichment/events/renew', { eventId, leaseOwner });
   }
 
+  async releaseSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+  ): Promise<{ released: boolean; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
+    return this.post('/api/semantic-enrichment/events/release', {
+      eventId,
+      leaseOwner,
+    });
+  }
+
   async appendSemanticEnrichmentEvent(
     eventId: string,
     leaseOwner: string,

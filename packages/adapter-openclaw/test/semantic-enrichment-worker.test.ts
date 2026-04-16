@@ -23,6 +23,7 @@ function makeClient(overrides: Partial<DkgDaemonClient> = {}): DkgDaemonClient {
     storeChatTurn: vi.fn(),
     claimSemanticEnrichmentEvent: vi.fn().mockResolvedValue({ event: null }),
     renewSemanticEnrichmentEvent: vi.fn().mockResolvedValue({ renewed: true }),
+    releaseSemanticEnrichmentEvent: vi.fn().mockResolvedValue({ released: true }),
     appendSemanticEnrichmentEvent: vi.fn().mockResolvedValue({
       applied: true,
       completed: true,
@@ -365,6 +366,7 @@ describe('SemanticEnrichmentWorker', () => {
       .mockResolvedValue({ event: null });
     const append = vi.fn();
     const fail = vi.fn();
+    const release = vi.fn().mockResolvedValue({ released: true });
     const getSessionMessages = vi.fn();
     const deleteSession = vi.fn().mockResolvedValue(undefined);
     const worker = new SemanticEnrichmentWorker(
@@ -385,6 +387,7 @@ describe('SemanticEnrichmentWorker', () => {
         claimSemanticEnrichmentEvent: claim,
         appendSemanticEnrichmentEvent: append,
         failSemanticEnrichmentEvent: fail,
+        releaseSemanticEnrichmentEvent: release,
       }),
     );
 
@@ -403,6 +406,7 @@ describe('SemanticEnrichmentWorker', () => {
     expect(getSessionMessages).not.toHaveBeenCalled();
     expect(append).not.toHaveBeenCalled();
     expect(fail).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith('evt-stop-quiesce', expect.any(String));
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
