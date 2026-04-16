@@ -299,7 +299,7 @@ describe('Private context graph sync auth (3 nodes)', () => {
       yParityAndS: requestB.requesterSignatureVS,
     });
     expect(recoveredB.toLowerCase()).toBe(walletB.address.toLowerCase());
-    expect(await chainA.verifyACKIdentity(recoveredB, idB)).toBe(true);
+    expect(await chainA.verifySyncIdentity(recoveredB, idB)).toBe(true);
     expect(await (nodeA as any).authorizeSyncRequest(requestB, nodeB.peerId)).toBe(true);
 
     const requestC = JSON.parse(new TextDecoder().decode(await (nodeC as any).buildSyncRequest(PRIVATE_PARANET, 0, 50, false, nodeA.peerId)));

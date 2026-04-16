@@ -44,7 +44,10 @@ describe('v10 ACK provider wiring', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     ({ agent } = await createAgent(chain));
 
-    const result = await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
+    const cgId = 'v10-ack-test-cg';
+    await agent.createContextGraph({ id: cgId, name: 'V10 ACK Test CG' });
+
+    const result = await agent.publish(cgId, [
       { subject: 'urn:test:ack-provider', predicate: 'http://schema.org/name', object: '"ACK"', graph: '' },
     ]);
 

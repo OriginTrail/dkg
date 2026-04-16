@@ -1039,7 +1039,7 @@ export class EVMChainAdapter implements ChainAdapter {
       [],
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
-      params.publishPolicy ?? 0,
+      params.publishPolicy ?? 1,
       params.publishAuthority ?? ethers.ZeroAddress,
       0n,
     );

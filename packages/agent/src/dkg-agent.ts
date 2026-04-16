@@ -2091,6 +2091,9 @@ export class DKGAgent {
     const effectiveSubCG = options?.subContextGraphId ?? options?.contextGraphId;
     const ctxGraphIdStr = effectiveSubCG != null ? String(effectiveSubCG) : undefined;
 
+    // Resolve numeric on-chain context graph ID (same as _publish does).
+    const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
+
     // Data is already in peers' SWM (via prior share() + gossip),
     // so V10 ACK collection can proceed without swmReplicator.
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
@@ -2098,7 +2101,7 @@ export class DKGAgent {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
       onPhase: options?.onPhase,
-      publishContextGraphId: ctxGraphIdStr,
+      publishContextGraphId: onChainId,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
       subGraphName: options?.subGraphName,
@@ -2749,10 +2752,11 @@ export class DKGAgent {
       typeof this.chain.createOnChainContextGraph === 'function'
     ) {
       try {
+        const sortedParticipants = [...participantIdentityIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const result = await this.chain.createOnChainContextGraph({
-          participantIdentityIds: [...participantIdentityIds],
+          participantIdentityIds: sortedParticipants,
           requiredSignatures: opts.requiredSignatures ?? 1,
-          publishPolicy: 0,
+          publishPolicy: 1,
         });
         const numericId = result.contextGraphId.toString();
         const sub = this.subscribedContextGraphs.get(opts.id);

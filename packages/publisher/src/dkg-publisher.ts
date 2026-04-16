@@ -1220,7 +1220,7 @@ export class DKGPublisher implements Publisher {
     // rejected on-chain by minimumRequiredSignatures — this is intentional:
     // the contract is the ultimate gatekeeper.
     if (
-      !v10ACKs &&
+      (!v10ACKs || v10ACKs.length === 0) &&
       this.publisherWallet &&
       this.publisherNodeIdentityId > 0n &&
       v10ChainId !== undefined &&
