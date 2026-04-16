@@ -1,7 +1,9 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { DkgNodePlugin } from './dist/index.js';
+
+const moduleRequire = createRequire(import.meta.url);
 
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
@@ -76,7 +78,11 @@ export default function (api) {
   // after adapter/CLI upgrades unless re-synced. This runs on every plugin
   // load, is idempotent (skips when content matches), and non-fatal.
   try {
-    const skillSrc = fileURLToPath(new URL('../cli/skills/dkg-node/SKILL.md', import.meta.url));
+    // Resolve via require.resolve so the path works in both the monorepo
+    // (packages/cli/skills/...) AND npm-installed layouts
+    // (node_modules/@origintrail-official/dkg/skills/...). The CLI package
+    // ships `skills/` in its `files` array.
+    const skillSrc = moduleRequire.resolve('@origintrail-official/dkg/skills/dkg-node/SKILL.md');
     if (workspaceDir && existsSync(skillSrc)) {
       const skillDest = join(workspaceDir, 'skills', 'dkg-node', 'SKILL.md');
       const srcContent = readFileSync(skillSrc, 'utf-8');
