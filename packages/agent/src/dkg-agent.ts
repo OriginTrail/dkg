@@ -107,6 +107,7 @@ interface SyncRequestEnvelope {
   requestId?: string;
   issuedAtMs?: number;
   requesterIdentityId?: string;
+  requesterAgentAddress?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
 }
@@ -4488,6 +4489,7 @@ export class DKGAgent {
         requestId: parsed.requestId,
         issuedAtMs: parsed.issuedAtMs,
         requesterIdentityId: parsed.requesterIdentityId,
+        requesterAgentAddress: parsed.requesterAgentAddress,
         requesterSignatureR: parsed.requesterSignatureR,
         requesterSignatureVS: parsed.requesterSignatureVS,
       };
@@ -4545,22 +4547,34 @@ export class DKGAgent {
     request.requesterPeerId = this.peerId;
     request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     request.issuedAtMs = Date.now();
+
+    const digest = this.computeSyncDigest(
+      contextGraphId,
+      offset,
+      limit,
+      includeSharedMemory,
+      responderPeerId,
+      request.requesterPeerId,
+      request.requestId,
+      request.issuedAtMs,
+    );
+
     const identityId = await this.chain.getIdentityId();
     if (identityId > 0n && typeof this.chain.signMessage === 'function') {
-      const digest = this.computeSyncDigest(
-        contextGraphId,
-        offset,
-        limit,
-        includeSharedMemory,
-        responderPeerId,
-        request.requesterPeerId,
-        request.requestId,
-        request.issuedAtMs,
-      );
       const signature = await this.chain.signMessage(digest);
       request.requesterIdentityId = identityId.toString();
       request.requesterSignatureR = ethers.hexlify(signature.r);
       request.requesterSignatureVS = ethers.hexlify(signature.vs);
+    } else if (this.defaultAgentAddress) {
+      const agent = this.localAgents.get(this.defaultAgentAddress);
+      if (agent?.privateKey) {
+        const wallet = new ethers.Wallet(agent.privateKey);
+        const sig = ethers.Signature.from(await wallet.signMessage(digest));
+        request.requesterIdentityId = '0';
+        request.requesterAgentAddress = this.defaultAgentAddress;
+        request.requesterSignatureR = ethers.hexlify(sig.r);
+        request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+      }
     }
 
     return new TextEncoder().encode(JSON.stringify(request));
@@ -4608,6 +4622,7 @@ export class DKGAgent {
 
     let requesterIdentityId = 0n;
     try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch { /* malformed — treated as unauthenticated */ }
+
     if (
       request.targetPeerId !== this.peerId ||
       request.requesterPeerId !== remotePeerId ||
@@ -4615,15 +4630,9 @@ export class DKGAgent {
       request.issuedAtMs == null ||
       now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
       now < request.issuedAtMs - 5000 ||
-      requesterIdentityId === 0n ||
       !request.requesterSignatureR ||
       !request.requesterSignatureVS
     ) {
-      return false;
-    }
-    // Require at least one identity verification method
-    const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
-    if (typeof verifyIdentity !== 'function') {
       return false;
     }
 
@@ -4652,15 +4661,28 @@ export class DKGAgent {
       return false;
     }
 
-    const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
-    if (!validIdentity) {
+    // Two auth paths:
+    // 1. Core nodes (identityId > 0): verify on-chain identity owns the key
+    // 2. Edge nodes (identityId = 0): wallet signature is sufficient —
+    //    recovered address checked directly against allowlist
+    if (requesterIdentityId > 0n) {
+      const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
+      if (typeof verifyIdentity !== 'function') {
+        return false;
+      }
+      const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
+      if (!validIdentity) {
+        return false;
+      }
+    } else if (!request.requesterAgentAddress ||
+      recoveredAddress.toLowerCase() !== request.requesterAgentAddress.toLowerCase()) {
       return false;
     }
 
     const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
     let allowed = participants?.some((p) =>
       p.toLowerCase() === recoveredAddress.toLowerCase() ||
-      p === String(requesterIdentityId),
+      (requesterIdentityId > 0n && p === String(requesterIdentityId)),
     ) ?? false;
 
     // Requester has valid on-chain identity but is not in our local participant
