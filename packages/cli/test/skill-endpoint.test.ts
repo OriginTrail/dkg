@@ -126,6 +126,12 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('target_context_graph');
   });
 
+  it('does NOT contain V9 to V10 migration table (removed - first product release)', () => {
+    expect(skillContent).not.toContain('V9 -> V10 Migration');
+    expect(skillContent).not.toContain('| Paranet | Context Graph |');
+    expect(skillContent).not.toContain('| `POST /api/workspace/write`');
+  });
+
   it('is under 500 lines (Agent Skills best practice)', () => {
     const lines = skillContent.split('\n').length;
     expect(lines).toBeLessThan(500);

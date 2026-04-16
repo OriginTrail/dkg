@@ -8,7 +8,7 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { contextGraphDataUri, SYSTEM_PARANETS, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { contextGraphDataUri, paranetMetaGraphUri, paranetDataGraphUri, SYSTEM_PARANETS, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   generateKCMetadata,
   computeTripleHashV10,
@@ -785,5 +785,675 @@ describe('Private context graph late join sync (3 nodes)', () => {
     } finally {
       await runner.stop();
     }
+  }, 45000);
+});
+
+/**
+ * Private CG sync chain: A → B → C
+ *
+ * Tests the critical path where an intermediary node (B) serves data to a
+ * third participant (C). After B syncs from curator A, B's store has the
+ * participant list from A's meta graph, enabling B to authorize C's request.
+ *
+ * Also verifies that B can publish new data to the private CG and C receives
+ * both A's and B's data, plus that an unauthorized node D is blocked everywhere.
+ */
+describe('Private CG sync chain propagation (A → B → C)', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+  let nodeC: DKGAgent;
+  let nodeD: DKGAgent;
+  let walletA: ethers.Wallet;
+  let walletB: ethers.Wallet;
+  let walletC: ethers.Wallet;
+  let walletD: ethers.Wallet;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+    try { await nodeC?.stop(); } catch { /* */ }
+    try { await nodeD?.stop(); } catch { /* */ }
+  });
+
+  const CHAIN_CG = 'private-chain-test';
+  const ENTITY_A = 'urn:e2e:chain:a:data:1';
+  const ENTITY_B = 'urn:e2e:chain:b:data:1';
+  const SWM_ENTITY_A = 'urn:e2e:chain:a:swm:1';
+
+  function createSignerFn(wallet: ethers.Wallet) {
+    return async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+  }
+
+  it('B serves C after syncing from A, unauthorized D is blocked', async () => {
+    walletA = ethers.Wallet.createRandom();
+    walletB = ethers.Wallet.createRandom();
+    walletC = ethers.Wallet.createRandom();
+    walletD = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+    const chainD = new MockChainAdapter('mock:31337', walletD.address);
+
+    chainA.signMessage = createSignerFn(walletA);
+    chainB.signMessage = createSignerFn(walletB);
+    chainC.signMessage = createSignerFn(walletC);
+    chainD.signMessage = createSignerFn(walletD);
+
+    const idA = 100n;
+    const idB = 101n;
+    const idC = 102n;
+    const idD = 103n;
+
+    // Shared identity registry — in production, all nodes see the same on-chain state
+    const allIdentities: Array<[string, bigint]> = [
+      [walletA.address, idA],
+      [walletB.address, idB],
+      [walletC.address, idC],
+      [walletD.address, idD],
+    ];
+    for (const chain of [chainA, chainB, chainC, chainD]) {
+      for (const [addr, id] of allIdentities) {
+        (chain as any).identities.set(addr, id);
+      }
+    }
+
+    nodeA = await DKGAgent.create({ name: 'ChainA', listenPort: 0, chainAdapter: chainA });
+    nodeB = await DKGAgent.create({ name: 'ChainB', listenPort: 0, chainAdapter: chainB });
+    nodeC = await DKGAgent.create({ name: 'ChainC', listenPort: 0, chainAdapter: chainC });
+    nodeD = await DKGAgent.create({ name: 'ChainD', listenPort: 0, chainAdapter: chainD });
+
+    await nodeA.start();
+    await nodeB.start();
+    await nodeC.start();
+    await nodeD.start();
+    await sleep(800);
+
+    // Connect B to A, C to B (NOT directly to A), D to B
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const addrB = nodeB.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await nodeB.connectTo(addrA);
+    await sleep(300);
+    await nodeC.connectTo(addrB);
+    await sleep(300);
+    await nodeD.connectTo(addrB);
+    await sleep(300);
+
+    // --- Step 1: A creates private CG with A, B, C as participants (D excluded) ---
+    await nodeA.createContextGraph({
+      id: CHAIN_CG,
+      name: 'Private Chain Test',
+      description: 'Tests A→B→C sync chain',
+      private: true,
+      participantIdentityIds: [idA, idB, idC],
+    });
+
+    // B syncs ontology so it learns about the CG's access policy
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // --- Step 2: A publishes durable data + SWM ---
+    await insertWithMeta((nodeA as any).store, CHAIN_CG, [
+      {
+        subject: ENTITY_A,
+        predicate: 'http://schema.org/name',
+        object: '"Data from curator A"',
+        graph: contextGraphDataUri(CHAIN_CG),
+      },
+    ]);
+    await nodeA.share(CHAIN_CG, [
+      { subject: SWM_ENTITY_A, predicate: 'http://schema.org/text', object: '"SWM from A"', graph: '' },
+    ], { localOnly: true });
+
+    // --- Step 3: B syncs from A (gets data + meta with participant list) ---
+    const bDataFromA = await nodeB.syncFromPeer(nodeA.peerId, [CHAIN_CG]);
+    expect(bDataFromA).toBeGreaterThan(0);
+    const bSwmFromA = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, [CHAIN_CG]);
+
+    // Verify B got A's durable data
+    const bQueryA = await nodeB.query(
+      `SELECT ?name WHERE { <${ENTITY_A}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CHAIN_CG },
+    );
+    expect(bQueryA.bindings.length).toBe(1);
+    expect(bQueryA.bindings[0]?.['name']).toBe('"Data from curator A"');
+
+    // --- Step 4: Verify B has participant IDs in its store (meta propagation) ---
+    const bParticipants = await (nodeB as any).getPrivateContextGraphParticipants(CHAIN_CG);
+    expect(bParticipants).toBeDefined();
+    expect(bParticipants).toContain(String(idA));
+    expect(bParticipants).toContain(String(idB));
+    expect(bParticipants).toContain(String(idC));
+
+    // --- Step 5: B publishes its own durable data ---
+    await insertWithMeta((nodeB as any).store, CHAIN_CG, [
+      {
+        subject: ENTITY_B,
+        predicate: 'http://schema.org/name',
+        object: '"Data from node B"',
+        graph: contextGraphDataUri(CHAIN_CG),
+      },
+    ]);
+
+    // --- Step 6: C syncs ontology from B (B got it from A) ---
+    await nodeC.syncFromPeer(nodeB.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // --- Step 7: C syncs the private CG from B ---
+    const cDataFromB = await nodeC.syncFromPeer(nodeB.peerId, [CHAIN_CG]);
+    expect(cDataFromB).toBeGreaterThan(0);
+
+    // Verify C has BOTH A's and B's data
+    const cQueryA = await nodeC.query(
+      `SELECT ?name WHERE { <${ENTITY_A}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CHAIN_CG },
+    );
+    expect(cQueryA.bindings.length).toBe(1);
+    expect(cQueryA.bindings[0]?.['name']).toBe('"Data from curator A"');
+
+    const cQueryB = await nodeC.query(
+      `SELECT ?name WHERE { <${ENTITY_B}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CHAIN_CG },
+    );
+    expect(cQueryB.bindings.length).toBe(1);
+    expect(cQueryB.bindings[0]?.['name']).toBe('"Data from node B"');
+
+    // --- Step 8: D (unauthorized) cannot sync from B ---
+    await nodeD.syncFromPeer(nodeB.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    const dDataFromB = await nodeD.syncFromPeer(nodeB.peerId, [CHAIN_CG]);
+    expect(dDataFromB).toBe(0);
+
+    const dSwmFromB = await nodeD.syncSharedMemoryFromPeer(nodeB.peerId, [CHAIN_CG]);
+    expect(dSwmFromB).toBe(0);
+
+    // D can't get data even from A directly
+    await nodeD.connectTo(addrA);
+    await sleep(300);
+    const dDataFromA = await nodeD.syncFromPeer(nodeA.peerId, [CHAIN_CG]);
+    expect(dDataFromA).toBe(0);
+
+    // Verify D has nothing
+    const dQuery = await nodeD.query(
+      `SELECT ?name WHERE { <${ENTITY_A}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CHAIN_CG },
+    );
+    expect(dQuery.bindings.length).toBe(0);
+  }, 60000);
+});
+
+/**
+ * Tests the sync-on-connect discovery flow: B connects to A for the first time,
+ * syncs ontology (discovers the CG), and immediately syncs the CG's durable data
+ * in the same connection cycle — no second connection needed.
+ */
+describe('Private CG auto-discovery on connect (2 nodes)', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+  });
+
+  it('B discovers and syncs a private CG in a single connect cycle via trySyncFromPeer', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const walletB = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainB.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletB.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    const idA = 200n;
+    const idB = 201n;
+    for (const chain of [chainA, chainB]) {
+      (chain as any).identities.set(walletA.address, idA);
+      (chain as any).identities.set(walletB.address, idB);
+    }
+
+    nodeA = await DKGAgent.create({ name: 'DiscoverA', listenPort: 0, chainAdapter: chainA });
+    nodeB = await DKGAgent.create({ name: 'DiscoverB', listenPort: 0, chainAdapter: chainB });
+
+    await nodeA.start();
+    await nodeB.start();
+    await sleep(500);
+
+    // A creates private CG and publishes data BEFORE B connects
+    const DISCOVER_CG = 'discover-private-test';
+    await nodeA.createContextGraph({
+      id: DISCOVER_CG,
+      name: 'Discover Private Test',
+      private: true,
+      participantIdentityIds: [idA, idB],
+    });
+
+    await insertWithMeta((nodeA as any).store, DISCOVER_CG, [
+      {
+        subject: 'urn:e2e:discover:data:1',
+        predicate: 'http://schema.org/name',
+        object: '"Auto-discovered data"',
+        graph: contextGraphDataUri(DISCOVER_CG),
+      },
+    ]);
+
+    // B connects to A — trySyncFromPeer should discover the CG from ontology
+    // and sync its durable data in the same cycle
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await nodeB.connectTo(addrA);
+
+    // Wait for trySyncFromPeer to complete (3s delay + sync time)
+    await sleep(6000);
+
+    // B should have the private CG data without any manual sync call
+    const result = await nodeB.query(
+      `SELECT ?name WHERE { <urn:e2e:discover:data:1> <http://schema.org/name> ?name }`,
+      { contextGraphId: DISCOVER_CG },
+    );
+    expect(result.bindings.length).toBe(1);
+    expect(result.bindings[0]?.['name']).toBe('"Auto-discovered data"');
+  }, 30000);
+});
+
+/**
+ * Tests the full ABC post-invite flow:
+ * A creates CG with [A, B], publishes data. B syncs and publishes.
+ * A then adds C to participants (simulating invite). C syncs from B.
+ * B doesn't have C in its local meta, triggers meta refresh from A,
+ * discovers C is now authorized, and serves the data.
+ */
+describe('Private CG meta refresh on auth miss (A→B→C post-invite)', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+  let nodeC: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+    try { await nodeC?.stop(); } catch { /* */ }
+  });
+
+  const META_REFRESH_CG = 'meta-refresh-test';
+  const ENTITY_A = 'urn:e2e:metarefresh:a:1';
+  const ENTITY_B = 'urn:e2e:metarefresh:b:1';
+
+  function createSignerFn(wallet: ethers.Wallet) {
+    return async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+  }
+
+  it('B refreshes meta from curator when C (late invite) requests sync', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const walletB = ethers.Wallet.createRandom();
+    const walletC = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+
+    chainA.signMessage = createSignerFn(walletA);
+    chainB.signMessage = createSignerFn(walletB);
+    chainC.signMessage = createSignerFn(walletC);
+
+    const idA = 300n;
+    const idB = 301n;
+    const idC = 302n;
+
+    // Shared identity registry
+    for (const chain of [chainA, chainB, chainC]) {
+      (chain as any).identities.set(walletA.address, idA);
+      (chain as any).identities.set(walletB.address, idB);
+      (chain as any).identities.set(walletC.address, idC);
+    }
+
+    nodeA = await DKGAgent.create({
+      name: 'MetaRefreshA', listenPort: 0, chainAdapter: chainA,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletA.privateKey] },
+    });
+    nodeB = await DKGAgent.create({
+      name: 'MetaRefreshB', listenPort: 0, chainAdapter: chainB,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletB.privateKey] },
+    });
+    nodeC = await DKGAgent.create({
+      name: 'MetaRefreshC', listenPort: 0, chainAdapter: chainC,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletC.privateKey] },
+    });
+
+    await nodeA.start();
+    await nodeB.start();
+    await nodeC.start();
+    await sleep(500);
+
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const addrB = nodeB.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+
+    // Connect B to A
+    await nodeB.connectTo(addrA);
+    await sleep(300);
+
+    // --- Step 1: A creates private CG with only A and B (C not included yet) ---
+    await nodeA.createContextGraph({
+      id: META_REFRESH_CG,
+      name: 'Meta Refresh Test',
+      private: true,
+      allowedAgents: [walletA.address, walletB.address],
+    });
+
+    // A publishes durable data
+    await insertWithMeta((nodeA as any).store, META_REFRESH_CG, [
+      {
+        subject: ENTITY_A,
+        predicate: 'http://schema.org/name',
+        object: '"Data from A"',
+        graph: contextGraphDataUri(META_REFRESH_CG),
+      },
+    ]);
+
+    // --- Step 2: B syncs from A (gets data + meta with participants [A, B]) ---
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    const bSynced = await nodeB.syncFromPeer(nodeA.peerId, [META_REFRESH_CG]);
+    expect(bSynced).toBeGreaterThan(0);
+
+    // Verify B has A's data
+    const bQueryA = await nodeB.query(
+      `SELECT ?name WHERE { <${ENTITY_A}> <http://schema.org/name> ?name }`,
+      { contextGraphId: META_REFRESH_CG },
+    );
+    expect(bQueryA.bindings.length).toBe(1);
+
+    // Verify B's participant list does NOT include C
+    const bParticipantsBefore = await (nodeB as any).getPrivateContextGraphParticipants(META_REFRESH_CG);
+    expect(bParticipantsBefore).toContain(walletA.address);
+    expect(bParticipantsBefore).toContain(walletB.address);
+    expect(bParticipantsBefore).not.toContain(walletC.address);
+
+    // B publishes its own data
+    await insertWithMeta((nodeB as any).store, META_REFRESH_CG, [
+      {
+        subject: ENTITY_B,
+        predicate: 'http://schema.org/name',
+        object: '"Data from B"',
+        graph: contextGraphDataUri(META_REFRESH_CG),
+      },
+    ]);
+
+    // --- Step 3: A "invites" C by adding C's agent address to A's allowlist ---
+    // This is what inviteAgentToContextGraph does under the hood.
+    const cgMetaGraph = paranetMetaGraphUri(META_REFRESH_CG);
+    const cgUri = paranetDataGraphUri(META_REFRESH_CG);
+    await (nodeA as any).store.insert([{
+      subject: cgUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${walletC.address}"`,
+      graph: cgMetaGraph,
+    }]);
+
+    // --- Step 4: C connects to B (NOT to A directly) and syncs ontology ---
+    await nodeC.connectTo(addrB);
+    await sleep(300);
+    // B must also be connected to A for the meta refresh to work
+    await nodeC.syncFromPeer(nodeB.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // --- Step 5: C tries to sync the private CG from B ---
+    // B's local meta has [A, B] but not C. authorizeSyncRequest should
+    // trigger refreshMetaFromCurator, re-sync meta from A, find C, and allow.
+    const cSynced = await nodeC.syncFromPeer(nodeB.peerId, [META_REFRESH_CG]);
+    expect(cSynced).toBeGreaterThan(0);
+
+    // --- Step 6: Verify C has both A's and B's data ---
+    const cQueryA = await nodeC.query(
+      `SELECT ?name WHERE { <${ENTITY_A}> <http://schema.org/name> ?name }`,
+      { contextGraphId: META_REFRESH_CG },
+    );
+    expect(cQueryA.bindings.length).toBe(1);
+    expect(cQueryA.bindings[0]?.['name']).toBe('"Data from A"');
+
+    const cQueryB = await nodeC.query(
+      `SELECT ?name WHERE { <${ENTITY_B}> <http://schema.org/name> ?name }`,
+      { contextGraphId: META_REFRESH_CG },
+    );
+    expect(cQueryB.bindings.length).toBe(1);
+    expect(cQueryB.bindings[0]?.['name']).toBe('"Data from B"');
+
+    // --- Step 7: Verify B now has the updated participant list (after refresh) ---
+    const bParticipantsAfter = await (nodeB as any).getPrivateContextGraphParticipants(META_REFRESH_CG);
+    expect(bParticipantsAfter).toContain(walletC.address);
+  }, 30000);
+});
+
+describe('Private CG invite via inviteAgentToContextGraph (V10 flow)', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+  });
+
+  it('B syncs after being invited by A via inviteAgentToContextGraph', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const walletB = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+
+    chainA.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletA.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainB.signMessage = async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await walletB.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+
+    for (const chain of [chainA, chainB]) {
+      (chain as any).identities.set(walletA.address, 400n);
+      (chain as any).identities.set(walletB.address, 401n);
+    }
+
+    nodeA = await DKGAgent.create({
+      name: 'InviteA', listenPort: 0, chainAdapter: chainA,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletA.privateKey] },
+    });
+    nodeB = await DKGAgent.create({
+      name: 'InviteB', listenPort: 0, chainAdapter: chainB,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletB.privateKey] },
+    });
+
+    await nodeA.start();
+    await nodeB.start();
+    await sleep(500);
+
+    const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await nodeB.connectTo(addrA);
+    await sleep(300);
+
+    // A creates private CG with only itself
+    await nodeA.createContextGraph({
+      id: 'invite-flow-test',
+      name: 'Invite Flow Test',
+      private: true,
+      allowedAgents: [walletA.address],
+    });
+
+    await insertWithMeta((nodeA as any).store, 'invite-flow-test', [{
+      subject: 'urn:e2e:invite:1',
+      predicate: 'http://schema.org/name',
+      object: '"Invite test data"',
+      graph: contextGraphDataUri('invite-flow-test'),
+    }]);
+
+    // A invites B
+    await nodeA.inviteAgentToContextGraph('invite-flow-test', walletB.address);
+
+    // B syncs — should succeed because B is now in the allowlist
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    const synced = await nodeB.syncFromPeer(nodeA.peerId, ['invite-flow-test']);
+    expect(synced).toBeGreaterThan(0);
+
+    const result = await nodeB.query(
+      `SELECT ?name WHERE { <urn:e2e:invite:1> <http://schema.org/name> ?name }`,
+      { contextGraphId: 'invite-flow-test' },
+    );
+    expect(result.bindings.length).toBe(1);
+    expect(result.bindings[0]?.['name']).toBe('"Invite test data"');
+  }, 30000);
+});
+
+/**
+ * Full end-to-end scenario:
+ * 1. Curator (A) creates private CG, invites B and C
+ * 2. B joins immediately and syncs
+ * 3. A publishes durable data + SWM
+ * 4. B receives SWM via sync, queries it
+ * 5. C joins later, syncs from B (not A) — gets all data including SWM
+ * 6. C queries durable + SWM data successfully
+ */
+describe('Full e2e scenario (curator + 2 joiners, late joiner via intermediate)', () => {
+  let curator: DKGAgent;
+  let nodeB: DKGAgent;
+  let nodeC: DKGAgent;
+
+  afterAll(async () => {
+    try { await curator?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+    try { await nodeC?.stop(); } catch { /* */ }
+  });
+
+  it('late joiner syncs all data (durable + SWM) from intermediate peer', async () => {
+    const walletA = ethers.Wallet.createRandom();
+    const walletB = ethers.Wallet.createRandom();
+    const walletC = ethers.Wallet.createRandom();
+
+    const chainA = new MockChainAdapter('mock:31337', walletA.address);
+    const chainB = new MockChainAdapter('mock:31337', walletB.address);
+    const chainC = new MockChainAdapter('mock:31337', walletC.address);
+
+    const mkSigner = (w: ethers.Wallet) => async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await w.signMessage(digest));
+      return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+    };
+    chainA.signMessage = mkSigner(walletA);
+    chainB.signMessage = mkSigner(walletB);
+    chainC.signMessage = mkSigner(walletC);
+
+    for (const chain of [chainA, chainB, chainC]) {
+      (chain as any).identities.set(walletA.address, 500n);
+      (chain as any).identities.set(walletB.address, 501n);
+      (chain as any).identities.set(walletC.address, 502n);
+    }
+
+    curator = await DKGAgent.create({
+      name: 'E2ECurator', listenPort: 0, chainAdapter: chainA,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletA.privateKey] },
+    });
+    nodeB = await DKGAgent.create({
+      name: 'E2ENodeB', listenPort: 0, chainAdapter: chainB,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletB.privateKey] },
+    });
+    nodeC = await DKGAgent.create({
+      name: 'E2ENodeC', listenPort: 0, chainAdapter: chainC,
+      chainConfig: { rpcUrl: '', hubAddress: '', operationalKeys: [walletC.privateKey] },
+    });
+
+    await curator.start();
+    await nodeB.start();
+    await nodeC.start();
+    await sleep(500);
+
+    const curatorAddr = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const addrB = nodeB.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+
+    // --- Step 1: Curator creates private CG and invites B + C ---
+    await curator.createContextGraph({
+      id: 'private-sync-e2e',
+      name: 'Private Sync E2E',
+      allowedAgents: [walletA.address, walletB.address, walletC.address],
+    });
+
+    // --- Step 2: B connects and syncs immediately ---
+    await nodeB.connectTo(curatorAddr);
+    await sleep(300);
+    await nodeB.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    await nodeB.syncFromPeer(curator.peerId, ['private-sync-e2e']);
+
+    // --- Step 3: Curator publishes durable data ---
+    await insertWithMeta((curator as any).store, 'private-sync-e2e', [{
+      subject: 'urn:e2e:mission:1',
+      predicate: 'http://schema.org/name',
+      object: '"First Mission"',
+      graph: contextGraphDataUri('private-sync-e2e'),
+    }]);
+
+    // Curator publishes SWM
+    await curator.share('private-sync-e2e', [{
+      subject: 'urn:e2e:swm:status',
+      predicate: 'http://schema.org/text',
+      object: '"SWM: mission briefing active"',
+      graph: '',
+    }], { localOnly: true });
+
+    // --- Step 4: B syncs again to pick up new durable data + SWM ---
+    await nodeB.syncFromPeer(curator.peerId, ['private-sync-e2e']);
+    await nodeB.syncSharedMemoryFromPeer(curator.peerId, ['private-sync-e2e']);
+
+    // Verify B has durable data
+    const bDurableQuery = await nodeB.query(
+      `SELECT ?name WHERE { <urn:e2e:mission:1> <http://schema.org/name> ?name }`,
+      { contextGraphId: 'private-sync-e2e' },
+    );
+    expect(bDurableQuery.bindings.length).toBe(1);
+    expect(bDurableQuery.bindings[0]?.['name']).toBe('"First Mission"');
+
+    // Verify B has SWM data
+    const bSwmQuery = await nodeB.query(
+      `SELECT ?text WHERE { <urn:e2e:swm:status> <http://schema.org/text> ?text }`,
+      { contextGraphId: 'private-sync-e2e', includeSharedMemory: true },
+    );
+    expect(bSwmQuery.bindings.length).toBe(1);
+
+    // --- Step 5: C joins LATER, connects to B only (not directly to curator) ---
+    await nodeC.connectTo(addrB);
+    await sleep(300);
+
+    // C syncs ontology from B
+    await nodeC.syncFromPeer(nodeB.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // C syncs the private CG from B — B's authorizeSyncRequest triggers
+    // refreshMetaFromCurator to verify C is in the allowlist
+    const cDurableSync = await nodeC.syncFromPeer(nodeB.peerId, ['private-sync-e2e']);
+    expect(cDurableSync).toBeGreaterThan(0);
+
+    // C syncs SWM from B
+    await nodeC.syncSharedMemoryFromPeer(nodeB.peerId, ['private-sync-e2e']);
+
+    // --- Step 6: Verify C has ALL data ---
+    const cDurableQuery = await nodeC.query(
+      `SELECT ?name WHERE { <urn:e2e:mission:1> <http://schema.org/name> ?name }`,
+      { contextGraphId: 'private-sync-e2e' },
+    );
+    expect(cDurableQuery.bindings.length).toBe(1);
+    expect(cDurableQuery.bindings[0]?.['name']).toBe('"First Mission"');
+
+    // Verify C has SWM
+    const cSwmQuery = await nodeC.query(
+      `SELECT ?text WHERE { <urn:e2e:swm:status> <http://schema.org/text> ?text }`,
+      { contextGraphId: 'private-sync-e2e', includeSharedMemory: true },
+    );
+    expect(cSwmQuery.bindings.length).toBe(1);
+    expect(cSwmQuery.bindings[0]?.['text']).toBe('"SWM: mission briefing active"');
+
+    // Verify B's participant list was updated to include C after meta refresh
+    const bParticipants = await (nodeB as any).getPrivateContextGraphParticipants('private-sync-e2e');
+    expect(bParticipants).toContain(walletC.address);
   }, 45000);
 });

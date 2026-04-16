@@ -34,6 +34,7 @@ export interface LiftResolvedPublishSlice {
   readonly operationCtx?: OperationContext;
   readonly onPhase?: PhaseCallback;
   readonly receiverSignatureProvider?: ReceiverSignatureProvider;
+  readonly publishContextGraphId?: string;
 }
 
 export interface LiftPublishMappingInput {
@@ -118,6 +119,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     operationCtx: input.resolved.operationCtx,
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
+    publishContextGraphId: input.resolved.publishContextGraphId,
   };
 }
 

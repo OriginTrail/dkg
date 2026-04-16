@@ -95,7 +95,7 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     const accessHandler = new AccessHandler(storeA, bus);
@@ -121,7 +121,7 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
 
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     const publicResult = await storeA.query(`

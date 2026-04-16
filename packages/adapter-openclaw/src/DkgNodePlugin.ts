@@ -366,10 +366,22 @@ export class DkgNodePlugin {
       }
       const registered = this.memoryPlugin.register(api);
       if (!registered) {
+        // Clear any stale re-assert callback from a previous registration
+        // so the channel plugin doesn't steal the slot back from the
+        // newly elected provider on subsequent turns.
+        this.channelPlugin?.setMemoryReAssert(null);
         api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
         return;
       }
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
+
+      // Wire the channel plugin to re-assert our memory-slot capability
+      // before each inbound turn dispatch. This guarantees our runtime
+      // handles recall even when memory-core's dreaming sidecar overwrites
+      // the single-slot capability store during plugin loading.
+      if (this.channelPlugin && this.memoryPlugin) {
+        this.channelPlugin.setMemoryReAssert(() => this.memoryPlugin?.reAssertCapability());
+      }
 
       // Cache the API handle so `ensureNodePeerId` can log from the lazy
       // re-probe call tree, which fires outside of any register() scope

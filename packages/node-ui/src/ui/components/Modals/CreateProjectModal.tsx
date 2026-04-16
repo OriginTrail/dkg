@@ -240,14 +240,6 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           )}
 
-          <div className="v10-layer-preview">
-            <div className="v10-layer-preview-title">Layer Activation</div>
-            <span style={{ fontFamily: 'var(--font-mono)' }}>
-              ┌─ Verified Memory ── activates on first publish (requires TRAC)<br />
-              ├─ Shared Memory ──── activates on first share (free)<br />
-              └─ Working Memory ─── created immediately (local, free)
-            </span>
-          </div>
         </div>
 
         <div className="v10-modal-footer">

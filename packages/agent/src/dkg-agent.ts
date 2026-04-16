@@ -92,6 +92,7 @@ const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
 const SYNC_AUTH_MAX_AGE_MS = 30_000;
+const META_REFRESH_COOLDOWN_MS = 30_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -106,6 +107,7 @@ interface SyncRequestEnvelope {
   requestId?: string;
   issuedAtMs?: number;
   requesterIdentityId?: string;
+  requesterAgentAddress?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
 }
@@ -236,6 +238,7 @@ export class DKGAgent {
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
+  private readonly metaRefreshTimestamps = new Map<string, number>();
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   private readonly localAgents = new Map<string, AgentKeyRecord>();
@@ -806,7 +809,7 @@ export class DKGAgent {
             }
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
-            this.syncContextGraphFromConnectedPeers(contextGraphId).catch(() => {});
+            this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
               agentAddress: approvedAddr,
@@ -937,6 +940,7 @@ export class DKGAgent {
       }
 
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
+      const knownCgsBefore = new Set(this.config.syncContextGraphs ?? []);
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
@@ -957,6 +961,30 @@ export class DKGAgent {
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
+
+      // Sync durable data for any CGs discovered after the initial sync pass.
+      // Without this, newly discovered private CGs would only sync on the next
+      // peer connection since they weren't in syncContextGraphs during the
+      // first syncFromPeer call.
+      const allCgsAfter = this.config.syncContextGraphs ?? [];
+      const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
+      if (newlyDiscovered.length > 0) {
+        this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
+        const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
+        this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
+        for (const id of newlyDiscovered) {
+          const sub = this.subscribedContextGraphs.get(id);
+          if (sub && sub.metaSynced === false) {
+            const metaGraph = paranetMetaGraphUri(id);
+            const check = await this.store.query(
+              `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+            );
+            if (check.type === 'boolean' && check.value === true) {
+              sub.metaSynced = true;
+            }
+          }
+        }
+      }
 
       const wsContextGraphIds = this.config.syncContextGraphs ?? [];
       if (wsContextGraphIds.length > 0) {
@@ -2885,39 +2913,28 @@ export class DKGAgent {
       return { onChainId: existingOnChainId, txHash: undefined };
     }
 
-    // Use V10 participant-based registration only when explicitly configured
-    // with a RequiredSignatures threshold or multiple participants beyond the
-    // creator. A single creator identity is NOT sufficient — that's the
-    // default for every CG and should use legacy registration.
-    const useV10MultiSig = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0;
-
-    let onChainId: string;
-    if (useV10MultiSig && participantIdentityIds.length > 0) {
-      const result = await this.registerContextGraphOnChain({
-        participantIdentityIds,
-        requiredSignatures: storedRequiredSignatures,
-      });
-      onChainId = result.contextGraphId.toString();
-    } else {
-      try {
-        const result = await this.chain.createContextGraph({
-          name: id,
-          description,
-          accessPolicy: resolvedAccessPolicy,
-          revealOnChain: opts?.revealOnChain,
-        });
-        onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
-      } catch (err) {
-        const errorName = enrichEvmError(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
-          onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
-          this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
-        } else {
-          throw err;
-        }
+    let effectiveParticipantIdentityIds = participantIdentityIds;
+    if (effectiveParticipantIdentityIds.length === 0) {
+      const selfIdentityId = await this.ensureIdentity();
+      if (selfIdentityId === 0n) {
+        throw new Error(
+          `Context graph "${id}" cannot be registered on-chain without an on-chain identity. ` +
+          'Create/ensure the curator identity first.',
+        );
       }
+      effectiveParticipantIdentityIds = [selfIdentityId];
     }
+
+    const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
+      ? storedRequiredSignatures
+      : 1;
+
+    const result = await this.registerContextGraphOnChain({
+      participantIdentityIds: effectiveParticipantIdentityIds,
+      requiredSignatures: effectiveRequiredSignatures,
+      publishPolicy: resolvedAccessPolicy,
+    });
+    const onChainId = result.contextGraphId.toString();
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId}`);
 
@@ -4467,6 +4484,7 @@ export class DKGAgent {
         requestId: parsed.requestId,
         issuedAtMs: parsed.issuedAtMs,
         requesterIdentityId: parsed.requesterIdentityId,
+        requesterAgentAddress: parsed.requesterAgentAddress,
         requesterSignatureR: parsed.requesterSignatureR,
         requesterSignatureVS: parsed.requesterSignatureVS,
       };
@@ -4524,22 +4542,34 @@ export class DKGAgent {
     request.requesterPeerId = this.peerId;
     request.requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     request.issuedAtMs = Date.now();
+
+    const digest = this.computeSyncDigest(
+      contextGraphId,
+      offset,
+      limit,
+      includeSharedMemory,
+      responderPeerId,
+      request.requesterPeerId,
+      request.requestId,
+      request.issuedAtMs,
+    );
+
     const identityId = await this.chain.getIdentityId();
     if (identityId > 0n && typeof this.chain.signMessage === 'function') {
-      const digest = this.computeSyncDigest(
-        contextGraphId,
-        offset,
-        limit,
-        includeSharedMemory,
-        responderPeerId,
-        request.requesterPeerId,
-        request.requestId,
-        request.issuedAtMs,
-      );
       const signature = await this.chain.signMessage(digest);
       request.requesterIdentityId = identityId.toString();
       request.requesterSignatureR = ethers.hexlify(signature.r);
       request.requesterSignatureVS = ethers.hexlify(signature.vs);
+    } else if (this.defaultAgentAddress) {
+      const agent = this.localAgents.get(this.defaultAgentAddress);
+      if (agent?.privateKey) {
+        const wallet = new ethers.Wallet(agent.privateKey);
+        const sig = ethers.Signature.from(await wallet.signMessage(digest));
+        request.requesterIdentityId = '0';
+        request.requesterAgentAddress = this.defaultAgentAddress;
+        request.requesterSignatureR = ethers.hexlify(sig.r);
+        request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+      }
     }
 
     return new TextEncoder().encode(JSON.stringify(request));
@@ -4587,6 +4617,7 @@ export class DKGAgent {
 
     let requesterIdentityId = 0n;
     try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch { /* malformed — treated as unauthenticated */ }
+
     if (
       request.targetPeerId !== this.peerId ||
       request.requesterPeerId !== remotePeerId ||
@@ -4594,15 +4625,9 @@ export class DKGAgent {
       request.issuedAtMs == null ||
       now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
       now < request.issuedAtMs - 5000 ||
-      requesterIdentityId === 0n ||
       !request.requesterSignatureR ||
       !request.requesterSignatureVS
     ) {
-      return false;
-    }
-    // Require at least one identity verification method
-    const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
-    if (typeof verifyIdentity !== 'function') {
       return false;
     }
 
@@ -4631,17 +4656,44 @@ export class DKGAgent {
       return false;
     }
 
-    const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
-    if (!validIdentity) {
+    // Two auth paths:
+    // 1. Core nodes (identityId > 0): verify on-chain identity owns the key
+    // 2. Edge nodes (identityId = 0): wallet signature is sufficient —
+    //    recovered address checked directly against allowlist
+    if (requesterIdentityId > 0n) {
+      const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
+      if (typeof verifyIdentity !== 'function') {
+        return false;
+      }
+      const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
+      if (!validIdentity) {
+        return false;
+      }
+    } else if (!request.requesterAgentAddress ||
+      recoveredAddress.toLowerCase() !== request.requesterAgentAddress.toLowerCase()) {
       return false;
     }
 
     const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
-    // Check against both agent address (V10) and identity ID (legacy)
-    const allowed = participants?.some((p) =>
+    let allowed = participants?.some((p) =>
       p.toLowerCase() === recoveredAddress.toLowerCase() ||
-      p === String(requesterIdentityId),
+      (requesterIdentityId > 0n && p === String(requesterIdentityId)),
     ) ?? false;
+
+    // Requester has valid on-chain identity but is not in our local participant
+    // list. The curator may have invited them after our last meta sync — try
+    // refreshing the meta graph from the curator before denying.
+    if (!allowed) {
+      const refreshed = await this.refreshMetaFromCurator(request.contextGraphId);
+      if (refreshed) {
+        const freshParticipants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
+        allowed = freshParticipants?.some((p) =>
+          p.toLowerCase() === recoveredAddress.toLowerCase() ||
+          p === String(requesterIdentityId),
+        ) ?? false;
+      }
+    }
+
     if (allowed) {
       this.seenPrivateSyncRequestIds.set(request.requestId, now);
     }
@@ -4745,6 +4797,151 @@ export class DKGAgent {
     const onChainParticipants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
     if (!onChainParticipants) return null;
     return onChainParticipants.map((id) => String(id));
+  }
+
+  /**
+   * Re-sync the meta graph for a private CG from the curator to pick up
+   * newly added participants. Rate-limited to avoid abuse.
+   * Returns true if meta was refreshed, false if skipped or failed.
+   */
+  private async refreshMetaFromCurator(contextGraphId: string): Promise<boolean> {
+    const now = Date.now();
+    const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
+    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
+      return false;
+    }
+
+    const ctx = createOperationContext('sync');
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+
+    const curatorResult = await this.store.query(
+      `SELECT ?curator WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator
+        }
+      } LIMIT 1`,
+    );
+    if (curatorResult.type !== 'bindings' || curatorResult.bindings.length === 0) {
+      return false;
+    }
+    const curatorDid = (curatorResult.bindings[0] as Record<string, string>)['curator'] ?? '';
+    const didPrefix = 'did:dkg:agent:';
+    if (!curatorDid.startsWith(didPrefix)) {
+      return false;
+    }
+    const curatorIdentifier = curatorDid.slice(didPrefix.length);
+
+    // Resolve curator identifier to a peer ID. The DID value is either a
+    // libp2p peer ID (legacy) or an Ethereum wallet address (V10). For
+    // wallet addresses, prefer the deterministic DKG_CREATOR triple (which
+    // stores the libp2p peer ID) over the agent registry (which may return
+    // an arbitrary match when multiple agents register the same wallet).
+    let curatorPeerId = curatorIdentifier;
+    if (curatorIdentifier.startsWith('0x')) {
+      let resolved = false;
+
+      // Preferred: look up the creator peer ID from the ontology definition
+      // graph or the _meta graph. The dkg:creator triple uses the libp2p
+      // peer ID while dkg:curator uses the wallet address.
+      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const creatorResult = await this.store.query(
+        `SELECT ?creator WHERE {
+          {
+            GRAPH <${ontologyGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
+            }
+          } UNION {
+            GRAPH <${cgMetaGraph}> {
+              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
+            }
+          }
+        } LIMIT 1`,
+      );
+      if (creatorResult.type === 'bindings' && creatorResult.bindings.length > 0) {
+        const creatorDid = (creatorResult.bindings[0] as Record<string, string>)['creator'] ?? '';
+        if (creatorDid.startsWith(didPrefix)) {
+          const creatorId = creatorDid.slice(didPrefix.length);
+          if (!creatorId.startsWith('0x')) {
+            curatorPeerId = creatorId;
+            resolved = true;
+          }
+        }
+      }
+
+      // Fallback: agent registry lookup (non-deterministic if multiple agents
+      // share the same wallet address, but better than failing outright)
+      if (!resolved) {
+        try {
+          const agents = await this.discovery.findAgents();
+          const match = agents.find(
+            (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+          );
+          if (match) {
+            curatorPeerId = match.peerId;
+            resolved = true;
+          }
+        } catch { /* registry unavailable */ }
+      }
+
+      if (!resolved) return false;
+    }
+
+    if (curatorPeerId === this.peerId) {
+      return false;
+    }
+
+    let connections = this.node.libp2p.getConnections();
+    let isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+
+    // If not directly connected, try dialing — first a regular dial (the peer
+    // store may already have direct multiaddrs), then via relay as fallback.
+    if (!isConnected) {
+      try {
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        const pid = peerIdFromString(curatorPeerId);
+
+        try {
+          await this.node.libp2p.dial(pid);
+          connections = this.node.libp2p.getConnections();
+          isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+        } catch { /* direct dial failed, try relay */ }
+
+        if (!isConnected) {
+          const agent = await this.discovery.findAgentByPeerId(curatorPeerId);
+          if (agent?.relayAddress) {
+            const { multiaddr } = await import('@multiformats/multiaddr');
+            const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
+            await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+            await this.node.libp2p.dial(pid);
+            connections = this.node.libp2p.getConnections();
+            isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
+          }
+        }
+      } catch (err) {
+        this.log.warn(ctx, `Failed to dial curator ${curatorPeerId.slice(-8)} for meta refresh: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (!isConnected) {
+      return false;
+    }
+
+    try {
+      const deadline = Date.now() + 10_000;
+      const metaQuads = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
+      if (metaQuads.length > 0) {
+        await this.store.insert(metaQuads);
+        this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaQuads.length} triples from curator ${curatorPeerId.slice(-8)}`);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      this.log.warn(ctx, `Meta refresh for "${contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    } finally {
+      this.metaRefreshTimestamps.set(contextGraphId, now);
+    }
   }
 
   /**

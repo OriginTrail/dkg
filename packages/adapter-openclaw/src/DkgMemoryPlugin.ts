@@ -540,6 +540,9 @@ export function buildDkgMemoryRuntime(
  * The only in-tree consumer of this class is `DkgNodePlugin`.
  */
 export class DkgMemoryPlugin {
+  private registeredCapability: MemoryPluginCapability | null = null;
+  private registeredApi: OpenClawPluginApi | null = null;
+
   constructor(
     private readonly client: DkgDaemonClient,
     private readonly config: NonNullable<DkgOpenClawConfig['memory']>,
@@ -548,6 +551,30 @@ export class DkgMemoryPlugin {
 
   register(api: OpenClawPluginApi): boolean {
     return this.registerCapability(api);
+  }
+
+  /**
+   * Re-assert the memory-slot capability registration. Called by the
+   * channel plugin right before each inbound turn dispatch to guarantee
+   * this adapter's runtime is the active one, regardless of whether
+   * memory-core's dreaming sidecar overwrote it during plugin loading.
+   *
+   * Cost: a single property assignment on a module-scoped object in the
+   * OpenClaw gateway (`memoryPluginState.capability = { ... }`). No
+   * allocations, no I/O, no async operations. Safe to call on every turn.
+   */
+  reAssertCapability(): void {
+    try {
+      if (this.registeredCapability && this.registeredApi &&
+          typeof this.registeredApi.registerMemoryCapability === 'function') {
+        this.registeredApi.registerMemoryCapability(this.registeredCapability);
+      }
+    } catch {
+      // Non-fatal: if the re-assert fails (gateway state mismatch,
+      // plugin teardown race), the turn proceeds with whatever
+      // capability was last registered. Log omitted to avoid per-turn
+      // noise — the initial registration log is the diagnostic anchor.
+    }
   }
 
   /**
@@ -587,6 +614,8 @@ export class DkgMemoryPlugin {
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);
+    this.registeredCapability = capability;
+    this.registeredApi = api;
     const modeLabel = (api.registrationMode ?? 'full');
     api.logger.info?.(`[dkg-memory] registerMemoryCapability called (registrationMode=${modeLabel})`);
     return true;
