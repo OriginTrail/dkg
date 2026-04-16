@@ -2885,39 +2885,28 @@ export class DKGAgent {
       return { onChainId: existingOnChainId, txHash: undefined };
     }
 
-    // Use V10 participant-based registration only when explicitly configured
-    // with a RequiredSignatures threshold or multiple participants beyond the
-    // creator. A single creator identity is NOT sufficient — that's the
-    // default for every CG and should use legacy registration.
-    const useV10MultiSig = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0;
-
-    let onChainId: string;
-    if (useV10MultiSig && participantIdentityIds.length > 0) {
-      const result = await this.registerContextGraphOnChain({
-        participantIdentityIds,
-        requiredSignatures: storedRequiredSignatures,
-      });
-      onChainId = result.contextGraphId.toString();
-    } else {
-      try {
-        const result = await this.chain.createContextGraph({
-          name: id,
-          description,
-          accessPolicy: resolvedAccessPolicy,
-          revealOnChain: opts?.revealOnChain,
-        });
-        onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
-      } catch (err) {
-        const errorName = enrichEvmError(err);
-        const msg = err instanceof Error ? err.message : String(err);
-        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
-          onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
-          this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
-        } else {
-          throw err;
-        }
+    let effectiveParticipantIdentityIds = participantIdentityIds;
+    if (effectiveParticipantIdentityIds.length === 0) {
+      const selfIdentityId = await this.ensureIdentity();
+      if (selfIdentityId === 0n) {
+        throw new Error(
+          `Context graph "${id}" cannot be registered on-chain without an on-chain identity. ` +
+          'Create/ensure the curator identity first.',
+        );
       }
+      effectiveParticipantIdentityIds = [selfIdentityId];
     }
+
+    const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
+      ? storedRequiredSignatures
+      : 1;
+
+    const result = await this.registerContextGraphOnChain({
+      participantIdentityIds: effectiveParticipantIdentityIds,
+      requiredSignatures: effectiveRequiredSignatures,
+      publishPolicy: resolvedAccessPolicy,
+    });
+    const onChainId = result.contextGraphId.toString();
 
     this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId}`);
 
