@@ -19,9 +19,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //     used by `StakingV10.cancelWithdrawal`.
     string private constant _VERSION = "1.2.0";
 
-    // Multiplier scale, matches Staking.convictionMultiplier /
-    // DKGStakingConvictionNFT._convictionMultiplier (both return 1e18-scaled
-    // values so fractional tiers like 1.5x and 3.5x are representable).
+    // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
+    // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
+    // are representable).
     uint256 internal constant SCALE18 = 1e18;
 
     // Position layout (two storage slots — Phase 5 split-bucket model):
@@ -141,6 +141,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     mapping(uint72 => uint256) public nodeLastFinalizedEpoch;
     mapping(uint72 => uint256) public nodeFirstDirtyEpoch;
 
+    // Phase 11 — per-node sum of V10 delegator bases (raw + rewards).
+    // Updated at transaction time only (stake/claim/withdraw/redelegate/convert),
+    // never at epoch boundaries. Used by RandomSampling.submitProof to compute
+    //   effectiveNodeStake = nodeStake + (nodeEffective - nodeV10BaseStake)
+    // so the denominator for score-per-stake separates the multiplier boost
+    // from the underlying base commitment.
+    mapping(uint72 => uint256) public nodeV10BaseStake;
+
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
     function initialize() public onlyHub {
@@ -165,11 +173,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // 1x rest state (post-expiry positions and V8-compat defaults both land
     // here). `lockEpochs == 1` is the 1-month bootstrap tier at 1.5x.
     //
-    // NOTE: `Staking.convictionMultiplier` and
-    // `DKGStakingConvictionNFT._convictionMultiplier` still carry the legacy
-    // snap-down tier tables. Updating them is out of scope for this Phase 5
-    // storage hotfix; downstream subagents must align all three in a single
-    // symmetric change before mainnet.
+    // NOTE: `DKGStakingConvictionNFT._convictionMultiplier` uses exact-match
+    // semantics aligned with this table. The legacy snap-down
+    // `Staking.convictionMultiplier` has been deleted (Phase 11).
     function expectedMultiplier18(uint40 lockEpochs) public pure returns (uint64) {
         if (lockEpochs == 0) return uint64(SCALE18);              // rest state: 1.0x
         if (lockEpochs == 1) return uint64((15 * SCALE18) / 10);  // 1.5x
@@ -213,6 +219,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             multiplier18: multiplier18,
             lastClaimedEpoch: uint64(currentEpoch - 1)
         });
+
+        // Phase 11: track the raw base for this node (rewards starts at 0).
+        nodeV10BaseStake[identityId] += uint256(raw);
 
         // Apply diff: full effective stake (raw * multiplier18 / 1e18) enters at currentEpoch
         int256 initialEffective = (int256(uint256(raw)) * int256(uint256(multiplier18))) / int256(SCALE18);
@@ -336,6 +345,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         pos.identityId = newIdentityId;
 
+        // Phase 11: move the base (raw + rewards) between nodes.
+        uint256 base = uint256(raw) + uint256(rewardsBucket);
+        nodeV10BaseStake[oldIdentityId] -= base;
+        nodeV10BaseStake[newIdentityId] += base;
+
         if (currentEpoch > 1) {
             _finalizeNodeEffectiveStakeUpTo(oldIdentityId, currentEpoch - 1);
             _finalizeNodeEffectiveStakeUpTo(newIdentityId, currentEpoch - 1);
@@ -382,6 +396,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             effectiveStakeDiff[expiryEpoch] += expiryDelta;
             nodeEffectiveStakeDiff[identityId][expiryEpoch] += expiryDelta;
         }
+
+        // Phase 11: subtract the full base before zeroing the struct.
+        nodeV10BaseStake[identityId] -= uint256(raw) + uint256(rewardsBucket);
 
         delete positions[tokenId];
 
@@ -444,6 +461,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         pos.rewards = pos.rewards + amount;
 
+        // Phase 11: rewards are part of the base.
+        nodeV10BaseStake[identityId] += uint256(amount);
+
         if (currentEpoch > 1) {
             _finalizeEffectiveStakeUpTo(currentEpoch - 1);
             _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
@@ -471,6 +491,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         _markNodeDirty(identityId, currentEpoch);
 
         pos.rewards = pos.rewards - amount;
+
+        // Phase 11: rewards are part of the base.
+        nodeV10BaseStake[identityId] -= uint256(amount);
 
         if (currentEpoch > 1) {
             _finalizeEffectiveStakeUpTo(currentEpoch - 1);
@@ -523,6 +546,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         }
 
         pos.raw = pos.raw - amount;
+
+        // Phase 11: raw is part of the base.
+        nodeV10BaseStake[identityId] -= uint256(amount);
 
         if (currentEpoch > 1) {
             _finalizeEffectiveStakeUpTo(currentEpoch - 1);
@@ -580,6 +606,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         }
 
         pos.raw = pos.raw + amount;
+
+        // Phase 11: raw is part of the base.
+        nodeV10BaseStake[identityId] += uint256(amount);
 
         if (currentEpoch > 1) {
             _finalizeEffectiveStakeUpTo(currentEpoch - 1);
@@ -672,6 +701,10 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
     function getNodeLastFinalizedEpoch(uint72 identityId) external view returns (uint256) {
         return nodeLastFinalizedEpoch[identityId];
+    }
+
+    function getNodeV10BaseStake(uint72 identityId) external view returns (uint256) {
+        return nodeV10BaseStake[identityId];
     }
 
     // ============================================================
