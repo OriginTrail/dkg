@@ -175,7 +175,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('does not persist semanticEnrichment false during setup-runtime registration', async () => {
+  it('persists semanticEnrichment false during setup-runtime registration when runtime.subagent support is unavailable', async () => {
     const originalFetch = globalThis.fetch;
     const fakeFetch = vi.fn().mockResolvedValue({
       ok: true,
@@ -211,8 +211,8 @@ describe('DkgNodePlugin', () => {
         localChat: true,
         connectFromUi: true,
         dkgPrimaryMemory: true,
+        semanticEnrichment: false,
       });
-      expect(connectBody.capabilities.semanticEnrichment).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;

@@ -1056,8 +1056,8 @@ export class DashboardDB {
       this.db.prepare(`
         UPDATE semantic_enrichment_events
         SET status = 'dead_letter',
-            lease_owner = CASE WHEN status = 'pending' THEN NULL ELSE lease_owner END,
-            lease_expires_at = CASE WHEN status = 'pending' THEN NULL ELSE lease_expires_at END,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
             last_error = ?,
             updated_at = ?
         WHERE status IN ('pending', 'leased')
@@ -1066,8 +1066,8 @@ export class DashboardDB {
       return rows.map((row) => ({
         ...row,
         status: 'dead_letter' as const,
-        lease_owner: row.status === 'pending' ? null : row.lease_owner,
-        lease_expires_at: row.status === 'pending' ? null : row.lease_expires_at,
+        lease_owner: null,
+        lease_expires_at: null,
         last_error: error,
         updated_at: ts,
       }));
@@ -1140,7 +1140,7 @@ export class DashboardDB {
           lease_expires_at = NULL,
           updated_at = ?,
           last_error = NULL
-      WHERE id = ? AND status IN ('leased', 'dead_letter') AND lease_owner = ?
+      WHERE id = ? AND status = 'leased' AND lease_owner = ?
     `).run(semanticTripleCount ?? null, updatedAt, id, leaseOwner);
     return result.changes > 0;
   }

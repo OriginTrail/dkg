@@ -135,16 +135,10 @@ export class DkgNodePlugin {
       ...OPENCLAW_LOCAL_AGENT_BASE_CAPABILITIES,
     };
     const semanticEnrichmentSupported = this.channelPlugin?.supportsSemanticEnrichment() === true;
-    if (registrationMode === 'full') {
+    if (registrationMode === 'full' || registrationMode === 'setup-runtime') {
       return {
         ...capabilities,
         semanticEnrichment: semanticEnrichmentSupported,
-      } as const;
-    }
-    if (registrationMode === 'setup-runtime' && semanticEnrichmentSupported) {
-      return {
-        ...capabilities,
-        semanticEnrichment: true,
       } as const;
     }
     return capabilities;

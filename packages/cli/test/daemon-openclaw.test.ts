@@ -365,6 +365,39 @@ describe('local agent semantic wake helper', () => {
     );
   });
 
+  it('infers bridge-token wake auth from a preserved wakeUrl when wakeAuth is missing', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake/',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:9301/semantic-enrichment/wake/',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-dkg-bridge-token': 'bridge-token',
+        }),
+      }),
+    );
+  });
+
   it('returns a failed wake result on fetch errors or non-2xx responses without throwing', async () => {
     await expect(
       notifyLocalAgentIntegrationWake(
@@ -557,6 +590,21 @@ describe('best-effort semantic enqueue helper', () => {
         },
       },
     }), 'openclaw')).toBe(false);
+  });
+
+  it('honors a live runtime downgrade when the stored integration still has stale semantic support', () => {
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: false,
+    })).toBe(false);
   });
 
   it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {

@@ -2213,7 +2213,7 @@ export async function notifyLocalAgentIntegrationWake(
     return { status: 'skipped', reason: 'wake_unavailable' };
   }
 
-  const wakeAuth = integration.transport?.wakeAuth ?? 'none';
+  const wakeAuth = integration.transport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -2246,6 +2246,24 @@ export async function notifyLocalAgentIntegrationWake(
   }
 }
 
+function inferWakeAuthFromUrl(wakeUrl: string): 'bridge-token' | 'gateway' | 'none' {
+  const trimmed = wakeUrl.trim();
+  if (!trimmed) return 'none';
+
+  const matchPath = (pathname: string): 'bridge-token' | 'gateway' | 'none' => {
+    const normalized = pathname.replace(/\/+$/, '');
+    if (normalized.endsWith('/api/dkg-channel/semantic-enrichment/wake')) return 'gateway';
+    if (normalized.endsWith('/semantic-enrichment/wake')) return 'bridge-token';
+    return 'none';
+  };
+
+  try {
+    return matchPath(new URL(trimmed).pathname);
+  } catch {
+    return matchPath(trimmed);
+  }
+}
+
 export function canQueueLocalAgentSemanticEnrichment(
   config: DkgConfig,
   integrationId: string,
@@ -2257,6 +2275,7 @@ export function canQueueLocalAgentSemanticEnrichment(
     return stored?.enabled === true;
   }
   if (!stored?.enabled) return false;
+  if (opts?.liveSemanticEnrichmentSupported === false && normalizedId === 'openclaw') return false;
   if (stored.capabilities?.semanticEnrichment === false) return false;
   if (stored.capabilities?.semanticEnrichment === true) return true;
   return false;
@@ -4844,8 +4863,7 @@ async function handleRequest(
     if (!eventPayload) {
       return jsonResponse(res, 500, { error: `Semantic enrichment event payload is invalid: ${eventId}` });
     }
-    const leaseStillOwned = (row.status === 'leased' || row.status === 'dead_letter')
-      && row.lease_owner === leaseOwner;
+    const leaseStillOwned = row.status === 'leased' && row.lease_owner === leaseOwner;
     if (!leaseStillOwned) {
       if (row.status === 'completed') {
         const semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);

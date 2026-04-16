@@ -203,7 +203,7 @@ describe('DashboardDB — semantic enrichment events', () => {
     expect(row!.semantic_triple_count).toBe(9);
   });
 
-  it('dead-letters active semantic events but still lets an already-leased owner finish cleanly', () => {
+  it('dead-letters active semantic events and clears leases so later completions fail closed', () => {
     insertEvent({
       id: 'semantic-event-pending',
       idempotency_key: 'semantic-event-pending',
@@ -228,14 +228,14 @@ describe('DashboardDB — semantic enrichment events', () => {
     });
     expect(db.getSemanticEnrichmentEvent('semantic-event-leased')).toMatchObject({
       status: 'dead_letter',
-      lease_owner: 'worker-a',
-      lease_expires_at: 2_000,
+      lease_owner: null,
+      lease_expires_at: null,
       last_error: 'semantic worker unavailable',
     });
-    expect(db.completeSemanticEnrichmentEvent('semantic-event-leased', 'worker-a', 3_100, 2)).toBe(true);
+    expect(db.completeSemanticEnrichmentEvent('semantic-event-leased', 'worker-a', 3_100, 2)).toBe(false);
     expect(db.getSemanticEnrichmentEvent('semantic-event-leased')).toMatchObject({
-      status: 'completed',
-      semantic_triple_count: 2,
+      status: 'dead_letter',
+      semantic_triple_count: 0,
     });
   });
 
