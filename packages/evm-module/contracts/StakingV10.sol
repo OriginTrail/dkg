@@ -58,9 +58,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // Constants
     // ========================================================================
 
-    /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`,
-    ///         `Staking.convictionMultiplier`, and
-    ///         `DKGStakingConvictionNFT._convictionMultiplier`. Tier math
+    /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`
+    ///         and `DKGStakingConvictionNFT._convictionMultiplier`. Tier math
     ///         and reward accounting all use this scale.
     uint256 public constant SCALE18 = 1e18;
 
@@ -384,7 +383,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    to first-time address-keyed delegators, and the Phase 4
         //    `_recordStake` path applies to NFT-keyed ones.
         bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(chronos.getCurrentEpoch(), identityId, delegatorKey);
+        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId);
 
         // 6. Pull TRAC straight from `staker` into `StakingStorage`.
         //    The NFT wrapper never holds funds (Phase 5 decision Q4):
@@ -518,8 +517,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    re-collect score the delegator has already effectively earned
         //    under the old (post-expiry, 1x) contribution profile. Mirrors
         //    the Phase 4 `Staking._recordStake` settlement step.
-        bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
 
         // 4. Resolve the new tier multiplier. Reverts `"Invalid lock"` for
         //    any lock outside {0,1,3,6,12}. Tier==0 is the rest state at 1x
@@ -681,8 +679,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //        score the new node earned before the NFT ever arrived.
         uint256 currentEpoch = chronos.getCurrentEpoch();
         bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, oldIdentityId, delegatorKey);
-        staking.prepareForStakeChange(currentEpoch, newIdentityId, delegatorKey);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
+        _prepareForStakeChangeV10(currentEpoch, tokenId, newIdentityId);
 
         // 7. Move the StakingStorage delegator stake base. Writing 0 on
         //    the old (identity, key) bucket triggers
@@ -840,10 +838,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (uint256(amount) > withdrawable) revert InsufficientWithdrawable();
 
         // Settle delegator score indices BEFORE mutating any effective stake.
-        // `prepareForStakeChange` is `onlyContracts` on the V8 `Staking`
-        // contract — StakingV10 is Hub-registered so the call is authorized.
+        // `_prepareForStakeChangeV10` uses effective stake (via
+        // `_getEffectiveStakeAtEpoch`) instead of V8's raw base.
         bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
 
         // Compute split: drain rewards first, raw for the remainder. The
         // earlier `withdrawable` check guarantees `rawDraw <= pos.raw`.
@@ -937,7 +935,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // Settle delegator score indices BEFORE mutating effective stake.
         uint256 currentEpoch = chronos.getCurrentEpoch();
         bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
 
         // Restore the conviction-side buckets to their pre-create state.
         // Re-use the rewardsPortion split captured at create time so a
@@ -1128,11 +1126,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // style reward claim at the same (identityId, delegatorKey) would
         // read `lastSettledScorePerStake` against a stale base and collect
         // score that belongs to the pre-compound delegation. Matches the
-        // stake / relock / redelegate / finalizeWithdrawal pattern in this
-        // contract — `prepareForStakeChange` is `external onlyContracts`
-        // on the V8 `Staking` contract and StakingV10 is Hub-registered.
+        // stake / relock / redelegate / createWithdrawal / cancelWithdrawal
+        // pattern in this contract — `_prepareForStakeChangeV10` uses
+        // effective stake instead of V8's raw base.
         bytes32 delegatorKey = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, pos.identityId, delegatorKey);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
 
         // Local cache to avoid repeated SLOAD in the walk loop.
         uint256 raw = uint256(pos.raw);
@@ -1425,7 +1423,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    don't want to commit to a lock tier but still want the
         //    NFT-backed model.
         bytes32 v10Key = bytes32(tokenId);
-        staking.prepareForStakeChange(currentEpoch, identityId, v10Key);
+        _prepareForStakeChangeV10(currentEpoch, tokenId);
 
         ss.setDelegatorStakeBase(identityId, v10Key, amount);
         ss.increaseNodeStake(identityId, amount);
@@ -1449,5 +1447,179 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ask.recalculateActiveSet();
 
         emit ConvertedFromV8(staker, tokenId, identityId, amount, lockEpochs);
+    }
+
+    // ========================================================================
+    // Internal helpers â V10 score-per-stake settlement
+    // ========================================================================
+
+    /**
+     * @dev Return the effective stake a position contributes at `epoch`.
+     *      Pre-expiry: `raw * multiplier18 / SCALE18 + rewards`.
+     *      Post-expiry (or lock-0 rest state where `expiryEpoch == 0`):
+     *      `raw + rewards`.
+     *
+     *      Used by `_prepareForStakeChangeV10` as the per-delegator base for
+     *      settlement (replaces V8's `stakingStorage.getDelegatorStakeBase`).
+     */
+    function _getEffectiveStakeAtEpoch(
+        ConvictionStakingStorage.Position memory pos,
+        uint256 epoch
+    ) internal pure returns (uint256) {
+        uint256 raw = uint256(pos.raw);
+        uint256 rewards = uint256(pos.rewards);
+        uint256 expiryEpoch = uint256(pos.expiryEpoch);
+        if (expiryEpoch != 0 && epoch < expiryEpoch) {
+            return (raw * uint256(pos.multiplier18)) / SCALE18 + rewards;
+        }
+        return raw + rewards;
+    }
+
+    /**
+     * @dev V10 analog of V8's `Staking._prepareForStakeChange` (Staking.sol:739-791).
+     *      Settles the delegator's score-per-stake index at `epoch` using the
+     *      position's **effective stake** (via `_getEffectiveStakeAtEpoch`)
+     *      instead of V8's raw `stakingStorage.getDelegatorStakeBase`.
+     *
+     *      This is the KEY difference from V8: the denominator in
+     *      `nodeEpochScorePerStake36` will use effective node stake (after M3),
+     *      so the per-delegator settlement must also use effective stake.
+     *      Otherwise `sum(delegatorScores) != nodeScore`.
+     *
+     *      V10's `UnclaimedEpochs` guard ensures effective stake is constant
+     *      throughout the claim window (no V10 mutations while unclaimed
+     *      epochs exist), making the effective-stake lookup safe at any epoch.
+     *
+     * @param epoch    The epoch to settle at (typically `currentEpoch`).
+     * @param tokenId  The V10 NFT position. `identityId` is read from the
+     *                 position itself.
+     * @return delegatorScore  The delegator's total score at `epoch` after
+     *                         settlement (existing + newly earned).
+     */
+    function _prepareForStakeChangeV10(
+        uint256 epoch,
+        uint256 tokenId
+    ) internal returns (uint256 delegatorScore) {
+        bytes32 delegatorKey = bytes32(tokenId);
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        uint72 identityId = pos.identityId;
+
+        // 1. Current score-per-stake index for the node.
+        uint256 nodeScorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(epoch, identityId);
+
+        uint256 currentDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+            epoch,
+            identityId,
+            delegatorKey
+        );
+
+        // 2. Last index at which this delegator was settled.
+        uint256 lastSettled = randomSamplingStorage
+            .getDelegatorLastSettledNodeEpochScorePerStake(epoch, identityId, delegatorKey);
+
+        // Nothing new to settle.
+        if (nodeScorePerStake36 == lastSettled) {
+            return currentDelegatorScore18;
+        }
+
+        // 3. Effective stake â the KEY difference from V8.
+        uint256 effectiveStake = _getEffectiveStakeAtEpoch(pos, epoch);
+
+        // If the delegator has no effective stake, just bump the index and exit.
+        if (effectiveStake == 0) {
+            randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
+                epoch,
+                identityId,
+                delegatorKey,
+                nodeScorePerStake36
+            );
+            return currentDelegatorScore18;
+        }
+
+        // 4. Newly earned score for this delegator in the epoch.
+        uint256 scorePerStakeDiff36 = nodeScorePerStake36 - lastSettled;
+        uint256 scoreEarned18 = (effectiveStake * scorePerStakeDiff36) / SCALE18;
+
+        // 5. Persist results.
+        if (scoreEarned18 > 0) {
+            randomSamplingStorage.addToEpochNodeDelegatorScore(epoch, identityId, delegatorKey, scoreEarned18);
+        }
+
+        randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
+            epoch,
+            identityId,
+            delegatorKey,
+            nodeScorePerStake36
+        );
+
+        return currentDelegatorScore18 + scoreEarned18;
+    }
+
+    /**
+     * @dev Overload for the redelegate new-node baseline case. Uses
+     *      `overrideIdentityId` instead of `pos.identityId` â needed when
+     *      settling on a node the position hasn't moved to yet (the position
+     *      still points at the OLD node at the time of the call).
+     *
+     *      Otherwise identical to the single-arg overload above.
+     */
+    function _prepareForStakeChangeV10(
+        uint256 epoch,
+        uint256 tokenId,
+        uint72 overrideIdentityId
+    ) internal returns (uint256 delegatorScore) {
+        bytes32 delegatorKey = bytes32(tokenId);
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        uint72 identityId = overrideIdentityId;
+
+        // 1. Current score-per-stake index for the node.
+        uint256 nodeScorePerStake36 = randomSamplingStorage.getNodeEpochScorePerStake(epoch, identityId);
+
+        uint256 currentDelegatorScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+            epoch,
+            identityId,
+            delegatorKey
+        );
+
+        // 2. Last index at which this delegator was settled.
+        uint256 lastSettled = randomSamplingStorage
+            .getDelegatorLastSettledNodeEpochScorePerStake(epoch, identityId, delegatorKey);
+
+        // Nothing new to settle.
+        if (nodeScorePerStake36 == lastSettled) {
+            return currentDelegatorScore18;
+        }
+
+        // 3. Effective stake â the KEY difference from V8.
+        uint256 effectiveStake = _getEffectiveStakeAtEpoch(pos, epoch);
+
+        // If the delegator has no effective stake, just bump the index and exit.
+        if (effectiveStake == 0) {
+            randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
+                epoch,
+                identityId,
+                delegatorKey,
+                nodeScorePerStake36
+            );
+            return currentDelegatorScore18;
+        }
+
+        // 4. Newly earned score for this delegator in the epoch.
+        uint256 scorePerStakeDiff36 = nodeScorePerStake36 - lastSettled;
+        uint256 scoreEarned18 = (effectiveStake * scorePerStakeDiff36) / SCALE18;
+
+        // 5. Persist results.
+        if (scoreEarned18 > 0) {
+            randomSamplingStorage.addToEpochNodeDelegatorScore(epoch, identityId, delegatorKey, scoreEarned18);
+        }
+
+        randomSamplingStorage.setDelegatorLastSettledNodeEpochScorePerStake(
+            epoch,
+            identityId,
+            delegatorKey,
+            nodeScorePerStake36
+        );
+
+        return currentDelegatorScore18 + scoreEarned18;
     }
 }
