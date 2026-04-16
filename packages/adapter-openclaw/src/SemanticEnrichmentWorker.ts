@@ -105,6 +105,12 @@ type LeaseHeartbeatController = {
   waitForLoss: () => Promise<void>;
 };
 
+type StopSignalController = {
+  triggered: boolean;
+  promise: Promise<void>;
+  trip: () => void;
+};
+
 const SUBAGENT_SESSION_PREFIX = 'agent';
 const SUBAGENT_SESSION_SCOPE = 'subagent';
 const SUBAGENT_SESSION_NAME = 'semantic-enrichment';
@@ -314,6 +320,7 @@ export class SemanticEnrichmentWorker {
   private readonly workerInstanceId = `${hostname()}:${process.pid}:${randomUUID()}`;
   private stopped = false;
   private started = false;
+  private stopSignal = this.createStopSignal();
   private tickTimer: ReturnType<typeof setTimeout> | null = null;
   private drainInFlight: Promise<void> | null = null;
   private drainRequested = false;
@@ -348,8 +355,9 @@ export class SemanticEnrichmentWorker {
   }
 
   async start(): Promise<void> {
-    this.stopped = false;
     if (this.started) return;
+    this.stopSignal = this.createStopSignal();
+    this.stopped = false;
     if (!this.getRuntimeProbe().supported) return;
     this.started = true;
     this.scheduleTick(0);
@@ -404,6 +412,7 @@ export class SemanticEnrichmentWorker {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.stopSignal.trip();
     this.started = false;
     if (this.tickTimer) {
       clearTimeout(this.tickTimer);
@@ -501,22 +510,29 @@ export class SemanticEnrichmentWorker {
     const sessionKey = this.buildSubagentSessionKey(event);
     const leaseHeartbeat = this.startLeaseHeartbeat(event.id);
     let leaseLost = false;
+    let stoppedDuringRun = false;
     const syncLeaseState = (): boolean => {
       if (!leaseLost && leaseHeartbeat.hasLostLease()) {
         leaseLost = true;
       }
       return leaseLost;
     };
+    const syncStopState = (): boolean => {
+      if (!stoppedDuringRun && this.stopped) {
+        stoppedDuringRun = true;
+      }
+      return stoppedDuringRun;
+    };
 
     try {
       const prompt = await this.buildSubagentPrompt(event);
-      if (syncLeaseState()) return;
+      if (syncLeaseState() || syncStopState()) return;
       const runResult = await subagent.run({
         sessionKey,
         message: prompt,
         deliver: false,
       });
-      if (syncLeaseState()) return;
+      if (syncLeaseState() || syncStopState()) return;
       const runId = typeof runResult?.runId === 'string' && runResult.runId.trim()
         ? runResult.runId.trim()
         : undefined;
@@ -525,25 +541,30 @@ export class SemanticEnrichmentWorker {
       }
 
       const waitResult = await this.waitForRunUntilLeaseLoss(runId, subagent, leaseHeartbeat);
-      if (!waitResult) {
+      if (waitResult.kind === 'lease-lost') {
         leaseLost = true;
         return;
       }
-      if (syncLeaseState()) return;
-      const waitStatus = typeof waitResult?.status === 'string' ? waitResult.status.trim().toLowerCase() : '';
+      if (waitResult.kind === 'stopped') {
+        stoppedDuringRun = true;
+        return;
+      }
+      if (syncLeaseState() || syncStopState()) return;
+      const waitStatus = typeof waitResult.value?.status === 'string' ? waitResult.value.status.trim().toLowerCase() : '';
       if (!waitStatus) {
         throw new Error(`OpenClaw subagent run ${runId} did not report a terminal success status`);
       }
       if (!SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
-        throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult?.status}"`);
+        throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult.value?.status}"`);
       }
       const messages = await subagent.getSessionMessages({
         sessionKey,
         limit: DEFAULT_SUBAGENT_MESSAGE_LIMIT,
       });
-      if (syncLeaseState()) return;
+      if (syncLeaseState() || syncStopState()) return;
       const assistantText = this.extractAssistantText(messages.messages ?? []);
       const triples = this.parseTriplesFromAssistantText(assistantText);
+      if (syncLeaseState() || syncStopState()) return;
       const appendResult = await this.client.appendSemanticEnrichmentEvent(
         event.id,
         this.workerInstanceId,
@@ -553,6 +574,7 @@ export class SemanticEnrichmentWorker {
         throw new Error(`Semantic append did not complete for ${event.id}`);
       }
     } catch (err: any) {
+      if (syncStopState()) return;
       const message = err?.message ?? String(err);
       leaseLost = message.includes('responded 409');
       if (!leaseLost) {
@@ -574,6 +596,7 @@ export class SemanticEnrichmentWorker {
           `[semantic-enrichment] session cleanup failed for ${event.id}: ${err?.message ?? String(err)}`,
         );
       });
+      if (stoppedDuringRun) return;
       if (leaseLost) {
         this.api.logger.warn?.(
           `[semantic-enrichment] lease for ${event.kind}:${event.id} was reclaimed before completion`,
@@ -586,15 +609,36 @@ export class SemanticEnrichmentWorker {
     runId: string,
     subagent: OpenClawRuntimeSubagent,
     leaseHeartbeat: LeaseHeartbeatController,
-  ): Promise<{ status?: string } | null> {
+  ): Promise<
+    | { kind: 'wait'; value: { status?: string } }
+    | { kind: 'lease-lost' }
+    | { kind: 'stopped' }
+  > {
     const result = await Promise.race([
       subagent.waitForRun({
         runId,
         timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
       }).then((value) => ({ kind: 'wait' as const, value })),
       leaseHeartbeat.waitForLoss().then(() => ({ kind: 'lease-lost' as const })),
+      this.stopSignal.promise.then(() => ({ kind: 'stopped' as const })),
     ]);
-    return result.kind === 'wait' ? result.value : null;
+    return result;
+  }
+
+  private createStopSignal(): StopSignalController {
+    let tripSignal!: () => void;
+    const controller: StopSignalController = {
+      triggered: false,
+      promise: new Promise<void>((resolve) => {
+        tripSignal = resolve;
+      }),
+      trip: () => {
+        if (controller.triggered) return;
+        controller.triggered = true;
+        tripSignal();
+      },
+    };
+    return controller;
   }
 
   private startLeaseHeartbeat(eventId: string): LeaseHeartbeatController {

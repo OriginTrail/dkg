@@ -262,6 +262,24 @@ describe('DkgDaemonClient', () => {
     expect(body.turnId).toBe('turn-1');
   });
 
+  it('storeChatTurn preserves an explicit false semantic-enrichment runtime header', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+
+    client.setLocalAgentRequestContext({
+      integrationId: 'openclaw',
+      semanticEnrichmentSupported: false,
+    });
+
+    await client.storeChatTurn('session-2', 'Hello', 'Hi there', { turnId: 'turn-2' });
+
+    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      'X-DKG-Local-Agent-Integration': 'openclaw',
+      'X-DKG-Local-Agent-Semantic-Enrichment': 'false',
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Memory stats
   // ---------------------------------------------------------------------------

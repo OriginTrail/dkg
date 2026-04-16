@@ -180,9 +180,14 @@ export class DkgDaemonClient {
       this.localAgentRequestContext = null;
       return;
     }
+    const semanticEnrichmentSupported = typeof context?.semanticEnrichmentSupported === 'boolean'
+      ? context.semanticEnrichmentSupported
+      : undefined;
     this.localAgentRequestContext = {
       integrationId,
-      ...(context?.semanticEnrichmentSupported === true ? { semanticEnrichmentSupported: true } : {}),
+      ...(typeof semanticEnrichmentSupported === 'boolean'
+        ? { semanticEnrichmentSupported }
+        : {}),
     };
   }
 
@@ -642,10 +647,11 @@ export class DkgDaemonClient {
   private localAgentHeaders(): Record<string, string> {
     const integrationId = this.localAgentRequestContext?.integrationId?.trim();
     if (!integrationId) return {};
+    const semanticEnrichmentSupported = this.localAgentRequestContext?.semanticEnrichmentSupported;
     return {
       'X-DKG-Local-Agent-Integration': integrationId,
-      ...(this.localAgentRequestContext?.semanticEnrichmentSupported === true
-        ? { 'X-DKG-Local-Agent-Semantic-Enrichment': 'true' }
+      ...(typeof semanticEnrichmentSupported === 'boolean'
+        ? { 'X-DKG-Local-Agent-Semantic-Enrichment': semanticEnrichmentSupported ? 'true' : 'false' }
         : {}),
     };
   }

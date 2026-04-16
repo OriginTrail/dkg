@@ -329,6 +329,83 @@ describe('SemanticEnrichmentWorker', () => {
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 
+  it('quiesces an in-flight subagent run on stop before any semantic append or failure write', async () => {
+    let resolveWaitForRun!: (value: { status: string }) => void;
+    let notifyWaitForRunStarted!: () => void;
+    const waitForRunStarted = new Promise<void>((resolve) => {
+      notifyWaitForRunStarted = resolve;
+    });
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-stop-quiesce',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-stop-quiesce',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-stop-quiesce',
+            userMessage: 'Capture the owner.',
+            assistantReply: 'Working on it.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn();
+    const fail = vi.fn();
+    const getSessionMessages = vi.fn();
+    const deleteSession = vi.fn().mockResolvedValue(undefined);
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-stop-quiesce' }),
+          waitForRun: vi.fn(() => {
+            notifyWaitForRunStarted();
+            return new Promise((resolve) => {
+              resolveWaitForRun = resolve;
+            });
+          }),
+          getSessionMessages,
+          deleteSession,
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-stop-quiesce',
+      triggerSource: 'daemon',
+    });
+
+    await waitForRunStarted;
+    await worker.stop();
+    resolveWaitForRun({ status: 'completed' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(getSessionMessages).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).not.toHaveBeenCalled();
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
+
   it('includes the attempt number in the subagent session key for retries', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({
