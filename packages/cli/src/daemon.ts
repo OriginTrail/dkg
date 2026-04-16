@@ -2294,22 +2294,28 @@ function readSingleHeaderValue(value: string | string[] | undefined): string | u
   return undefined;
 }
 
-function parseBooleanHeaderValue(value: string | undefined): boolean {
-  if (!value) return false;
+function parseBooleanHeaderValue(value: string | undefined): boolean | undefined {
+  if (!value) return undefined;
   const normalized = value.trim().toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return undefined;
 }
 
 export function requestAdvertisesLocalAgentSemanticEnrichment(
   req: IncomingMessage,
   integrationId: string,
-): boolean {
+): boolean | undefined {
   const requestedIntegrationId = normalizeIntegrationId(integrationId);
   const headerIntegrationId = normalizeIntegrationId(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
   );
   if (!requestedIntegrationId || headerIntegrationId !== requestedIntegrationId) {
-    return false;
+    return undefined;
   }
   return parseBooleanHeaderValue(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-semantic-enrichment']),

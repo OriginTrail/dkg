@@ -25,6 +25,7 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  requestAdvertisesLocalAgentSemanticEnrichment,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   readSemanticTripleCountForEvent,
@@ -605,6 +606,51 @@ describe('best-effort semantic enqueue helper', () => {
       },
     }), 'openclaw', {
       liveSemanticEnrichmentSupported: false,
+    })).toBe(false);
+  });
+
+  it('treats missing live semantic-enrichment headers as absent so direct daemon routes fall back to stored capability', () => {
+    const req = {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw')).toBeUndefined();
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
+    })).toBe(true);
+  });
+
+  it('treats explicit false live semantic-enrichment headers as a runtime downgrade', () => {
+    const req = {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-local-agent-semantic-enrichment': 'false',
+      },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw')).toBe(false);
+    expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          capabilities: {
+            semanticEnrichment: true,
+          },
+        },
+      },
+    }), 'openclaw', {
+      liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
     })).toBe(false);
   });
 
