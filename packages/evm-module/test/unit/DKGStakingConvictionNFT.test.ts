@@ -519,6 +519,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // Advance past the 1-epoch lock.
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       const beforeEpoch = await ChronosContract.getCurrentEpoch();
       const tx = await NFT.connect(accounts[0]).relock(0, 12);
@@ -545,6 +546,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       const beforeEpoch = await ChronosContract.getCurrentEpoch();
       // Tier 0 is the permanent rest state: a legitimate post-expiry relock
@@ -567,6 +569,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       const beforeEpoch = await ChronosContract.getCurrentEpoch();
       await NFT.connect(accounts[0]).relock(0, 6);
@@ -597,11 +600,25 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // exactly 1 epoch so currentEpoch == expiryEpoch — under the old
       // `<=` check this would still revert as LockStillActive.
       await advanceEpochs(1);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       await NFT.connect(accounts[0]).relock(0, 6);
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.lockEpochs).to.equal(6);
       expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
+    });
+
+    it('reverts UnclaimedEpochs if position has unclaimed epochs', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      // Advance 3 epochs past expiry without claiming — lastClaimedEpoch
+      // is stuck at creationEpoch - 1 while currentEpoch has moved forward.
+      await advanceEpochs(3);
+      await expect(
+        NFT.connect(accounts[0]).relock(0, 6),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
     });
   });
 
@@ -708,6 +725,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(fromId, amount, 1);
       await advanceEpochs(2); // post-expiry so createWithdrawal is allowed
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, hre.ethers.parseEther('100'));
 
       // Pending exists → redelegate must reject. Otherwise the cancel/
@@ -780,6 +798,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // rest state on the source node. Redelegate should still work — the
       // raw principal follows the position to the new node unchanged.
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       await NFT.connect(accounts[0]).redelegate(0, toId);
 
@@ -833,6 +852,19 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Global totalStake invariant across the entire sequence (two mints,
       // one redelegate).
       expect(await StakingStorage.getTotalStake()).to.equal(totalBefore);
+    });
+
+    it('reverts UnclaimedEpochs if position has unclaimed epochs', async () => {
+      const { identityId: fromId } = await createProfile();
+      const { identityId: toId } = await createProfile(accounts[0], accounts[2]);
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(fromId, amount, 12);
+      // Advance 3 epochs without claiming.
+      await advanceEpochs(3);
+      await expect(
+        NFT.connect(accounts[0]).redelegate(0, toId),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
     });
   });
 
@@ -993,6 +1025,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       // raw=1000 TRAC, rewards=0 → withdrawable=1000. 1001 is one wei too many.
       await expect(
         NFT.connect(accounts[0]).createWithdrawal(0, amount + 1n),
@@ -1005,6 +1038,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       // Second request on the same tokenId fails — one pending at a time.
       await expect(
@@ -1023,6 +1057,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // revert as InsufficientWithdrawable because withdrawable would be
       // computed as `rewards`-only).
       await advanceEpochs(1);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       // Withdraw the full raw — must succeed at the boundary.
       await NFT.connect(accounts[0]).createWithdrawal(0, amount);
       const pending = await ConvictionStakingStorageContract.getPendingWithdrawal(0);
@@ -1087,6 +1122,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2); // post-expiry → raw is withdrawable
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       const totalStakeBefore = await StakingStorage.getTotalStake();
       const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
@@ -1127,6 +1163,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await injectRewards(0n, identityId, rewards);
 
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       const total = amount + rewards;
       const tx = await NFT.connect(accounts[0]).createWithdrawal(0, total);
       await expect(tx).to.emit(StakingV10Contract, 'WithdrawalCreated');
@@ -1152,6 +1189,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await injectRewards(0n, identityId, rewards);
 
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       // Withdraw 500: rewards 300 drained fully + raw drained for 200.
       const withdrawAmount = hre.ethers.parseEther('500');
@@ -1181,6 +1219,18 @@ describe('@unit DKGStakingConvictionNFT', () => {
         ),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
     });
+
+    it('reverts UnclaimedEpochs if position has unclaimed epochs', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      // Advance 3 epochs past expiry without claiming.
+      await advanceEpochs(3);
+      await expect(
+        NFT.connect(accounts[0]).createWithdrawal(0, 100n),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
+    });
   });
 
   describe('cancelWithdrawal (→ StakingV10.cancelWithdrawal)', () => {
@@ -1195,6 +1245,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       await expect(
         NFT.connect(accounts[4]).cancelWithdrawal(0),
@@ -1207,6 +1258,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await expect(
         NFT.connect(accounts[0]).cancelWithdrawal(0),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'WithdrawalNotRequested');
@@ -1218,6 +1270,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       // Snapshot pre-request state.
       const totalStakeBefore = await StakingStorage.getTotalStake();
@@ -1264,6 +1317,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       await NFT.connect(accounts[0]).cancelWithdrawal(0);
@@ -1285,6 +1339,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await injectRewards(0n, identityId, rewards);
 
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       // Withdraw 500: 300 rewards + 200 raw.
       const withdrawAmount = hre.ethers.parseEther('500');
@@ -1309,10 +1364,28 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       await expect(
         StakingV10Contract.connect(accounts[0]).cancelWithdrawal(accounts[0].address, 0),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
+    });
+
+    it('reverts UnclaimedEpochs if position has unclaimed epochs at cancel time', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
+      // Advance to post-expiry; claim to satisfy the guard for createWithdrawal.
+      await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0);
+      await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
+      // Advance further without claiming — cancelWithdrawal now sees stale
+      // lastClaimedEpoch and must revert.
+      await advanceEpochs(2);
+      await expect(
+        NFT.connect(accounts[0]).cancelWithdrawal(0),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'UnclaimedEpochs');
     });
   });
 
@@ -1329,6 +1402,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await expect(
@@ -1353,6 +1427,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       // 14 days is one day short of the 15-day delay.
       await time.increase(14 * 24 * 60 * 60);
@@ -1371,6 +1446,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       const withdrawAmount = minStake / 2n;
       // createWithdrawal does the heavy lifting: decrements pos.raw + node/
@@ -1446,6 +1522,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(true);
 
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
 
       // Sharding-table removal happens at CREATE time under the new model.
@@ -1467,6 +1544,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Node stake still drained, sharding-table state still reflects removal.
       expect(await StakingStorage.getNodeStake(identityId)).to.equal(0n);
       expect(await ShardingTableStorage.nodeExists(identityId)).to.equal(false);
+
+      // Phase 5 round-2 fix: full-drain finalize calls deletePosition to
+      // clear the orphaned Position struct. After finalize, identityId must
+      // be 0 (deleted) rather than stale metadata left on-chain.
+      const posAfterFinalize = await ConvictionStakingStorageContract.getPosition(0);
+      expect(posAfterFinalize.identityId).to.equal(0);
+      expect(posAfterFinalize.raw).to.equal(0n);
+      expect(posAfterFinalize.rewards).to.equal(0n);
     });
 
     it('happy path rewards-first draw pre-expiry: TRAC refunded, raw untouched throughout', async () => {
@@ -1520,6 +1605,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await injectRewards(0n, identityId, rewards);
 
       await advanceEpochs(2); // post-expiry
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
 
       // Withdraw more than rewards: rewards drained fully (300) +
       // raw drained for the remainder (200). Total = 500.
@@ -1561,6 +1647,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
       await advanceEpochs(2);
+      await NFT.connect(accounts[0]).claim(0); // satisfy UnclaimedEpochs guard
       await NFT.connect(accounts[0]).createWithdrawal(0, 100n);
       await time.increase(WITHDRAWAL_DELAY_SECONDS + 1);
       await expect(
@@ -1763,6 +1850,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
         nodeStakeBefore + expectedReward,
       );
       expect(await StakingStorage.getTotalStake()).to.equal(totalStakeBefore + expectedReward);
+
+      // TRAC-zero invariant: neither the NFT wrapper nor StakingV10 hold funds.
+      expect(await Token.balanceOf(await NFT.getAddress())).to.equal(0n);
+      expect(await Token.balanceOf(await StakingV10Contract.getAddress())).to.equal(0n);
     });
 
     it('multi-epoch happy path: three epochs of distinct scores, claim sums cumulatively', async () => {

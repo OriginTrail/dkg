@@ -191,6 +191,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // can tell the user "you have nothing to migrate" instead of "finish your
     // V8 claims first".
     error NoV8StakeToConvert();
+    // Phase 5 round-2 fix — guard on stake-changing entry points that
+    // require a fully-claimed position before mutation.  The user must call
+    // `claim()` first so reward accounting is settled before any structural
+    // change to the position (relock, redelegate, withdraw, cancel).
+    error UnclaimedEpochs();
 
     // ========================================================================
     // Constructor + initialize
@@ -254,6 +259,24 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             revert StakingLib.OnlyConvictionNFT();
         }
         _;
+    }
+
+    // ========================================================================
+    // Internal guards
+    // ========================================================================
+
+    /**
+     * @dev Reverts `UnclaimedEpochs` if the position has not been claimed up
+     *      to `currentEpoch - 1`.  Called at the top of every stake-changing
+     *      entry point (relock / redelegate / createWithdrawal / cancelWithdrawal)
+     *      so that reward history is settled before any structural mutation.
+     *      NOT called in `stake` (no prior position) or `convertToNFT`
+     *      (V8-side claim is a separate precondition).
+     */
+    function _requireFullyClaimed(ConvictionStakingStorage.Position memory pos) internal view {
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (currentEpoch <= 1) return;
+        if (pos.lastClaimedEpoch < currentEpoch - 1) revert UnclaimedEpochs();
     }
 
     // ========================================================================
@@ -470,6 +493,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    `require(pos.raw > 0, "No position")` catches it with a
         //    string revert — no principal to re-lock.
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        _requireFullyClaimed(pos);
 
         // 2. Lock expiry boundary. `expiryEpoch` is the FIRST unboosted epoch
         //    (set by `ConvictionStakingStorage.createPosition` as
@@ -598,6 +622,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         //    fully-drained rewards-only position that slipped past the
         //    owner check. Mirrors the relock precedent above.
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        _requireFullyClaimed(pos);
         uint72 oldIdentityId = pos.identityId;
 
         // 2. Same-node short-circuit. Storage (`updateOnRedelegate`) also
@@ -793,6 +818,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
         if (pos.identityId == 0) revert PositionNotFound();
+        _requireFullyClaimed(pos);
 
         // One pending at a time per NFT — gates on the V10-native pending
         // map, not the legacy V8 `StakingStorage.withdrawals` slot.
@@ -903,6 +929,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
         if (pos.identityId == 0) revert PositionNotFound();
+        _requireFullyClaimed(pos);
 
         ConvictionStakingStorage.PendingWithdrawal memory pending = convictionStorage.getPendingWithdrawal(tokenId);
         if (pending.amount == 0) revert WithdrawalNotRequested();
@@ -995,6 +1022,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         // Delete the pending slot — request is satisfied.
         convictionStorage.deletePendingWithdrawal(tokenId);
+
+        // Clean up orphaned Position struct on full drain. When both
+        // buckets are zero (all stake + rewards withdrawn) the position
+        // struct carries only dead metadata. `deletePosition` clears it
+        // and emits `PositionDeleted`; the effective-stake diff operations
+        // inside are zero-delta no-ops because the position's contribution
+        // was already decremented at `createWithdrawal` time.
+        ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(tokenId);
+        if (posAfter.raw == 0 && posAfter.rewards == 0) {
+            convictionStorage.deletePosition(tokenId);
+        }
 
         emit WithdrawalFinalized(tokenId, amount);
     }

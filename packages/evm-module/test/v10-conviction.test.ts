@@ -333,6 +333,8 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     const epochLength = await ChronosContract.epochLength();
     await time.increase(Number(epochLength) * 2);
 
+    // Satisfy the UnclaimedEpochs guard before withdrawal.
+    await NFT.connect(accounts[0]).claim(0);
     // Start the 15-day withdrawal timer for the full stake.
     await NFT.connect(accounts[0]).createWithdrawal(0, minStake);
 
