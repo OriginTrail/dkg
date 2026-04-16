@@ -29,6 +29,7 @@ import {
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   readSemanticTripleCountForEvent,
+  resolveChatTurnsAssertionAgentAddress,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
@@ -674,6 +675,18 @@ describe('best-effort semantic enqueue helper', () => {
     }), 'openclaw', {
       liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
     })).toBe(false);
+  });
+
+  it('uses the same resolved default agent address as assertion writes for chat-turn semantic URIs', () => {
+    expect(resolveChatTurnsAssertionAgentAddress({
+      peerId: 'peer-id',
+      getDefaultAgentAddress: () => 'agent-address-1',
+    })).toBe('agent-address-1');
+
+    expect(resolveChatTurnsAssertionAgentAddress({
+      peerId: 'peer-id',
+      getDefaultAgentAddress: () => undefined,
+    })).toBe('peer-id');
   });
 
   it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {

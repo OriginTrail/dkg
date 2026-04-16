@@ -3520,8 +3520,18 @@ function deadLetterUnavailableOpenClawSemanticEvents(
   return rows.length;
 }
 
+export function resolveChatTurnsAssertionAgentAddress(agent: {
+  peerId: string;
+  getDefaultAgentAddress?: () => string | undefined;
+}): string {
+  const defaultAgentAddress = typeof agent.getDefaultAgentAddress === 'function'
+    ? agent.getDefaultAgentAddress()?.trim()
+    : '';
+  return defaultAgentAddress || agent.peerId;
+}
+
 function buildChatSemanticEventPayload(args: {
-  agentPeerId: string;
+  assertionAgentAddress: string;
   sessionId: string;
   turnId: string;
   userMessage: string;
@@ -3537,7 +3547,7 @@ function buildChatSemanticEventPayload(args: {
     turnId: args.turnId,
     contextGraphId: 'agent-context',
     assertionName: 'chat-turns',
-    assertionUri: contextGraphAssertionUri('agent-context', args.agentPeerId, 'chat-turns'),
+    assertionUri: contextGraphAssertionUri('agent-context', args.assertionAgentAddress, 'chat-turns'),
     sessionUri: `urn:dkg:chat:session:${args.sessionId}`,
     turnUri: `urn:dkg:chat:turn:${args.turnId}`,
     userMessage: args.userMessage,
@@ -4702,7 +4712,7 @@ async function handleRequest(
         integrationId: 'openclaw',
         kind: 'chat_turn',
         payload: buildChatSemanticEventPayload({
-          agentPeerId: agent.peerId,
+          assertionAgentAddress: resolveChatTurnsAssertionAgentAddress(agent),
           sessionId,
           turnId: normalizedTurnId,
           userMessage,
