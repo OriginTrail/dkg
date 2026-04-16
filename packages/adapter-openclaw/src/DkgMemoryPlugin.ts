@@ -564,9 +564,16 @@ export class DkgMemoryPlugin {
    * allocations, no I/O, no async operations. Safe to call on every turn.
    */
   reAssertCapability(): void {
-    if (this.registeredCapability && this.registeredApi &&
-        typeof this.registeredApi.registerMemoryCapability === 'function') {
-      this.registeredApi.registerMemoryCapability(this.registeredCapability);
+    try {
+      if (this.registeredCapability && this.registeredApi &&
+          typeof this.registeredApi.registerMemoryCapability === 'function') {
+        this.registeredApi.registerMemoryCapability(this.registeredCapability);
+      }
+    } catch {
+      // Non-fatal: if the re-assert fails (gateway state mismatch,
+      // plugin teardown race), the turn proceeds with whatever
+      // capability was last registered. Log omitted to avoid per-turn
+      // noise — the initial registration log is the diagnostic anchor.
     }
   }
 
